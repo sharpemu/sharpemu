@@ -73,6 +73,8 @@ public class ResourceBranchTests
     // selected sources are evaluated by the compiled branch transaction.
     private static ResourceRuntimeInputs WithTablePhase(ResourceRuntimeInputs inputs) => new()
     {
+        IsRangeMapped = inputs.IsRangeMapped,
+        TraceImageCandidate = inputs.TraceImageCandidate,
     };
     [Theory]
     [InlineData("SCbranchScc1", 0u, 0)]

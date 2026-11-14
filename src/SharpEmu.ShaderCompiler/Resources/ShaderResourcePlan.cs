@@ -196,10 +196,11 @@ public sealed partial class ShaderResourcePlan
 
     public static ShaderResourcePlan Extract(Gen5ShaderProgram program, ShaderStage stage, ulong hash, uint userDataBase, uint userDataCount,
         IReadOnlySet<uint>? fixedFunctionVertexLoads = null, Action<ShaderResourcePlan>? beforeResourceTracking = null, uint waveSize = 64,
-        bool bindlessNullDescriptors = false, bool bindlessHeap = false, bool callRecords = false, bool callMarks = false, int dynamicUserData = -1,
-        BufferDescriptorNormalizer? normalizeBufferDescriptor = null,
+        bool bindlessNullDescriptors = false, bool bindlessHeap = false, bool callRecords = false, bool callMarks = false,
+        int dynamicUserData = -1, BufferDescriptorNormalizer? normalizeBufferDescriptor = null,
         ImageDescriptorNormalizer? normalizeImageDescriptor = null, Func<long>? imageNormalizationVersion = null,
-        StableImageDescriptorLimits stableImageLimits = default, bool? scalarDataOnDevice = null)
+        StableImageDescriptorLimits stableImageLimits = default, bool? scalarDataOnDevice = null,
+        bool? deviceRecordCounts = null)
     {
         // Mesh system inputs are not uniform user data, even when a GS pointer occupies s0:s1.
         var graph = ScalarGraphDiskCache.Build(program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize,
@@ -210,7 +211,8 @@ public sealed partial class ShaderResourcePlan
             NormalizeImageDescriptor = normalizeImageDescriptor,
             ImageNormalizationVersion = imageNormalizationVersion,
         };
-        var reads = ResourceTableReadPlanner.Plan(graph, stage, hash, scalarDataOnDevice ?? ScalarDataReadPolicy.Enabled);
+        plan.DeviceRecordCounts = (deviceRecordCounts ?? DeviceRecordCountPlan.Enabled) ? DeviceRecordCountPlan.Create(graph, stage) : null;
+        var reads = ResourceTableReadPlanner.Plan(graph, stage, hash, scalarDataOnDevice ?? ScalarDataReadPolicy.Enabled, plan.DeviceRecordCounts);
         var memo = new Dictionary<ScalarValue, ScalarValue>();
         ScalarValue Rewrite(ScalarValue value) => graph.Substitute(value, reads.Replacements, memo);
         ScalarValue RewriteRead(ScalarValue read)
@@ -343,6 +345,7 @@ public sealed partial class ShaderResourcePlan
     }
 
     public const int WrittenRangeDwordCount = 3;
+    public DeviceRecordCountPlan? DeviceRecordCounts { get; private set; }
 
     // Planned after tracking; optional, and never a reason for the plan to fail.
     public IReadOnlyList<DeviceAddressRangePlan> DeviceAddressRanges { get; private set; } = [];

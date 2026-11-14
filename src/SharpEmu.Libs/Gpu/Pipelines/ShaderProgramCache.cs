@@ -46,6 +46,14 @@ public sealed class StageCompileOptions
     public uint PixelInputAddress { get; init; }
     public ComputeInputInfo? ComputeInfo { get; init; }
     public Gen5ComputeSystemRegisters? ComputeSystemRegisters { get; init; }
+    public DispatchBufferFootprint.Dispatch? ComputeDispatch { get; init; }
+    public bool DeviceRecordCounts { get; private set; } = true;
+    public StageCompileOptions WithoutDeviceRecordCounts()
+    {
+        var copy = (StageCompileOptions)MemberwiseClone();
+        copy.DeviceRecordCounts = false;
+        return copy;
+    }
     public MeshDrawConfiguration? MeshInfo { get; init; }
     public Gen5TessellationInfo? Tessellation { get; init; }
     public Gen5TessellationHullInfo? TessellationHull { get; init; }
@@ -186,6 +194,7 @@ internal sealed partial class ShaderProgramCache
     private const uint MaxInstructionScan = 16384;
 
     private readonly CpuContext _context;
+    private readonly Func<ulong, ulong, bool> _isRangeMapped;
     private readonly IGuestGpuBackend _compiler;
     private readonly IShaderPipelineHost _host;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<ProgramKey, ProgramSourceEntry> _programs = new(ProgramKeyComparer.Instance);
@@ -359,6 +368,7 @@ internal sealed partial class ShaderProgramCache
     public ShaderProgramCache(CpuContext context, IGuestGpuBackend compiler, IShaderPipelineHost host)
     {
         _context = context;
+        _isRangeMapped = context.Memory.CanRead;
         _compiler = compiler;
         _host = host;
         _readGuestWord = host.TryReadGuestWord;
@@ -402,7 +412,7 @@ internal sealed partial class ShaderProgramCache
         var shaders = _compiler.CompileTessellationBridge(layout, domain);
         ShaderProgram Create(IGuestCompiledShader shader, ShaderStage stage)
         {
-            var id = ++_nextProgramId;
+            var id = Interlocked.Increment(ref _nextProgramId);
             return new(id, _host.CreateShaderModule(shader, stage, 0, id));
         }
 
@@ -645,12 +655,20 @@ internal sealed partial class ShaderProgramCache
                     _imageDescriptorTrace.RecordCandidate(source.Hash, descriptorSource, candidateKey, heap, address, words.Span)
                 : null,
             ReadResidentMemory = _prefetchResidentGuestBytes,
-            ComputeState = source.Stage == ShaderStage.Compute && options.ComputeInfo is { } computeState
-                ? new ComputeSelectorState(computeState.WaveSize, Math.Max(computeState.ThreadsX, 1),
-                    Math.Max(computeState.ThreadsY, 1), Math.Max(computeState.ThreadsZ, 1), computeState.DispatchThreadDimensions,
-                    computeState.LocalDataShareDwords, computeState.ThreadIdCount)
-                : null,
+            ComputeState = ComputeStateOf(source, options),
+            IsRangeMapped = _isRangeMapped,
         };
+        if (entry.Plan.DeviceRecordCounts is { } counts && !counts.SupportsDescriptors(entry.Plan, inputs))
+        {
+            var handle = GetOrCompileCore(source, options.WithoutDeviceRecordCounts(), ref pushDataCursor, out stage, deferLinking);
+            if (runtimeFallback is null)
+            {
+                _lastEntry = entry;
+            }
+
+            return handle;
+        }
+
         var hasShaderCalls = entry.HasShaderCalls;
         if (hasShaderCalls && !_compiler.LinkedShaderCallsSupported)
             throw new ShaderProgramRejectedException(
@@ -1022,6 +1040,17 @@ internal sealed partial class ShaderProgramCache
         new(source.Stage, source.Hash, (uint)source.UserData.Length, source.CodeSize,
             source.ContinuationAddressOffset, StaticState.ToArray());
 
+    // The compute selector state of a compute stage's inputs, with the dispatch its record counts are proven against.
+    private static ComputeSelectorState? ComputeStateOf(ShaderSource source, StageCompileOptions options) =>
+        source.Stage == ShaderStage.Compute && options.ComputeInfo is { } computeState
+            ? new ComputeSelectorState(computeState.WaveSize, Math.Max(computeState.ThreadsX, 1),
+                Math.Max(computeState.ThreadsY, 1), Math.Max(computeState.ThreadsZ, 1), computeState.DispatchThreadDimensions,
+                computeState.LocalDataShareDwords, computeState.ThreadIdCount)
+            {
+                Dispatch = options.ComputeDispatch,
+                DeviceCountProof = DeviceRecordCountPlan.Enabled,
+            }
+            : null;
 
     // With runtimeRecords, a program whose callees cannot read their records at run time is refused (null), and its caller
     // links a copy per record from then on (RefuseRuntimeCallRecords).
@@ -1407,22 +1436,23 @@ internal sealed partial class ShaderProgramCache
             default:
                 StageStaticKey.Build(options.ComputeInfo ?? throw new ArgumentException("The compute lookup has no compute input info."), state);
                 if (ScalarDataReadPolicy.Enabled) state.Add(ScalarDataReadPolicy.CacheIdentity);
+                if (DeviceRecordCountPlan.Enabled && options.DeviceRecordCounts) state.Add(DeviceRecordCountPlan.CacheIdentity);
                 break;
         }
 
         if (options.Tessellation is { } tessellation)
         {
-            StaticState.Add((uint)tessellation.Domain);
-            StaticState.Add((uint)tessellation.Spacing);
-            StaticState.Add(tessellation.PointMode ? 1u : 0);
-            StaticState.Add(tessellation.Clockwise ? 1u : 0);
+            state.Add((uint)tessellation.Domain);
+            state.Add((uint)tessellation.Spacing);
+            state.Add(tessellation.PointMode ? 1u : 0);
+            state.Add(tessellation.Clockwise ? 1u : 0);
         }
 
         if (options.TessellationHull is { } hull)
         {
-            StaticState.Add(hull.InputControlPoints);
-            StaticState.Add(hull.OutputControlPoints);
-            StaticState.Add(hull.PatchesPerGroup);
+            state.Add(hull.InputControlPoints);
+            state.Add(hull.OutputControlPoints);
+            state.Add(hull.PatchesPerGroup);
             state.Add(hull.HullEntryPc);
         }
     }
@@ -1468,6 +1498,7 @@ internal sealed partial class ShaderProgramCache
                     _ => 32u,
                 }, dynamicUserData: options.VertexInfo?.StartInstanceUserData ?? -1,
                 bindlessNullDescriptors: BindlessNullDescriptors, bindlessHeap: _host.SupportsBindlessHeap,
+                deviceRecordCounts: DeviceRecordCountPlan.Enabled && options.DeviceRecordCounts,
                 normalizeBufferDescriptor: source.Registered.Frontend?.NormalizeBufferDescriptor,
                 normalizeImageDescriptor: ImageNormalizer(source.Registered.Frontend),
                 imageNormalizationVersion: source.Registered.Frontend?.ImageNormalizationVersion);
@@ -1858,6 +1889,7 @@ internal sealed partial class ShaderProgramCache
                 SystemRegisters = options.ComputeSystemRegisters,
                 Specialization = specialization.Clone(),
                 Linked = entry.LinkedPrewarm,
+                DeviceRecordCounts = plan.DeviceRecordCounts is not null,
             });
         }
 
@@ -2105,6 +2137,7 @@ internal sealed partial class ShaderProgramCache
                 // Match LinkProgram's extraction policy; linked plans currently do not use stable image tables.
                 stableImageLimits: linked is null ? stableImageLimits : default,
                 callRecords: linked?.RuntimeRecords ?? false, callMarks: linked?.CallMarks ?? false,
+                deviceRecordCounts: record.DeviceRecordCounts,
                 normalizeBufferDescriptor: frontend?.NormalizeBufferDescriptor,
                 normalizeImageDescriptor: frontend?.NormalizeImageDescriptor,
                 imageNormalizationVersion: frontend?.ImageNormalizationVersion);

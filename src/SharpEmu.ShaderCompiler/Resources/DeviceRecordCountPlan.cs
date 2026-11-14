@@ -1,0 +1,144 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+namespace SharpEmu.ShaderCompiler.Resources;
+
+// A raw buffer whose base/format are dispatch inputs and whose count is loaded by the GPU.
+// The shader retains the actual count. Only residency can use a count-independent upper bound.
+public sealed class DeviceRecordCountPlan
+{
+    // SHARPEMU_DEVICE_RECORD_COUNTS=0 plans no such buffer.
+    public static bool Enabled { get; } = Environment.GetEnvironmentVariable("SHARPEMU_DEVICE_RECORD_COUNTS") != "0";
+    public const uint CacheIdentity = 0x44524301;
+    private readonly Dictionary<int, ScalarValue> _handles;
+    private readonly HashSet<ScalarValue> _skipCounts;
+    private readonly HashSet<uint> _pcs;
+    private readonly object _gate = new();
+    private uint[]? _lastUserData;
+    private DispatchBufferFootprint.Dispatch? _lastDispatch;
+    private Dictionary<uint, DispatchBufferFootprint.Span>? _lastSpans;
+
+    private DeviceRecordCountPlan(ScalarValueGraph graph, Dictionary<int, ScalarValue> handles)
+    {
+        _handles = handles;
+        _skipCounts = handles.Values.ToHashSet();
+        _pcs = handles.Keys.Select(index => graph.Memory[index].Pc).ToHashSet();
+    }
+
+    public bool Contains(int memoryIndex) => _handles.ContainsKey(memoryIndex);
+    public bool SkipCount(ScalarValue handle) => _skipCounts.Contains(handle);
+
+    // The alternate ordinary plan handles descriptor modes the device raw-buffer lowering does not support.
+    // This reads only expressions proven independent of guest memory during Create.
+    public bool SupportsDescriptors(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
+    {
+        using var scratch = RuntimeEvaluationScratch.Rent();
+        var evaluator = new RuntimeValueEvaluator(scratch, plan, inputs);
+        foreach (var handle in _handles.Values)
+            if (!evaluator.Evaluate(handle.Operands[1], out var high) || !evaluator.Evaluate(handle.Operands[3], out var format) ||
+                (high & 0x80000000) != 0 || (format & (1u << 23)) != 0) return false;
+        return true;
+    }
+
+    public static DeviceRecordCountPlan? Create(ScalarValueGraph graph, ShaderStage stage)
+    {
+        if (stage != ShaderStage.Compute || graph.CallArgumentRegisters != 0 || graph.Program.IsFusedProgram ||
+            Gen5ShaderCallLinker.IsLinked(graph.Program) || graph.Program.Instructions.Count > 2048 ||
+            graph.Program.Instructions.Any(instruction => instruction.Opcode is "SSetpcB64" or "SSwappcB64" or "SRfeB64"))
+            return null;
+        var handles = new Dictionary<int, ScalarValue>();
+        for (var index = 0; index < graph.Accesses.Length; index++)
+        {
+            var memory = graph.Memory[index];
+            if (memory.Kind != MemoryResourceKind.Buffer || memory.Typed || memory.Formatted ||
+                memory.Access is not (MemoryAccess.Read or MemoryAccess.Write) ||
+                !(memory.Opcode.StartsWith("BufferLoadDword", StringComparison.Ordinal) ||
+                  memory.Opcode.StartsWith("BufferStoreDword", StringComparison.Ordinal)) ||
+                graph.Accesses[index]?.Handle is not { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } handle ||
+                (graph.ResolveInvariantPhi(handle.Operands[2]) ?? handle.Operands[2]) is not { Kind: ScalarValueKind.ScalarBufferWord } count ||
+                !MemoryFree(graph, handle.Operands[0], []) || !MemoryFree(graph, handle.Operands[1], []) || !MemoryFree(graph, handle.Operands[3], []) ||
+                count.Operands.Length != 2 || !count.Operands[1].IsConstant ||
+                !count.Operands[0].Operands.All(value => MemoryFree(graph, value, []))) continue;
+            handles.Add(index, handle);
+        }
+        return handles.Count == 0 ? null : new(graph, handles);
+    }
+
+    private static bool MemoryFree(ScalarValueGraph graph, ScalarValue value, HashSet<ScalarValue> visiting)
+    {
+        // Unmodified inputs and counts may cross loop headers. Resolve only proven invariant phis;
+        // a varying count/base still refuses admission and follows the ordinary plan.
+        value = graph.ResolveInvariantPhi(value) ?? value;
+        if (value.IsConstant || value.Kind is ScalarValueKind.UserData or ScalarValueKind.ShaderBase) return true;
+        if (value.Kind != ScalarValueKind.Operation || !RuntimeValueValidator.IsUniformOperation(value.Operation) ||
+            !visiting.Add(value)) return false;
+        var result = value.Operands.All(operand => MemoryFree(graph, operand, visiting));
+        visiting.Remove(value);
+        return result;
+    }
+
+    internal DeviceAddressRange[] Append(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, DeviceAddressRange[] ordinary)
+    {
+        Dictionary<uint, DispatchBufferFootprint.Span>? spans = null;
+        if (inputs.ComputeState is { HasPartialWorkgroups: false, DeviceCountProof: true, Dispatch: { } dispatch })
+        {
+            // Indexing marks every input in the materialization cache's dependency recorder, even on a proof-cache hit.
+            lock (_gate)
+            {
+                var same = _lastUserData is not null && _lastDispatch == dispatch && _lastUserData.Length == inputs.UserData.Count;
+                for (var index = 0; index < inputs.UserData.Count; index++)
+                {
+                    var word = inputs.UserData[index];
+                    if (same && _lastUserData![index] != word) same = false;
+                }
+                if (!same)
+                {
+                    var userData = new uint[inputs.UserData.Count];
+                    for (var index = 0; index < userData.Length; index++) userData[index] = inputs.UserData[index];
+                    _lastSpans = DispatchBufferFootprint.TryEvaluate(plan.Graph.Program, userData, plan.Graph.UserDataBase,
+                        dispatch, _pcs, out var evaluated) ? evaluated : null;
+                    _lastUserData = userData;
+                    _lastDispatch = dispatch;
+                }
+                spans = _lastSpans;
+            }
+        }
+        var result = new List<DeviceAddressRange>(ordinary);
+        using var scratch = RuntimeEvaluationScratch.Rent();
+        var evaluator = new RuntimeValueEvaluator(scratch, plan, inputs);
+        var seen = new HashSet<(ulong Base, ulong Size, bool Written)>();
+        foreach (var (index, handle) in _handles)
+        {
+            if (!evaluator.Evaluate(handle.Operands[0], out var low) || !evaluator.Evaluate(handle.Operands[1], out var high) ||
+                !evaluator.Evaluate(handle.Operands[3], out var format))
+                throw new ResourcePlanException("The device-count buffer address cannot be resolved.");
+            var address = low | ((ulong)(high & 0xFFFF) << 32);
+            if ((high & 0x80000000) != 0 || (format & (1u << 23)) != 0)
+                throw new ResourcePlanException("The device-count buffer uses unsupported swizzling or thread indices.");
+            ulong size;
+            var memory = plan.Memory[index];
+            if (spans is not null && !spans.ContainsKey(memory.Pc)) // All paths proved inactive.
+            {
+                continue;
+            }
+            if (spans is not null && spans.TryGetValue(memory.Pc, out var span) && span.Base == address &&
+                inputs.IsRangeMapped?.Invoke(address, span.Size) == true)
+            {
+                size = span.Size;
+            }
+            else
+            {
+                // Same device-descriptor shader, exact original residency and synchronization when the proof refuses.
+                if (!evaluator.Evaluate(handle.Operands[2], out var count))
+                    throw new ResourcePlanException("The device-count buffer fallback count cannot be resolved.");
+                size = (ulong)count * Math.Max((high >> 16) & 0x3FFF, 1u);
+            }
+            if (size == 0) continue;
+            if (size > 0x1_0000_0000_0000ul - address)
+                throw new ResourcePlanException("The device-count buffer wraps the guest address space.");
+            var written = memory.Access == MemoryAccess.Write;
+            if (seen.Add((address, size, written))) result.Add(new((uint)result.Count, address, size, true, written));
+        }
+        return result.ToArray();
+    }
+}

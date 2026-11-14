@@ -237,6 +237,26 @@ public sealed class ShaderPrewarmListTests : IDisposable
     }
 
     [Fact]
+    public void DeviceCountPlanRoundTripsBesideOrdinaryPrewarmRecords()
+    {
+        using (var list = Open()) CompileAtRuntime(list, BufferDescriptorWords.Format32UInt);
+        using (var list = Open())
+        {
+            var (ordinary, code) = Assert.Single(list.LoadedComputes());
+            Assert.False(ordinary.DeviceRecordCounts);
+            list.RecordCompute(code, new ComputePrewarmRecord
+            {
+                Hash = ordinary.Hash, CodeSize = ordinary.CodeSize, Address = ordinary.Address,
+                UserDataBase = ordinary.UserDataBase, UserDataCount = ordinary.UserDataCount,
+                PushDataCursor = ordinary.PushDataCursor, Info = ordinary.Info, SystemRegisters = ordinary.SystemRegisters,
+                Specialization = ordinary.Specialization, DeviceRecordCounts = true,
+            });
+        }
+        using var reloaded = Open();
+        Assert.Equal(new[] { false, true }, reloaded.LoadedComputes().Select(entry => entry.Record.DeviceRecordCounts));
+    }
+
+    [Fact]
     public void Coverage_UsesLoadedRecordsAndDoesNotCertifyConcurrentAppends()
     {
         using (var list = Open())

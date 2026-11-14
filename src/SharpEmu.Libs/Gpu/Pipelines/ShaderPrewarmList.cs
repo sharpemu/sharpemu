@@ -142,6 +142,7 @@ internal sealed class ComputePrewarmRecord
     public Gen5ComputeSystemRegisters? SystemRegisters { get; init; }
     public required ResourceSpecialization Specialization { get; init; }
     public LinkedShaderPrewarm? Linked { get; init; }
+    public bool DeviceRecordCounts { get; init; }
 
     public (ulong Hash, uint CodeSize, ulong Address, ulong ContinuationAddressOffset) CodeKey =>
         (Hash, CodeSize, Address, ContinuationAddressOffset);
@@ -853,6 +854,8 @@ internal sealed class ShaderPrewarmList : IDisposable
         WriteSpecialization(writer, record.Specialization);
         writer.Write(record.Linked is not null);
         record.Linked?.Write(writer);
+        // Optional extension: old records retain their ordinary resource plan and byte identity.
+        if (record.DeviceRecordCounts) writer.Write((byte)1);
 
         writer.Flush();
         return stream.ToArray();
@@ -1359,6 +1362,12 @@ internal sealed class ShaderPrewarmList : IDisposable
 
         var specialization = ReadSpecialization(reader, payload.Length);
         var linked = reader.ReadBoolean() ? LinkedShaderPrewarm.Read(reader) : null;
+        var deviceRecordCounts = false;
+        if (reader.BaseStream.Position + 1 == reader.BaseStream.Length)
+        {
+            if (reader.ReadByte() != 1) throw new ArgumentException("Unknown prewarm compute extension.");
+            deviceRecordCounts = true;
+        }
         if (reader.BaseStream.Position != reader.BaseStream.Length)
             throw new ArgumentException("Trailing prewarm compute data.");
         return new ComputePrewarmRecord
@@ -1374,6 +1383,7 @@ internal sealed class ShaderPrewarmList : IDisposable
             SystemRegisters = registers,
             Specialization = specialization,
             Linked = linked,
+            DeviceRecordCounts = deviceRecordCounts,
         };
     }
 

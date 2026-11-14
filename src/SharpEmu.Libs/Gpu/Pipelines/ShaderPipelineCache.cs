@@ -1158,7 +1158,11 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !_host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ,
             kept.GpuThreadCounts);
         var pushDataCursor = ComputePushDataCursor(input);
-        var options = new StageCompileOptions { ComputeInfo = input, ComputeSystemRegisters = kept.SystemRegisters };
+        var options = new StageCompileOptions
+        {
+            ComputeInfo = input, ComputeSystemRegisters = kept.SystemRegisters,
+            ComputeDispatch = CountedDispatch(input, kept.SystemRegisters, dimensionX, dimensionY, dimensionZ, kept.GpuThreadCounts),
+        };
         if (!_programs.TryGetProgramForEntry(entry, source, options, _strictShaders, ref pushDataCursor, out var handle, out var stage, out var rejection))
         {
             ReportShaderSkip(source, rejection);
@@ -1230,6 +1234,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
         var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !_host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ,
             gpuThreadCounts);
+        var dispatch = CountedDispatch(input, systemRegisters, dimensionX, dimensionY, dimensionZ, gpuThreadCounts);
         if (source.Registered.Frontend is { } frontend &&
             frontend.TryResolveImageCopy(_context, source.Registered, source.UserData, input, systemRegisters, dimensionX, dimensionY, dimensionZ,
                 out var copySource, out var copyDestination))
@@ -1237,19 +1242,20 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             return new ComputeProgram
             {
                 Input = input,
-                ImageCopy = new(copySource, copyDestination, () => CompileComputeProgram(source, input, systemRegisters)),
+                ImageCopy = new(copySource, copyDestination, () => CompileComputeProgram(source, input, systemRegisters, dispatch)),
             };
         }
-        return CompileComputeProgram(source, input, systemRegisters);
+        return CompileComputeProgram(source, input, systemRegisters, dispatch);
     }
 
-    private ComputeProgram CompileComputeProgram(ShaderSource source, ComputeInputInfo input, Gen5ComputeSystemRegisters systemRegisters)
+    private ComputeProgram CompileComputeProgram(ShaderSource source, ComputeInputInfo input, Gen5ComputeSystemRegisters systemRegisters,
+        DispatchBufferFootprint.Dispatch? dispatch)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
         var pushDataCursor = ComputePushDataCursor(input);
         if (!TryPrepareProgram(
             source,
-            new StageCompileOptions { ComputeInfo = input, ComputeSystemRegisters = systemRegisters },
+            new StageCompileOptions { ComputeInfo = input, ComputeSystemRegisters = systemRegisters, ComputeDispatch = dispatch },
             ref pushDataCursor,
             out var handle,
             out var stage))
@@ -1263,6 +1269,15 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
     // Thread limits the GPU writes need shader data in a buffer: a cursor at the end of the push range keeps it out.
     private static uint ComputePushDataCursor(ComputeInputInfo input) => input.IndirectThreadCounts ? PushData.DwordCount : 0u;
+
+    // The dispatch whose GPU-loaded record counts a footprint proof bounds (DeviceRecordCountPlan); none when the thread
+    // counts are in GPU memory or the initiator counts threads.
+    private static DispatchBufferFootprint.Dispatch? CountedDispatch(ComputeInputInfo input, Gen5ComputeSystemRegisters systemRegisters,
+        uint dimensionX, uint dimensionY, uint dimensionZ, bool gpuThreadCounts) =>
+        DeviceRecordCountPlan.Enabled && !gpuThreadCounts && !input.DispatchThreadDimensions
+            ? new(dimensionX, dimensionY, dimensionZ, Math.Max(input.ThreadsX, 1), Math.Max(input.ThreadsY, 1), Math.Max(input.ThreadsZ, 1),
+                input.WaveSize, input.ThreadIdCount, systemRegisters)
+            : null;
 
     private bool TryPrepareProgram(ShaderSource source, StageCompileOptions options, ref uint pushDataCursor,
         out ShaderProgram program, out ShaderStageResources stage)

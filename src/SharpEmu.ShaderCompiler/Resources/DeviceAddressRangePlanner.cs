@@ -378,10 +378,13 @@ public static class DeviceAddressRangePlanner
 
     // Evaluates the planned ranges for one draw. A bounded range spans its lowest byte to
     // its extent; an unbounded one starts at the lowest immediate and takes the cap.
-    public static DeviceAddressRange[] Evaluate(ShaderResourcePlan plan, ResourceRuntimeInputs inputs) =>
-        CompiledDeviceAddressRanges.Configured == CompiledDeviceAddressRanges.Mode.Off
+    public static DeviceAddressRange[] Evaluate(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
+    {
+        var ranges = CompiledDeviceAddressRanges.Configured == CompiledDeviceAddressRanges.Mode.Off
             ? EvaluateInterpreted(plan, inputs)
             : CompiledDeviceAddressRanges.Serve(plan, inputs);
+        return plan.DeviceRecordCounts?.Append(plan, inputs, ranges) ?? ranges;
+    }
 
     // One evaluator for every range and then the function V#s; the reference of CompiledDeviceAddressRanges.
     internal static DeviceAddressRange[] EvaluateInterpreted(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)

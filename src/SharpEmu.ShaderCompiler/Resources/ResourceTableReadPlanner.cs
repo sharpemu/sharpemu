@@ -14,6 +14,7 @@ public sealed class ResourceTableReadPlanner
     private readonly ShaderStage _stage;
     private readonly ulong _hash;
     private readonly bool _scalarDataOnDevice;
+    private readonly DeviceRecordCountPlan? _deviceRecordCounts;
     private readonly List<ResourceTableRead> _reads = [];
     private readonly List<ScalarValue> _dynamicReads = [];
     private readonly HashSet<ScalarValue> _dynamicReadSet = [];
@@ -24,11 +25,13 @@ public sealed class ResourceTableReadPlanner
     private readonly HashSet<ScalarValue> _visited = [];
     private readonly Dictionary<ScalarValue, ScalarValue> _replacements = [];
 
-    private ResourceTableReadPlanner(ScalarValueGraph graph, ShaderStage stage, ulong hash, bool scalarDataOnDevice)
+    private ResourceTableReadPlanner(ScalarValueGraph graph, ShaderStage stage, ulong hash, bool scalarDataOnDevice,
+        DeviceRecordCountPlan? deviceRecordCounts)
     {
         _graph = graph;
         _stage = stage;
         _hash = hash;
+        _deviceRecordCounts = deviceRecordCounts;
         _scalarDataOnDevice = scalarDataOnDevice && stage == ShaderStage.Compute && graph.CallArgumentRegisters == 0 &&
             !Gen5ShaderCallLinker.IsLinked(graph.Program) &&
             !graph.Program.Instructions.Any(instruction => instruction.Opcode is "SSetpcB64" or "SSwappcB64" or "SRfeB64");
@@ -40,8 +43,9 @@ public sealed class ResourceTableReadPlanner
         IReadOnlyDictionary<ScalarValue, ScalarValue> Replacements,
         IReadOnlyDictionary<int, uint> FlattenedSlotByMemoryIndex);
 
-    public static Result Plan(ScalarValueGraph graph, ShaderStage stage, ulong hash, bool scalarDataOnDevice = false) =>
-        new ResourceTableReadPlanner(graph, stage, hash, scalarDataOnDevice).Run();
+    public static Result Plan(ScalarValueGraph graph, ShaderStage stage, ulong hash, bool scalarDataOnDevice = false,
+        DeviceRecordCountPlan? deviceRecordCounts = null) =>
+        new ResourceTableReadPlanner(graph, stage, hash, scalarDataOnDevice, deviceRecordCounts).Run();
 
     private Result Run()
     {
@@ -64,9 +68,10 @@ public sealed class ResourceTableReadPlanner
         {
             if (access?.Handle is { } handle)
             {
-                foreach (var dword in handle.Operands)
+                for (var component = 0; component < handle.Operands.Length; component++)
                 {
-                    Collect(dword, 0);
+                    if (component != 2 || _deviceRecordCounts?.SkipCount(handle) != true)
+                        Collect(handle.Operands[component], 0);
                 }
             }
 

@@ -1378,6 +1378,7 @@ public sealed partial class ResourceMaterializationCache
                 ReadsClean = inputs.ReadsClean,
                 ComputeState = inputs.ComputeState,
                 TablePhase = recorder.TablePhase,
+                IsRangeMapped = inputs.IsRangeMapped,
             };
             if (!ResourceMaterializer.Materialize(plan, recording, ref snapshot, ref specialization, out failure))
                 return false;
@@ -1500,6 +1501,7 @@ public sealed partial class ResourceMaterializationCache
                 ReadResidentMemory = recorder.WrapResident(inputs.ReadResidentMemory),
                 ReadsClean = inputs.ReadsClean,
                 ComputeState = inputs.ComputeState,
+                IsRangeMapped = inputs.IsRangeMapped,
             };
             var cachedTable = cached.Snapshot.FlattenedResourceTable;
             ReadingTable = true;
@@ -2084,6 +2086,7 @@ public sealed partial class ResourceMaterializationCache
                     ReadResidentMemory = recorder.WrapResident(inputs.ReadResidentMemory),
                     ReadsClean = inputs.ReadsClean,
                     ComputeState = inputs.ComputeState,
+                    IsRangeMapped = inputs.IsRangeMapped,
                 };
                 var cachedTable = entry.Snapshot.FlattenedResourceTable;
                 ReadingTable = true;
