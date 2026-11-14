@@ -297,8 +297,9 @@ public sealed class RuntimeValueEvaluator
             var size = stride == 0 ? (ulong)(uint)records : (ulong)stride * (uint)records;
             if (aligned > size || size - aligned < sizeof(uint))
             {
-                // An unbound (empty) V# reads as zero; overrunning a bound buffer stays a failure.
-                return (uint)records == 0 || offset >= 0x8000_0000u ? RawAddress.Zero : RawAddress.Failed;
+                // The GPU does not read a dword past the V#'s records (scalar memory bounds checking): it reads as zero, as
+                // every dword of an unbound (empty) V# does.
+                return RawAddress.Zero;
             }
 
             address = ((baseAddress & ~3ul) + byteOffset) & ~3ul;
