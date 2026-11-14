@@ -512,6 +512,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         image.MarkGpuModified();
         image.Uses.RenderTarget = true;
         TraceVolumeState("color-acquire", image, request);
+        LogTargetExtent(image, "color-target");
         RefreshFromGuest(imageIdentifier, request);
         TraceMetadataBinding(request);
         if (request.Description.Metadata.Kind == MetadataKind.Dcc && request.Description.Metadata.Range.Size == 0)
@@ -578,6 +579,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         image.MarkGpuModified();
         image.Uses.DepthTarget = true;
         TraceVolumeState("depth-acquire", image, request);
+        LogTargetExtent(image, "depth-target");
         RefreshFromGuest(imageIdentifier, request);
         TraceMetadataBinding(request);
         if (request.Description.HasMetadata)
@@ -826,6 +828,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         var imageIdentifier = _slots.Insert(new CachedImage(_device, _scheduler, _backing, description, _backingPool, _reportAllocationFailure));
         _createdImageCount++;
         ReportLargeImageCreation(_slots[imageIdentifier], creationPath);
+        LogImageCreated(_slots[imageIdentifier], creationPath);
         ReportImageLifetime(_slots[imageIdentifier], "recreate");
         if (RenderPhaseProfile.Enabled)
         {
