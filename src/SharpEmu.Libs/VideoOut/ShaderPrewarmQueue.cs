@@ -128,20 +128,46 @@ internal sealed class ShaderPrewarmQueue<T>
     }
 
     // The order of the background lane of linked records (VulkanVideoPresenter.StartLinkedPrewarm), which compiles one at a
-    // time: every caller's newest record before any caller's older one, since one ready permutation already runs the
-    // caller's dispatches while a newer one compiles; within each round, callers a session saw compile for minutes first,
-    // since a session cannot compile those in time itself; otherwise the places NewestLinkedFirst gives.
-    internal static T[] LinkedLaneOrder(IReadOnlyList<T> records, Func<T, ulong> caller, Func<ulong, bool> slow)
+    // time. Every caller's first record goes before any caller's second, since one ready permutation already runs the
+    // caller's dispatches while a newer one compiles. A caller's first record is the one its next session asks for first
+    // (firstAsked: the library of the callees a session kept for it, which the session links first); without one, the
+    // oldest, since a session then links what the caller's tables name at its first dispatch, which sessions record before
+    // the later permutations. The caller's other records follow newest first. Within each round, callers a session saw
+    // compile for minutes go first, since a session cannot compile those in time itself; otherwise callers keep the order
+    // in which they were first recorded.
+    internal static T[] LinkedLaneOrder(IReadOnlyList<T> records, Func<T, ulong> caller, Func<ulong, bool> slow,
+        Func<T, bool> firstAsked)
     {
-        var newestFirst = NewestLinkedFirst(records, record => caller(record));
-        var rounds = new Dictionary<ulong, int>();
-        var keyed = new (T Record, int Round, bool Slow, int Place)[newestFirst.Length];
-        for (var place = 0; place < newestFirst.Length; place++)
+        var callers = new Dictionary<ulong, (int Place, List<T> Records)>();
+        for (var index = 0; index < records.Count; index++)
         {
-            var hash = caller(newestFirst[place]);
-            var round = rounds.GetValueOrDefault(hash);
-            rounds[hash] = round + 1;
-            keyed[place] = (newestFirst[place], round, slow(hash), place);
+            var hash = caller(records[index]);
+            if (!callers.TryGetValue(hash, out var entry))
+            {
+                callers.Add(hash, entry = (index, []));
+            }
+
+            entry.Records.Add(records[index]);
+        }
+
+        var keyed = new List<(T Record, int Round, bool Slow, int Place)>(records.Count);
+        foreach (var (hash, (place, list)) in callers)
+        {
+            var first = Math.Max(0, list.FindIndex(record => firstAsked(record)));
+            var lane = new List<T>(list.Count) { list[first] };
+            for (var index = list.Count - 1; index >= 0; index--)
+            {
+                if (index != first)
+                {
+                    lane.Add(list[index]);
+                }
+            }
+
+            var isSlow = slow(hash);
+            for (var round = 0; round < lane.Count; round++)
+            {
+                keyed.Add((lane[round], round, isSlow, place));
+            }
         }
 
         return [.. keyed.OrderBy(static entry => entry.Round).ThenByDescending(static entry => entry.Slow)

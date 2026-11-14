@@ -35,10 +35,11 @@ public sealed class ShaderPrewarmQueueTests
             ordered.Select(static item => item.Name));
     }
 
-    // The background lane takes every caller's newest record before any older one, slow callers first within a round, and
-    // otherwise the places NewestLinkedFirst gives.
+    // The background lane takes every caller's first record before any second one: the one its session asks for first
+    // (a-mid, c-new), else the oldest (b-old); then each caller's other records newest first. Slow callers go first within
+    // a round, then callers in the order first recorded.
     [Fact]
-    public void TheLinkedLaneTakesEachCallersNewestRecordFirstAndSlowCallersFirst()
+    public void TheLinkedLaneTakesEachCallersFirstAskedRecordFirstAndSlowCallersFirst()
     {
         Item[] items =
         [
@@ -47,9 +48,9 @@ public sealed class ShaderPrewarmQueueTests
         ];
 
         var ordered = ShaderPrewarmQueue<Item>.LinkedLaneOrder(items, static item => item.Caller!.Value,
-            static caller => caller == 0xC);
+            static caller => caller == 0xC, static item => item.Name is "a-mid" or "c-new");
 
-        Assert.Equal(new[] { "c-new", "a-new", "b-new", "c-old", "a-mid", "b-old", "a-old" },
+        Assert.Equal(new[] { "c-new", "a-mid", "b-old", "c-old", "a-new", "b-new", "a-old" },
             ordered.Select(static item => item.Name));
     }
 

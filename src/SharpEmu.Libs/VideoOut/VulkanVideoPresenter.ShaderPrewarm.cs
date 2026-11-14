@@ -67,6 +67,16 @@ internal static unsafe partial class VulkanVideoPresenter
         // linked records whose cache and recording stamps match); skipping it otherwise moves its pipelines to first use.
         private static readonly bool PrewarmBinarySkip = Environment.GetEnvironmentVariable("SHARPEMU_PREWARM_BINARY_SKIP") != "0";
 
+        // A linked permutation can be a whole-module compile of many minutes and gigabytes of driver memory, so the prewarm the
+        // game waits for leaves the recorded ones out. By default they compile on a background thread the game does not wait
+        // for (StartLinkedPrewarm); SHARPEMU_PREWARM_LINKED=all compiles them with the rest of the prewarm, =none not at all.
+        private static readonly string PrewarmLinked = Environment.GetEnvironmentVariable("SHARPEMU_PREWARM_LINKED") switch
+        {
+            null or "" or "background" => "background",
+            "none" => "none",
+            _ => "all",
+        };
+
         ShaderPrewarmList? IShaderPipelineHost.ShaderPrewarm => Volatile.Read(ref _shaderPrewarmList);
 
         private void StartShaderPrewarm()
