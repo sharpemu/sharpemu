@@ -85,11 +85,18 @@ public class ShaderProgramInfo
     public IReadOnlyList<CallRecordCallee> CallRecordCallees { get; init; } = [];
 }
 
+// Null RequestedGeneration means the requested link is still pending: its exact layout identity is known, but no
+// linked generation exists yet. "link", "permutation" and "pipeline" name the work that forced the fallback.
+public sealed record LinkedCompileFallback(ulong CallerHash, long? RequestedGeneration, long ServedGeneration,
+    string RequestedLibrary, string ServedLibrary, string Reason);
+
 // One shader stage bound to a draw or dispatch: its program, the resources it reads and its code base.
 public readonly record struct ShaderStageResources(ShaderProgramInfo? Program, ResourceSnapshot Resources, ulong ShaderBase = 0)
 {
     public bool IsValid => Program is not null;
 
+    // Per-resolution provenance of a compile fallback (ShaderProgramCache). It is never stored on a shared module.
+    public LinkedCompileFallback? CompileFallback { get; init; }
 
     public DispatchThreadLimits? ThreadLimits { get; init; }
 

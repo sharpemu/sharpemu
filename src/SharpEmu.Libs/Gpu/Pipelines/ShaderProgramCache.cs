@@ -151,6 +151,11 @@ internal sealed class ProgramSourceEntry
     public byte[][] CallTargetCodes { get; init; } = [];
     public Dictionary<uint, UnitedCallee[]>? RuntimeCallees { get; init; }
     public LinkedShaderPrewarm? LinkedPrewarm { get; init; }
+
+    // With RuntimeCallRecords, the permutation whose pipeline was still compiling at this program's last full resolution, with
+    // that resolution's stage resources (RuntimePipelineReady polls it with them, as it polls older compiles). Null once it is
+    // ready. See SkipPendingPass.
+    public (ShaderProgram Handle, ShaderStageResources Stage)? PendingPipeline { get; set; }
     public ConstantFill? ConstantFill { get; init; }
     public BoundedFill? BoundedFill { get; init; }
     public BoundedCopy? BoundedCopy { get; init; }
@@ -203,6 +208,48 @@ internal sealed class ShaderProgramCache
     // links a new layout on a worker and reports the program as not ready, so its dispatches are skipped as they are
     // while its module compiles; each program links one layout at a time.
     public bool DeferLinking { get; init; }
+
+    // While the newest program of a runtime-record caller compiles and an older ready program serves its dispatches, a
+    // dispatch whose resolution selects the permutation still compiling (PendingPermutationServes) polls that compile and,
+    // while it still compiles, serves the fallback without the newest program's record ranges and stage resources, which
+    // the fallback would discard: it resolves its own. On by default; SHARPEMU_PENDING_PASS_SKIP=0, or any value but 1,
+    // turns it off.
+    // PendingPassSkips counts the dispatches it served.
+    internal bool SkipPendingPass { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_PENDING_PASS_SKIP") is null or "" or "1";
+    internal long PendingPassSkips { get; private set; }
+
+    // The pending-pass skip is decided before the newest program's targets, records and linked materialization. When that
+    // program has exactly one permutation and it is the one still compiling, every selection serves the fallback: the same
+    // selection polls that compile, and a new one cannot compile while the stage's linked module compiles
+    // (TryCreateComputePipeline admits one at a time) and is served by the fallback meanwhile. So the compile is polled
+    // first, exactly as the late check polls it, and while it still compiles the fallback serves without the
+    // materialization the late check would have discarded. A new specialization's translation then starts at the first
+    // full resolution after the compile, not before it; what is served is unchanged. SHARPEMU_PENDING_PASS_EARLY=0 leaves
+    // the decision to the late check.
+    internal bool SkipPendingPassEarly { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_PENDING_PASS_EARLY") != "0";
+    internal long PendingPassEarlySkips { get; private set; }
+
+    // Whether a layout starts its push data where BindingLayout.Allocate would start it at this cursor.
+    private static bool StartsAt(BindingLayout layout, uint pushDataCursor) => layout.PushDataStartDword == PushData.StartFor(pushDataCursor, layout.ShaderDataDwordCount);
+
+    // Whether the stage step serves this permutation for the push-data cursor and specialization (it takes the first that does).
+    internal static bool Selects(ProgramPermutation candidate, uint pushDataCursor, ResourceSpecialization specialization) =>
+        StartsAt(candidate.Bindings, pushDataCursor) && candidate.Specialization.Equals(specialization);
+
+    // Whether the stage step would select the pending permutation: then it would poll that compile and, while it compiles,
+    // serve the caller's fallback. Any other selection, or none, is left to the stage step.
+    internal static bool PendingPermutationServes(IReadOnlyList<ProgramPermutation> permutations, ShaderProgram pending,
+        uint pushDataCursor, ResourceSpecialization specialization)
+    {
+        foreach (var candidate in permutations)
+        {
+            if (Selects(candidate, pushDataCursor, specialization)) return candidate.Handle.Id == pending.Id;
+        }
+
+        return false;
+    }
     private readonly Dictionary<ulong, ((ProgramKey Key, string Library) LinkedKey, Task<ProgramSourceEntry?> Link)> _pendingLinks = new();
 
     // Callers whose callees cannot read their records at run time: they link a copy per record.
@@ -747,6 +794,25 @@ internal sealed class ShaderProgramCache
                         linkedTiers.LinkedGeneration = linked.Generation;
                     }
 
+                    if (runtimeFallback is null && SkipPendingPassEarly && SkipPendingPass &&
+                        linked.RuntimeCallRecords && linked.PendingPipeline is { } earlyPending && linked.Permutations.Count == 1 &&
+                        linked.Permutations[0].Handle.Id == earlyPending.Handle.Id &&
+                        _runtimeFallbacks.TryGetValue(programKey, out var earlyFallback) && !ReferenceEquals(earlyFallback, linked))
+                    {
+                        if (RuntimePipelineReady(programKey, linked, earlyPending.Handle, earlyPending.Stage, options, null))
+                        {
+                            linked.PendingPipeline = null;
+                        }
+                        // The poll can promote an older compile that finished meanwhile; the fallback it leaves serves.
+                        else if (_runtimeFallbacks.TryGetValue(programKey, out var earlyServing) && !ReferenceEquals(earlyServing, linked))
+                        {
+                            PendingPassSkips++;
+                            PendingPassEarlySkips++;
+                            return GetOrCompileFallback(source, options, ref pushDataCursor, out stage, deferLinking, earlyServing,
+                            linked.Generation, linked.LibraryIdentity, "pipeline");
+                        }
+                    }
+
                     callArguments = library.Arguments;
                     if (linked.RuntimeCallRecords)
                     {
@@ -772,6 +838,24 @@ internal sealed class ShaderProgramCache
                         : ResourceMaterializer.Materialize(entry.Plan, linkedInputs, ref snapshot, ref specialization);
                     if (!linkedMaterialized)
                         throw new InvalidOperationException("The linked shader resources could not be materialized.");
+                    if (runtimeFallback is null && linked.PendingPipeline is { } pending && SkipPendingPass &&
+                        PendingPermutationServes(linked.Permutations, pending.Handle, pushDataCursor, specialization) &&
+                        _runtimeFallbacks.TryGetValue(programKey, out var fallbackBefore) && !ReferenceEquals(fallbackBefore, linked))
+                    {
+                        if (RuntimePipelineReady(programKey, linked, pending.Handle, pending.Stage, options, null))
+                        {
+                            linked.PendingPipeline = null;
+                        }
+                        // The poll can promote an older compile that finished meanwhile; the fallback it leaves serves, as after
+                        // the stage step's own poll.
+                        else if (_runtimeFallbacks.TryGetValue(programKey, out var servingWhilePending) && !ReferenceEquals(servingWhilePending, linked))
+                        {
+                            PendingPassSkips++;
+                            return GetOrCompileFallback(source, options, ref pushDataCursor, out stage, deferLinking, servingWhilePending,
+                                linked.Generation, linked.LibraryIdentity, "pipeline");
+                        }
+                    }
+
                     if (linked.RuntimeCallRecords)
                         (callRecords, callRecordRanges) = CallRecordRanges(entry.Plan, callRecords!, callTargets, linkedInputs, source.UserDataBase);
                 }
@@ -790,7 +874,7 @@ internal sealed class ShaderProgramCache
 
         _imageDescriptorTrace.Record(source, entry.Plan, snapshot);
         var permutation = Volatile.Read(ref entry.LastPermutation) is { } last && ReferenceEquals(last.Specialization, specialization) &&
-            last.Bindings.PushDataStartDword == PushData.StartFor(pushDataCursor, last.Bindings.ShaderDataDwordCount)
+            StartsAt(last.Bindings, pushDataCursor)
             ? last
             : FindPermutation(entry, specialization, pushDataCursor);
         if (permutation is null)
@@ -826,7 +910,13 @@ internal sealed class ShaderProgramCache
         {
             lock (_callGate)
             {
-                if (!RuntimePipelineReady(key!, entry, permutation.Handle, stage, options, runtimeFallback))
+                var pipelineReady = RuntimePipelineReady(key!, entry, permutation.Handle, stage, options, runtimeFallback);
+                if (runtimeFallback is null)
+                {
+                    entry.PendingPipeline = pipelineReady ? null : (permutation.Handle, stage);
+                }
+
+                if (!pipelineReady)
                 {
                     if (runtimeFallback is not null)
                         throw new ShaderProgramPendingException();
@@ -879,8 +969,7 @@ internal sealed class ShaderProgramCache
         {
             foreach (var candidate in entry.Permutations)
             {
-                var layout = candidate.Bindings;
-                if (layout.PushDataStartDword == (layout.UsesTessellationData ? PushData.NoStart : PushData.StartFor(pushDataCursor, layout.ShaderDataDwordCount)) && candidate.Specialization.Equals(specialization))
+                if (Selects(candidate, pushDataCursor, specialization))
                 {
                     return candidate;
                 }
@@ -898,6 +987,17 @@ internal sealed class ShaderProgramCache
         }
     }
 
+    // A recursive GetOrCompileCore that serves a ready program; its stage names the fallback (CompileFallback).
+    private ShaderProgram GetOrCompileFallback(ShaderSource source, StageCompileOptions options, ref uint pushDataCursor,
+        out ShaderStageResources stage, bool deferLinking, ProgramSourceEntry fallback,
+        long? requestedGeneration, string requestedLibrary, string reason)
+    {
+        var handle = GetOrCompileCore(source, options, ref pushDataCursor, out stage, deferLinking, fallback);
+        var selection = new LinkedCompileFallback(source.Hash, requestedGeneration, fallback.Generation,
+            requestedLibrary, fallback.LibraryIdentity, reason);
+        stage = stage with { CompileFallback = selection };
+        return handle;
+    }
 
     // The key of the entry the static state was just built for.
     private ProgramKey BuildProgramKey(ShaderSource source) =>
@@ -1304,7 +1404,7 @@ internal sealed class ShaderProgramCache
             StaticState.Add(hull.InputControlPoints);
             StaticState.Add(hull.OutputControlPoints);
             StaticState.Add(hull.PatchesPerGroup);
-            StaticState.Add(hull.HullEntryPc);
+            state.Add(hull.HullEntryPc);
         }
     }
 
