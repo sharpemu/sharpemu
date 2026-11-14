@@ -47,8 +47,12 @@ public sealed class Gen5VertexSystemRegisterTests
         var store = instructions.FindIndex(item => item.Opcode == SpirvOp.Store && item.Operands[0] == register);
         Assert.True(store >= 0);
         var value = instructions[store].Operands[1];
-        var read = instructions.FindIndex(item => item.Opcode == SpirvOp.BitFieldUExtract && item.Operands[2] == value);
-        Assert.True(store >= 0 && store < read, "The vertex count must be initialized before its first read.");
+        // The read (S_BFE_U32 of the field at bit 12, 9 bits wide) folds: s10 receives the count field of the stored value.
+        var count = Register(instructions, "s10");
+        var read = instructions.FindIndex(item => item.Opcode == SpirvOp.Store && item.Operands[0] == count);
+        Assert.True(store < read, "The vertex count must be initialized before its first read.");
+        Assert.Equal(32u, Assert.Single(instructions, item => item.Opcode == SpirvOp.Constant &&
+            item.Operands[1] == instructions[read].Operands[1]).Operands[2]);
         var packed = Assert.Single(instructions, item => item.Opcode == SpirvOp.Constant && item.Operands[1] == value).Operands[2];
         Assert.Equal(32u << 12, packed);
         Assert.Equal(0u, (packed >> 22) & 0x1ff);

@@ -10,6 +10,7 @@ public sealed partial class SpirvModuleBuilder
     private const uint GlslFrexp = 51;
     private const uint SubgroupScope = 3;
     private static readonly uint[] GlslMinMax = [37, 38, 39, 40, 41, 42, 79, 80];
+    private const uint GlslUMin = 38;
 
     private readonly Dictionary<uint, uint> _resultTypes = [];
     private readonly Dictionary<uint, (uint Width, bool Signed)> _integerTypeInfo = [];
@@ -799,6 +800,30 @@ public sealed partial class SpirvModuleBuilder
     private bool Defines(uint id, SpirvOp opcode, out Definition definition) =>
         _definitions.TryGetValue(id, out definition) && definition.Opcode == opcode;
 
+    // The largest value a 32-bit unsigned id can hold, from its definition: a constant, a logical right shift by a constant
+    // or an AND with a constant.
+    private ulong UpperBound(uint id)
+    {
+        if (IsIntegerConstant(id, out var value))
+        {
+            return value;
+        }
+
+        if (Defines(id, SpirvOp.ShiftRightLogical, out var shift) && IsIntegerConstant(shift.Operands[1], out var amount) &&
+            amount < 32)
+        {
+            return uint.MaxValue >> (int)amount;
+        }
+
+        if (Defines(id, SpirvOp.BitwiseAnd, out var and))
+        {
+            return Math.Min(IsIntegerConstant(and.Operands[0], out var left) ? left : uint.MaxValue,
+                IsIntegerConstant(and.Operands[1], out var right) ? right : uint.MaxValue);
+        }
+
+        return uint.MaxValue;
+    }
+
     private bool IsIntegerConstant(uint id, out ulong value)
     {
         if (_wideConstantValues.TryGetValue(id, out value))
@@ -897,6 +922,10 @@ public sealed partial class SpirvModuleBuilder
                 return true;
             case SpirvOp.ExtInst when operands.Length == 4 && GlslMinMax.Contains(operands[1]) &&
                 operands[2] == operands[3] && HasType(operands[2], resultType):
+                result = operands[2];
+                return true;
+            case SpirvOp.ExtInst when operands.Length == 4 && operands[1] == GlslUMin && IsUnsignedInteger(resultType, 32) &&
+                IsIntegerConstant(operands[3], out var limit) && UpperBound(operands[2]) <= limit:
                 result = operands[2];
                 return true;
             case SpirvOp.IEqual or SpirvOp.INotEqual when operands.Length == 2:
