@@ -6059,7 +6059,7 @@ public static partial class KernelMemoryCompatExports
         return result;
     }
 
-    private static int InvokeKernelMemoryOperation(
+    internal static int InvokeKernelMemoryOperation(
         CpuContext ctx,
         Func<CpuContext, int> operation,
         ulong rdi = 0,
