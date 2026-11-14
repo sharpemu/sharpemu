@@ -166,7 +166,8 @@ public static class CallRecordPlanner
             return true;
         }
 
-        var evaluator = new RuntimeValueEvaluator(plan, inputs.WithCallArguments(userDataBase, [argument]));
+        using var scratch = RuntimeEvaluationScratch.Rent();
+        var evaluator = new RuntimeValueEvaluator(scratch, plan, inputs.WithCallArguments(userDataBase, [argument]));
         Span<uint> words = stackalloc uint[4];
         foreach (var buffer in plan.CallRecordCallees[callee].BufferWords)
         {

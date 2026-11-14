@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Buffers.Binary;
+using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Ir;
@@ -111,16 +112,16 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
             return true;
         }
 
-        foreach (var (call, index) in caller.Instructions.Select((instruction, index) => (instruction, index)))
+        foreach (var callSite in CallSites(caller, userDataBase, (uint)snapshot.UserData.Length))
         {
-            if (call.Opcode != "SSwappcB64") continue;
-            if (call.Sources.Count != 1 || call.Destinations.Count != 1 ||
-                call.Sources[0].Kind != Gen5OperandKind.ScalarRegister || call.Destinations[0].Kind != Gen5OperandKind.ScalarRegister)
-                throw new InvalidOperationException("The shader call does not use a supported table record.");
-            if (TryFindUserDataCall(caller, index, snapshot, userDataBase, out var userTarget, out var userArgument))
+            if (callSite.Refusal is { } refusal) throw new InvalidOperationException(refusal);
+            var call = caller.Instructions[callSite.Index];
+            if (callSite.UserData is { } userData)
             {
                 // A function pointer the dispatch passes in user data: one target, which the linked program still checks
                 // against the call registers when the call runs. Its argument is a record argument like a table's.
+                var userTarget = UserDataPair(snapshot, userDataBase, userData.Target);
+                var userArgument = UserDataPair(snapshot, userDataBase, userData.Argument);
                 var userArgumentRegister = call.Sources[0].Value + 2;
                 var userReturn = unchecked(caller.Address + call.ProgramOffset + (ulong)call.Words.Count * sizeof(uint));
                 identity.AppendData(BitConverter.GetBytes(userTarget));
@@ -132,49 +133,9 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
                 calls.Add(new(call.Pc, call.Sources[0].Value, userArgumentRegister, call.Destinations[0].Value, userReturn, userTargets));
                 continue;
             }
-            Gen5ShaderInstruction load;
-            Gen5ScalarMemoryControl loadControl;
-            uint argumentRegister = 0;
-            if (TryFindDirectRecordLoads(caller, index, out var targetLoad, out var directArgumentRegister))
-            {
-                load = targetLoad;
-                loadControl = (Gen5ScalarMemoryControl)targetLoad.Control!;
-                argumentRegister = directArgumentRegister;
-            }
-            else
-            {
-                if (index < 6) throw new InvalidOperationException("The shader call does not use a supported table record.");
-                var loadIndex = index - 6;
-                while (loadIndex >= 0 && caller.Instructions[loadIndex] is { Opcode: "VMovB32", Destinations.Count: 1 } vectorMove &&
-                    vectorMove.Destinations[0].Kind == Gen5OperandKind.VectorRegister) loadIndex--;
-                if (loadIndex < 0) throw new InvalidOperationException("The shader call table load is missing.");
-                load = caller.Instructions[loadIndex];
-                if (load.Opcode != "SBufferLoadDwordx4" || load.Control is not Gen5ScalarMemoryControl recordControl ||
-                    load.Destinations.Count != 4 || caller.Instructions[index - 5].Opcode != "SWaitcnt")
-                    throw new InvalidOperationException("The shader call table load is not supported.");
-                loadControl = recordControl;
-                if (loadControl.DynamicOffsetRegister is { } selector)
-                {
-                    var scale = caller.Instructions.Take(loadIndex).Reverse().FirstOrDefault(instruction =>
-                        instruction.Opcode.StartsWith("SCbranch", StringComparison.Ordinal) || instruction.Opcode is "SBranch" or "SSwappcB64" ||
-                        instruction.Destinations.Any(destination => destination.Kind == Gen5OperandKind.ScalarRegister &&
-                            selector >= destination.Value && selector - destination.Value < instruction.DestinationWidth));
-                    if (scale is null || scale.Opcode != "SLshlB32" || scale.Destinations.Count != 1 || scale.Destinations[0] != Gen5Operand.Scalar(selector) ||
-                        scale.Sources.Count != 2 || scale.Sources[1] != new Gen5Operand(Gen5OperandKind.EncodedConstant, 132))
-                        throw new InvalidOperationException("The shader call table does not use 16-byte records.");
-                }
-                for (var component = 0; component < 4; component++)
-                {
-                    var move = caller.Instructions[index - 4 + component];
-                    if (move.Opcode != "SMovB32" || move.Sources.Count != 1 || move.Destinations.Count != 1 ||
-                        move.Sources[0] != load.Destinations[component] || move.Destinations[0].Kind != Gen5OperandKind.ScalarRegister)
-                        throw new InvalidOperationException("The shader call record has an unsupported register transfer.");
-                    if (component == 2) argumentRegister = move.Destinations[0].Value;
-                    var expected = component < 2 ? call.Sources[0].Value + (uint)component : argumentRegister + (uint)component - 2;
-                    if (move.Destinations[0].Value != expected)
-                        throw new InvalidOperationException("The shader call record does not use register pairs.");
-                }
-            }
+            var load = callSite.Load!;
+            var loadControl = (Gen5ScalarMemoryControl)load.Control!;
+            var argumentRegister = callSite.ArgumentRegister;
             var access = memory.Find(load.Pc);
             if (access is null || access.Resource >= snapshot.Buffers.Length)
                 throw new InvalidOperationException("The shader call table has no materialized buffer.");
@@ -520,21 +481,128 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
     // A caller may also copy its target and argument pairs from user data: each of the four call registers (the
     // target pair, then the argument pair) still holds a user-data register, reached through S_MOV_B32 and
     // S_MOV_B64 copies (a caller may save a pair at entry and reuse it after the call registers were overwritten).
-    private static bool TryFindUserDataCall(Gen5ShaderProgram caller, int index, ResourceSnapshot snapshot, uint userDataBase,
-        out ulong target, out ulong argument)
+    // A call site as the caller's code decides it: the user-data registers that hold its target and argument pairs, or the
+    // instruction that loads its record, or why it is refused. Each read takes the values from its own dispatch.
+    private sealed record CallSitePlan(int Index, string? Refusal = null, (uint Target, uint Argument)? UserData = null,
+        Gen5ShaderInstruction? Load = null, uint ArgumentRegister = 0);
+
+    private sealed record CallSitePlans(uint UserDataBase, uint UserDataCount, CallSitePlan[] Sites);
+
+    private sealed class CallSitePlanSlot
     {
-        target = 0;
-        argument = 0;
+        public volatile CallSitePlans? Plans;
+    }
+
+    // By instruction list, which a copy of the program at another address shares.
+    private static readonly ConditionalWeakTable<IReadOnlyList<Gen5ShaderInstruction>, CallSitePlanSlot> SitePlans = new();
+
+    private static CallSitePlan[] CallSites(Gen5ShaderProgram caller, uint userDataBase, uint userDataCount)
+    {
+        var slot = SitePlans.GetValue(caller.Instructions, static _ => new CallSitePlanSlot());
+        if (slot.Plans is { } plans && plans.UserDataBase == userDataBase && plans.UserDataCount == userDataCount)
+        {
+            return plans.Sites;
+        }
+
+        var planned = new CallSitePlans(userDataBase, userDataCount, PlanSites(caller, userDataBase, userDataCount));
+        slot.Plans = planned;
+        return planned.Sites;
+    }
+
+    private static CallSitePlan[] PlanSites(Gen5ShaderProgram caller, uint userDataBase, uint userDataCount)
+    {
+        var sites = new List<CallSitePlan>();
+        for (var index = 0; index < caller.Instructions.Count; index++)
+        {
+            if (caller.Instructions[index].Opcode == "SSwappcB64")
+            {
+                sites.Add(PlanSite(caller, index, userDataBase, userDataCount));
+            }
+        }
+
+        return [.. sites];
+    }
+
+    private static CallSitePlan PlanSite(Gen5ShaderProgram caller, int index, uint userDataBase, uint userDataCount)
+    {
+        try
+        {
+            return PlanSiteOrThrow(caller, index, userDataBase, userDataCount);
+        }
+        catch (InvalidOperationException refusal)
+        {
+            return new CallSitePlan(index, refusal.Message);
+        }
+    }
+
+    private static CallSitePlan PlanSiteOrThrow(Gen5ShaderProgram caller, int index, uint userDataBase, uint userDataCount)
+    {
+        var call = caller.Instructions[index];
+        if (call.Sources.Count != 1 || call.Destinations.Count != 1 ||
+            call.Sources[0].Kind != Gen5OperandKind.ScalarRegister || call.Destinations[0].Kind != Gen5OperandKind.ScalarRegister)
+            throw new InvalidOperationException("The shader call does not use a supported table record.");
+        if (TryFindUserDataCall(caller, index, userDataBase, userDataCount, out var userData))
+            return new CallSitePlan(index, UserData: userData);
+        Gen5ShaderInstruction load;
+        Gen5ScalarMemoryControl loadControl;
+        uint argumentRegister = 0;
+        if (TryFindDirectRecordLoads(caller, index, out var targetLoad, out var directArgumentRegister))
+        {
+            load = targetLoad;
+            loadControl = (Gen5ScalarMemoryControl)targetLoad.Control!;
+            argumentRegister = directArgumentRegister;
+        }
+        else
+        {
+            if (index < 6) throw new InvalidOperationException("The shader call does not use a supported table record.");
+            var loadIndex = index - 6;
+            while (loadIndex >= 0 && caller.Instructions[loadIndex] is { Opcode: "VMovB32", Destinations.Count: 1 } vectorMove &&
+                vectorMove.Destinations[0].Kind == Gen5OperandKind.VectorRegister) loadIndex--;
+            if (loadIndex < 0) throw new InvalidOperationException("The shader call table load is missing.");
+            load = caller.Instructions[loadIndex];
+            if (load.Opcode != "SBufferLoadDwordx4" || load.Control is not Gen5ScalarMemoryControl recordControl ||
+                load.Destinations.Count != 4 || caller.Instructions[index - 5].Opcode != "SWaitcnt")
+                throw new InvalidOperationException("The shader call table load is not supported.");
+            loadControl = recordControl;
+            if (loadControl.DynamicOffsetRegister is { } selector)
+            {
+                var scale = caller.Instructions.Take(loadIndex).Reverse().FirstOrDefault(instruction =>
+                    instruction.Opcode.StartsWith("SCbranch", StringComparison.Ordinal) || instruction.Opcode is "SBranch" or "SSwappcB64" ||
+                    instruction.Destinations.Any(destination => destination.Kind == Gen5OperandKind.ScalarRegister &&
+                        selector >= destination.Value && selector - destination.Value < instruction.DestinationWidth));
+                if (scale is null || scale.Opcode != "SLshlB32" || scale.Destinations.Count != 1 || scale.Destinations[0] != Gen5Operand.Scalar(selector) ||
+                    scale.Sources.Count != 2 || scale.Sources[1] != new Gen5Operand(Gen5OperandKind.EncodedConstant, 132))
+                    throw new InvalidOperationException("The shader call table does not use 16-byte records.");
+            }
+            for (var component = 0; component < 4; component++)
+            {
+                var move = caller.Instructions[index - 4 + component];
+                if (move.Opcode != "SMovB32" || move.Sources.Count != 1 || move.Destinations.Count != 1 ||
+                    move.Sources[0] != load.Destinations[component] || move.Destinations[0].Kind != Gen5OperandKind.ScalarRegister)
+                    throw new InvalidOperationException("The shader call record has an unsupported register transfer.");
+                if (component == 2) argumentRegister = move.Destinations[0].Value;
+                var expected = component < 2 ? call.Sources[0].Value + (uint)component : argumentRegister + (uint)component - 2;
+                if (move.Destinations[0].Value != expected)
+                    throw new InvalidOperationException("The shader call record does not use register pairs.");
+            }
+        }
+        return new CallSitePlan(index, Load: load, ArgumentRegister: argumentRegister);
+    }
+
+    private static ulong UserDataPair(ResourceSnapshot snapshot, uint userDataBase, uint first) =>
+        snapshot.UserData[first - userDataBase] | (ulong)snapshot.UserData[first - userDataBase + 1] << 32;
+
+    private static bool TryFindUserDataCall(Gen5ShaderProgram caller, int index, uint userDataBase, uint userDataCount,
+        out (uint Target, uint Argument) userData)
+    {
+        userData = default;
         var callRegister = caller.Instructions[index].Sources[0].Value;
         var sources = new uint[4];
         for (var slot = 0; slot < sources.Length; slot++)
-            if (!TryTraceUserDataRegister(caller, index, callRegister + (uint)slot, userDataBase, (uint)snapshot.UserData.Length,
-                    out sources[slot]))
+            if (!TryTraceUserDataRegister(caller, index, callRegister + (uint)slot, userDataBase, userDataCount, out sources[slot]))
                 return false;
         if (sources[1] != sources[0] + 1 || sources[3] != sources[2] + 1) return false;
-        ulong Pair(uint first) => snapshot.UserData[first - userDataBase] | (ulong)snapshot.UserData[first - userDataBase + 1] << 32;
-        target = Pair(sources[0]);
-        argument = Pair(sources[2]);
+        userData = (sources[0], sources[2]);
         return true;
     }
 

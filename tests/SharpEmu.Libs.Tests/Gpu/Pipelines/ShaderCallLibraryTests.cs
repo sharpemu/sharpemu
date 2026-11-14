@@ -321,6 +321,41 @@ public sealed class ShaderCallLibraryTests
         Assert.Equal((0x11_0020_0100ul, 0x12_0000_6000ul), (second.Address, second.Argument));
     }
 
+    // A caller's call sites are planned once from its code, and each read takes its dispatch's user data and address: a
+    // copy at another address returns to its own address, and a dispatch whose user data cannot hold both pairs is
+    // planned again and refused.
+    [Fact]
+    public void CallSitePlansReadEachDispatchsUserDataAndAddress()
+    {
+        var caller = Program(
+            Vop1(0, "VMovB32", 1, Operand(0)),
+            MoveScalarRegister(4, 14, 0), MoveScalarRegister(8, 15, 1),
+            MoveScalarRegister(12, 16, 2), MoveScalarRegister(16, 17, 3),
+            Vop1(20, "VMovB32", 5, Operand(0)),
+            Sop1(24, "SSwappcB64", 14, Gen5Operand.Scalar(14)), EndProgram(28));
+        var words = new Dictionary<ulong, uint>
+        {
+            [0x11_0020_0000] = 0xBF800000, [0x11_0020_0004] = 0xBE80200E,
+            [0x11_0020_0100] = 0xBF800000, [0x11_0020_0104] = 0xBE80200E,
+        };
+        ShaderCallSite Read(Gen5ShaderProgram program, uint[] userData) => Assert.Single(ShaderCallLibrary.Read(program,
+            new MemoryAccessTable(), new ResourceSnapshot { UserData = userData },
+            (ulong address, out uint word) => words.TryGetValue(address, out word)).Calls);
+
+        var first = Assert.Single(Read(caller, [0x200000, 0x11, 0x5000, 0x12]).Targets);
+        Assert.Equal((0x11_0020_0000ul, 0x12_0000_5000ul), (first.Address, first.Argument));
+        var second = Assert.Single(Read(caller, [0x200100, 0x11, 0x6000, 0x12]).Targets);
+        Assert.Equal((0x11_0020_0100ul, 0x12_0000_6000ul), (second.Address, second.Argument));
+
+        var moved = caller with { Address = caller.Address + 0x1000 };
+        Assert.Equal(Read(caller, [0x200000, 0x11, 0x5000, 0x12]).ReturnAddress + 0x1000,
+            Read(moved, [0x200000, 0x11, 0x5000, 0x12]).ReturnAddress);
+
+        Assert.Throws<InvalidOperationException>(() => Read(caller, [0x200000, 0x11]));
+        Assert.Throws<InvalidOperationException>(() => Read(caller, [0x200000, 0x11]));
+        Assert.Single(Read(caller, [0x200000, 0x11, 0x5000, 0x12]).Targets);
+    }
+
     // A site linked with run-time records holds each callee once, so its table may hold more records than a site linked
     // per record.
     [Theory]
