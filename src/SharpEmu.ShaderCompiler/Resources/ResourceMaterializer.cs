@@ -2204,10 +2204,11 @@ public static partial class ResourceMaterializer
         specialization = new ResourceSpecialization
         {
             BaseBufferCount = baseBufferCount,
+            StableImageBindings = plan.StableImageBindings,
             Buffers = buffers,
             Images = images,
             BufferCandidateTables = candidateTables,
-            ImageDescriptorGroups = DescriptorBindingAliases.Group(snapshot.Images, images),
+            ImageDescriptorGroups = plan.StableImageBindings ? [] : DescriptorBindingAliases.Group(snapshot.Images, images),
             SamplerDescriptorGroups = DescriptorBindingAliases.Group(snapshot.Samplers.Take(info.Samplers.Count).ToArray()),
         };
         specializedSnapshot = snapshot;
@@ -2267,6 +2268,9 @@ public static partial class ResourceMaterializer
     public static SpecializedResourceInfo ApplyTo(ShaderResourcePlan plan, ResourceSpecialization specialization)
     {
         var source = plan.Info;
+        if (plan.StableImageBindings != specialization.StableImageBindings ||
+            (plan.StableImageBindings && specialization.ImageDescriptorGroups.Count != 0))
+            throw new ResourcePlanException("shader image binding policy does not match the plan");
         if (source.Buffers.Count != specialization.BaseBufferCount || source.Images.Count > specialization.Images.Count)
         {
             throw new ResourcePlanException(

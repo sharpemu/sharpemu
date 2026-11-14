@@ -302,7 +302,7 @@ internal sealed class ShaderPrewarmList : IDisposable
 
     private const uint Magic = 0x57504553;
     private const uint GraphicsMagic = 0x47504553;
-    private const uint FormatVersion = 4;
+    private const uint FormatVersion = 5;
     private const uint GraphicsFormatVersion = 1;
     private const byte CodeKind = 1;
     private const byte ComputeKind = 2;
@@ -852,6 +852,7 @@ internal sealed class ShaderPrewarmList : IDisposable
     private static void WriteSpecialization(BinaryWriter writer, ResourceSpecialization specialization)
     {
         writer.Write(specialization.BaseBufferCount);
+        writer.Write(specialization.StableImageBindings);
         writer.Write(specialization.Buffers.Count);
         foreach (var buffer in specialization.Buffers)
         {
@@ -891,7 +892,10 @@ internal sealed class ShaderPrewarmList : IDisposable
 
     private static ResourceSpecialization ReadSpecialization(BinaryReader reader, int limit)
     {
-        var specialization = new ResourceSpecialization { BaseBufferCount = reader.ReadInt32() };
+        var specialization = new ResourceSpecialization
+        {
+            BaseBufferCount = reader.ReadInt32(), StableImageBindings = reader.ReadBoolean(),
+        };
         for (var count = CheckedCount(reader.ReadInt32(), limit); count > 0; count--)
         {
             specialization.Buffers.Add(new BufferSpecialization(reader.ReadUInt32(), reader.ReadUInt32(), reader.ReadUInt32()));

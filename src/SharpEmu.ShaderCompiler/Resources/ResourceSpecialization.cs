@@ -36,6 +36,7 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
 {
     // The plan's base buffer count; Buffers beyond it are materialized candidates.
     public int BaseBufferCount { get; init; }
+    public bool StableImageBindings { get; init; }
     public List<BufferSpecialization> Buffers { get; init; } = [];
     public List<ImageSpecialization> Images { get; init; } = [];
     public List<BufferCandidateTableSpecialization> BufferCandidateTables { get; init; } = [];
@@ -43,7 +44,8 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
     public List<uint> SamplerDescriptorGroups { get; init; } = [];
 
     public bool Equals(ResourceSpecialization? other) =>
-        ReferenceEquals(this, other) || other is not null && BaseBufferCount == other.BaseBufferCount && Buffers.SequenceEqual(other.Buffers) &&
+        ReferenceEquals(this, other) || other is not null && StableImageBindings == other.StableImageBindings &&
+        BaseBufferCount == other.BaseBufferCount && Buffers.SequenceEqual(other.Buffers) &&
         Images.SequenceEqual(other.Images) && BufferCandidateTables.SequenceEqual(other.BufferCandidateTables) &&
         ImageDescriptorGroups.SequenceEqual(other.ImageDescriptorGroups) &&
         SamplerDescriptorGroups.SequenceEqual(other.SamplerDescriptorGroups);
@@ -54,6 +56,7 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
     {
         var hash = new HashCode();
         hash.Add(BaseBufferCount);
+        hash.Add(StableImageBindings);
         foreach (var buffer in Buffers)
         {
             hash.Add(buffer);
@@ -77,6 +80,7 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
     public ResourceSpecialization Clone() => new()
     {
         BaseBufferCount = BaseBufferCount,
+        StableImageBindings = StableImageBindings,
         Buffers = [.. Buffers],
         Images = [.. Images],
         BufferCandidateTables = [.. BufferCandidateTables],

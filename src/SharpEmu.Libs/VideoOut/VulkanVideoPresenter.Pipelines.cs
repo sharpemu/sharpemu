@@ -4,6 +4,7 @@
 namespace SharpEmu.Libs.VideoOut;
 
 using System.Diagnostics;
+using System.Collections.Concurrent;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.GpuCommands;
@@ -59,9 +60,9 @@ internal static unsafe partial class VulkanVideoPresenter
         private static int _vertexOutOfBoundsLines;
 
         private readonly Dictionary<ulong, ShaderModule> _shaderModules = new();
-        private readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, int> _shaderModuleSpirvBytes = new();
-        private readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, byte[]> _rectangleStageCode = new();
-        private readonly Dictionary<ulong, string> _shaderModuleCacheIdentities = new();
+        private readonly ConcurrentDictionary<ulong, int> _shaderModuleSpirvBytes = new();
+        private readonly ConcurrentDictionary<ulong, byte[]> _rectangleStageCode = new();
+        private readonly ConcurrentDictionary<ulong, string> _shaderModuleCacheIdentities = new();
         private long _pipelineCreationMilliseconds;
         internal KhrPushDescriptor _pushDescriptorApi = null!;
         private uint _maxPushDescriptors;
@@ -70,6 +71,9 @@ internal static unsafe partial class VulkanVideoPresenter
         internal SharpEmu.Libs.Gpu.Buffers.ContentUploadArena _contentUploads = null!;
 
         uint IShaderPipelineHost.MaxPushDescriptors => _maxPushDescriptors;
+
+        StableImageDescriptorLimits IShaderPipelineHost.ComputeImageDescriptorLimits =>
+            ShaderDescriptorLimits.ComputeImageLimits(_shaderDescriptorLimits);
 
         bool IShaderPipelineHost.TryCopyImage(in ImageRequest source, in ImageRequest destination) =>
             _imageCache.TryCopyImage(source, destination);

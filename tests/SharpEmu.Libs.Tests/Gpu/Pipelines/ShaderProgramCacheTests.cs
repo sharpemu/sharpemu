@@ -92,6 +92,28 @@ public sealed class ShaderProgramCacheTests : IDisposable
         Assert.Equal("SNop", request.Program.Instructions[0].Opcode);
     }
 
+    [Theory]
+    [InlineData(16u, 1)]
+    [InlineData(15u, 2)]
+    public void ImageAliasPartitionsReuseOnePermutationWhenUncoalescedDemandFits(uint imageLimit, int permutations)
+    {
+        _guest.Host.ComputeImageDescriptorLimits = ImageBindingTestProgram.Limits with { SampledImages = imageLimit };
+        _guest.RegisterProgram(CodeA, HeaderA, ImageBindingTestProgram.Code());
+        var ids = new List<ulong>();
+        foreach (var partition in ImageBindingTestProgram.Partitions)
+        {
+            ImageBindingTestProgram.WriteDescriptors(_guest, DataBase, partition);
+            var cursor = 0u;
+            var program = Compile(CodeA, [unchecked((uint)DataBase), (uint)(DataBase >> 32)], ref cursor, out var stage);
+            ids.Add(program.Id);
+            Assert.Equal(16, stage.Resources.Images.Length);
+        }
+        Assert.Equal(permutations, ids.Distinct().Count());
+        Assert.Equal(permutations, Assert.Single(_guest.Programs.Entries).Permutations.Count);
+        Assert.Equal(permutations, _guest.Compiler.Requests.Count);
+        Assert.Equal(permutations, _guest.Host.Modules.Count);
+    }
+
     private readonly FatalScope _fatal = new();
     private readonly PipelineTestGuest _guest = new();
 

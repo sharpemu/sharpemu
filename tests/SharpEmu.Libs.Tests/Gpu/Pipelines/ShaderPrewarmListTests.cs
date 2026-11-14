@@ -53,6 +53,41 @@ public sealed class ShaderPrewarmListTests : IDisposable
         return (guest.Host, Assert.Single(guest.Compiler.Shaders).Spirv);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ImageBindingPolicyRoundTripsAndPrewarmRejectsTheOtherHostPolicy(bool stable)
+    {
+        var limits = stable ? ImageBindingTestProgram.Limits : default;
+        byte[] runtime;
+        using (var list = Open())
+        {
+            var guest = new PipelineTestGuest(Compile);
+            guest.Host.ShaderPrewarm = list;
+            guest.Host.ComputeImageDescriptorLimits = limits;
+            guest.RegisterProgram(CodeAddress, HeaderAddress, ImageBindingTestProgram.Code());
+            ImageBindingTestProgram.WriteDescriptors(guest, BufferAddress, ImageBindingTestProgram.Partitions[0]);
+            var cursor = 0u;
+            guest.Programs.GetOrCompile(guest.Source(CodeAddress, ShaderStage.Compute,
+                    [unchecked((uint)BufferAddress), (uint)(BufferAddress >> 32)]),
+                PipelineTestGuest.ComputeOptions(), ref cursor, out _);
+            runtime = Assert.Single(guest.Compiler.Shaders).Spirv;
+        }
+        using var reloaded = Open();
+        var (record, code) = Assert.Single(reloaded.LoadedComputes());
+        Assert.Equal(stable, record.Specialization.StableImageBindings);
+        Assert.Equal(stable, record.Specialization.Clone().StableImageBindings);
+        var compiler = new FakeShaderCompiler(Compile);
+        Assert.True(ShaderProgramCache.TryCompilePrewarm(record, code, compiler, false, true, false,
+            out var compiled, out _, out var error, stableImageLimits: limits), error);
+        Assert.Equal(runtime, Assert.IsType<FakeCompiledShader>(compiled).Spirv);
+        var rejected = new FakeShaderCompiler(Compile);
+        Assert.False(ShaderProgramCache.TryCompilePrewarm(record, code, rejected, false, true, false,
+            out _, out _, out error, stableImageLimits: stable ? default : ImageBindingTestProgram.Limits));
+        Assert.Contains("image binding policy", error);
+        Assert.Empty(rejected.Requests);
+    }
+
     private ShaderPrewarmList Open() => ShaderPrewarmList.Open(_directory) ?? throw new InvalidOperationException("The list did not open.");
 
     [Theory]
@@ -91,6 +126,8 @@ public sealed class ShaderPrewarmListTests : IDisposable
     [Theory]
     [InlineData(1u)]
     [InlineData(3u)]
+    [InlineData(4u)]
+    [InlineData(4u)]
     public void OlderFormatRecordsAreRejectedBeforeAppending(uint version)
     {
         using (var list = Open())
@@ -291,6 +328,7 @@ public sealed class ShaderPrewarmListTests : IDisposable
     [InlineData(0)]
     [InlineData(1)]
     [InlineData(2)]
+    [InlineData(3)]
     public void RecordedSpecializationPreservesAliasesAndMipStatistics(int changedField)
     {
         using (var list = Open())
@@ -307,7 +345,11 @@ public sealed class ShaderPrewarmListTests : IDisposable
                 1, 0, DescriptorConstants.IdentityDestinationSelect, DescriptorConstants.NoIndex, 0, 0, false);
             baseline.Images.Add(image);
             baseline.Images.Add(image);
-            expected = baseline.Clone();
+            expected = changedField == 3 ? new ResourceSpecialization
+            {
+                BaseBufferCount = baseline.BaseBufferCount, Buffers = [.. baseline.Buffers],
+                Images = [.. baseline.Images], StableImageBindings = true,
+            } : baseline.Clone();
             switch (changedField)
             {
                 case 0: expected.ImageDescriptorGroups.AddRange([0u, 0u]); break;

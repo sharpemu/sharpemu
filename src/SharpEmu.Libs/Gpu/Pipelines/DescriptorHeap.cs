@@ -56,7 +56,7 @@ public sealed unsafe class DescriptorHeap : IDisposable
 
     private readonly GpuDeviceInfo _device;
     private readonly SubmissionScheduler _scheduler;
-    private static readonly DescriptorSetDemand PoolCapacity = new(8192, 8192, 1024, 1024);
+    internal static readonly DescriptorSetDemand PoolCapacity = new(8192, 8192, 1024, 1024);
 
     private readonly Queue<(DescriptorPool Pool, ulong Tick)> _pendingPools = new();
     private readonly Dictionary<ulong, SetBatchState> _sets = new();

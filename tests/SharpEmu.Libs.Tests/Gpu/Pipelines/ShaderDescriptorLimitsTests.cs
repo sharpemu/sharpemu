@@ -10,6 +10,30 @@ namespace SharpEmu.Libs.Tests.Gpu.Pipelines;
 public sealed unsafe class ShaderDescriptorLimitsTests
 {
     [Fact]
+    public void StableComputeBudgetUsesPerStagePerSetAndPoolLimits()
+    {
+        var limits = new PhysicalDeviceLimits
+        {
+            MaxPerStageDescriptorSampledImages = 16, MaxDescriptorSetSampledImages = 32,
+            MaxPerStageDescriptorStorageImages = 32, MaxDescriptorSetStorageImages = 8,
+            MaxPerStageDescriptorSamplers = uint.MaxValue, MaxDescriptorSetSamplers = uint.MaxValue,
+            MaxPerStageDescriptorStorageBuffers = uint.MaxValue, MaxDescriptorSetStorageBuffers = uint.MaxValue,
+            MaxPerStageResources = 27,
+        };
+        var budget = ShaderDescriptorLimits.ComputeImageLimits(limits);
+        Assert.Equal(16u, budget.SampledImages);
+        Assert.Equal(8u, budget.StorageImages);
+        Assert.Equal(DescriptorHeap.PoolCapacity.Samplers, budget.Samplers);
+        Assert.Equal(DescriptorHeap.PoolCapacity.StorageBuffers, budget.StorageBuffers);
+        Assert.Equal(27u, budget.Resources);
+        limits.MaxPerStageDescriptorSampledImages = limits.MaxDescriptorSetSampledImages = uint.MaxValue;
+        limits.MaxPerStageDescriptorStorageImages = limits.MaxDescriptorSetStorageImages = uint.MaxValue;
+        budget = ShaderDescriptorLimits.ComputeImageLimits(limits);
+        Assert.Equal(DescriptorHeap.PoolCapacity.SampledImages, budget.SampledImages);
+        Assert.Equal(DescriptorHeap.PoolCapacity.StorageImages, budget.StorageImages);
+    }
+
+    [Fact]
     public void CountsPhysicalDescriptorsAcrossBindingsAndStages()
     {
         var limits = new PhysicalDeviceLimits

@@ -69,6 +69,8 @@ internal interface IShaderPipelineHost
 {
     uint MaxPushDescriptors { get; }
 
+    StableImageDescriptorLimits ComputeImageDescriptorLimits => default;
+
     bool ComputeWave64Supported { get; }
 
     // True when a 64-invocation wave64 compute workgroup runs as one 64-lane host subgroup.

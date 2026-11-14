@@ -8,6 +8,7 @@ public static partial class ResourceMaterializer
     // A published guard owns its data. Callers receive a separate specialization.
     internal sealed class SpecializationGuard
     {
+        internal bool StableImageBindings;
         internal uint[][] Buffers = [];
         internal uint[][] Images = [];
         internal uint[][] Samplers = [];
@@ -29,6 +30,7 @@ public static partial class ResourceMaterializer
             snapshot.Buffers.Any(words => words.Length != 4 || words[3] >> 30 != 0)) return null;
         return new SpecializationGuard
         {
+            StableImageBindings = plan.StableImageBindings,
             Buffers = snapshot.Buffers.Select((words, index) => new[] { words[1] & 0xBFFF0000u, words[3] & BufferGuardFlags(plan, index) }).ToArray(),
             Images = snapshot.Images.Select(words => words.ToArray()).ToArray(),
             Samplers = snapshot.Samplers.Select(words => words.ToArray()).ToArray(),
@@ -38,7 +40,8 @@ public static partial class ResourceMaterializer
     private static bool MatchesGuard(ShaderResourcePlan plan, MaterializedSnapshot snapshot, SpecializationGuard guard,
         bool checkSamplers = true)
     {
-        if (snapshot.Buffers.Length != guard.Buffers.Length || snapshot.Images.Length != guard.Images.Length ||
+        if (plan.StableImageBindings != guard.StableImageBindings ||
+            snapshot.Buffers.Length != guard.Buffers.Length || snapshot.Images.Length != guard.Images.Length ||
             snapshot.IndirectImages.Count != 0 || snapshot.BufferCandidateTables.Count != 0) return false;
         for (var index = 0; index < guard.Buffers.Length; index++)
         {

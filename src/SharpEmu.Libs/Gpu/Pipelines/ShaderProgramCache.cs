@@ -1900,6 +1900,7 @@ internal sealed class ShaderProgramCache
         bool sharedInt64Atomics, bool execGuardElision, bool signedZeroInfNanPreserve, out IGuestCompiledShader? compiled,
         out BindingLayout? layout, out string error, bool hostWave64Supported = false, bool hostComputeSubgroup32 = false,
         bool imageInt64Atomics = false, bool shaderDeviceClock = false, bool bindlessHeap = false,
+        StableImageDescriptorLimits stableImageLimits = default,
         bool tableBlocks = false, Func<ulong, IShaderFrontend?>? frontendOf = null)
     {
         compiled = null;

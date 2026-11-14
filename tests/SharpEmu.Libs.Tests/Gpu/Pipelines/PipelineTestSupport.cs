@@ -28,7 +28,7 @@ internal sealed class FakeCompiledShader(ShaderCompileRequest request, byte[]? s
 }
 
 // Counts modules and pipelines; every guest read comes straight from the fake memory.
-internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
+internal class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
 {
     private ulong _nextHandle = 1;
 
@@ -52,6 +52,8 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
     public SampleCountFlags NoAttachmentSampleCounts { get; set; } = SampleCountFlags.Count1Bit | SampleCountFlags.Count4Bit;
 
     public uint MaxPushDescriptors => 32;
+
+    public StableImageDescriptorLimits ComputeImageDescriptorLimits { get; set; }
 
     public bool ComputeWave64Supported => true;
 
