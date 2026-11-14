@@ -1055,7 +1055,9 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             }
 
             var epoch = _tracker.CpuDirtyEpoch;
-            if (mapping != _bdaSweepMapping || (epoch != _bdaSweepEpoch && (!ObservationGated || _observation != _bdaSweepObservation)))
+            var registrations = _registrationGeneration;
+            if (mapping != _bdaSweepMapping || registrations != _bdaSweepRegistrations ||
+                (epoch != _bdaSweepEpoch && (!ObservationGated || _observation != _bdaSweepObservation)))
             {
                 if (!_bdaSweepPlanBuilt || mapping != _bdaSweepPlanMapping)
                 {
@@ -1103,6 +1105,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
                 _bdaSweepEpoch = epoch;
                 _bdaSweepMapping = mapping;
+                _bdaSweepRegistrations = registrations;
                 _bdaSweepObservation = _observation;
                 Interlocked.Increment(ref BdaSweeps);
             }
@@ -1250,6 +1253,10 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     }
 
     private long _bdaSweepEpoch = -1;
+
+    // Every registration advances it: a new owner needs its first upload even when no CPU write moved the epoch.
+    private long _registrationGeneration;
+    private long _bdaSweepRegistrations = -1;
     private long _bdaSweepObservation = -1;
     private long _observation;
     public static long BdaSweeps;
@@ -2417,6 +2424,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         {
             _bufferPages.Set(buffer.CpuAddress, buffer.Size, covered: true);
             _registry.RegisterBuffer(bufferIdentifier, _retirementPolicy.CurrentTick);
+            _registrationGeneration++;
             var addresses = new ulong[sizePages];
             for (ulong page = 0; page < sizePages; page++)
             {
@@ -2429,6 +2437,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         {
             _bufferPages.Set(buffer.CpuAddress, buffer.Size, covered: false);
             _registry.BeginRetirement(bufferIdentifier);
+            _registrationGeneration++;
             _bdaPageTable.Fill(first * sizeof(ulong), sizePages * sizeof(ulong), 0);
         }
     }
