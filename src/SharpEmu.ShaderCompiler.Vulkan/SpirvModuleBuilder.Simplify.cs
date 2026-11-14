@@ -1385,7 +1385,8 @@ public sealed partial class SpirvModuleBuilder
         var opcode = (SpirvOp)(words[offset] & 0xFFFF);
         if (opcode == SpirvOp.Load)
         {
-            return wordCount == 4 && (_localVariables.Contains(words[offset + 3]) || _elementBases.ContainsKey(words[offset + 3]));
+            // A load without memory operands yields its value and nothing else; no module declares Volatile memory.
+            return wordCount == 4;
         }
 
         if (wordCount < 3)
