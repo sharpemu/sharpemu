@@ -1845,6 +1845,61 @@ internal static unsafe partial class VulkanVideoPresenter
         private static readonly SemaphoreSlim _computeCompileSlots =
             new(Math.Max(2, Environment.ProcessorCount / 2));
 
+        // A linked compile starts only when LinkedCompileAdmission admits it (free commit for its estimate beside
+        // the linked compiles already running, one large one at a time). Until then the fallback that serves a pending
+        // linked program keeps serving it. Shutdown abandons the ones still waiting.
+        private static readonly LinkedCompileAdmission _linkedCompileAdmission =
+            new(SharpEmu.Logging.HostSystemInfo.AvailableCommitBytes);
+        private volatile bool _linkedAdmissionClosed;
+
+        // Waits until the compile is admitted; false when shutdown abandons it. Without mayWait it answers at once (the
+        // prewarm's linked records). An admitted compile calls ReleaseLinkedAdmission when it ends.
+        private bool WaitForLinkedAdmission(ulong hash, long spirvBytes, bool mayWait = true)
+        {
+            var reported = false;
+            while (!_linkedAdmissionClosed)
+            {
+                if (_linkedCompileAdmission.TryAdmit(spirvBytes, out var available, out var reserved))
+                {
+                    if (reported)
+                    {
+                        try
+                        {
+                            Console.Error.WriteLine($"[GPU][LINKED_ADMISSION] admitted hash=0x{hash:X16} available_gb={available / (double)(1L << 30):F1} " +
+                                $"reserved_gb={reserved / (double)(1L << 30):F1}");
+                        }
+                        catch
+                        {
+                            ReleaseLinkedAdmission(spirvBytes);
+                            throw;
+                        }
+                    }
+
+                    return true;
+                }
+
+                if (!mayWait)
+                {
+                    return false;
+                }
+
+                if (!reported)
+                {
+                    reported = true;
+                    var needed = LinkedCompileAdmission.Estimate(spirvBytes) + LinkedCompileAdmission.MarginBytes;
+                    Console.Error.WriteLine($"[GPU][LINKED_ADMISSION] waiting hash=0x{hash:X16} spirv_mb={spirvBytes / 1048576.0:F1} " +
+                        $"needed_gb={needed / (double)(1L << 30):F1} available_gb={available / (double)(1L << 30):F1} " +
+                        $"reserved_gb={reserved / (double)(1L << 30):F1}");
+                }
+
+                Thread.Sleep(500);
+            }
+
+            return false;
+        }
+
+        private static void ReleaseLinkedAdmission(long spirvBytes) => _linkedCompileAdmission.Release(spirvBytes);
+
         // A host shader compiler can spend tens of seconds on one large translated
         // program. Running the compile on a worker thread keeps it out of the pipeline
         // cache's lock, so other queues can still create their own pipelines meanwhile;
@@ -1949,6 +2004,15 @@ internal static unsafe partial class VulkanVideoPresenter
                 () =>
                 {
                     ComputeCompileProfile.Record(ComputeCompileProfile.Part.StartDelay, started.StartTimestamp);
+                    // A linked compile first waits for its admission (LinkedCompileAdmission).
+                    var linkedAdmitted = started.Linked && WaitForLinkedAdmission(started.Hash, started.SpirvBytes);
+                    if (started.Linked && !linkedAdmitted)
+                    {
+                        return default;
+                    }
+
+                    try
+                    {
                     // Each compile blocks its thread inside the Metal compiler service,
                     // so the number in flight is bounded instead of one thread per
                     // program the frame happens to touch.
@@ -1975,6 +2039,11 @@ internal static unsafe partial class VulkanVideoPresenter
                             (long)Stopwatch.GetElapsedTime(compileStart).TotalMilliseconds);
                         _computeCompileSlots.Release();
                         started.CompletedTimestamp = ComputeCompileProfile.Start();
+                    }
+                    }
+                    finally
+                    {
+                        if (linkedAdmitted) ReleaseLinkedAdmission(started.SpirvBytes);
                     }
                 },
                 CancellationToken.None,

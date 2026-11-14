@@ -122,6 +122,25 @@ public static class HostSystemInfo
         return 1;
     }
 
+    // The commit the process can still make (physical memory plus page file), or -1 when it cannot be read.
+    public static long AvailableCommitBytes()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return -1;
+        }
+
+        try
+        {
+            var status = new MemoryStatusEx { dwLength = (uint)Marshal.SizeOf<MemoryStatusEx>() };
+            return GlobalMemoryStatusEx(ref status) ? (long)Math.Min(status.ullAvailPageFile, long.MaxValue) : -1;
+        }
+        catch (Exception)
+        {
+            return -1;
+        }
+    }
+
     private static string GetMemoryDescription()
     {
         if (OperatingSystem.IsWindows())
