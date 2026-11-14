@@ -1551,7 +1551,22 @@ public static partial class Gen5SpirvTranslator
 
         private enum SharedMemoryPhase { None, Read, Write }
 
+        private IReadOnlyList<ShaderBlock>? _dispatcherStartBlocks;
+        private int _dispatcherStart;
+
+        // Every block body asks for the dispatcher start of the same immutable block list: scan it once.
         private int FindComputeDispatcherStart(IReadOnlyList<ShaderBlock> blocks)
+        {
+            if (!ReferenceEquals(blocks, _dispatcherStartBlocks))
+            {
+                _dispatcherStart = ScanComputeDispatcherStart(blocks);
+                _dispatcherStartBlocks = blocks;
+            }
+
+            return _dispatcherStart;
+        }
+
+        private int ScanComputeDispatcherStart(IReadOnlyList<ShaderBlock> blocks)
         {
             if (_stage != Gen5SpirvStage.Compute || _hasIndirectControlFlow) return 0;
             var start = blocks.Count;

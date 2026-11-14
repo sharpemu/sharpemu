@@ -486,7 +486,6 @@ public sealed partial class SpirvModuleBuilder
         var first = incoming[0].State;
         foreach (var (expression, value) in first.Expressions)
         {
-            if (incoming.All(entry => entry.State.Expressions.TryGetValue(expression, out var other) && other == value))
             {
                 _blockValues[expression] = value;
             }
@@ -506,6 +505,21 @@ public sealed partial class SpirvModuleBuilder
         }
 
         _inheritedLabels[label] = incoming.Count;
+    }
+
+    // Whether every incoming state after the first holds the first state's expression with the same value. A loop, not a
+    // closure and delegate per expression: blocks inherit thousands of expressions.
+    private static bool HeldByOthers(List<(uint Block, BlockState State)> incoming, InstructionKey expression, uint value)
+    {
+        for (var index = 1; index < incoming.Count; index++)
+        {
+            if (!incoming[index].State.Expressions.TryGetValue(expression, out var other) || other != value)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private uint MergeIncomingValue(uint pointer, uint value, List<(uint Block, BlockState State)> incoming)
