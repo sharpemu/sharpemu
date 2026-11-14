@@ -243,6 +243,29 @@ public sealed class KernelBackedMemoryTests
         }
     }
 
+    [Fact]
+    public void PrtWriteLandsOnlyInMappedSlices()
+    {
+        using var test = new BackedKernelMemory();
+        var address = SharpEmu.Libs.Tests.Memory.HostViews.HostViewTestSupport.ProbeGuestAddress(test.Host, 0x10000);
+        test.Reserve(0x10000, address);
+        SetPrtAperture(test, address, 0x10000);
+        try
+        {
+            test.Allocate(0, 0x8000);
+            test.Map(0, 0x4000, address);
+            test.Map(0x4000, 0x4000, address + 0xC000);
+            var payload = Enumerable.Repeat((byte)0x66, 0x10000).ToArray();
+            Assert.True(KernelMemoryCompatExports.TryWritePrtBacking(test.Memory, address, payload));
+            var actual = new byte[0x10000];
+            Assert.True(KernelMemoryCompatExports.TryReadPrtBacking(test.Memory, address, actual));
+            Assert.All(actual.Take(0x4000), value => Assert.Equal((byte)0x66, value));
+            Assert.All(actual.Skip(0x4000).Take(0x8000), value => Assert.Equal((byte)0, value));
+            Assert.All(actual.Skip(0xC000), value => Assert.Equal((byte)0x66, value));
+        }
+        finally { SetPrtAperture(test, address, 0); }
+    }
+
     private static void SetPrtAperture(BackedKernelMemory test, ulong address, ulong size)
     {
         test.Context[CpuRegister.Rdi] = 0;
