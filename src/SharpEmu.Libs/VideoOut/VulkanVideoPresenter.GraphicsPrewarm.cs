@@ -189,14 +189,21 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         // The translation of a vertex or mesh record and its pre-rasterization library for one recorded state, built as
-        // CompilePreRasterizationPart builds the session's.
+        // CompilePreRasterizationPart builds the session's, with the task stage of a task-launched mesh program.
         private bool PrewarmPreRasterizationLibrary(VertexPrewarmRecord program, ShaderCodeCapture code, PreRasterizationState state,
             IGuestGpuBackend compiler)
         {
             var name = $"{(program.Mesh ? "ms" : "vs")}=0x{program.Hash:X16} shader=0x{program.Address:X16}";
-            if (!ShaderProgramCache.TryCompileVertexPrewarm(program, code, compiler, this, out var compiled, out var layout, out var error))
+            if (!ShaderProgramCache.TryCompileVertexPrewarm(program, code, compiler, this, out var compiled, out var layout,
+                    out var task, out var error))
             {
                 NoteGraphicsPrewarmFailure(name, error);
+                return false;
+            }
+
+            if (task is not null && !_supportsTaskShader)
+            {
+                NoteGraphicsPrewarmFailure(name, "the device has no task shaders");
                 return false;
             }
 
@@ -204,6 +211,9 @@ internal static unsafe partial class VulkanVideoPresenter
             DescriptorSetLayout set = default;
             PipelineLayout pipelineLayout = default;
             var library = default(Pipeline);
+            var taskEntries = stackalloc SpecializationMapEntry[TaskSpecializationValues];
+            var taskValues = stackalloc uint[TaskSpecializationValues];
+            var taskSpecialization = new SpecializationInfo();
             var entryPoint = (byte*)SilkMarshal.StringToPtr("main");
             try
             {
@@ -218,8 +228,9 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
 
                 pipelineLayout = CreateLibraryPipelineLayout(set, layout!.UsesBindlessHeap, default);
-                library = CreatePreRasterizationLibrary(VertexStageInfo(program.Mesh, module, entryPoint), null, state, pipelineLayout,
-                    $"{name} prewarm");
+                var taskStage = task is { } launch ? TaskStageInfo(launch, taskEntries, taskValues, &taskSpecialization, entryPoint) : default;
+                library = CreatePreRasterizationLibrary(VertexStageInfo(program.Mesh, module, entryPoint), task is null ? null : &taskStage,
+                    state, pipelineLayout, $"{name} prewarm");
                 return NoteGraphicsPrewarmLibrary(library, identity, name);
             }
             catch (Exception exception)

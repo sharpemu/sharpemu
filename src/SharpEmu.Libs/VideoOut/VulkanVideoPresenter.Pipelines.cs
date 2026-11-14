@@ -884,6 +884,25 @@ internal static unsafe partial class VulkanVideoPresenter
             };
         }
 
+        private const int TaskSpecializationValues = 5;
+
+        // The task stage of a task-launched mesh program's pipeline or pre-rasterization part; the graphics prewarm
+        // builds the same one. entries and values hold TaskSpecializationValues each and, like specialization, outlive
+        // the create info.
+        private PipelineShaderStageCreateInfo TaskStageInfo(MeshTaskLaunchInfo task, SpecializationMapEntry* entries, uint* values,
+            SpecializationInfo* specialization, byte* entryPoint)
+        {
+            FillTaskSpecialization(task, entries, values, ref *specialization);
+            return new PipelineShaderStageCreateInfo
+            {
+                SType = StructureType.PipelineShaderStageCreateInfo,
+                Stage = ShaderStageFlags.TaskBitExt,
+                Module = RequireMeshTaskModule(),
+                PName = entryPoint,
+                PSpecializationInfo = specialization,
+            };
+        }
+
         private ShaderModule CreateShaderModule(byte[] code)
         {
             if (!_supportsShaderClipDistance && RequiresCapability(code, SpirvCapability.ClipDistance))
@@ -1430,20 +1449,12 @@ internal static unsafe partial class VulkanVideoPresenter
                     if (pixelCode is not null) rectanglePixelModule = CreateShaderModule(pixelCode);
                 }
                 var shaderStages = stackalloc PipelineShaderStageCreateInfo[5];
-                var taskEntries = stackalloc SpecializationMapEntry[5];
-                var taskValues = stackalloc uint[5];
+                var taskEntries = stackalloc SpecializationMapEntry[TaskSpecializationValues];
+                var taskValues = stackalloc uint[TaskSpecializationValues];
                 var taskSpecialization = new SpecializationInfo();
                 var stageCount = 1u;
-                shaderStages[0] = new PipelineShaderStageCreateInfo
-                {
-                    SType = StructureType.PipelineShaderStageCreateInfo,
-                    Stage = description.VertexStage.Stage == ShaderStageKind.Mesh
-                        ? ShaderStageFlags.MeshBitExt : ShaderStageFlags.VertexBit,
-                    Flags = description.VertexStage.Stage == ShaderStageKind.Mesh
-                        ? PipelineShaderStageCreateFlags.RequireFullSubgroupsBit : 0,
-                    Module = expandRectangles ? rectangleVertexModule : vertexModule,
-                    PName = entryPoint,
-                };
+                shaderStages[0] = VertexStageInfo(description.VertexStage.Stage == ShaderStageKind.Mesh,
+                    expandRectangles ? rectangleVertexModule : vertexModule, entryPoint);
                 var tessellationState = new PipelineTessellationStateCreateInfo
                 {
                     SType = StructureType.PipelineTessellationStateCreateInfo,
@@ -1502,15 +1513,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         throw SubmissionScheduler.Fatal("A task-launched mesh program needs task shaders and a mesh pipeline.");
                     }
 
-                    FillTaskSpecialization(task, taskEntries, taskValues, ref taskSpecialization);
-                    shaderStages[stageCount++] = new PipelineShaderStageCreateInfo
-                    {
-                        SType = StructureType.PipelineShaderStageCreateInfo,
-                        Stage = ShaderStageFlags.TaskBitExt,
-                        Module = RequireMeshTaskModule(),
-                        PName = entryPoint,
-                        PSpecializationInfo = &taskSpecialization,
-                    };
+                    shaderStages[stageCount++] = TaskStageInfo(task, taskEntries, taskValues, &taskSpecialization, entryPoint);
                 }
 
                 var vertexBindings = new VertexInputBindingDescription[description.VertexInput.BindingCount];

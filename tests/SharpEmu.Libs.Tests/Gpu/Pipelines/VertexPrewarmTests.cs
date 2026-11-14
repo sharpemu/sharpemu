@@ -248,9 +248,65 @@ public sealed class VertexPrewarmTests : IDisposable
         var part = Assert.IsType<PreRasterizationPrewarmItem>(Assert.Single(reloaded.LoadedGraphicsPrewarm()));
         Assert.Equal(state, part.State);
         var compiler = new FakeShaderCompiler(Compile);
-        Assert.True(ShaderProgramCache.TryCompileVertexPrewarm(part.Program, part.Code, compiler, host, out var compiled, out var layout, out var error), error);
+        Assert.True(ShaderProgramCache.TryCompileVertexPrewarm(part.Program, part.Code, compiler, host, out var compiled, out var layout,
+            out var task, out var error), error);
+        Assert.Null(task);
         Assert.NotNull(layout);
         Assert.Single(Assert.IsType<FakeCompiledShader>(compiled).Request.VertexInputs);
         Assert.Equal(runtime, Assert.IsType<FakeCompiledShader>(compiled).Spirv);
+    }
+
+    internal static readonly MeshShaderLimits TaskMeshLimits = new(128, 256, 256, 28672, 65535, 65535, 1u << 22, 128, 32768, 49152,
+        1, 1, 128);
+
+    // A task-launched mesh program (s_endpgm) compiled by a program cache that records into the list, as a session's does: its
+    // prewarm identity, the task launch of its program and the host it compiled for.
+    internal static (ulong Identity, MeshTaskLaunchInfo? Task, IShaderPipelineHost Host) RecordTaskLaunchedMeshProgram(
+        ShaderPrewarmList list)
+    {
+        var guest = new PipelineTestGuest(Compile);
+        guest.Host.ShaderPrewarm = list;
+        guest.Host.MeshShadersSupported = true;
+        guest.Host.MeshLimits = TaskMeshLimits;
+        guest.RegisterProgram(CodeAddress, HeaderAddress, PipelineTestGuest.EndProgram);
+        var options = new StageCompileOptions
+        {
+            MeshInfo = new MeshDrawConfiguration
+            {
+                Execution = new MeshExecutionLimits { DeviceSubgroupLaneCount = 32 },
+                Geometry = new GuestGeometryConfiguration
+                {
+                    WaveSize = 32, ThreadsPerGroup = 32, OutputVertexCapacity = 3, OutputPrimitiveCapacity = 1,
+                    InputPrimitiveCountPerWorkgroup = 4, InputVertexCountPerWorkgroup = 3, InputPointList = true, TaskLaunched = true,
+                },
+            },
+        };
+        var cursor = 0u;
+        guest.Programs.GetOrCompile(guest.Source(CodeAddress, ShaderStage.Mesh, []), options, ref cursor, out var stage);
+        var (_, identity) = Assert.Single(guest.Host.RecordedVertexPrograms);
+        return (identity, stage.Program!.MeshTask, guest.Host);
+    }
+
+    // A task-launched mesh program is recorded as any other mesh program, and translated again from its record it takes
+    // the task launch its session's pipelines specialize the generic task stage with.
+    [Fact]
+    public void ATaskLaunchedMeshProgramIsRecordedWithItsSessionsTaskLaunch()
+    {
+        var state = new PreRasterizationState(0, 0, 0, false, false, true, false);
+        MeshTaskLaunchInfo? runtime;
+        IShaderPipelineHost host;
+        using (var list = Open())
+        {
+            (var identity, runtime, host) = RecordTaskLaunchedMeshProgram(list);
+            list.RecordPreRasterization(identity, state);
+        }
+
+        Assert.Equal(new MeshTaskLaunchInfo(4, true), runtime);
+        using var reloaded = Open();
+        var part = Assert.IsType<PreRasterizationPrewarmItem>(Assert.Single(reloaded.LoadedGraphicsPrewarm()));
+        Assert.True(ShaderProgramCache.TryCompileVertexPrewarm(part.Program, part.Code, new FakeShaderCompiler(Compile), host,
+            out var compiled, out _, out var task, out var error), error);
+        Assert.NotNull(compiled);
+        Assert.Equal(runtime, task);
     }
 }

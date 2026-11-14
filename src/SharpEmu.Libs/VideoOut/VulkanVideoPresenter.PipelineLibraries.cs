@@ -373,8 +373,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 var created = CreatePreRasterizationLibrary(info->PStages[0], taskIndex >= 0 ? info->PStages + taskIndex : null,
                     state, layout, label);
-                // A task-launched program's part also takes the task stage, which the prewarm does not record.
-                if (created.Handle != 0 && taskIndex < 0)
+                if (created.Handle != 0)
                 {
                     RecordPreRasterization(info->PStages[0].Module.Handle, state);
                 }

@@ -1905,7 +1905,7 @@ internal sealed partial class ShaderProgramCache
         // Vertex and mesh programs, for the graphics prewarm; the host records their parts' states under the identity. The
         // part of a task-launched mesh program also takes the generic task stage, which its record determines (TaskLaunch).
         if (source.Stage is ShaderStage.Vertex or ShaderStage.Mesh && _host.ShaderPrewarm is { } vertexPrewarm &&
-            !entry.HasShaderCalls && options.MeshInfo is not { Geometry.TaskLaunched: true } &&
+            !entry.HasShaderCalls &&
             _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var vertexCapture))
         {
             var identity = vertexPrewarm.RecordVertex(vertexCapture, new VertexPrewarmRecord
@@ -2286,12 +2286,15 @@ internal sealed partial class ShaderProgramCache
     }
 
     // A recorded vertex or mesh program translated again as its session translated it (CreateEntry, then the specialized
-    // translation through the translation cache); the caller compiles its pre-rasterization libraries.
+    // translation through the translation cache), with the task launch of a task-launched mesh program; the caller compiles
+    // its pre-rasterization libraries.
     internal static bool TryCompileVertexPrewarm(VertexPrewarmRecord record, ShaderCodeCapture code, IGuestGpuBackend compiler,
-        IShaderPipelineHost host, out IGuestCompiledShader? compiled, out BindingLayout? layout, out string error)
+        IShaderPipelineHost host, out IGuestCompiledShader? compiled, out BindingLayout? layout, out MeshTaskLaunchInfo? task,
+        out string error)
     {
         compiled = null;
         layout = null;
+        task = null;
         try
         {
             if (!Gen5ShaderTranslator.TryDecodeProgram(code.CreateContext(), code.Address, out var program, out error))
@@ -2333,6 +2336,7 @@ internal sealed partial class ShaderProgramCache
             var request = record.Mesh
                 ? BuildMeshRequest(host, plan, resources, layout, options)
                 : BuildVertexRequest(host, plan, resources, layout, options, vertexInputs);
+            task = TaskLaunch(request);
             var state = new List<uint>();
             BuildStaticState(stage, options, state);
             var key = new ProgramKey(stage, record.Hash, record.UserDataCount, record.CodeSize, record.ContinuationAddressOffset,
@@ -2504,8 +2508,14 @@ internal sealed partial class ShaderProgramCache
             Resources = resources,
             Bindings = layout,
             CallRecordCallees = request.CallRecordCallees,
+            MeshTask = TaskLaunch(request),
         };
     }
+
+    // What a task-launched mesh program's pipelines specialize the generic task stage with; the prewarm takes the same.
+    internal static MeshTaskLaunchInfo? TaskLaunch(ShaderCompileRequest request) => request.Mesh is { TaskLaunched: true } mesh
+        ? new MeshTaskLaunchInfo(mesh.InputPrimitiveCountPerWorkgroup, mesh.InputPointList)
+        : null;
 }
 
 // Writes each compiled module and its decoded listing when the dump switch is on.

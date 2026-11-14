@@ -85,4 +85,51 @@ public sealed unsafe partial class RenderHostDeviceTests
             }
         }
     }
+
+    // The graphics prewarm builds a task-launched mesh program's pre-rasterization part with the generic task stage, as the
+    // session's pipelines take it.
+    [Fact]
+    public void ThePrewarmBuildsATaskLaunchedMeshPartWithItsTaskStage()
+    {
+        if (!Ready() || !_vulkan.SupportsGraphicsPipelineLibrary || !_vulkan.SupportsMeshShaders || !_vulkan.SupportsTaskShaders)
+        {
+            return;
+        }
+
+        var directory = Path.Combine(Path.GetTempPath(), "SharpEmuTests", Guid.NewGuid().ToString("N"));
+        try
+        {
+            using var presenter = new PresenterUnderTest(_vulkan);
+            presenter.SetField("_graphicsPipelineLibraries", true);
+            presenter.SetField("_supportsMeshShader", true);
+            presenter.SetField("_supportsTaskShader", true);
+            presenter.SetField("_meshShaderLimits", VertexPrewarmTests.TaskMeshLimits);
+            presenter.SetField("_prewarmedGraphicsModules", new ConcurrentDictionary<string, byte>(StringComparer.Ordinal));
+            var state = new PreRasterizationState((int)PolygonMode.Fill, (int)CullModeFlags.None, (int)FrontFace.CounterClockwise,
+                false, false, true, false);
+            using (var list = ShaderPrewarmList.Open(directory) ?? throw new InvalidOperationException("The list did not open."))
+            {
+                var (identity, _, _) = VertexPrewarmTests.RecordTaskLaunchedMeshProgram(list);
+                list.RecordPreRasterization(identity, state);
+            }
+
+            using (var reloaded = ShaderPrewarmList.Open(directory) ?? throw new InvalidOperationException("The list did not open."))
+            {
+                var part = Assert.IsType<PreRasterizationPrewarmItem>(Assert.Single(reloaded.LoadedGraphicsPrewarm()));
+                var compiler = new FakeShaderCompiler(VertexPrewarmTests.Compile);
+                Assert.True((bool)presenter.InvokeMethod("PrewarmPreRasterizationLibrary", part.Program, part.Code, part.State, compiler)!);
+                Assert.Equal(1, presenter.GetField<int>("_graphicsPrewarmCompiled"));
+                Assert.Equal(0, presenter.GetField<int>("_graphicsPrewarmFailed"));
+            }
+
+            presenter.Harness.Shutdown();
+        }
+        finally
+        {
+            if (Directory.Exists(directory))
+            {
+                Directory.Delete(directory, recursive: true);
+            }
+        }
+    }
 }
