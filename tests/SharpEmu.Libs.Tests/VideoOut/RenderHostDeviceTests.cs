@@ -1150,6 +1150,43 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         harness.Shutdown();
     }
 
+    // A table block too large for a content upload goes to the stream ring; when the ring would wrap over the
+    // preparation, a host buffer of the draw takes it.
+    [Fact]
+    public void TableBlock_TakesAHostBufferWhenTheRingWouldWrapOverThePreparation()
+    {
+        if (!Ready())
+        {
+            return;
+        }
+
+        using var presenter = new PresenterUnderTest(_vulkan);
+        presenter.LoadRenderingCommands();
+        var harness = presenter.Harness;
+        var stream = harness.Cache.GetUtilityBuffer(GpuBufferUsage.Stream);
+        var host = presenter.RenderHost;
+        var upload = host.GetType().GetMethod("UploadTableBlock", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+            .CreateDelegate<TableBlockUpload>(host);
+        var chunk = new byte[stream.Size / 4];
+        var block = new byte[128 * 1024];
+        presenter.Run(() =>
+        {
+            using var preparation = host.BeginPreparation();
+            for (var index = 0; index < 4; index++)
+            {
+                Assert.Equal(stream.Handle.Handle, host.UploadTransient(chunk, 16).Handle);
+            }
+
+            var address = upload(block, new ShaderProgramInfo());
+            Assert.NotEqual(0UL, address);
+            Assert.False(address >= stream.DeviceAddress && address < stream.DeviceAddress + stream.Size);
+        });
+        harness.Finish();
+        harness.Shutdown();
+    }
+
+    private delegate ulong TableBlockUpload(ReadOnlySpan<byte> bytes, ShaderProgramInfo program);
+
     // Retained ring bytes force expanded indices into a host buffer; the draw reads it before retirement.
     [Fact]
     public void OverflowIndexBuffer_IsConsumedByTheDrawAndRetiredWithIt()

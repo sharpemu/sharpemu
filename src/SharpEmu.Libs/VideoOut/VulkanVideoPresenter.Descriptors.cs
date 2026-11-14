@@ -1523,7 +1523,9 @@ internal static unsafe partial class VulkanVideoPresenter
                 return stream.DeviceAddress + offset;
             }
 
-            throw SubmissionScheduler.Fatal($"No upload ring could take a table block: bytes={bytes.Length} hash=0x{program.Hash:X16}.");
+            // The ring cannot wrap over the open preparation's own uploads; a host buffer of the draw then takes the block,
+            // as it takes other transient uploads.
+            return UploadHostBufferAddress(bytes, $"table block buffer of program 0x{program.Hash:X16}");
         }
 
         private const uint TableBlockAlignment = 16;

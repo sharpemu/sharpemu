@@ -476,8 +476,14 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw Serial("mesh index upload", resumable: true);
             }
 
+            return UploadHostBufferAddress(System.Runtime.InteropServices.MemoryMarshal.AsBytes(indices), "mesh index buffer");
+        }
+
+        // A host buffer of the open preparation holds bytes that a shader reads through their device address; the draw
+        // that consumes them retires it.
+        private ulong UploadHostBufferAddress(ReadOnlySpan<byte> bytes, string label)
+        {
             var preparation = RequirePreparation();
-            var bytes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(indices);
             var buffer = _presenter.CreateHostBuffer(bytes,
                 BufferUsageFlags.StorageBufferBit | BufferUsageFlags.ShaderDeviceAddressBit,
                 out var memory, out _);
@@ -488,7 +494,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 Buffer = buffer,
             };
             var address = _vk.GetBufferDeviceAddress(_device, &addressInfo);
-            if (address == 0) throw new InvalidOperationException("The mesh index buffer has no device address.");
+            if (address == 0) throw new InvalidOperationException($"The {label} has no device address.");
             return address;
         }
 
