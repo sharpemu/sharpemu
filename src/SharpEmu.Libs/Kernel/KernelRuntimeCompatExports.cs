@@ -833,6 +833,8 @@ public static partial class KernelRuntimeCompatExports
     {
         if (size == 0 || address > ulong.MaxValue - size)
             return false;
+        if (Ampr.AmprExports.ContainsAmmRange(address, size))
+            return true;
         lock (_prtApertureGate)
         {
             return _prtApertures.Any(aperture => address >= aperture.Base &&

@@ -406,6 +406,13 @@ public static partial class AmprExports
     }
 
     // The area is reserved at the first AMM call, before the title maps anything into it.
+    // The AMM area is GPU memory a title maps piece by piece: a streamed texture's descriptor covers its whole mip
+    // chain while only the resident levels are mapped, and its minimum LOD keeps sampling on those. The pages of the
+    // area that are not mapped read as zeros, as in a PRT aperture.
+    internal static bool ContainsAmmRange(ulong address, ulong size) =>
+        Volatile.Read(ref _ammAreaReserved) && size != 0 && address >= AmmAreaStart && address < AmmAreaEnd &&
+        size <= AmmAreaEnd - address;
+
     private static bool TryReserveAmmArea(CpuContext ctx)
     {
         lock (_ammGate)
