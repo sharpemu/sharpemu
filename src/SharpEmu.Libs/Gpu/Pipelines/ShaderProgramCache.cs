@@ -183,6 +183,8 @@ internal sealed class ShaderProgramCache
     private readonly IGuestGpuBackend _compiler;
     private readonly IShaderPipelineHost _host;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<ProgramKey, ProgramSourceEntry> _programs = new(ProgramKeyComparer.Instance);
+    // A plan depends only on its key, and planning a large program takes seconds, so a rejected key stays rejected.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<ProgramKey, string> _rejectedPrograms = new(ProgramKeyComparer.Instance);
     private readonly Dictionary<(ProgramKey Key, string Library), ProgramSourceEntry> _linkedPrograms = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<(ulong Hash, uint CodeSize, ulong ContinuationAddressOffset), Gen5ShaderProgram> _decoded = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<(ulong Hash, uint CodeSize, ulong ContinuationAddressOffset), ShaderCodeCapture> _codeCaptures = new();
@@ -503,7 +505,10 @@ internal sealed class ShaderProgramCache
         ProgramSourceEntry? entry;
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramCacheLookup))
         {
-            entry = FindEntry(source, options, out key);
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramCacheLookup))
+            {
+                entry = FindEntry(source, options, out key);
+            }
         }
 
         var sourceWasCached = entry is not null;
@@ -520,7 +525,16 @@ internal sealed class ShaderProgramCache
                 sourceWasCached = entry is not null;
                 if (entry is null)
                 {
-                    entry = CreateEntry(source, options);
+                    try
+                    {
+                        entry = CreateEntry(source, options);
+                    }
+                    catch (ShaderProgramRejectedException exception)
+                    {
+                        _rejectedPrograms.TryAdd(KeyFor(source, options), exception.Message);
+                        throw;
+                    }
+
                     BuildStaticState(source.Stage, options);
                     key = BuildProgramKey(source);
                     _programs.TryAdd(key, entry);
@@ -532,6 +546,7 @@ internal sealed class ShaderProgramCache
         return CompleteProgram(entry, sourceWasCached, key, source, options, ref pushDataCursor, out stage, deferLinking, runtimeFallback);
     }
 
+    // The entry of this source and static state, or null; a key whose plan was rejected throws its rejection again.
     private ProgramSourceEntry? FindEntry(ShaderSource source, StageCompileOptions options, out ProgramKey? key)
     {
         BuildStaticState(source.Stage, options);
@@ -541,6 +556,11 @@ internal sealed class ShaderProgramCache
         {
             key = found;
             return entry;
+        }
+
+        if (_rejectedPrograms.GetAlternateLookup<ProgramKeyProbe>().TryGetValue(probe, out _, out var rejection))
+        {
+            throw new ShaderProgramRejectedException(rejection);
         }
 
         key = null;
