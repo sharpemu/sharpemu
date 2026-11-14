@@ -128,6 +128,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 Memoized = false;
                 TexturesKept = false;
                 Memo = null;
+                // Only programs with call records prepare these; a reused stage must not hand the previous program's
+                // records and ranges to the next one, which would bind, upload and mark written memory it never uses.
+                CallRecordWords = [];
+                CallRecordRanges = [];
                 Descriptors.GlobalDataShare = default;
                 Descriptors.FlattenedTable = default;
                 Descriptors.ShaderData = default;
