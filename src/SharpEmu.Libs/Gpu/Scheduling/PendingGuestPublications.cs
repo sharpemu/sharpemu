@@ -60,6 +60,17 @@ internal sealed class PendingGuestPublications
     private volatile Entry[] _dumps = [];
     private volatile Exception? _failure;
 
+    // A dump lookup remembers, per thread, the empty gap between pending dumps that its range fell in, and a later lookup
+    // inside that gap of the same dump array answers without a scan. SHARPEMU_PUBLICATION_GAPS=0 scans every lookup.
+    internal bool ReusePublicationGaps { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_PUBLICATION_GAPS") != "0";
+
+    // Only immutable range membership is cached, never Tick/Publishing/GpuSlot.
+    // Index replaces the array on every ranged dump addition and removal. One
+    // thread cannot borrow or mutate another thread's proof, even for this owner.
+    private readonly record struct DumpGap(PendingGuestPublications Owner, Entry[] Snapshot, ulong Start, ulong End);
+    [ThreadStatic] private static DumpGap _lastDumpGap;
+
     private static int FilterSlot(ulong page) => (int)((page * 0x9E37_79B9_7F4A_7C15UL) >> (64 - PageFilterBits));
 
     // Descriptor and buffer lookups call this often; a range with no pending page skips the lock.
@@ -103,13 +114,48 @@ internal sealed class PendingGuestPublications
     {
         var found = false;
         tick = 0;
-        foreach (var dump in _dumps)
+        var dumps = _dumps;
+        if (dumps.Length == 0) return false;
+        var reuse = ReusePublicationGaps;
+        if (!reuse)
         {
-            if (address >= dump.Address + dump.Size || dump.Address >= address + size) continue;
+            foreach (var dump in dumps)
+            {
+                if (address >= dump.Address + dump.Size || dump.Address >= address + size) continue;
+                if (skipGpuSlots && dump.GpuSlot >= 0) continue;
+                found = true;
+                if (!dump.Publishing) tick = Math.Max(tick, dump.Tick);
+            }
+            return found;
+        }
+        var end = address + size; // The callers already rejected overflow/empty ranges.
+        var gap = _lastDumpGap;
+        if (ReferenceEquals(gap.Owner, this) && ReferenceEquals(gap.Snapshot, dumps) &&
+            address >= gap.Start && end <= gap.End)
+        {
+            return false;
+        }
+
+        ulong left = 0, right = ulong.MaxValue;
+        var rawOverlap = false;
+        foreach (var dump in dumps)
+        {
+            if (address >= dump.Address + dump.Size)
+            {
+                left = Math.Max(left, dump.Address + dump.Size);
+                continue;
+            }
+            if (dump.Address >= end)
+            {
+                right = Math.Min(right, dump.Address);
+                continue;
+            }
+            rawOverlap = true;
             if (skipGpuSlots && dump.GpuSlot >= 0) continue;
             found = true;
             if (!dump.Publishing) tick = Math.Max(tick, dump.Tick);
         }
+        if (!rawOverlap) _lastDumpGap = new(this, dumps, left, right);
         return found;
     }
 
