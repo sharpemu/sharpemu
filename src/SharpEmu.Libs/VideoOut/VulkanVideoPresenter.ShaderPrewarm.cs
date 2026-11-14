@@ -265,6 +265,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 Environment.GetEnvironmentVariable("SHARPEMU_PREWARM_LINKED"),
                 driverSignature.TrimEnd('\n'));
 
+        // Different permutations of one caller write the same linked cache file: the prewarm's queue (ShaderPrewarmQueue)
+        // gives each caller's records to one worker at a time.
         private bool PrewarmComputePipeline(
             ComputePrewarmRecord record,
             ShaderCodeCapture code,
