@@ -999,6 +999,9 @@ internal static unsafe partial class VulkanVideoPresenter
                 default:
                     throw SubmissionScheduler.Fatal($"The end-of-pipe write kind is unknown: kind={write.Kind}.");
             }
+
+            // SHARPEMU_END_OF_PIPE_SOFT_WAITS: the release completes with the recording it is in now; batching is unchanged.
+            write.Landing?.Recorded(_scheduler.CurrentTick);
         }
 
         public void TriggerInterrupt(int eventId, uint contextId)

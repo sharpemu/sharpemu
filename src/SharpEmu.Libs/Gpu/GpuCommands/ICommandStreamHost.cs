@@ -82,7 +82,9 @@ public readonly record struct EndOfPipeWrite(
     int FlipMode = 0,
     long FlipArgument = 0,
     ulong FlipRequestId = 0,
-    bool WaitForGpu = false);
+    bool WaitForGpu = false,
+    // SHARPEMU_END_OF_PIPE_SOFT_WAITS: the host names the GPU tick that completes this write.
+    EndOfPipeLanding? Landing = null);
 
 // Everything a packet handler needs from the renderer, the caches, the scheduler and video out.
 public interface ICommandStreamHost
