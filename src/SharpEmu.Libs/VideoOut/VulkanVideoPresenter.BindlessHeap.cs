@@ -51,7 +51,8 @@ internal static unsafe partial class VulkanVideoPresenter
         private DescriptorSet _heapSet;
         private GpuBuffer? _heapFeedback;
         private GpuBuffer? _heapFeedbackReadback;
-        private uint[]? _heapFeedbackSnapshot;
+        private Action? _heapFeedbackCopyCompleted;
+        private int _heapFeedbackReady;
         private int _heapFeedbackCopyPending;
         private uint[] _heapMarked = [];
         private readonly Dictionary<(int Slot, uint Index), HeapEntry> _heapEntries = new();
@@ -184,6 +185,13 @@ internal static unsafe partial class VulkanVideoPresenter
 
             _heapFeedback = new GpuBuffer(_deviceInfo, _scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AllFlags, FeedbackBytes);
             _heapFeedbackReadback = new GpuBuffer(_deviceInfo, _scheduler, GpuBufferUsage.Download, 0, GpuBuffer.AllFlags, FeedbackBytes);
+            var completedReadback = _heapFeedbackReadback;
+            _heapFeedbackCopyCompleted = () =>
+            {
+                // A callback from a retired heap must not make a replacement slot appear complete.
+                if (ReferenceEquals(_heapFeedbackReadback, completedReadback))
+                    Volatile.Write(ref _heapFeedbackReady, 1);
+            };
             _ = BeginBatchedGuestCommands();
             _heapFeedback.Fill(0, FeedbackBytes, 0);
             _heapMarked = new uint[BindlessHeap.FeedbackWords];
@@ -250,6 +258,9 @@ internal static unsafe partial class VulkanVideoPresenter
             _heapFeedbackReadback?.Dispose();
             _heapFeedback = null;
             _heapFeedbackReadback = null;
+            _heapFeedbackCopyCompleted = null;
+            Volatile.Write(ref _heapFeedbackReady, 0);
+            Volatile.Write(ref _heapFeedbackCopyPending, 0);
             if (_heapPool.Handle != 0)
             {
                 _vk.DestroyDescriptorPool(_device, _heapPool, null);
@@ -317,9 +328,14 @@ internal static unsafe partial class VulkanVideoPresenter
         // Takes the marks of the last completed copy and starts the next copy; one copy is in flight at a time.
         private void PollHeapFeedback()
         {
-            if (Interlocked.Exchange(ref _heapFeedbackSnapshot, null) is { } marked)
+            if (Interlocked.Exchange(ref _heapFeedbackReady, 0) != 0)
             {
-                ResolveMarkedRecords(marked);
+                var completed = _heapFeedbackReadback!;
+                completed.Invalidate(0, FeedbackBytes);
+                // Keep the slot pending through consumption, including any reentrant preparation. No later GPU copy
+                // may overwrite these mapped words until every marked record has been resolved.
+                ResolveMarkedRecords(MemoryMarshal.Cast<byte, uint>(completed.Mapped[..(int)FeedbackBytes]));
+                Volatile.Write(ref _heapFeedbackCopyPending, 0);
             }
 
             if (Volatile.Read(ref _heapFeedbackCopyPending) != 0)
@@ -336,21 +352,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 AccessFlags.ShaderWriteBit | AccessFlags.MemoryWriteBit, AccessFlags.None,
                 AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit | AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit,
                 AccessFlags.HostReadBit);
-            _scheduler.QueueCompletionAction(() =>
-            {
-                if (_heapFeedbackReadback is null)
-                {
-                    return;
-                }
-
-                readback.Invalidate(0, FeedbackBytes);
-                var words = MemoryMarshal.Cast<byte, uint>(readback.Mapped[..(int)FeedbackBytes]).ToArray();
-                Volatile.Write(ref _heapFeedbackSnapshot, words);
-                Volatile.Write(ref _heapFeedbackCopyPending, 0);
-            });
+            _scheduler.QueueCompletionAction(_heapFeedbackCopyCompleted!);
         }
 
-        private void ResolveMarkedRecords(uint[] marked)
+        private void ResolveMarkedRecords(ReadOnlySpan<uint> marked)
         {
             for (var word = 0; word < marked.Length && word < _heapMarked.Length; word++)
             {
@@ -384,18 +389,19 @@ internal static unsafe partial class VulkanVideoPresenter
         private void RevalidateHeapEntries()
         {
             _heapRevalidatedTick = _scheduler.CurrentTick;
+            Span<uint> scratch = stackalloc uint[8];
             foreach (var entry in _heapEntries.Values)
             {
-                var words = ReadHeapRecord(entry.Slot, entry.Index);
+                var words = scratch[..ReadHeapRecord(entry.Slot, entry.Index, scratch)];
                 if (entry.Image is { } image && _imageCache.TryGetImage(entry.ImageIdentifier, out var found) && ReferenceEquals(found, image))
                 {
                     // Keeps the image the heap reads from the cache's collection of unused images.
                     _ = _imageCache.GetImage(entry.ImageIdentifier);
                 }
 
-                if (!words.AsSpan().SequenceEqual(entry.Words))
+                if (!words.SequenceEqual(entry.Words))
                 {
-                    entry.Words = words;
+                    entry.Words = words.ToArray();
                     ResolveHeapEntry(entry);
                 }
             }
@@ -413,16 +419,23 @@ internal static unsafe partial class VulkanVideoPresenter
         // The record's words, or none when the heap has no such record or it cannot be read.
         private uint[] ReadHeapRecord(int slot, uint index)
         {
+            Span<uint> words = stackalloc uint[8];
+            return words[..ReadHeapRecord(slot, index, words)].ToArray();
+        }
+
+        // Revalidation compares current words in scratch; only a changed entry needs a new retained array.
+        private int ReadHeapRecord(int slot, uint index, Span<uint> words)
+        {
             var sampler = slot >= BindlessHeap.ImageKinds.Length;
             var heap = sampler ? _samplerHeap : _textureHeap;
             var bytes = sampler ? BindlessHeap.SamplerRecordBytes : BindlessHeap.ImageRecordBytes;
             if (heap.Base == 0 || index >= heap.Records)
             {
-                return [];
+                return 0;
             }
 
-            var words = new uint[bytes / sizeof(uint)];
-            return _guestMemory.TryRead(heap.Base + (ulong)index * bytes, MemoryMarshal.AsBytes(words.AsSpan())) ? words : [];
+            var count = checked((int)(bytes / sizeof(uint)));
+            return _guestMemory.TryRead(heap.Base + (ulong)index * bytes, MemoryMarshal.AsBytes(words[..count])) ? count : 0;
         }
 
         private void ResolveHeapEntry(HeapEntry entry)
