@@ -145,7 +145,7 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
     private sealed class FixedProgramProvider(IShaderPipelineHost host, ulong vertexAddress, bool pushData = false,
         byte[]? interpolationShader = null, uint vertexCount = VertexCount,
         byte[]? vertexShader = null, uint vertexComponents = 2, uint vertexStride = VertexStride,
-        bool announcePixelProgram = false) : IShaderPipelineProvider
+        bool announcePixelProgram = false, bool throughWorkers = false) : IShaderPipelineProvider
     {
         private const uint Float2Format = 64;
         private static readonly uint[] UserRegisters = [0, 1];
@@ -224,10 +224,25 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
             bool primitiveRestartEnabled,
             bool disableBlending,
             ShaderProgram vertexProgram,
-            ShaderProgram pixelProgram) =>
-            host.CreateGraphicsPipeline(ShaderPipelineCache.BuildGraphicsDescription(
+            ShaderProgram pixelProgram)
+        {
+            var description = ShaderPipelineCache.BuildGraphicsDescription(
                 colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, disableBlending,
-                vertexProgram, pixelProgram, host.NoAttachmentSampleCounts));
+                vertexProgram, pixelProgram, host.NoAttachmentSampleCounts);
+            if (!throughWorkers)
+            {
+                return host.CreateGraphicsPipeline(description);
+            }
+
+            // As the pipeline cache does: the pipeline builds on a worker and the draw waits for it.
+            PipelineHandle handle;
+            while (!host.TryCreateGraphicsPipeline(description, out handle))
+            {
+                host.WaitForGraphicsPipeline(description);
+            }
+
+            return handle;
+        }
 
         public ComputeProgram GetComputeProgram(ComputeStageRegisters compute, ShaderInterfaceRegisters shaderInterface, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ) =>
             throw new InvalidOperationException("The test provider has no compute program.");
@@ -701,8 +716,10 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         Assert.Equal(HostPageProtection.ReadWriteExecute, harness.Protection(address));
     }
 
-    [Fact]
-    public void APixelProgramsPart_CompilesWhenTheProgramIsCreated_AndItsDrawLinksIt()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void APixelProgramsPart_CompilesWhenTheProgramIsCreated_AndItsDrawLinksIt(bool throughWorkers)
     {
         if (!Ready() || !_vulkan.SupportsGraphicsPipelineLibrary)
         {
@@ -717,7 +734,8 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         var vertices = harness.MapBacked(0x10000, ReadWrite);
         var words = RegisterWords.Color(target, Size, Size);
         harness.Write(vertices, Triangle(-1f, -1f, 3f, -1f, -1f, 3f));
-        var provider = new FixedProgramProvider((IShaderPipelineHost)presenter.Instance, vertices, announcePixelProgram: true);
+        var provider = new FixedProgramProvider((IShaderPipelineHost)presenter.Instance, vertices, announcePixelProgram: true,
+            throughWorkers: throughWorkers);
         var executor = new RenderExecutor(presenter.RenderHost, provider);
         GuestGpuMemoryHook.Attach(harness.Gpu);
         try

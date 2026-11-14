@@ -208,6 +208,21 @@ internal static unsafe partial class VulkanVideoPresenter
             return layout;
         }
 
+        // Links the pipeline from its parts when its entry is laid out for them, else builds it whole, as when a part fails.
+        private Result LinkOrBuildGraphicsPipeline(RenderPipelineEntry? libraries, GraphicsPipelineDescription description,
+            bool expandRectangles, GraphicsPipelineCreateInfo* info, PipelineDynamicStateCreateInfo* baseDynamicState,
+            PipelineCache cache, out Pipeline pipeline, out double milliseconds)
+        {
+            if (libraries is { LinkedFromLibraries: true } && !expandRectangles &&
+                CreateLinkedGraphicsPipeline(libraries, description, info, baseDynamicState, out pipeline, out milliseconds) == Result.Success)
+            {
+                return Result.Success;
+            }
+
+            return CreatePipelineWithBinaries(info, &info->PNext, cache, &CreateGraphicsPipelineCall, out pipeline,
+                out milliseconds);
+        }
+
         // Links a pipeline from its parts, compiling the parts no earlier pipeline compiled. info holds the whole state the
         // pipeline would be created with; each part takes its share. A part's dynamic states are the ones that apply to it
         // (baseDynamicState: all but color write enable, which only the color outputs take).

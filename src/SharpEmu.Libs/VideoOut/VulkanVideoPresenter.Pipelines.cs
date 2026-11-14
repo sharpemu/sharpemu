@@ -1161,7 +1161,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     var compileStart = Stopwatch.GetTimestamp();
                     try
                     {
-                        return CreateRenderPipeline(description, topology, entry.Layout, worker: started);
+                        return CreateRenderPipeline(description, topology, entry.Layout, worker: started, libraries: entry);
                     }
                     finally
                     {
@@ -1593,27 +1593,15 @@ internal static unsafe partial class VulkanVideoPresenter
                     double creationMilliseconds;
                     if (worker is not null)
                     {
-                        creationResult = CreatePipelineWithBinaries(&pipelineInfo, &pipelineInfo.PNext, cache,
-                            &CreateGraphicsPipelineCall, out pipeline, out creationMilliseconds);
+                        creationResult = LinkOrBuildGraphicsPipeline(libraries, description, expandRectangles, &pipelineInfo,
+                            &baseDynamicState, cache, out pipeline, out creationMilliseconds);
                     }
                     else
                     {
                         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GraphicsPipelineDriver))
                         {
-                            creationResult = Result.ErrorUnknown;
-                            pipeline = default;
-                            creationMilliseconds = 0;
-                            if (libraries is { LinkedFromLibraries: true } && !expandRectangles)
-                            {
-                                creationResult = CreateLinkedGraphicsPipeline(libraries, description, &pipelineInfo,
-                                    &baseDynamicState, out pipeline, out creationMilliseconds);
-                            }
-
-                            if (creationResult != Result.Success)
-                            {
-                                creationResult = CreatePipelineWithBinaries(&pipelineInfo, &pipelineInfo.PNext, cache,
-                                    &CreateGraphicsPipelineCall, out pipeline, out creationMilliseconds);
-                            }
+                            creationResult = LinkOrBuildGraphicsPipeline(libraries, description, expandRectangles, &pipelineInfo,
+                                &baseDynamicState, cache, out pipeline, out creationMilliseconds);
                         }
                     }
                     if (RenderPhaseProfile.Enabled && !prewarm)
