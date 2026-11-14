@@ -42,10 +42,12 @@ public sealed class SharedDeviceLoadDeviceTests(HeadlessVulkanFixture fixture, I
         var vulkan = fixture.Vulkan;
         if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
         var program = LinkedProgram();
-        var previous = Gen5SpirvTranslator.SharedDeviceLoads;
+        var (previous, previousRanges) = (Gen5SpirvTranslator.SharedDeviceLoads, Gen5SpirvTranslator.SharedDeviceRanges);
         Compiled before, after;
         try
         {
+            // One call per dword (the range functions off, whatever SHARPEMU_SHARED_DEVICE_RANGES says).
+            Gen5SpirvTranslator.SharedDeviceRanges = false;
             Gen5SpirvTranslator.SharedDeviceLoads = false;
             before = Compile(program);
             Gen5SpirvTranslator.SharedDeviceLoads = true;
@@ -53,11 +55,43 @@ public sealed class SharedDeviceLoadDeviceTests(HeadlessVulkanFixture fixture, I
         }
         finally
         {
-            Gen5SpirvTranslator.SharedDeviceLoads = previous;
+            (Gen5SpirvTranslator.SharedDeviceLoads, Gen5SpirvTranslator.SharedDeviceRanges) = (previous, previousRanges);
         }
 
         output.WriteLine($"module: {before.Spirv.Length} B -> {after.Spirv.Length} B");
         Assert.True(after.Spirv.Length < before.Spirv.Length, "the loads go through the shared function");
+        Compare(vulkan!, before, after);
+    }
+
+    // The same program with the shared function, its dword ranges one call per dword and one call per range.
+    [Fact]
+    public void DeviceRangesMatchWithAndWithoutTheRangeFunctions()
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+        var program = LinkedProgram();
+        var (previousLoads, previousRanges) = (Gen5SpirvTranslator.SharedDeviceLoads, Gen5SpirvTranslator.SharedDeviceRanges);
+        Compiled before, after;
+        try
+        {
+            Gen5SpirvTranslator.SharedDeviceLoads = true;
+            Gen5SpirvTranslator.SharedDeviceRanges = false;
+            before = Compile(program);
+            Gen5SpirvTranslator.SharedDeviceRanges = true;
+            after = Compile(program);
+        }
+        finally
+        {
+            (Gen5SpirvTranslator.SharedDeviceLoads, Gen5SpirvTranslator.SharedDeviceRanges) = (previousLoads, previousRanges);
+        }
+
+        output.WriteLine($"module: {before.Spirv.Length} B -> {after.Spirv.Length} B");
+        Assert.Contains("loadDeviceDwords8", System.Text.Encoding.ASCII.GetString(after.Spirv));
+        Compare(vulkan!, before, after);
+    }
+
+    private void Compare(HeadlessVulkan vulkan, Compiled before, Compiled after)
+    {
         (ulong Base, uint Records, bool SecondPage)[] cases =
         [
             (GuestBase + 512, 0x10000, true),

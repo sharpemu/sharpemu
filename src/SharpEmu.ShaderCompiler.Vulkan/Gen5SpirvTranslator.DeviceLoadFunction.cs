@@ -11,6 +11,15 @@ public static partial class Gen5SpirvTranslator
     // body, which compiles in seconds this way, and they lengthen the program's GPU submissions. Tests may set it.
     public static bool SharedDeviceLoads { get; set; } =
         !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_SHARED_DEVICE_LOADS"), "0", StringComparison.Ordinal);
+
+    // SHARPEMU_SHARED_DEVICE_RANGES (on by default; =0 turns it off): with the shared function, a range of 2 to 16
+    // consecutive device dwords (scalar loads, scalar buffer loads, buffer elements) goes through one DontInline
+    // function per range length instead of one call per dword. The driver's compile time grows faster than linearly
+    // with the call sites in a module, so a record of many outlined bodies can take minutes and gigabytes to compile;
+    // one call per range leaves about a third of the call sites. Tests may set it.
+    public static bool SharedDeviceRanges { get; set; } =
+        !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_SHARED_DEVICE_RANGES"), "0", StringComparison.Ordinal);
+
     private sealed partial class CompilationContext
     {
         private uint _deviceDwordFunction;
@@ -30,6 +39,65 @@ public static partial class Gen5SpirvTranslator
             }
 
             return _module.AddInstruction(SpirvOp.FunctionCall, _uintType, _deviceDwordFunction, address64, allowed, report);
+        }
+
+        // Each range length's function holds the range's inline form (LoadDeviceDwordRange: the first and last dwords' page
+        // lookups and fault reports, then each dword's load), which reads and reports as the calls per dword do.
+        private readonly Dictionary<int, (uint Function, uint ArrayType)> _deviceRangeFunctions = [];
+        private bool _emittingDeviceRange;
+
+        private bool UsesSharedDeviceRanges => SharedDeviceRanges && UsesSharedDeviceLoads && !_emittingDeviceRange;
+
+        private uint[] CallDeviceDwordRange(uint address64, IReadOnlyList<uint> allowed)
+        {
+            var count = allowed.Count;
+            if (!_deviceRangeFunctions.TryGetValue(count, out var range))
+            {
+                range = (_module.AllocateId(), _module.TypeArrayDistinct(_uintType, (uint)count));
+                _deviceRangeFunctions[count] = range;
+            }
+
+            var result = _module.AddInstruction(SpirvOp.FunctionCall, range.ArrayType, [range.Function, address64, .. allowed]);
+            var values = new uint[count];
+            for (var dword = 0; dword < count; dword++)
+            {
+                values[dword] = _module.AddInstruction(SpirvOp.CompositeExtract, _uintType, result, (uint)dword);
+            }
+
+            return values;
+        }
+
+        // After every function that may call them.
+        private void EmitDeviceRangeFunctions()
+        {
+            const uint dontInline = 2;
+            foreach (var (count, range) in _deviceRangeFunctions.OrderBy(entry => entry.Key))
+            {
+                var functionType = _module.TypeFunction(range.ArrayType, [_ulongType, .. Enumerable.Repeat(_boolType, count)]);
+                _module.BeginFunction(range.ArrayType, functionType, dontInline, range.Function);
+                _module.AddName(range.Function, $"loadDeviceDwords{count}");
+                var address = _module.AddFunctionParameter(_ulongType);
+                var allowed = new uint[count];
+                for (var dword = 0; dword < count; dword++)
+                {
+                    allowed[dword] = _module.AddFunctionParameter(_boolType);
+                }
+
+                _module.AddLabel();
+                InitializeDeviceAddressFallback();
+                _emittingDeviceRange = true;
+                try
+                {
+                    var values = LoadDeviceDwordRange(address, allowed);
+                    _module.AddStatement(SpirvOp.ReturnValue, _module.AddInstruction(SpirvOp.CompositeConstruct, range.ArrayType, values));
+                }
+                finally
+                {
+                    _emittingDeviceRange = false;
+                }
+
+                _module.EndFunction();
+            }
         }
 
         // After every function that may call it.

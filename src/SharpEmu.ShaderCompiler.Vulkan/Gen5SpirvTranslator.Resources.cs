@@ -1412,9 +1412,15 @@ public static partial class Gen5SpirvTranslator
                 return [LoadDeviceDword(address64, allowed[0])];
             }
 
+            // The whole range through one shared function per range length, which holds the form below.
+            if (UsesSharedDeviceRanges)
+            {
+                return CallDeviceDwordRange(address64, allowed);
+            }
+
             // Through the shared function, one call per dword in order: the last call that reports a missing page leaves it,
             // as the second page's report after the first page's does below.
-            if (UsesSharedDeviceLoads)
+            if (UsesSharedDeviceLoads && !_emittingDeviceRange)
             {
                 var called = new uint[count];
                 for (var dword = 0; dword < count; dword++)
