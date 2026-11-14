@@ -69,7 +69,25 @@ public sealed class ResidentImageBackingTests
     public void ABackedPageAfterAHoleIsRejected()
     {
         var backing = new PrefixBacking(Base, (0, 1), (2, 1));
-        Assert.False(ResidentImageBacking.TryReadResidentPrefix(backing, Base, new byte[3 * Page]));
+        Assert.False(ResidentImageBacking.TryReadResidentPrefix(backing, Base, new byte[3 * Page], allowHoles: false));
+    }
+
+    // SHARPEMU_IMAGE_BACKING_HOLES: Games bind images whose backing has a backed page after a hole
+    // (first byte backed, last not). The holes read as zero and the backed pages as their bytes.
+    [Fact]
+    public void WithHolesAllowedEveryHoleIsZeroedAndEveryBackedPageCopied()
+    {
+        var backing = new PrefixBacking(Base, (0, 1), (2, 1));
+        var bytes = new byte[4 * Page];
+        Array.Fill(bytes, (byte)0xFF);
+
+        Assert.True(ResidentImageBacking.TryReadResidentPrefix(backing, Base, bytes, allowHoles: true));
+
+        Assert.All(bytes.AsSpan(0, Page).ToArray(), value => Assert.Equal(0xAB, value));
+        Assert.All(bytes.AsSpan(Page, Page).ToArray(), value => Assert.Equal(0, value));
+        Assert.All(bytes.AsSpan(2 * Page, Page).ToArray(), value => Assert.Equal(0xAB, value));
+        Assert.All(bytes.AsSpan(3 * Page).ToArray(), value => Assert.Equal(0, value));
+        Assert.False(ResidentImageBacking.TryReadResidentPrefix(new PrefixBacking(Base, (1, 2)), Base, new byte[3 * Page], allowHoles: true));
     }
 
     [Fact]
