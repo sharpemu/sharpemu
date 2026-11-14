@@ -375,6 +375,32 @@ internal sealed record ShaderCallLibrary(string Identity, IReadOnlyList<ShaderCa
         };
     }
 
+    // This runtime-argument library without the callee at an address, at every site: a call to it returns at once.
+    public ShaderCallLibrary WithoutCallee(ulong callerAddress, ulong address) =>
+        WithSiteCallees(callerAddress, SiteCallees().ToDictionary(static site => site.Key,
+            site => site.Value.Where(callee => callee.Target.Address != address).ToDictionary(static callee => callee.Target.Address)));
+
+    // Links the sites with run-time arguments. A callee the linker cannot copy (one that calls another function, say) is left
+    // out at every site and the others still link: its records return at once, as the records of any callee a program lacks
+    // do. The library becomes the one the program holds.
+    public static Gen5ShaderProgram LinkLeavingOutUnlinkable(Gen5ShaderProgram caller, ref ShaderCallLibrary library,
+        Action<ShaderCallLinkException> leftOut)
+    {
+        while (true)
+        {
+            try
+            {
+                return Gen5ShaderCallLinker.Link(caller, library.Calls, runtimeArguments: true);
+            }
+            catch (ShaderCallLinkException failure) when (library.Calls.Any(site =>
+                site.Targets.Any(target => target.Address == failure.Target.Address)))
+            {
+                leftOut(failure);
+                library = library.WithoutCallee(caller.Address, failure.Target.Address);
+            }
+        }
+    }
+
     // This runtime-argument library without a callee at any site: its program returns from every call at once, as from a
     // record of a callee it does not hold, and compiles in seconds where the callees' code can take the driver minutes.
     public ShaderCallLibrary WithoutCallees(ulong callerAddress) =>

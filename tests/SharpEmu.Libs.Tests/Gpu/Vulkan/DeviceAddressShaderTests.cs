@@ -159,6 +159,33 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
         run.Finish(output, nameof(LinkedCalls_FunctionReadsItsOwnProgramAddress));
     }
 
+    // The caller reads its program address with S_GETPC_B64 after a call, as a program does to address the constants placed
+    // after its code: it reads the shader base plus the instruction's offset in its own code, although the callee body linked
+    // before it moved the instruction.
+    [Fact]
+    public void LinkedCalls_CallerReadsItsOwnProgramAddressAfterACall()
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+        const ulong shaderBase = 0x3_0040_0000;
+        var caller = Program(MoveScalar(0, 14, 0x2000), MoveScalar(4, 15, 0), MoveScalar(8, 16, 10), MoveScalar(12, 17, 0),
+            Sop1(16, "SSwappcB64", 14, Gen5Operand.Scalar(14)),
+            Sop1(20, "SGetpcB64", 2, Gen5Operand.Scalar(0)),
+            Vop1(24, "VMovB32", 3, Gen5Operand.Scalar(2)), Vop1(28, "VMovB32", 4, Gen5Operand.Scalar(3)),
+            BufferAccess(32, "BufferStoreDwordx4", ResultRegister, dwords: 4, vectorData: 1), EndProgram(40));
+        var function = Program(Vop1(0, "VMovB32", 1, Gen5Operand.Scalar(16)), Vop1(4, "VMovB32", 2, Operand(7)),
+            Sop1(8, "SSetpcB64", 0, Gen5Operand.Scalar(14)));
+        var linked = Gen5ShaderCallLinker.Link(caller, [new(16, 14, 16, 14, caller.Address + 20, [new(0x2000, 10, function)])]);
+        var run = new Run(vulkan, linked);
+        run.Dispatch(GuestBase, shaderBase: shaderBase);
+        Assert.Equal(10u, run.ResultWord(0));
+        Assert.Equal(7u, run.ResultWord(4));
+        Assert.Equal(unchecked((uint)(shaderBase + 24)), run.ResultWord(8));
+        Assert.Equal((uint)(shaderBase >> 32), run.ResultWord(12));
+        Assert.All(run.FaultWords(), word => Assert.Equal(0u, word));
+        run.Finish(output, nameof(LinkedCalls_CallerReadsItsOwnProgramAddressAfterACall));
+    }
+
     // A partial wave: the lanes past the dispatch's thread count do not run, and the others run a call body whose comparison
     // is a wave operation over the running lanes.
     [Fact]

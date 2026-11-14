@@ -49,7 +49,7 @@ public static class Gen5ShaderCallLinker
     // the records; otherwise one copy per record, whose argument the plan reads.
     public static Gen5ShaderProgram Link(Gen5ShaderProgram caller, IReadOnlyList<ShaderCallSite> calls, bool runtimeArguments = false)
     {
-        if (caller.IsFusedProgram || caller.Instructions.Any(instruction => instruction.Opcode is "SGetpcB64" or "SSetpcB64"))
+        if (caller.IsFusedProgram || caller.Instructions.Any(instruction => instruction.Opcode is "SSetpcB64"))
             throw new InvalidOperationException("The caller uses an unsupported program-address operation.");
         var instructions = new List<Gen5ShaderInstruction>();
         var functionBuffers = new HashSet<uint>();
@@ -70,14 +70,16 @@ public static class Gen5ShaderCallLinker
             branches.Add((instructions.Count, body, target));
             Append(new(0, Gen5ShaderEncoding.Sopp, "SBranch", [0xBF820000], [], [], null));
         }
-        foreach (var instruction in caller.Instructions)
+        foreach (var instruction in caller.Instructions.Select(WithoutDebuggerBranch))
         {
             labels.Add((0, instruction.Pc), pc);
             if (instruction.Opcode != "SSwappcB64")
             {
                 if (Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out var target))
                     branches.Add((instructions.Count, 0, target));
-                Append(instruction);
+                // S_GETPC_B64 reads the shader base plus the instruction's offset in the caller's code, to address the
+                // constants placed after the code, say. The copy keeps that offset after the callee bodies before it moved it.
+                Append(instruction.Opcode == "SGetpcB64" ? instruction with { AddressOffset = instruction.ProgramOffset } : instruction);
                 continue;
             }
             // A site whose table holds only null records has no target: it links to its fault, which the
@@ -104,7 +106,7 @@ public static class Gen5ShaderCallLinker
                         RuntimeArgument = runtimeArguments,
                         Callee = target.Address,
                     }));
-                foreach (var operation in target.Program.Instructions)
+                foreach (var operation in target.Program.Instructions.Select(WithoutDebuggerBranch))
                 {
                     labels.Add((body, operation.Pc), pc);
                     // A function may also return with s_swappc_b64 null, s[ret:ret+1], which jumps without saving an address.
@@ -194,6 +196,13 @@ public static class Gen5ShaderCallLinker
     // Whether a program was linked with its shader calls: every site of a linked program holds call entries or a fault.
     public static bool IsLinked(Gen5ShaderProgram program) =>
         program.Instructions.Any(static instruction => instruction.Control is ShaderCallEntryControl or ShaderCallFaultControl);
+
+    // S_CBRANCH_CDBG* branch only under an attached GPU debugger, and the translators emit them as never taken. Their targets
+    // are debugger stubs past S_ENDPGM that the decode leaves out, so a linked program holds them as S_NOP.
+    private static Gen5ShaderInstruction WithoutDebuggerBranch(Gen5ShaderInstruction instruction) =>
+        instruction.Opcode.StartsWith("SCbranchCdbg", StringComparison.Ordinal)
+            ? instruction with { Opcode = "SNop", Words = [0xBF800000], Sources = [], Destinations = [], Control = null }
+            : instruction;
 
     private static string Describe(ShaderCallTarget target, Gen5ShaderInstruction operation) =>
         $"target=0x{target.Address:X} pc=0x{operation.Pc:X} {operation.Opcode} {string.Join(',', operation.Destinations)} <- " +

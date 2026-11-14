@@ -180,6 +180,49 @@ public sealed class ShaderCallLibraryTests
             ShaderCallLibrary.Read(caller, memory, Snapshot((16u << 20) / 16 + 1), ReadWord, runtimeArguments: true, readBytes: ReadBytes));
     }
 
+    // A callee the linker cannot copy (here one that calls another function) is left out of a run-time-argument program at
+    // every site, and the tables' other callees still link; a copy per record has no such fallback.
+    [Fact]
+    public void RuntimeArguments_LinkLeavesOutACalleeTheLinkerCannotCopy()
+    {
+        var caller = Program(
+            Sop2(0, "SLshlB32", 20, Gen5Operand.Scalar(20), Operand(4)),
+            ScalarBufferLoad(4, 0, 16, 4, dynamicOffsetRegister: 20),
+            Vop1(12, "VMovB32", 111, Operand(0)),
+            new(16, Gen5ShaderEncoding.Sopp, "SWaitcnt", [0xBF8C0000], [], [], null),
+            MoveScalarRegister(20, 14, 16), MoveScalarRegister(24, 15, 17),
+            MoveScalarRegister(28, 16, 18), MoveScalarRegister(32, 17, 19),
+            Sop1(36, "SSwappcB64", 14, Gen5Operand.Scalar(14)), EndProgram(40));
+        var memory = new MemoryAccessTable();
+        memory.Add(new() { Pc = 4, Kind = MemoryResourceKind.ScalarBuffer, Resource = 0 });
+        var snapshot = new ResourceSnapshot { Buffers = [[0x1000, 16u << 16, 3, 0]] };
+        var words = new Dictionary<ulong, uint>
+        {
+            // 0x200000: s_nop 0; s_setpc_b64 s[14:15]. 0x300000: s_swappc_b64 s[16:17], s[18:19] before its return.
+            [0x200000] = 0xBF800000, [0x200004] = 0xBE80200E,
+            [0x300000] = 0xBE902112, [0x300004] = 0xBE80200E,
+        };
+        (ulong Target, ulong Argument)[] records = [(0x200000, 0x5000), (0x300000, 0x5100), (0x200000, 0x5200)];
+        for (var record = 0; record < records.Length; record++)
+        {
+            var address = 0x1000ul + (ulong)record * 16;
+            words[address] = (uint)records[record].Target;
+            words[address + 4] = 0;
+            words[address + 8] = (uint)records[record].Argument;
+            words[address + 12] = 0;
+        }
+
+        var library = ShaderCallLibrary.Read(caller, memory, snapshot, (ulong address, out uint word) => words.TryGetValue(address, out word),
+            runtimeArguments: true);
+        var leftOut = new List<ShaderCallLinkException>();
+        var linked = ShaderCallLibrary.LinkLeavingOutUnlinkable(caller, ref library, leftOut.Add);
+        Assert.Equal(0x300000ul, Assert.Single(leftOut).Target.Address);
+        Assert.Equal([0x200000ul], Gen5ShaderCallLinker.CallTargets(linked));
+        Assert.Equal([0x200000ul], Assert.Single(library.Calls).Targets.Select(static target => target.Address));
+        Assert.Throws<ShaderCallLinkException>(() => Gen5ShaderCallLinker.Link(caller,
+            ShaderCallLibrary.Read(caller, memory, snapshot, (ulong address, out uint word) => words.TryGetValue(address, out word)).Calls));
+    }
+
     // A caller may pass its function pointer and argument in user data: the call registers are copied from user-data
     // registers nothing wrote before, and the target and argument come from the dispatch's user data. Another argument
     // is another library, but the same layout, so it links to the same program.

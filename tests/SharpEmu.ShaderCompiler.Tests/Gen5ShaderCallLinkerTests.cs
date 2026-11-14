@@ -119,6 +119,41 @@ public sealed class Gen5ShaderCallLinkerTests
         Assert.True(BindingLayout.ReadsShaderBase(linked));
     }
 
+    // A caller may read its program address with S_GETPC_B64, to address the constants placed after its code. The linked
+    // copy keeps the caller's offset, although the callee body linked at the call before it moved the instruction. An
+    // S_SETPC_B64 in a caller is a jump the linker cannot follow.
+    [Fact]
+    public void Link_KeepsTheCallerOffsetForProgramCounterReads()
+    {
+        var caller = Program(Sop1(0, "SSwappcB64", 14, Gen5Operand.Scalar(14)), Sop1(4, "SGetpcB64", 2, Gen5Operand.Scalar(0)),
+            EndProgram(8));
+        var body = Program(Nop(0), Nop(4), Sop1(8, "SSetpcB64", 0, Gen5Operand.Scalar(14)));
+        ShaderCallSite[] calls = [new(0, 14, 16, 14, 4, [new ShaderCallTarget(0x2000, 0x3000, body)])];
+        var linked = Gen5ShaderCallLinker.Link(caller, calls);
+        var read = Assert.Single(linked.Instructions, instruction => instruction.Opcode == "SGetpcB64");
+        Assert.True(read.Pc > 4);
+        Assert.Equal(4ul, read.ProgramOffset);
+        Assert.Null(read.Control);
+        Assert.True(BindingLayout.ReadsShaderBase(linked));
+
+        var jump = Program(Sop1(0, "SSwappcB64", 14, Gen5Operand.Scalar(14)), Sop1(4, "SSetpcB64", 0, Gen5Operand.Scalar(2)),
+            EndProgram(8));
+        Assert.Throws<InvalidOperationException>(() => Gen5ShaderCallLinker.Link(jump, calls));
+    }
+
+    // S_CBRANCH_CDBG* branch only under an attached GPU debugger, to stubs past S_ENDPGM that the decode leaves out. A
+    // linked program holds them as S_NOP, in the caller and in a callee.
+    [Fact]
+    public void Link_HoldsDebuggerBranchesAsNops()
+    {
+        var caller = Program(Branch(0, "SCbranchCdbgsysOrUser", 3), Sop1(4, "SSwappcB64", 14, Gen5Operand.Scalar(14)),
+            EndProgram(8));
+        var body = Program(Branch(0, "SCbranchCdbguser", 7), Sop1(4, "SSetpcB64", 0, Gen5Operand.Scalar(14)));
+        var linked = Gen5ShaderCallLinker.Link(caller, [new(4, 14, 16, 14, 8, [new ShaderCallTarget(0x2000, 0x3000, body)])]);
+        Assert.DoesNotContain(linked.Instructions, instruction => instruction.Opcode.StartsWith("SCbranchCdbg", StringComparison.Ordinal));
+        Assert.Equal(2, linked.Instructions.Count(instruction => instruction.Opcode == "SNop"));
+    }
+
     // The host pushes the callees in the order the module tests them: each once, by site and then by record.
     [Fact]
     public void CallTargets_FollowTheSitesAndRecords()

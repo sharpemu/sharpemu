@@ -900,7 +900,9 @@ internal sealed class ShaderProgramCache
         ShaderResourcePlan plan;
         try
         {
-            program = Gen5ShaderCallLinker.Link(caller, library.Calls, runtimeRecords);
+            program = runtimeRecords
+                ? ShaderCallLibrary.LinkLeavingOutUnlinkable(caller, ref library, failure => ReportLeftOutCallee(hash, failure))
+                : Gen5ShaderCallLinker.Link(caller, library.Calls, runtimeRecords);
             plan = ShaderResourcePlan.Extract(program, stage, hash, userDataBase, userDataCount,
                 beforeResourceTracking: beforeResourceTracking, waveSize: waveSize, bindlessNullDescriptors: BindlessNullDescriptors,
                 bindlessHeap: bindlessHeap, callRecords: runtimeRecords, callMarks: callMarks,
@@ -923,6 +925,17 @@ internal sealed class ShaderProgramCache
             Generation = Interlocked.Increment(ref _linkGenerations),
             HasShaderCalls = program.Instructions.Any(instruction => instruction.Opcode == "SSwappcB64"),
             HasBitwiseExclusiveOr = program.Instructions.Any(instruction => instruction.Opcode.Contains("Xor", StringComparison.Ordinal)) };
+    }
+
+    private static int _leftOutCalleeReports;
+
+    private static void ReportLeftOutCallee(ulong hash, ShaderCallLinkException failure)
+    {
+        if (Interlocked.Increment(ref _leftOutCalleeReports) <= 16)
+        {
+            Console.Error.WriteLine($"[GPU][WARN][LINKED_PROGRAM] A callee cannot be linked and is left out; its calls return at once: " +
+                $"hash=0x{hash:X16} {failure.Message}");
+        }
     }
 
     // The program linked for linkedKey once its worker is done; until then the program is pending. A finished link of
