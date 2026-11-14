@@ -64,6 +64,8 @@ public readonly record struct DynamicDrawState(
     uint ColorWriteCount,
     byte ColorWriteEnableMask,
     uint DepthCountControl = 0,
+    StencilOperations FrontStencilOperations = default,
+    StencilOperations BackStencilOperations = default,
     bool DepthBoundsTestEnabled = false,
     float DepthMinBounds = 0f,
     float DepthMaxBounds = 1f);

@@ -1303,18 +1303,26 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         ShaderProgram vertexProgram,
         ShaderProgram pixelProgram)
     {
-        // A caller that cannot leave its draw out waits for a compile the host runs off this thread.
+        // A draw waits for a compile the host runs off this thread, outside the cache's lock: programs and pipelines of
+        // other draws resolve meanwhile.
         PipelineHandle handle;
         while (!TryCreateGraphicsPipeline(colors, in depth, vertexInput, pixelInput, context, in rendering, topology,
-            primitiveRestartEnabled, disableBlending, vertexProgram, pixelProgram, out handle))
+            primitiveRestartEnabled, disableBlending, vertexProgram, pixelProgram, out handle, out var compiling))
         {
-            Thread.Sleep(1);
+            if (compiling is null)
+            {
+                Thread.Sleep(1);
+                continue;
+            }
+
+            _host.WaitForGraphicsPipeline(compiling);
         }
 
         return handle;
     }
 
-    public bool TryCreateGraphicsPipeline(
+    // compiling: the description of the compile the host still runs when this returns false.
+    private bool TryCreateGraphicsPipeline(
         ReadOnlySpan<ColorTargetState> colors,
         in DepthAttachmentState depth,
         VertexInputInfo vertexInput,
@@ -1326,8 +1334,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         bool disableBlending,
         ShaderProgram vertexProgram,
         ShaderProgram pixelProgram,
-        out PipelineHandle handle)
+        out PipelineHandle handle,
+        out GraphicsPipelineDescription? compiling)
     {
+        compiling = null;
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PipelineCreation);
         // The lookup fills objects this thread reuses for every draw; only a new pipeline gets its own.
         var lookup = _graphicsLookup ??= new GraphicsPipelineKey
@@ -1363,6 +1373,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             {
                 if (!_host.TryCreateGraphicsPipeline(pending.Description, out handle))
                 {
+                    compiling = pending.Description;
                     return false;
                 }
 
@@ -1386,6 +1397,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             if (!_host.TryCreateGraphicsPipeline(description, out handle))
             {
                 _pendingGraphicsPipelines.Add(key, (key, description));
+                compiling = description;
                 return false;
             }
 

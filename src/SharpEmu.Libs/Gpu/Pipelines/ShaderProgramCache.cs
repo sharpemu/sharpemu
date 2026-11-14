@@ -1686,9 +1686,13 @@ internal sealed class ShaderProgramCache
         _compiler.CountShaderCompilation();
         ShaderPermutationDump.WriteModule(permutationDump, compiled.Payload, compiled.PayloadFileExtension);
         CompiledShaderDump.Write(source.Label, source.Address, source.Hash, compiled, program);
-        var id = ++_nextProgramId;
+        var id = Interlocked.Increment(ref _nextProgramId);
         var module = _host.CreateShaderModule(compiled, source.Stage, source.Hash, id);
         var info = CreateProgramInfo(source, entry, resources, layout, request, compiled.InputLocationMask);
+        if (source.Stage == ShaderStage.Pixel)
+        {
+            _host.PixelProgramCreated(info, module);
+        }
         if (source.Stage == ShaderStage.Compute && options.TessellationHull is null &&
             _host.ShaderPrewarm is { } prewarm &&
             _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var capture))

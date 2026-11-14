@@ -8,6 +8,7 @@ using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
+using Silk.NET.Core.Native;
 using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.VideoOut;
@@ -15,12 +16,16 @@ namespace SharpEmu.Libs.VideoOut;
 // Graphics pipeline libraries (VK_EXT_graphics_pipeline_library). A graphics pipeline compiles its vertex and pixel programs
 // together, so a program that many pipelines share (a material vertex shader paired with each material's pixel shader, or
 // a pixel shader drawn into other targets) is compiled again for each of them. With libraries each part compiles once:
-// the vertex input, the vertex or mesh stage with its rasterization state, the pixel stage with its depth and stencil
-// state, and the color outputs. A pipeline links its parts without optimizing across them.
+// the vertex input, the vertex or mesh stage with its rasterization state, the pixel stage, and the color outputs. A
+// pipeline links its parts without optimizing across them.
 // Parts link only through layouts with independent sets: the vertex stage's bindings are set 0 and the pixel stage's set 2
 // (PixelDescriptorSet: each pixel module's set-0 variables move there), the bindless heap stays set 1. The vertex set is
 // pushed when it fits, the pixel set is allocated, so each set's layout depends on its own stage alone.
-// SHARPEMU_GRAPHICS_PIPELINE_LIBRARY=0 keeps whole pipelines with one set.
+// Every depth and stencil state is dynamic (BaseDynamicStates), so the pixel stage's part depends on the pixel program
+// alone. It starts compiling on a worker as soon as the program is translated (PixelProgramCreated), usually before the
+// draw that needs it, and the programs a scene brings at once compile side by side instead of one draw after another.
+// SHARPEMU_GRAPHICS_PIPELINE_LIBRARY=0 keeps whole pipelines with one set; SHARPEMU_EARLY_PIXEL_LIBRARIES=0 compiles each
+// part when a pipeline first needs it.
 internal static unsafe partial class VulkanVideoPresenter
 {
     private sealed partial class Presenter
@@ -33,11 +38,61 @@ internal static unsafe partial class VulkanVideoPresenter
         private static bool GraphicsPipelineLibrariesRequested() =>
             Environment.GetEnvironmentVariable("SHARPEMU_GRAPHICS_PIPELINE_LIBRARY") != "0";
 
+        private static readonly bool _earlyPixelLibraries =
+            Environment.GetEnvironmentVariable("SHARPEMU_EARLY_PIXEL_LIBRARIES") != "0";
+
         // Device setup sets this when the device links libraries fast.
         private bool _graphicsPipelineLibraries;
 
-        // The compiled parts by the state each holds; destroyed with the pipelines.
+        // The compiled parts by the state each holds, and the parts a thread is compiling now, both under
+        // _graphicsLibraryLock: pipeline workers and early pixel compiles share them with the command stream. The parts
+        // are destroyed with the pipelines.
+        private readonly object _graphicsLibraryLock = new();
         private readonly Dictionary<string, Pipeline> _graphicsLibraries = new(StringComparer.Ordinal);
+        private readonly Dictionary<string, TaskCompletionSource<Pipeline>> _graphicsLibraryCompiles = new(StringComparer.Ordinal);
+
+        // The early pixel compiles not yet waited for; teardown waits for them before the modules go.
+        private readonly List<Task> _earlyPixelLibraryTasks = new();
+
+        private static readonly SemaphoreSlim _pixelLibrarySlots = new(Math.Max(2, Environment.ProcessorCount / 2));
+
+        // The states every guest graphics pipeline takes from the draw (SetDynamicState), in this order.
+        private DynamicState[]? _baseDynamicStates;
+
+        private DynamicState[] BaseDynamicStates => _baseDynamicStates ??= BuildBaseDynamicStates();
+
+        private DynamicState[] BuildBaseDynamicStates()
+        {
+            var states = new List<DynamicState>
+            {
+                DynamicState.Viewport,
+                DynamicState.Scissor,
+                DynamicState.LineWidth,
+                DynamicState.DepthTestEnableExt,
+                DynamicState.DepthWriteEnableExt,
+                DynamicState.DepthCompareOpExt,
+                DynamicState.DepthBiasEnableExt,
+                DynamicState.DepthBias,
+                DynamicState.StencilCompareMask,
+                DynamicState.StencilReference,
+                DynamicState.StencilWriteMask,
+                DynamicState.BlendConstants,
+                DynamicState.StencilTestEnableExt,
+                DynamicState.StencilOpExt,
+            };
+            if (_supportsDepthBounds)
+            {
+                states.Add(DynamicState.DepthBoundsTestEnableExt);
+                states.Add(DynamicState.DepthBounds);
+            }
+
+            return states.ToArray();
+        }
+
+        // The push constant stages of every linked pipeline and part. Linked parts need equal ranges, so vertex and mesh
+        // pipelines share them.
+        internal ShaderStageFlags LibraryPushStages =>
+            ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit | (_supportsMeshShader ? ShaderStageFlags.MeshBitExt : 0);
 
         // A copy of a SPIR-V module whose descriptor set `from` decorations name set `to`.
         internal static byte[] WithDescriptorSet(byte[] code, uint from, uint to)
@@ -91,8 +146,9 @@ internal static unsafe partial class VulkanVideoPresenter
                 pixelSet = CreateDescriptorSetLayout(pixelBindings, allowPush: false, out _, out pixelDemand);
             }
 
-            var heap = UsesBindlessHeap(description.VertexStage) ||
-                (description.PixelStage is { } heapStage && UsesBindlessHeap(heapStage));
+            // Each part's layout names the heap only when its own stage reads it.
+            var vertexHeap = UsesBindlessHeap(description.VertexStage);
+            var pixelHeap = description.PixelStage is { } heapStage && UsesBindlessHeap(heapStage);
             return new RenderPipelineEntry
             {
                 SetLayout = vertexSet,
@@ -103,8 +159,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 LinkedFromLibraries = true,
                 VertexSetSignature = SetSignature(vertexBindings, vertexPush),
                 PixelSetSignature = SetSignature(pixelBindings, push: false),
-                Layout = CreateLibraryPipelineLayout(vertexSet, heap, pixelSet, mesh),
-                UsesBindlessHeap = heap,
+                Layout = CreateLibraryPipelineLayout(vertexSet, vertexHeap || pixelHeap, pixelSet),
+                UsesBindlessHeap = vertexHeap || pixelHeap,
+                VertexUsesBindlessHeap = vertexHeap,
+                PixelUsesBindlessHeap = pixelHeap,
                 Description = description,
                 ProfileVertexHash = description.VertexStage.Hash,
                 ProfilePixelHash = description.PixelStage?.Hash ?? 0,
@@ -124,12 +182,12 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         // The layout of a linked pipeline or of one part of it: sets 0 (vertex), 1 (bindless heap) and 2 (pixel), each
-        // null where the pipeline or part has none, and one push constant range for both stages.
-        private PipelineLayout CreateLibraryPipelineLayout(DescriptorSetLayout vertexSet, bool heap, DescriptorSetLayout pixelSet, bool mesh)
+        // null where the pipeline or part has none, and one push constant range for every stage.
+        private PipelineLayout CreateLibraryPipelineLayout(DescriptorSetLayout vertexSet, bool heap, DescriptorSetLayout pixelSet)
         {
             var pushConstants = new PushConstantRange
             {
-                StageFlags = (mesh ? ShaderStageFlags.MeshBitExt : ShaderStageFlags.VertexBit) | ShaderStageFlags.FragmentBit,
+                StageFlags = LibraryPushStages,
                 Offset = 0,
                 Size = PushConstantBytes,
             };
@@ -154,8 +212,8 @@ internal static unsafe partial class VulkanVideoPresenter
         // pipeline would be created with; each part takes its share. A part's dynamic states are the ones that apply to it
         // (baseDynamicState: all but color write enable, which only the color outputs take).
         private Result CreateLinkedGraphicsPipeline(RenderPipelineEntry entry, GraphicsPipelineDescription description,
-            GraphicsPipelineCreateInfo* info, PipelineDepthStencilStateCreateInfo* depthStencil,
-            PipelineDynamicStateCreateInfo* baseDynamicState, out Pipeline pipeline, out double milliseconds)
+            GraphicsPipelineCreateInfo* info, PipelineDynamicStateCreateInfo* baseDynamicState, out Pipeline pipeline,
+            out double milliseconds)
         {
             var started = Stopwatch.GetTimestamp();
             var mesh = description.VertexStage.Stage == ShaderStageKind.Mesh;
@@ -165,15 +223,16 @@ internal static unsafe partial class VulkanVideoPresenter
             if (!mesh)
             {
                 parts[count++] = GraphicsLibrary(VertexInputKey(info, baseDynamicState), GraphicsPipelineLibraryFlagsEXT.VertexInputInterfaceBitExt,
-                    info, depthStencil, baseDynamicState, entry, mesh, label);
+                    info, baseDynamicState, entry, label);
             }
 
-            parts[count++] = GraphicsLibrary(PreRasterizationKey(entry, info, mesh, baseDynamicState), GraphicsPipelineLibraryFlagsEXT.PreRasterizationShadersBitExt,
-                info, depthStencil, baseDynamicState, entry, mesh, label);
-            parts[count++] = GraphicsLibrary(FragmentKey(entry, info, depthStencil, mesh, baseDynamicState), GraphicsPipelineLibraryFlagsEXT.FragmentShaderBitExt,
-                info, depthStencil, baseDynamicState, entry, mesh, label);
+            parts[count++] = GraphicsLibrary(PreRasterizationKey(entry, info, baseDynamicState), GraphicsPipelineLibraryFlagsEXT.PreRasterizationShadersBitExt,
+                info, baseDynamicState, entry, label);
+            var pixelModule = info->StageCount > 1 ? info->PStages[1].Module.Handle : 0;
+            parts[count++] = GraphicsLibrary(FragmentKey(pixelModule, entry.PixelSetSignature, entry.PixelUsesBindlessHeap, info->PMultisampleState, baseDynamicState),
+                GraphicsPipelineLibraryFlagsEXT.FragmentShaderBitExt, info, baseDynamicState, entry, label);
             parts[count++] = GraphicsLibrary(OutputKey(info), GraphicsPipelineLibraryFlagsEXT.FragmentOutputInterfaceBitExt,
-                info, depthStencil, baseDynamicState, entry, mesh, label);
+                info, baseDynamicState, entry, label);
             for (var index = 0; index < count; index++)
             {
                 if (parts[index].Handle == 0)
@@ -203,74 +262,134 @@ internal static unsafe partial class VulkanVideoPresenter
             return result;
         }
 
+        // The part for key from the pipeline state in info: compiled by this thread unless it is compiled already or another
+        // thread compiles it now. A part that fails is not kept; its pipeline is built whole.
         private Pipeline GraphicsLibrary(string key, GraphicsPipelineLibraryFlagsEXT part, GraphicsPipelineCreateInfo* info,
-            PipelineDepthStencilStateCreateInfo* depthStencil, PipelineDynamicStateCreateInfo* baseDynamicState,
-            RenderPipelineEntry entry, bool mesh, string label)
+            PipelineDynamicStateCreateInfo* baseDynamicState, RenderPipelineEntry entry, string label)
         {
-            if (_graphicsLibraries.TryGetValue(key, out var cached))
+            if (TryTakeGraphicsLibrary(key, out var library, out var compile))
             {
-                return cached;
+                return library;
             }
 
-            var partInfo = new GraphicsPipelineLibraryCreateInfoEXT
-            {
-                SType = StructureType.GraphicsPipelineLibraryCreateInfoExt,
-                PNext = info->PNext,
-                Flags = part,
-            };
-            var library = new GraphicsPipelineCreateInfo
-            {
-                SType = StructureType.GraphicsPipelineCreateInfo,
-                PNext = &partInfo,
-                Flags = PipelineCreateFlags.CreateLibraryBitKhr,
-                PDynamicState = baseDynamicState,
-            };
-            PipelineLayout layout = default;
-            switch (part)
-            {
-                case GraphicsPipelineLibraryFlagsEXT.VertexInputInterfaceBitExt:
-                    library.PVertexInputState = info->PVertexInputState;
-                    library.PInputAssemblyState = info->PInputAssemblyState;
-                    break;
-                case GraphicsPipelineLibraryFlagsEXT.PreRasterizationShadersBitExt:
-                    library.StageCount = 1;
-                    library.PStages = info->PStages;
-                    library.PViewportState = info->PViewportState;
-                    library.PRasterizationState = info->PRasterizationState;
-                    library.Layout = layout = CreateLibraryPipelineLayout(entry.SetLayout,
-                        entry.UsesBindlessHeap, default, mesh);
-                    break;
-                case GraphicsPipelineLibraryFlagsEXT.FragmentShaderBitExt:
-                    library.StageCount = info->StageCount > 1 ? 1u : 0u;
-                    library.PStages = info->StageCount > 1 ? info->PStages + 1 : null;
-                    library.PMultisampleState = info->PMultisampleState;
-                    library.PDepthStencilState = depthStencil;
-                    library.Layout = layout = CreateLibraryPipelineLayout(default, entry.UsesBindlessHeap,
-                        entry.PixelSetLayout, mesh);
-                    break;
-                default:
-                    library.PColorBlendState = info->PColorBlendState;
-                    library.PMultisampleState = info->PMultisampleState;
-                    library.PDynamicState = info->PDynamicState;
-                    break;
-            }
-
-            Pipeline created;
-            double milliseconds;
-            Result result;
+            var created = default(Pipeline);
             try
             {
-                result = CreatePipelineWithBinaries(&library, &library.PNext, default, &CreateGraphicsPipelineCall,
-                    out created, out milliseconds, PipelineCreateFlags2.Vk2LibraryBitKhr);
+                var partInfo = new GraphicsPipelineLibraryCreateInfoEXT
+                {
+                    SType = StructureType.GraphicsPipelineLibraryCreateInfoExt,
+                    PNext = info->PNext,
+                    Flags = part,
+                };
+                var create = new GraphicsPipelineCreateInfo
+                {
+                    SType = StructureType.GraphicsPipelineCreateInfo,
+                    PNext = &partInfo,
+                    Flags = PipelineCreateFlags.CreateLibraryBitKhr,
+                    PDynamicState = baseDynamicState,
+                };
+                // Every depth and stencil state is dynamic.
+                var depthStencil = new PipelineDepthStencilStateCreateInfo { SType = StructureType.PipelineDepthStencilStateCreateInfo };
+                PipelineLayout layout = default;
+                switch (part)
+                {
+                    case GraphicsPipelineLibraryFlagsEXT.VertexInputInterfaceBitExt:
+                        create.PVertexInputState = info->PVertexInputState;
+                        create.PInputAssemblyState = info->PInputAssemblyState;
+                        break;
+                    case GraphicsPipelineLibraryFlagsEXT.PreRasterizationShadersBitExt:
+                        create.StageCount = 1;
+                        create.PStages = info->PStages;
+                        create.PViewportState = info->PViewportState;
+                        create.PRasterizationState = info->PRasterizationState;
+                        create.Layout = layout = CreateLibraryPipelineLayout(entry.SetLayout, entry.VertexUsesBindlessHeap, default);
+                        break;
+                    case GraphicsPipelineLibraryFlagsEXT.FragmentShaderBitExt:
+                        create.StageCount = info->StageCount > 1 ? 1u : 0u;
+                        create.PStages = info->StageCount > 1 ? info->PStages + 1 : null;
+                        create.PMultisampleState = info->PMultisampleState;
+                        create.PDepthStencilState = &depthStencil;
+                        create.Layout = layout = CreateLibraryPipelineLayout(default, entry.PixelUsesBindlessHeap, entry.PixelSetLayout);
+                        break;
+                    default:
+                        create.PColorBlendState = info->PColorBlendState;
+                        create.PMultisampleState = info->PMultisampleState;
+                        create.PDynamicState = info->PDynamicState;
+                        break;
+                }
+
+                try
+                {
+                    created = CompileGraphicsLibrary(&create, part, label);
+                }
+                finally
+                {
+                    if (layout.Handle != 0)
+                    {
+                        _vk.DestroyPipelineLayout(_device, layout, null);
+                    }
+                }
             }
             finally
             {
-                if (layout.Handle != 0)
+                FinishGraphicsLibrary(key, compile!, created);
+            }
+
+            return created;
+        }
+
+        // True with a compiled part, after waiting while another thread compiles it; false with the completion this
+        // thread finishes (FinishGraphicsLibrary) once it has compiled the part itself.
+        private bool TryTakeGraphicsLibrary(string key, out Pipeline library, out TaskCompletionSource<Pipeline>? compile)
+        {
+            while (true)
+            {
+                TaskCompletionSource<Pipeline>? running;
+                lock (_graphicsLibraryLock)
                 {
-                    _vk.DestroyPipelineLayout(_device, layout, null);
+                    if (_graphicsLibraries.TryGetValue(key, out library))
+                    {
+                        compile = null;
+                        return true;
+                    }
+
+                    if (!_graphicsLibraryCompiles.TryGetValue(key, out running))
+                    {
+                        compile = new TaskCompletionSource<Pipeline>(TaskCreationOptions.RunContinuationsAsynchronously);
+                        _graphicsLibraryCompiles.Add(key, compile);
+                        return false;
+                    }
+                }
+
+                library = running.Task.GetAwaiter().GetResult();
+                if (library.Handle != 0)
+                {
+                    compile = null;
+                    return true;
+                }
+
+                // The other thread's compile failed: this thread tries once more itself.
+            }
+        }
+
+        private void FinishGraphicsLibrary(string key, TaskCompletionSource<Pipeline> compile, Pipeline created)
+        {
+            lock (_graphicsLibraryLock)
+            {
+                _graphicsLibraryCompiles.Remove(key);
+                if (created.Handle != 0)
+                {
+                    _graphicsLibraries.Add(key, created);
                 }
             }
 
+            compile.SetResult(created);
+        }
+
+        private Pipeline CompileGraphicsLibrary(GraphicsPipelineCreateInfo* create, GraphicsPipelineLibraryFlagsEXT part, string label)
+        {
+            var result = CreatePipelineWithBinaries(create, &create->PNext, default, &CreateGraphicsPipelineCall,
+                out var created, out var milliseconds, PipelineCreateFlags2.Vk2LibraryBitKhr);
             if (result != Result.Success)
             {
                 Console.Error.WriteLine($"[GPU][WARN] Graphics pipeline library failed: part={PartName(part)} {label} result={result}; the pipeline is built whole.");
@@ -279,11 +398,165 @@ internal static unsafe partial class VulkanVideoPresenter
 
             if (milliseconds >= SlowPipelineCreationMilliseconds)
             {
-                Console.Error.WriteLine($"[GPU][INFO] Graphics pipeline library compiled: part={PartName(part)} {label} ms={milliseconds:F0} libraries={_graphicsLibraries.Count + 1}");
+                var module = create->StageCount != 0 ? create->PStages[0].Module.Handle : 0;
+                int count;
+                lock (_graphicsLibraryLock)
+                {
+                    count = _graphicsLibraries.Count + 1;
+                }
+
+                Console.Error.WriteLine($"[GPU][INFO] Graphics pipeline library compiled: part={PartName(part)} {label} ms={milliseconds:F0} " +
+                    $"module=0x{module:X} libraries={count}");
             }
 
-            _graphicsLibraries.Add(key, created);
             return created;
+        }
+
+        // A pixel program was translated: its pixel stage part is compiled on a worker for the sample state draws give it
+        // (one sample, no sample shading), so the draws that use the program link the part instead of compiling it, and
+        // the programs a scene brings compile side by side.
+        public void PixelProgramCreated(ShaderProgramInfo program, ulong module)
+        {
+            if (!_graphicsPipelineLibraries || !_earlyPixelLibraries || program.Bindings is null || module == 0)
+            {
+                return;
+            }
+
+            var bindings = new List<DescriptorSetLayoutBinding>();
+            CollectLayoutBindings(bindings, program, ShaderStage.Pixel);
+            var heap = UsesBindlessHeap(program);
+            var multisample = SingleSampleState();
+            var states = BaseDynamicStates;
+            string key;
+            fixed (DynamicState* statePointer = states)
+            {
+                var dynamicState = new PipelineDynamicStateCreateInfo
+                {
+                    SType = StructureType.PipelineDynamicStateCreateInfo,
+                    DynamicStateCount = (uint)states.Length,
+                    PDynamicStates = statePointer,
+                };
+                key = FragmentKey(module, SetSignature(bindings, push: false), heap, &multisample, &dynamicState);
+            }
+
+            lock (_graphicsLibraryLock)
+            {
+                if (_graphicsLibraries.ContainsKey(key) || _graphicsLibraryCompiles.ContainsKey(key))
+                {
+                    return;
+                }
+            }
+
+            var label = $"vs=early ps=0x{program.Hash:X16}";
+            var task = Task.Factory.StartNew(
+                () =>
+                {
+                    _pixelLibrarySlots.Wait();
+                    try
+                    {
+                        CompileEarlyPixelLibrary(key, module, bindings, heap, label);
+                    }
+                    catch (Exception exception)
+                    {
+                        Console.Error.WriteLine($"[GPU][WARN] Early pixel library failed: {label} {exception.Message}");
+                    }
+                    finally
+                    {
+                        _pixelLibrarySlots.Release();
+                    }
+                },
+                CancellationToken.None,
+                TaskCreationOptions.LongRunning,
+                TaskScheduler.Default);
+            lock (_earlyPixelLibraryTasks)
+            {
+                _earlyPixelLibraryTasks.RemoveAll(static item => item.IsCompleted);
+                _earlyPixelLibraryTasks.Add(task);
+            }
+        }
+
+        private static PipelineMultisampleStateCreateInfo SingleSampleState() => new()
+        {
+            SType = StructureType.PipelineMultisampleStateCreateInfo,
+            RasterizationSamples = SampleCountFlags.Count1Bit,
+            MinSampleShading = 1f,
+        };
+
+        // The pixel stage part GraphicsLibrary builds for a one-sample pipeline of this program.
+        private void CompileEarlyPixelLibrary(string key, ulong module, List<DescriptorSetLayoutBinding> bindings, bool heap, string label)
+        {
+            if (TryTakeGraphicsLibrary(key, out _, out var compile))
+            {
+                return;
+            }
+
+            var created = default(Pipeline);
+            DescriptorSetLayout pixelSet = default;
+            PipelineLayout layout = default;
+            var entryPoint = (byte*)SilkMarshal.StringToPtr("main");
+            try
+            {
+                if (bindings.Count != 0)
+                {
+                    pixelSet = CreateDescriptorSetLayout(bindings, allowPush: false, out _, out _);
+                }
+
+                layout = CreateLibraryPipelineLayout(default, heap, pixelSet);
+                var stage = new PipelineShaderStageCreateInfo
+                {
+                    SType = StructureType.PipelineShaderStageCreateInfo,
+                    Stage = ShaderStageFlags.FragmentBit,
+                    Module = new ShaderModule(module),
+                    PName = entryPoint,
+                };
+                var multisample = SingleSampleState();
+                var depthStencil = new PipelineDepthStencilStateCreateInfo { SType = StructureType.PipelineDepthStencilStateCreateInfo };
+                var rendering = new PipelineRenderingCreateInfo { SType = StructureType.PipelineRenderingCreateInfo };
+                var states = BaseDynamicStates;
+                fixed (DynamicState* statePointer = states)
+                {
+                    var dynamicState = new PipelineDynamicStateCreateInfo
+                    {
+                        SType = StructureType.PipelineDynamicStateCreateInfo,
+                        DynamicStateCount = (uint)states.Length,
+                        PDynamicStates = statePointer,
+                    };
+                    var partInfo = new GraphicsPipelineLibraryCreateInfoEXT
+                    {
+                        SType = StructureType.GraphicsPipelineLibraryCreateInfoExt,
+                        PNext = &rendering,
+                        Flags = GraphicsPipelineLibraryFlagsEXT.FragmentShaderBitExt,
+                    };
+                    var create = new GraphicsPipelineCreateInfo
+                    {
+                        SType = StructureType.GraphicsPipelineCreateInfo,
+                        PNext = &partInfo,
+                        Flags = PipelineCreateFlags.CreateLibraryBitKhr,
+                        StageCount = 1,
+                        PStages = &stage,
+                        PMultisampleState = &multisample,
+                        PDepthStencilState = &depthStencil,
+                        PDynamicState = &dynamicState,
+                        Layout = layout,
+                    };
+                    created = CompileGraphicsLibrary(&create, GraphicsPipelineLibraryFlagsEXT.FragmentShaderBitExt, label);
+                }
+            }
+            finally
+            {
+                if (layout.Handle != 0)
+                {
+                    _vk.DestroyPipelineLayout(_device, layout, null);
+                }
+
+                if (pixelSet.Handle != 0)
+                {
+                    _vk.DestroyDescriptorSetLayout(_device, pixelSet, null);
+                }
+
+                SilkMarshal.Free((nint)entryPoint);
+                FinishGraphicsLibrary(key, compile!, created);
+            }
         }
 
         private static string PartName(GraphicsPipelineLibraryFlagsEXT part) => part switch
@@ -331,7 +604,8 @@ internal static unsafe partial class VulkanVideoPresenter
             return builder.ToString();
         }
 
-        private static string PreRasterizationKey(RenderPipelineEntry entry, GraphicsPipelineCreateInfo* info, bool mesh,
+        // Depth bias enable and line width are dynamic.
+        private static string PreRasterizationKey(RenderPipelineEntry entry, GraphicsPipelineCreateInfo* info,
             PipelineDynamicStateCreateInfo* dynamicState)
         {
             var stage = info->PStages[0];
@@ -339,27 +613,17 @@ internal static unsafe partial class VulkanVideoPresenter
             var clipControl = viewport->PNext is null ? "-" : ((bool)((PipelineViewportDepthClipControlCreateInfoEXT*)viewport->PNext)->NegativeOneToOne).ToString();
             var raster = info->PRasterizationState;
             var depthClip = raster->PNext is null ? "-" : ((bool)((PipelineRasterizationDepthClipStateCreateInfoEXT*)raster->PNext)->DepthClipEnable).ToString();
-            // Depth bias enable and line width are dynamic (CreateRenderPipeline's dynamic states).
-            return $"pr;{stage.Module.Handle:X};{(int)stage.Stage};{(int)stage.Flags};{entry.VertexSetSignature};{entry.UsesBindlessHeap};{mesh};" +
+            return $"pr;{stage.Module.Handle:X};{(int)stage.Stage};{(int)stage.Flags};{entry.VertexSetSignature};{entry.VertexUsesBindlessHeap};" +
                 $"{clipControl};{(int)raster->PolygonMode};{(int)raster->CullMode};{(int)raster->FrontFace};{depthClip};" +
                 $"{(bool)raster->DepthClampEnable};{(bool)raster->RasterizerDiscardEnable};" +
                 DynamicKey(dynamicState);
         }
 
-        private static string FragmentKey(RenderPipelineEntry entry, GraphicsPipelineCreateInfo* info,
-            PipelineDepthStencilStateCreateInfo* depthStencil, bool mesh, PipelineDynamicStateCreateInfo* dynamicState)
-        {
-            var pixelModule = info->StageCount > 1 ? info->PStages[1].Module.Handle : 0;
-            var ds = depthStencil;
-            // Depth test, depth write, the compare op and the stencil masks and reference are dynamic.
-            return $"fs;{pixelModule:X};{entry.PixelSetSignature};{entry.UsesBindlessHeap};{mesh};{MultisampleKey(info->PMultisampleState)};" +
-                $"{(bool)ds->DepthBoundsTestEnable},{(bool)ds->StencilTestEnable},{StencilKey(ds->Front)},{StencilKey(ds->Back)}," +
-                $"{ds->MinDepthBounds},{ds->MaxDepthBounds};" +
-                DynamicKey(dynamicState);
-        }
-
-        private static string StencilKey(StencilOpState state) =>
-            $"{(int)state.FailOp}/{(int)state.PassOp}/{(int)state.DepthFailOp}/{(int)state.CompareOp}";
+        // The pixel stage part depends on the program, its set, whether it reads the heap and the sample state: depth and
+        // stencil state are dynamic.
+        private static string FragmentKey(ulong pixelModule, string pixelSetSignature, bool pixelHeap,
+            PipelineMultisampleStateCreateInfo* multisample, PipelineDynamicStateCreateInfo* dynamicState) =>
+            $"fs;{pixelModule:X};{pixelSetSignature};{pixelHeap};{MultisampleKey(multisample)};" + DynamicKey(dynamicState);
 
         private static string OutputKey(GraphicsPipelineCreateInfo* info)
         {
@@ -387,14 +651,38 @@ internal static unsafe partial class VulkanVideoPresenter
             return builder.ToString();
         }
 
-        private void DestroyGraphicsLibraries()
+        // Waits for the early pixel compiles still running: they use program modules, which teardown destroys.
+        private void WaitForEarlyPixelLibraries()
         {
-            foreach (var library in _graphicsLibraries.Values)
+            Task[] running;
+            lock (_earlyPixelLibraryTasks)
             {
-                _vk.DestroyPipeline(_device, library, null);
+                running = _earlyPixelLibraryTasks.ToArray();
+                _earlyPixelLibraryTasks.Clear();
             }
 
-            _graphicsLibraries.Clear();
+            try
+            {
+                Task.WaitAll(running);
+            }
+            catch (AggregateException)
+            {
+                // Each compile reports its own failure.
+            }
+        }
+
+        private void DestroyGraphicsLibraries()
+        {
+            WaitForEarlyPixelLibraries();
+            lock (_graphicsLibraryLock)
+            {
+                foreach (var library in _graphicsLibraries.Values)
+                {
+                    _vk.DestroyPipeline(_device, library, null);
+                }
+
+                _graphicsLibraries.Clear();
+            }
         }
     }
 }

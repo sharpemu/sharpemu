@@ -88,6 +88,7 @@ internal sealed class PresenterUnderTest : IDisposable
             "_batchResources", "_batchRetireBuffers", "_pendingGuestSubmissions",
             "_deferredGuestImageVersionDestroys",
             "_pipelineEntries", "_shaderModules", "_shaderModuleSpirvBytes", "_rectangleStageCode",
+            "_pendingGraphicsPipelines", "_graphicsLibraries", "_graphicsLibraryLock", "_graphicsLibraryCompiles",
         })
         {
             var field = PresenterType.GetField(name, InstanceMembers)!;

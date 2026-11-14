@@ -173,6 +173,17 @@ internal interface IShaderPipelineHost
         return true;
     }
 
+    // Blocks until the compile TryCreateGraphicsPipeline left running for this description is done. The caller holds no
+    // pipeline cache lock, so programs of later draws resolve meanwhile.
+    void WaitForGraphicsPipeline(GraphicsPipelineDescription description)
+    {
+    }
+
+    // A pixel program was created; the host can start compiling what depends on the program alone.
+    void PixelProgramCreated(ShaderProgramInfo program, ulong module)
+    {
+    }
+
     PipelineHandle CreateComputePipeline(ComputePipelineDescription description);
 
     Task? GetComputePipelineCompletion(ShaderProgram program) => null;

@@ -2157,13 +2157,15 @@ internal static unsafe partial class VulkanVideoPresenter
 
                 if (hasPushData)
                 {
-                    var pushStages = bindPoint == PipelineBindPoint.Graphics
-                        ? ((entry.Description?.VertexStage.Stage == ShaderStageKind.Mesh
-                            ? ShaderStageFlags.MeshBitExt : ShaderStageFlags.VertexBit) |
-                           ShaderStageFlags.FragmentBit |
-                           (entry.Description?.Tessellation is null
-                               ? 0 : ShaderStageFlags.TessellationControlBit | ShaderStageFlags.TessellationEvaluationBit))
-                        : ShaderStageFlags.ComputeBit;
+                    var pushStages = bindPoint != PipelineBindPoint.Graphics
+                        ? ShaderStageFlags.ComputeBit
+                        : entry.LinkedFromLibraries
+                            ? _presenter.LibraryPushStages
+                            : (entry.Description?.VertexStage.Stage == ShaderStageKind.Mesh
+                                ? ShaderStageFlags.MeshBitExt : ShaderStageFlags.VertexBit) |
+                              ShaderStageFlags.FragmentBit |
+                              (entry.Description?.Tessellation is null
+                                  ? 0 : ShaderStageFlags.TessellationControlBit | ShaderStageFlags.TessellationEvaluationBit);
                     PushConstantsShadowed(command, entry.Layout, pushStages, pushData);
                 }
 

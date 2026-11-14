@@ -584,6 +584,25 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         Assert.Equal(2, cache.GraphicsPipelineCount);
     }
 
+    [Fact]
+    public void GraphicsPipelines_StillCompiling_AreWaitedForOutsideTheCacheLock()
+    {
+        var guest = new PipelineTestGuest();
+        guest.Host.PendingGraphicsCompiles = 2;
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+        var host = new RecordingRenderHost();
+        var executor = new RenderExecutor(host, new CachingProvider(cache));
+
+        executor.DrawAuto(1, Banks(), Auto(3));
+
+        // The draw is not left out: it waited twice for the compile it started, then took the pipeline.
+        Assert.Single(host.Calls, call => call.StartsWith("draw ", StringComparison.Ordinal));
+        Assert.Single(guest.Host.GraphicsPipelines);
+        Assert.Equal(3, guest.Host.GraphicsPipelineRequests.Count);
+        Assert.Equal(2, guest.Host.GraphicsPipelineWaits.Count);
+        Assert.All(guest.Host.GraphicsPipelineWaits, wait => Assert.Same(guest.Host.GraphicsPipelineRequests[0], wait));
+        Assert.Equal(1, cache.GraphicsPipelineCount);
+    }
 
     // Programs from the fixtures, pipelines from the real cache over the fake host.
     private sealed class CachingProvider(ShaderPipelineCache cache) : IShaderPipelineProvider

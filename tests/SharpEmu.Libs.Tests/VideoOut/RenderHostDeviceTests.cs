@@ -144,7 +144,8 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
     // One float2 position program and one solid red pixel program over empty resource plans.
     private sealed class FixedProgramProvider(IShaderPipelineHost host, ulong vertexAddress, bool pushData = false,
         byte[]? interpolationShader = null, uint vertexCount = VertexCount,
-        byte[]? vertexShader = null, uint vertexComponents = 2, uint vertexStride = VertexStride) : IShaderPipelineProvider
+        byte[]? vertexShader = null, uint vertexComponents = 2, uint vertexStride = VertexStride,
+        bool announcePixelProgram = false) : IShaderPipelineProvider
     {
         private const uint Float2Format = 64;
         private static readonly uint[] UserRegisters = [0, 1];
@@ -183,7 +184,13 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
                 vertexShader ?? CreatePositionVertexShader(interpolationShader is not null)), ShaderStage.Vertex, 1, 1));
             _pixelProgram = new ShaderProgram(2, host.CreateShaderModule(new VulkanCompiledGuestShader(
                 interpolationShader ?? SpirvFixedShaders.CreateSolidFragment(1f, 0f, 0f, 1f)), ShaderStage.Pixel, 2, 2));
+            if (announcePixelProgram)
+            {
+                host.PixelProgramCreated(_pixel, _pixelProgram.Module);
+            }
         }
+
+        public void CreateModules() => EnsureModules();
 
         public GraphicsPrograms GetGraphicsPrograms(
             RegisterBanks banks,
@@ -692,6 +699,50 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
 
         harness.Shutdown();
         Assert.Equal(HostPageProtection.ReadWriteExecute, harness.Protection(address));
+    }
+
+    [Fact]
+    public void APixelProgramsPart_CompilesWhenTheProgramIsCreated_AndItsDrawLinksIt()
+    {
+        if (!Ready() || !_vulkan.SupportsGraphicsPipelineLibrary)
+        {
+            return;
+        }
+
+        using var presenter = new PresenterUnderTest(_vulkan);
+        presenter.SetField("_graphicsPipelineLibraries", true);
+        presenter.LoadRenderingCommands();
+        var harness = presenter.Harness;
+        var target = harness.MapBacked(0x10000, ReadWrite);
+        var vertices = harness.MapBacked(0x10000, ReadWrite);
+        var words = RegisterWords.Color(target, Size, Size);
+        harness.Write(vertices, Triangle(-1f, -1f, 3f, -1f, -1f, 3f));
+        var provider = new FixedProgramProvider((IShaderPipelineHost)presenter.Instance, vertices, announcePixelProgram: true);
+        var executor = new RenderExecutor(presenter.RenderHost, provider);
+        GuestGpuMemoryHook.Attach(harness.Gpu);
+        try
+        {
+            presenter.Run(provider.CreateModules);
+            presenter.InvokeMethod("WaitForEarlyPixelLibraries");
+            var parts = presenter.GetField<Dictionary<string, Pipeline>>("_graphicsLibraries");
+            var pixelPart = Assert.Single(parts.Values);
+
+            presenter.Run(() => executor.DrawAuto(1, Banks(words), Draw()));
+            presenter.Run(() => presenter.InvokeMethod("FlushBatchedGuestCommands"));
+            harness.Finish();
+
+            var pixels = harness.ReadImageBytes(TargetImage(presenter, words));
+            Assert.All(Enumerable.Range(0, (int)(Size * Size)), index => Assert.Equal(Red, BitConverter.ToUInt32(pixels, index * 4)));
+            // The draw added the vertex input, vertex and output parts and linked the pixel part compiled before it.
+            Assert.Equal(4, parts.Count);
+            Assert.Contains(pixelPart, parts.Values);
+        }
+        finally
+        {
+            GuestGpuMemoryHook.Attach(null);
+        }
+
+        harness.Shutdown();
     }
 
     [Theory]

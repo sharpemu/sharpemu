@@ -995,12 +995,51 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
             }
 
-            if (state.DepthBoundsTestEnabled && _presenter._supportsDepthBounds && (!known || !last.DepthBoundsTestEnabled ||
-                state.DepthMinBounds != last.DepthMinBounds || state.DepthMaxBounds != last.DepthMaxBounds))
+            // Pipelines built from libraries keep the stencil test, the stencil operations and the depth bounds test dynamic.
+            if (!known || state.StencilTestEnabled != last.StencilTestEnabled)
             {
                 using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
                 {
-                    _vk.CmdSetDepthBounds(command, state.DepthMinBounds, state.DepthMaxBounds);
+                    _vk.CmdSetStencilTestEnable(command, state.StencilTestEnabled);
+                }
+            }
+
+            if (!known || state.FrontStencilOperations != last.FrontStencilOperations)
+            {
+                var front = state.FrontStencilOperations;
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdSetStencilOp(command, StencilFaceFlags.FaceFrontBit, front.FailOperation, front.PassOperation, front.DepthFailOperation, front.Compare);
+                }
+            }
+
+            if (!known || state.BackStencilOperations != last.BackStencilOperations)
+            {
+                var back = state.BackStencilOperations;
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdSetStencilOp(command, StencilFaceFlags.FaceBackBit, back.FailOperation, back.PassOperation, back.DepthFailOperation, back.Compare);
+                }
+            }
+
+            if (_presenter._supportsDepthBounds)
+            {
+                if (!known || state.DepthBoundsTestEnabled != last.DepthBoundsTestEnabled)
+                {
+                    using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                    {
+                        _vk.CmdSetDepthBoundsTestEnable(command, state.DepthBoundsTestEnabled);
+                    }
+                }
+
+                // The bounds only matter while the test is on.
+                if (state.DepthBoundsTestEnabled && (!known || !last.DepthBoundsTestEnabled ||
+                    state.DepthMinBounds != last.DepthMinBounds || state.DepthMaxBounds != last.DepthMaxBounds))
+                {
+                    using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                    {
+                        _vk.CmdSetDepthBounds(command, Math.Clamp(state.DepthMinBounds, 0f, 1f), Math.Clamp(state.DepthMaxBounds, 0f, 1f));
+                    }
                 }
             }
 

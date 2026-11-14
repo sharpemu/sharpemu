@@ -208,6 +208,11 @@ internal class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
         handle = CreateGraphicsPipeline(description);
         return true;
     }
+
+    // The descriptions a caller waited for, outside the pipeline cache's lock.
+    public List<GraphicsPipelineDescription> GraphicsPipelineWaits { get; } = new();
+
+    public void WaitForGraphicsPipeline(GraphicsPipelineDescription description) => GraphicsPipelineWaits.Add(description);
 }
 
 // Remembers every request; compiles nothing unless a module factory was given.

@@ -47,6 +47,8 @@ internal static unsafe partial class VulkanVideoPresenter
         public DescriptorSetDemand PixelDemand;
         public string VertexSetSignature = "";
         public string PixelSetSignature = "";
+        public bool VertexUsesBindlessHeap;
+        public bool PixelUsesBindlessHeap;
 
         public bool RectangleList => Description is { Tessellation: null, StaticParameters.Topology: PrimitiveTopology.PatchList };
     }
@@ -1079,10 +1081,37 @@ internal static unsafe partial class VulkanVideoPresenter
         private static readonly SemaphoreSlim _graphicsCompileSlots = new(Math.Max(2, Environment.ProcessorCount / 4));
 
         // A host shader compiler can spend seconds on one large translated pixel shader, and a game entering a new area
-        // asks for dozens. Graphics pipelines are built on worker threads; SHARPEMU_ASYNC_GRAPHICS_PIPELINES=0 builds
-        // them on the command stream.
+        // asks for dozens. Graphics pipelines are built on worker threads, and the draw waits for its pipeline outside the
+        // pipeline cache's lock (WaitForGraphicsPipeline), so the next draws' programs are translated meanwhile and their
+        // pixel stage parts compile beside it (PixelProgramCreated). SHARPEMU_ASYNC_GRAPHICS_PIPELINES=0 builds them on the
+        // command stream. Resolve workers create pipelines concurrently, so the pending compiles are read and changed under
+        // their own lock.
         private static readonly bool _asyncGraphicsPipelines =
-            !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_ASYNC_GRAPHICS_PIPELINES"), "0", StringComparison.Ordinal);
+            Environment.GetEnvironmentVariable("SHARPEMU_ASYNC_GRAPHICS_PIPELINES") != "0";
+
+        // The command stream waits here, outside the pipeline cache's lock, for a compile TryCreateGraphicsPipeline left
+        // running; the next TryCreateGraphicsPipeline takes the pipeline.
+        public void WaitForGraphicsPipeline(GraphicsPipelineDescription description)
+        {
+            PendingGraphicsPipeline? pending;
+            lock (_pendingGraphicsPipelines)
+            {
+                if (!_pendingGraphicsPipelines.TryGetValue(description, out pending) || pending.Compile.IsCompleted)
+                {
+                    return;
+                }
+            }
+
+            using var waitScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.GraphicsPipelineDriver);
+            try
+            {
+                pending.Compile.Wait();
+            }
+            catch (AggregateException)
+            {
+                // A failed compile throws when its pipeline is taken.
+            }
+        }
 
         public bool TryCreateGraphicsPipeline(GraphicsPipelineDescription description, out PipelineHandle handle)
         {
@@ -1091,6 +1120,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 return TryCreateGraphicsPipelineCore(description, out handle);
             }
         }
+
         private bool TryCreateGraphicsPipelineCore(GraphicsPipelineDescription description, out PipelineHandle handle)
         {
             if (_pendingGraphicsPipelines.TryGetValue(description, out var pending))
@@ -1506,25 +1536,14 @@ internal static unsafe partial class VulkanVideoPresenter
                         MinDepthBounds = 0f,
                         MaxDepthBounds = 1f,
                     };
-                    var dynamicStates = stackalloc DynamicState[14];
-                    dynamicStates[0] = DynamicState.Viewport;
-                    dynamicStates[1] = DynamicState.Scissor;
-                    dynamicStates[2] = DynamicState.LineWidth;
-                    dynamicStates[3] = DynamicState.DepthTestEnableExt;
-                    dynamicStates[4] = DynamicState.DepthWriteEnableExt;
-                    dynamicStates[5] = DynamicState.DepthCompareOpExt;
-                    dynamicStates[6] = DynamicState.DepthBiasEnableExt;
-                    dynamicStates[7] = DynamicState.DepthBias;
-                    dynamicStates[8] = DynamicState.StencilCompareMask;
-                    dynamicStates[9] = DynamicState.StencilReference;
-                    dynamicStates[10] = DynamicState.StencilWriteMask;
-                    dynamicStates[11] = DynamicState.BlendConstants;
-                    var dynamicStateCount = 12u;
-                    if (_supportsDepthBounds)
+                    var baseStates = BaseDynamicStates;
+                    var dynamicStates = stackalloc DynamicState[baseStates.Length + 1];
+                    for (var index = 0; index < baseStates.Length; index++)
                     {
-                        dynamicStates[dynamicStateCount++] = DynamicState.DepthBounds;
+                        dynamicStates[index] = baseStates[index];
                     }
 
+                    var dynamicStateCount = (uint)baseStates.Length;
                     var baseDynamicStateCount = dynamicStateCount;
                     // Last so a pipeline without color attachments can leave it out.
                     if (_colorWriteEnableApi is not null && colorCount != 0)
@@ -1586,7 +1605,7 @@ internal static unsafe partial class VulkanVideoPresenter
                             creationMilliseconds = 0;
                             if (libraries is { LinkedFromLibraries: true } && !expandRectangles)
                             {
-                                creationResult = CreateLinkedGraphicsPipeline(libraries, description, &pipelineInfo, &depthStencil,
+                                creationResult = CreateLinkedGraphicsPipeline(libraries, description, &pipelineInfo,
                                     &baseDynamicState, out pipeline, out creationMilliseconds);
                             }
 
