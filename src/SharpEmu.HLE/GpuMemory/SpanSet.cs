@@ -6,8 +6,37 @@ namespace SharpEmu.HLE.GpuMemory;
 public sealed class SpanSnapshot(ulong[] starts, ulong[] ends)
 {
     public static readonly SpanSnapshot Empty = new([], []);
+    // Contains remembers, per thread, the span of its last complete hit in a snapshot; SHARPEMU_SPAN_CONTAINS_CACHE=0
+    // searches every query.
+    private static readonly bool CacheLastHit = Environment.GetEnvironmentVariable("SHARPEMU_SPAN_CONTAINS_CACHE") != "0";
 
-    public bool Contains(ulong address, ulong size)
+    [ThreadStatic] private static SpanSnapshot? _lastSnapshot;
+    [ThreadStatic] private static int _lastIndex;
+
+    public bool Contains(ulong address, ulong size) => CacheLastHit
+        ? ContainsWithLastHit(address, size)
+        : ContainsUncached(address, size);
+
+    internal bool ContainsWithLastHit(ulong address, ulong size)
+    {
+        // Snapshot identity includes mapping changes. Only a complete positive range can hit; a zero-sized or
+        // overflowing request gives the answer ContainsUncached gives.
+        if (ReferenceEquals(_lastSnapshot, this) && size != 0 &&
+            address >= starts[_lastIndex] && address < ends[_lastIndex] && size <= ends[_lastIndex] - address)
+            return true;
+
+        var index = Array.BinarySearch(starts, address);
+        if (index < 0) index = ~index - 1;
+        var contained = index >= 0 && ends[index] >= address + size;
+        if (contained && size != 0 && address < ends[index] && size <= ends[index] - address)
+        {
+            _lastIndex = index;
+            _lastSnapshot = this;
+        }
+        return contained;
+    }
+
+    private bool ContainsUncached(ulong address, ulong size)
     {
         var index = Array.BinarySearch(starts, address);
         if (index < 0)
