@@ -305,6 +305,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     bindlessHeap: _bindlessHeapSupported,
                     stableImageLimits: ((IShaderPipelineHost)this).ComputeImageDescriptorLimits,
                     bufferInt64Atomics: BufferInt64AtomicsEnabled,
+                    robustBufferAccess2: _robustBufferAccess2Enabled,
                     frontendOf: Agc.AgcExports.ShaderFrontendForDomain))
             {
                 NoteShaderPrewarmFailure("cs", record.Hash, record.Address, error);
@@ -590,6 +591,7 @@ internal static unsafe partial class VulkanVideoPresenter
             public bool ImageInt64AtomicsEnabled => _inner.ImageInt64AtomicsEnabled;
             public bool ShaderDeviceClockEnabled => _inner.ShaderDeviceClockEnabled;
             public bool ShaderSignedZeroInfNanPreserveFloat32Supported => _inner.ShaderSignedZeroInfNanPreserveFloat32Supported;
+            public bool RobustBufferAccess2Enabled => _inner.RobustBufferAccess2Enabled;
             public bool ExecGuardElisionEnabled => _inner.ExecGuardElisionEnabled;
             public bool PerVertexPixelInputsSupported => _inner.PerVertexPixelInputsSupported;
             public bool ClipDistanceEnabled => _inner.ClipDistanceEnabled;

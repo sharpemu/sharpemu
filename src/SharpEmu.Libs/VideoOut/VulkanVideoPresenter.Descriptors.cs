@@ -23,11 +23,13 @@ using VkBuffer = Silk.NET.Vulkan.Buffer;
 internal static unsafe partial class VulkanVideoPresenter
 {
     // The shader bounds a storage binding in whole dwords (OpArrayLength), so the view ends on a dword: a 16-bit element
-    // in the binding's last partial dword stays in range. A view that would not fit keeps its exact size.
+    // in the binding's last partial dword stays in range. A view that would not fit ends on the dword before, which
+    // ArrayLength leaves out as well, so robustBufferAccess2 bounds a dword where ArrayLength does; under four bytes it
+    // keeps its exact size.
     internal static ulong StorageBufferViewRange(ulong bytes, ulong available, ulong maxRange)
     {
         var rounded = (bytes + 3) & ~3UL;
-        return rounded <= available && rounded <= maxRange ? rounded : bytes;
+        return rounded <= available && rounded <= maxRange ? rounded : bytes >= 4 ? bytes & ~3UL : bytes;
     }
 
     private static long _stageMemoHits;

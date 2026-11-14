@@ -8959,6 +8959,14 @@ public static partial class Gen5SpirvTranslator
 
         private uint LoadBufferWord(int binding, uint dwordAddress)
         {
+            // robustBufferAccess2 reads zero past the view's range, as the selects below do. A view ends on a whole dword
+            // (StorageBufferViewRange), so the device bounds the load where ArrayLength does; a length of zero leaves both
+            // unbounded. A table-block buffer is read through its device address, which robust access does not bound.
+            if (_request.RobustBufferAccess2 && !_request.Bindings.UsesTableBlock)
+            {
+                return Load(_uintType, BufferWordPointer(binding, RobustDwordIndex(dwordAddress)));
+            }
+
             var inRange = IsBufferWordInRange(binding, dwordAddress);
             var safeAddress = _module.AddInstruction(
                 SpirvOp.Select,
@@ -8975,6 +8983,12 @@ public static partial class Gen5SpirvTranslator
                 UInt(0));
         }
 
+        // A robust load's dword index stays below 2^30: NVIDIA's robust access takes the byte offset modulo 2^32, so a larger
+        // index would read the view's start instead of zero. From 0x3FFFFFFF on an index is past every view (at most 2^32 - 1
+        // bytes), so the clamp changes no result, and it folds away when the index cannot pass it (a byte address >> 2).
+        private uint RobustDwordIndex(uint dwordIndex) => Ext(38, _uintType, dwordIndex, UInt(0x3FFF_FFFF));
+
+        // The packed memory-offset byte of this buffer, loaded at entry.
         private uint ApplyGuestBufferByteBias(int binding, uint byteAddress) =>
             IAdd(byteAddress, CapturedBufferValue(_bufferBiasValues, binding) ?? Load(_uintType, RuntimeBufferBiasPointer(binding)));
 
@@ -8982,7 +8996,10 @@ public static partial class Gen5SpirvTranslator
         {
             EmitConditional(
                 IsBufferWordInRange(binding, dwordAddress),
-                () => Store(BufferWordPointer(binding, dwordAddress), value));
+                () =>
+                {
+                    Store(BufferWordPointer(binding, dwordAddress), value);
+                });
         }
 
         // A GLC DWORDX2 access: one 64-bit access when it is aligned and inside the pair view, else two dword accesses.
@@ -9009,9 +9026,12 @@ public static partial class Gen5SpirvTranslator
             var pairIndex = ShiftRightLogical(dwordAddress, UInt(1));
             EmitConditional(
                 IsBufferPairInRange(binding, dwordAddress, pairIndex),
-                () => Store(
-                    BufferPairPointer(binding, pairIndex),
-                    _module.AddInstruction(SpirvOp.CompositeConstruct, _uvec2Type, low, high)),
+                () =>
+                {
+                    Store(
+                        BufferPairPointer(binding, pairIndex),
+                        _module.AddInstruction(SpirvOp.CompositeConstruct, _uvec2Type, low, high));
+                },
                 () =>
                 {
                     StoreBufferWord(binding, dwordAddress, low);

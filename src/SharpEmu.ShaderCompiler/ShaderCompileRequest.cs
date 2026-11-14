@@ -335,6 +335,10 @@ public sealed class ShaderCompileRequest
     // S_MEMREALTIME read.
     public bool SupportsShaderDeviceClock { get; init; }
     public bool ShaderSignedZeroInfNanPreserveFloat32Supported { get; init; }
+
+    // The device bounds every storage buffer access by its descriptor's range and reads zero past it (robustBufferAccess2),
+    // so a guest buffer load needs no bounds check of its own.
+    public bool RobustBufferAccess2 { get; init; }
     public Gen5ComputeSystemRegisters? ComputeSystemRegisters { get; init; }
 
     public IReadOnlyList<Gen5PixelOutputBinding> PixelOutputs { get; init; } = [];

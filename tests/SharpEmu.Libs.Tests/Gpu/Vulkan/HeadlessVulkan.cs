@@ -64,6 +64,9 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
     public bool SupportsImageInt64Atomics { get; private init; }
     public bool SupportsBufferInt64Atomics { get; private init; }
 
+    // As on the presenter's device: a storage buffer access past its descriptor's range reads zero and writes nothing.
+    public bool RobustBufferAccess2 { get; private init; }
+
     public bool SupportsGraphicsPipelineLibrary { get; private init; }
 
     private static readonly string[] RenderingExtensionNames =
@@ -348,6 +351,13 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             vk.GetPhysicalDeviceFeatures2(physical, &query);
         }
         var imageAtomicInt64 = (bool)imageAtomicInt64Features.ShaderImageInt64Atomics;
+        const string robustness2Extension = "VK_EXT_robustness2";
+        var robustness2Features = new PhysicalDeviceRobustness2FeaturesEXT { SType = StructureType.PhysicalDeviceRobustness2FeaturesExt };
+        if (HasDeviceExtensions(vk, physical, [robustness2Extension]))
+        {
+            var query = new PhysicalDeviceFeatures2 { SType = StructureType.PhysicalDeviceFeatures2, PNext = &robustness2Features };
+            vk.GetPhysicalDeviceFeatures2(physical, &query);
+        }
         var atomicInt64Features = new PhysicalDeviceShaderAtomicInt64Features
         {
             SType = StructureType.PhysicalDeviceShaderAtomicInt64Features,
@@ -466,6 +476,17 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             imageAtomicInt64Features.PNext = vulkan13Features.PNext;
             vulkan13Features.PNext = &imageAtomicInt64Features;
         }
+        var robustBufferAccess2 = (bool)robustness2Features.RobustBufferAccess2 && baseFeatures.RobustBufferAccess;
+        if (robustBufferAccess2)
+        {
+            robustness2Features = new PhysicalDeviceRobustness2FeaturesEXT
+            {
+                SType = StructureType.PhysicalDeviceRobustness2FeaturesExt,
+                RobustBufferAccess2 = true,
+                PNext = vulkan13Features.PNext,
+            };
+            vulkan13Features.PNext = &robustness2Features;
+        }
         var extensionNames = new List<string>();
         if (meshShaders)
         {
@@ -480,6 +501,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             extensionNames.Add(meshExtension);
         }
         if (imageAtomicInt64) extensionNames.Add(imageAtomicInt64Extension);
+        if (robustBufferAccess2) extensionNames.Add(robustness2Extension);
         if (graphicsPipelineLibrary)
         {
             graphicsPipelineLibraryFeatures = new PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT
@@ -531,6 +553,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             SupportsImageInt64Atomics = imageAtomicInt64,
             SupportsBufferInt64Atomics = bufferInt64Atomics,
             SupportsGraphicsPipelineLibrary = graphicsPipelineLibrary,
+            RobustBufferAccess2 = robustBufferAccess2,
         };
         if (validation)
         {

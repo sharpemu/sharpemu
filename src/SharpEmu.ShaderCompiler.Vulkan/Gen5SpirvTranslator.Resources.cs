@@ -827,9 +827,15 @@ public static partial class Gen5SpirvTranslator
             return LoadBlockWord(_shaderData, dwordIndex);
         }
 
-        // A bounds-checked dword of a storage block; outside the block reads zero.
+        // A bounds-checked dword of a storage block; outside the block reads zero. The host binds these blocks as whole
+        // dwords (UploadDwords, the 64 KiB GDS), so robustBufferAccess2 bounds them where the length does.
         private uint LoadBlockWord(uint block, uint dwordIndex)
         {
+            if (_request.RobustBufferAccess2)
+            {
+                return Load(_uintType, BlockWordPointer(block, RobustDwordIndex(dwordIndex)));
+            }
+
             var length = StorageBlockLength(block);
             var inRange = _module.AddInstruction(SpirvOp.ULessThan, _boolType, dwordIndex, length);
             var safeIndex = _module.AddInstruction(SpirvOp.Select, _uintType, inRange, dwordIndex, UInt(0));

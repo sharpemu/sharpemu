@@ -113,6 +113,10 @@ internal interface IShaderPipelineHost
     // The device supports shaderDeviceClock, so a program can read a running clock.
     bool ShaderDeviceClockEnabled => false;
     bool ShaderSignedZeroInfNanPreserveFloat32Supported => false;
+
+    // The device was created with robustBufferAccess2: a storage buffer access past its descriptor's range reads zero and
+    // writes nothing.
+    bool RobustBufferAccess2Enabled => false;
     bool ExecGuardElisionEnabled => true;
     ShaderPrewarmList? ShaderPrewarm => null;
     bool PerVertexPixelInputsSupported => true;
