@@ -187,20 +187,30 @@ public sealed unsafe partial class CachedImage : IDisposable
         };
         var allocated = Result.ErrorOutOfDeviceMemory;
         var allocationAttempted = false;
-        for (uint index = 0; index < device.MemoryTypeCount; index++)
+        // Device-local memory first. When it is exhausted, any other type the image allows: system memory the device reads
+        // over the bus is slow but keeps the run going, as GpuBuffer.RankMemoryTypes does for buffers.
+        for (var deviceLocalPass = 1; deviceLocalPass >= 0 && allocated != Result.Success; deviceLocalPass--)
         {
-            if ((requirements.MemoryTypeBits & (1u << (int)index)) == 0 ||
-                (device.GetMemoryTypeFlags(index) & MemoryPropertyFlags.DeviceLocalBit) == 0)
+            for (uint index = 0; index < device.MemoryTypeCount; index++)
             {
-                continue;
-            }
+                var deviceLocal = (device.GetMemoryTypeFlags(index) & MemoryPropertyFlags.DeviceLocalBit) != 0;
+                if ((requirements.MemoryTypeBits & (1u << (int)index)) == 0 || deviceLocal != (deviceLocalPass == 1))
+                {
+                    continue;
+                }
 
-            allocateInfo.MemoryTypeIndex = index;
-            allocationAttempted = true;
-            allocated = device.AllocateMemory(allocateInfo, out Backing.Memory);
-            if (allocated == Result.Success)
-            {
-                break;
+                allocateInfo.MemoryTypeIndex = index;
+                allocationAttempted = true;
+                allocated = device.AllocateMemory(allocateInfo, out Backing.Memory);
+                if (allocated == Result.Success)
+                {
+                    if (!deviceLocal)
+                    {
+                        ReportSystemMemoryImage(create, requirements.Size, index);
+                    }
+
+                    break;
+                }
             }
         }
 
@@ -214,12 +224,25 @@ public sealed unsafe partial class CachedImage : IDisposable
             Backing.Handle = default;
             Backing.Memory = default;
             reportAllocationFailure?.Invoke();
-            throw CreateFailure(create, !allocationAttempted ? "select_device_local_memory_type" :
+            throw CreateFailure(create, !allocationAttempted ? "select_memory_type" :
                 allocated != Result.Success ? "vkAllocateMemory" : "vkBindImageMemory",
                 bindingResult, requirements.Size, requirements.MemoryTypeBits);
         }
 
         Backing.AllocationSize = requirements.Size;
+    }
+
+    private static int _systemMemoryImageReports;
+
+    private static void ReportSystemMemoryImage(in ImageCreateInfo create, ulong size, uint memoryType)
+    {
+        if (Interlocked.Increment(ref _systemMemoryImageReports) <= 16)
+        {
+            Console.Error.WriteLine(
+                $"[GPU][WARN] Device-local memory is exhausted; the image is in system memory: extent={create.Extent.Width}x" +
+                $"{create.Extent.Height}x{create.Extent.Depth} format={create.Format} layers={create.ArrayLayers} " +
+                $"levels={create.MipLevels} bytes={size} memory_type={memoryType}");
+        }
     }
 
     private static Exception CreateFailure(in ImageCreateInfo create, string operation, Result result,

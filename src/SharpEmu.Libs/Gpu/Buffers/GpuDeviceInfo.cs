@@ -175,9 +175,18 @@ public sealed unsafe class GpuDeviceInfo : IImageFormatSupport
         return entry.Result == Result.Success;
     }
 
+    // Tests: memory types whose allocations fail as when their heap is exhausted.
+    internal Func<uint, bool>? SimulateExhaustedMemoryType { get; set; }
+
     // Every device-memory allocation goes through here so the live count stays exact.
     public Result AllocateMemory(in MemoryAllocateInfo info, out DeviceMemory memory)
     {
+        if (SimulateExhaustedMemoryType is { } exhausted && exhausted(info.MemoryTypeIndex))
+        {
+            memory = default;
+            return Result.ErrorOutOfDeviceMemory;
+        }
+
         fixed (MemoryAllocateInfo* pointer = &info)
         {
             var result = Vk.AllocateMemory(Device, pointer, null, out memory);
