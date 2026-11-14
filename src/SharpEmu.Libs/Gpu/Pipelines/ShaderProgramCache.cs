@@ -889,6 +889,7 @@ internal sealed class ShaderProgramCache
         new(source.Stage, source.Hash, (uint)source.UserData.Length, source.CodeSize,
             source.ContinuationAddressOffset, StaticState.ToArray());
 
+
     // With runtimeRecords, a program whose callees cannot read their records at run time is refused (null), and its caller
     // links a copy per record from then on (RefuseRuntimeCallRecords).
     private ProgramSourceEntry? LinkProgram(Gen5ShaderProgram caller, ShaderCallLibrary library, ShaderStage stage, ulong hash,
@@ -1230,22 +1231,27 @@ internal sealed class ShaderProgramCache
             CallTargets = callTargets,
             CallRecords = callRecords,
             CallRecordRanges = callRecordRanges,
-            ThreadLimits = source.Stage == ShaderStage.Compute && options.ComputeInfo is { DispatchThreadDimensions: true } compute
+            ThreadLimits = source.Stage == ShaderStage.Compute &&
+                options.ComputeInfo is { DispatchThreadDimensions: true, IndirectThreadCounts: false } compute
                 ? new DispatchThreadLimits(compute.DispatchThreadsX, compute.DispatchThreadsY, compute.DispatchThreadsZ)
                 : null,
+            GpuThreadLimits = source.Stage == ShaderStage.Compute && options.ComputeInfo is { IndirectThreadCounts: true },
         };
     }
 
-    private void BuildStaticState(ShaderStage stage, StageCompileOptions options)
+    private static void BuildStaticState(ShaderStage stage, StageCompileOptions options) => BuildStaticState(stage, options, StaticState);
+
+    // Into a list of the caller's: the prewarm builds its own.
+    private static void BuildStaticState(ShaderStage stage, StageCompileOptions options, List<uint> state)
     {
         switch (stage)
         {
             case ShaderStage.Vertex:
             case ShaderStage.TessellationEvaluation:
-                StageStaticKey.Build(options.VertexInfo ?? throw new ArgumentException("The vertex lookup has no vertex input info."), options.RequiredVertexOutputCount, StaticState);
+                StageStaticKey.Build(options.VertexInfo ?? throw new ArgumentException("The vertex lookup has no vertex input info."), options.RequiredVertexOutputCount, state);
                 break;
             case ShaderStage.Pixel:
-                StageStaticKey.Build(options.PixelInfo ?? throw new ArgumentException("The pixel lookup has no pixel input info."), StaticState);
+                StageStaticKey.Build(options.PixelInfo ?? throw new ArgumentException("The pixel lookup has no pixel input info."), state);
                 foreach (var output in options.PixelOutputs)
                 {
                     StaticState.Add(output.GuestSlot);

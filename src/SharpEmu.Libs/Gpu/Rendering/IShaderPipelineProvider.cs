@@ -186,6 +186,12 @@ public interface IShaderPipelineProvider
     ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ, bool indirect) =>
         GetComputeProgram(banks, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
 
+    // gpuThreadCounts: the thread counts are in GPU memory (the dimensions are zero); the program reads its thread limits
+    // from shader data the GPU writes (ComputeInputInfo.IndirectThreadCounts).
+    ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ, bool indirect,
+        bool gpuThreadCounts) =>
+        GetComputeProgram(banks, dispatchInitiator, dimensionX, dimensionY, dimensionZ, indirect);
+
     PipelineHandle CreateComputePipeline(ComputeInputInfo input, ShaderProgram program);
 
     Task? GetComputePipelineCompletion(ShaderProgram program) => null;

@@ -1040,8 +1040,15 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     public ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ) =>
         GetComputeProgram(banks, dispatchInitiator, dimensionX, dimensionY, dimensionZ, indirect: false);
 
-    public ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ, bool indirect)
+    public ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ, bool indirect) =>
+        GetComputeProgram(banks, dispatchInitiator, dimensionX, dimensionY, dimensionZ, indirect, gpuThreadCounts: false);
+
+    // gpuThreadCounts: the thread counts are in GPU memory (zero here); the program reads its thread limits from shader data
+    // the GPU writes (ComputeInputInfo.IndirectThreadCounts).
+    public ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ, bool indirect,
+        bool gpuThreadCounts)
     {
+        indirect |= gpuThreadCounts;
         var compute = banks.Shader.Compute;
         var registrations = ShaderHeaderRegistry.Registrations;
         var all = _keptComputes ??= new Dictionary<ulong, List<KeptComputeProgram>>();
@@ -1054,7 +1061,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         KeptComputeProgram? kept = null;
         foreach (var candidate in keptList)
         {
-            if (candidate.Registrations == registrations && candidate.DispatchInitiator == dispatchInitiator && SameComputeShape(candidate.Registers, compute))
+            if (candidate.Registrations == registrations && candidate.DispatchInitiator == dispatchInitiator &&
+                candidate.GpuThreadCounts == gpuThreadCounts && SameComputeShape(candidate.Registers, compute))
             {
                 kept = candidate;
                 break;
@@ -1080,7 +1088,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         _computeResolved.Increment();
-        var program = ResolveComputeProgram(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, out var source, out var systemRegisters, out var decoded);
+        var program = ResolveComputeProgram(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, gpuThreadCounts, out var source,
+            out var systemRegisters, out var decoded);
         if (program.ImageCopy is not null)
             return program;
         if (kept is null)
@@ -1090,7 +1099,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 keptList.RemoveAt(0);
             }
 
-            kept = new KeptComputeProgram { Registrations = registrations, DispatchInitiator = dispatchInitiator };
+            kept = new KeptComputeProgram { Registrations = registrations, DispatchInitiator = dispatchInitiator, GpuThreadCounts = gpuThreadCounts };
             keptList.Add(kept);
         }
 
@@ -1104,7 +1113,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
     private static void KeepComputeProgram(KeptComputeProgram kept, ComputeProgram program, ComputeStageRegisters compute, uint dimensionX, uint dimensionY, uint dimensionZ)
     {
-        kept.Program = program.Available && !program.Consumed ? program : null;
+        // A program with shader calls reads its call tables at every dispatch (its entry rebinds instead).
+        kept.Program = program.Available && !program.Consumed && kept.Entry is not { HasShaderCalls: true } ? program : null;
         if (kept.Registers is { } registers && SameComputeShape(registers, compute))
         {
             registers.UserScalars.CopyFrom(compute.UserScalars, compute.UserScalarCount);
@@ -1125,8 +1135,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var userData = UserData(compute.UserScalars, compute.UserScalarCount, probeWrittenRegisters: false, compute.Address, "compute").ToArray();
         var source = kept.Source! with { UserData = userData };
         kept.Source = source;
-        var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !_host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ);
-        var pushDataCursor = 0u;
+        var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !_host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ,
+            kept.GpuThreadCounts);
+        var pushDataCursor = ComputePushDataCursor(input);
         var options = new StageCompileOptions { ComputeInfo = input, ComputeSystemRegisters = kept.SystemRegisters };
         if (!_programs.TryGetProgramForEntry(entry, source, options, _strictShaders, ref pushDataCursor, out var handle, out var stage, out var rejection))
         {
@@ -1163,13 +1174,14 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         uint dimensionY,
         uint dimensionZ)
     {
-        var program = ResolveComputeProgram(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, out var source, out var systemRegisters, out var decoded);
+        var program = ResolveComputeProgram(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, gpuThreadCounts: false, out var source,
+            out var systemRegisters, out var decoded);
         var kernel = decoded is not null && program.Available && !program.Consumed ? KernelFor(decoded) : null;
         return WithPrediction(program, kernel, source, systemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect: false);
     }
 
     private ComputeProgram ResolveComputeProgram(ComputeStageRegisters compute, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ,
-        out ShaderSource? resolvedSource, out Gen5ComputeSystemRegisters resolvedSystemRegisters, out Gen5ShaderProgram? decoded)
+        bool gpuThreadCounts, out ShaderSource? resolvedSource, out Gen5ComputeSystemRegisters resolvedSystemRegisters, out Gen5ShaderProgram? decoded)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
         var userData = UserData(compute.UserScalars, compute.UserScalarCount, probeWrittenRegisters: false, compute.Address, "compute").ToArray();
@@ -1196,7 +1208,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 if (usesRayTracing) return new ComputeProgram { Available = false };
             }
         }
-        var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !_host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ);
+        var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !_host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ,
+            gpuThreadCounts);
         if (source.Registered.Frontend is { } frontend &&
             frontend.TryResolveImageCopy(_context, source.Registered, source.UserData, input, systemRegisters, dimensionX, dimensionY, dimensionZ,
                 out var copySource, out var copyDestination))
@@ -1213,7 +1226,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private ComputeProgram CompileComputeProgram(ShaderSource source, ComputeInputInfo input, Gen5ComputeSystemRegisters systemRegisters)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
-        var pushDataCursor = 0u;
+        var pushDataCursor = ComputePushDataCursor(input);
         if (!TryPrepareProgram(
             source,
             new StageCompileOptions { ComputeInfo = input, ComputeSystemRegisters = systemRegisters },
@@ -1227,6 +1240,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         input.Stage = stage;
         return new ComputeProgram { Program = handle, Input = input };
     }
+
+    // Thread limits the GPU writes need shader data in a buffer: a cursor at the end of the push range keeps it out.
+    private static uint ComputePushDataCursor(ComputeInputInfo input) => input.IndirectThreadCounts ? PushData.DwordCount : 0u;
 
     private bool TryPrepareProgram(ShaderSource source, StageCompileOptions options, ref uint pushDataCursor,
         out ShaderProgram program, out ShaderStageResources stage)
@@ -1749,6 +1765,7 @@ internal sealed class KeptComputeProgram
     public long Rebinds;
     public long Registrations;
     public uint DispatchInitiator;
+    public bool GpuThreadCounts;
     public uint DimensionX;
     public uint DimensionY;
     public uint DimensionZ;

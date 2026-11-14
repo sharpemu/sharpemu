@@ -24,6 +24,11 @@ public sealed partial class RenderExecutor
     private const uint ImageClearStride = 16;
     private const uint ImageClearUserDataCount = 8;
 
+    // Thread counts a shader wrote stay on the GPU, which converts them to groups (IRenderHost.PrepareThreadDispatch).
+    internal bool GpuThreadCountsFor(uint dispatchInitiator, ulong indirectArgumentsAddress) =>
+        (dispatchInitiator & DispatchInitiatorUseThreadDimensions) != 0 && indirectArgumentsAddress != 0 &&
+        _host.ResolvesIndirectThreadDispatchOnGpu;
+
     public void Dispatch(ulong submitId, RegisterBanks banks, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator, ulong indirectArgumentsAddress = 0)
     {
         var compute = banks.Shader.Compute;
@@ -51,7 +56,9 @@ public sealed partial class RenderExecutor
         }
 
         var useThreadDimensions = (dispatchInitiator & DispatchInitiatorUseThreadDimensions) != 0;
-        if ((indirectArgumentsAddress == 0 || useThreadDimensions) && IsEmptyDispatch(compute, useThreadDimensions, groupsX, groupsY, groupsZ))
+        var gpuThreadCounts = GpuThreadCountsFor(dispatchInitiator, indirectArgumentsAddress);
+        if (!gpuThreadCounts && (indirectArgumentsAddress == 0 || useThreadDimensions) &&
+            IsEmptyDispatch(compute, useThreadDimensions, groupsX, groupsY, groupsZ))
         {
             if (RenderTrace.Enabled && RenderTrace.ZeroDispatch())
             {
@@ -66,7 +73,8 @@ public sealed partial class RenderExecutor
         ComputeProgram computeProgram;
         using (VideoOut.RenderPhaseProfile.MeasureDetail(VideoOut.RenderPhaseProfile.Phase.DrawProgramResolution))
         {
-            computeProgram = _pipelines.GetComputeProgram(banks, dispatchInitiator, groupsX, groupsY, groupsZ, indirectArgumentsAddress != 0);
+            computeProgram = _pipelines.GetComputeProgram(banks, dispatchInitiator, groupsX, groupsY, groupsZ, indirectArgumentsAddress != 0,
+                gpuThreadCounts);
         }
 
         if (computeProgram.ImageCopy is not null)
@@ -136,7 +144,7 @@ public sealed partial class RenderExecutor
             }
         }
 
-        if (useThreadDimensions)
+        if (useThreadDimensions && !gpuThreadCounts)
         {
             indirectArgumentsAddress = 0;
             var threadsX = groupsX;
@@ -176,6 +184,7 @@ public sealed partial class RenderExecutor
         record.GroupsY = groupsY;
         record.GroupsZ = groupsZ;
         record.IndirectArgumentsAddress = indirectArgumentsAddress;
+        record.GpuThreadCounts = gpuThreadCounts;
         record.HasStorageWrites = hasStorageWrites;
         var resources = input.Stage.Resources;
         Diagnostics.DispatchRunTally.NoteResolved(computeProgram.Program.Id, resources.Images, resources.Samplers, program.Bindings?.UsesTableBlock == true,

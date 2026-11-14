@@ -822,7 +822,8 @@ internal sealed class ShaderPrewarmList : IDisposable
         writer.Write(info.ThreadsX);
         writer.Write(info.ThreadsY);
         writer.Write(info.ThreadsZ);
-        writer.Write(info.DispatchThreadDimensions);
+        // 1 counts threads, 2 counts threads the GPU wrote (an older reader reads either as true).
+        writer.Write((byte)(info.IndirectThreadCounts ? 2 : info.DispatchThreadDimensions ? 1 : 0));
         writer.Write(info.GroupIdX);
         writer.Write(info.GroupIdY);
         writer.Write(info.GroupIdZ);
@@ -1320,12 +1321,17 @@ internal sealed class ShaderPrewarmList : IDisposable
         var userDataBase = reader.ReadUInt32();
         var userDataCount = reader.ReadUInt32();
         var pushDataCursor = reader.ReadUInt32();
+        var threadsX = reader.ReadUInt32();
+        var threadsY = reader.ReadUInt32();
+        var threadsZ = reader.ReadUInt32();
+        var threadDimensions = reader.ReadByte();
         var info = new ComputeInputInfo
         {
-            ThreadsX = reader.ReadUInt32(),
-            ThreadsY = reader.ReadUInt32(),
-            ThreadsZ = reader.ReadUInt32(),
-            DispatchThreadDimensions = reader.ReadBoolean(),
+            ThreadsX = threadsX,
+            ThreadsY = threadsY,
+            ThreadsZ = threadsZ,
+            DispatchThreadDimensions = threadDimensions != 0,
+            IndirectThreadCounts = threadDimensions == 2,
             GroupIdX = reader.ReadBoolean(),
             GroupIdY = reader.ReadBoolean(),
             GroupIdZ = reader.ReadBoolean(),

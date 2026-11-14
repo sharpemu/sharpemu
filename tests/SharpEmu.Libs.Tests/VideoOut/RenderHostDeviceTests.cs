@@ -244,11 +244,17 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
             return handle;
         }
 
+        public ComputeProgram? Compute { get; init; }
+
         public ComputeProgram GetComputeProgram(ComputeStageRegisters compute, ShaderInterfaceRegisters shaderInterface, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ) =>
-            throw new InvalidOperationException("The test provider has no compute program.");
+            Compute ?? throw new InvalidOperationException("The test provider has no compute program.");
 
         public PipelineHandle CreateComputePipeline(ComputeInputInfo input, ShaderProgram program) =>
-            throw new InvalidOperationException("The test provider has no compute pipeline.");
+            Compute is null ? throw new InvalidOperationException("The test provider has no compute pipeline.") :
+                host.CreateComputePipeline(new ComputePipelineDescription
+                {
+                    Program = program, Stage = input.Stage.Program!, Input = input,
+                });
     }
 
     // position = (input.xy, 0, 1)

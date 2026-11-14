@@ -90,7 +90,11 @@ public readonly record struct ShaderStageResources(ShaderProgramInfo? Program, R
 {
     public bool IsValid => Program is not null;
 
+
     public DispatchThreadLimits? ThreadLimits { get; init; }
+
+    // The thread limits come from GPU memory (ComputeInputInfo.IndirectThreadCounts); the host writes none.
+    public bool GpuThreadLimits { get; init; }
 
     public MeshDrawParameters? MeshDraw { get; init; }
 
@@ -126,7 +130,7 @@ public readonly record struct ShaderStageResources(ShaderProgramInfo? Program, R
 
     public void WriteDispatchThreadLimits(Span<uint> shaderData)
     {
-        if (Program?.Bindings is not { UsesDispatchThreadLimits: true } layout) return;
+        if (Program?.Bindings is not { UsesDispatchThreadLimits: true } layout || GpuThreadLimits) return;
         if (ThreadLimits is not { } limits || shaderData.Length != layout.ShaderDataDwordCount)
         {
             throw SubmissionScheduler.Fatal("The compute dispatch has missing thread limits or invalid shader data.");
@@ -313,6 +317,8 @@ public sealed class ComputeInputInfo
     public uint ThreadsY { get; init; }
     public uint ThreadsZ { get; init; }
     public bool DispatchThreadDimensions { get; init; }
+    // The thread counts are in GPU memory: the GPU writes the thread limits (IRenderHost.PrepareThreadDispatch).
+    public bool IndirectThreadCounts { get; init; }
     public uint DispatchThreadsX { get; set; }
     public uint DispatchThreadsY { get; set; }
     public uint DispatchThreadsZ { get; set; }

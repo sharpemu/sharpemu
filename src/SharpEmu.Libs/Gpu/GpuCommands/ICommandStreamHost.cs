@@ -221,6 +221,10 @@ public interface ICommandStreamHost
     // GPU, so the interpreter need not wait for the GPU to read them back first.
     bool ResolvesIndirectDispatchOnGpu => false;
 
+    // True when an indirect dispatch whose arguments count threads (DISPATCH_INITIATOR.USE_THREAD_DIMENSIONS) also keeps
+    // its counts on the GPU (IRenderHost.PrepareThreadDispatch).
+    bool ResolvesIndirectThreadDispatchOnGpu => false;
+
     // True when an indirect draw may be handed over with its arguments still in guest
     // memory (the IndirectArgumentsAddress of DrawIndexedArguments and DrawAutoArguments).
     bool ResolvesIndirectDrawOnGpu => false;

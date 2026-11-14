@@ -1592,7 +1592,28 @@ internal static unsafe partial class VulkanVideoPresenter
             var (obtainedBuffer, offset) = _worker
                 ? ObtainBufferForSlice(argumentsAddress, 3u * sizeof(uint), isWritten: false, isTexelBuffer: false)
                 : _bufferCache.ObtainBuffer(argumentsAddress, 3u * sizeof(uint), false);
-            var buffer = obtainedBuffer.Handle;
+            RecordIndirectDispatch(obtainedBuffer.Handle, offset, physicalAxisOfLogical);
+            return true;
+        }
+
+        // The arguments were registered before the stage's resources (PrepareIndirectDispatchArguments), so the dispatch
+        // acquires no guest range here: an acquisition after binding could merge an owner the shader already writes.
+        public bool TryDispatchIndirect(IIndirectDispatchArguments arguments, ReadOnlySpan<int> physicalAxisOfLogical)
+        {
+            if (arguments is SliceDispatchArguments slice)
+            {
+                return TryDispatchIndirect(slice.Address, physicalAxisOfLogical);
+            }
+
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawRecording);
+            var binding = ((PreparedDispatchArguments)arguments).Use();
+            RecordIndirectDispatch(new VkBuffer(binding.Handle), binding.Offset, physicalAxisOfLogical);
+            return true;
+        }
+
+        private void RecordIndirectDispatch(VkBuffer buffer, ulong offset, ReadOnlySpan<int> physicalAxisOfLogical)
+        {
+            var permuted = physicalAxisOfLogical is not [0, 1, 2];
             var permutedArguments = permuted ? UploadTransient(stackalloc byte[3 * sizeof(uint)], 16) : default;
             var command = BeginBatchedGuestCommands();
             var barrier = new BufferMemoryBarrier2
@@ -1635,7 +1656,6 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             CountDraw();
             NoteShaderMayWriteMappedMemory();
-            return true;
         }
 
         internal static readonly bool BatchBarriers =

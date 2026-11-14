@@ -170,6 +170,8 @@ internal sealed class ResolvedDispatch
     public uint GroupsY;
     public uint GroupsZ;
     public ulong IndirectArgumentsAddress;
+    // The indirect arguments count threads the GPU converts to groups (IRenderHost.PrepareThreadDispatch).
+    public bool GpuThreadCounts;
     public MetadataBufferProbe[]? MetadataClear;
     public bool MetadataClearHasExclusiveOr;
     public ConstantFillCandidate? ConstantFill;
@@ -190,6 +192,7 @@ internal sealed class ResolvedDispatch
         GroupsY = 0;
         GroupsZ = 0;
         IndirectArgumentsAddress = 0;
+        GpuThreadCounts = false;
         MetadataClear = null;
         MetadataClearHasExclusiveOr = false;
         ConstantFill = null;

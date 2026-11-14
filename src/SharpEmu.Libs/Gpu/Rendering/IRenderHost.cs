@@ -11,6 +11,20 @@ namespace SharpEmu.Libs.Gpu.Rendering;
 // A host buffer and the byte offset a guest address maps to inside it.
 public readonly record struct BufferBinding(ulong Handle, ulong Offset);
 
+// A dispatch whose groups the GPU computes from guest arguments that count threads (IRenderHost.PrepareThreadDispatch).
+public interface IThreadDispatch : IDisposable
+{
+    void Dispatch();
+}
+
+// Registers indirect arguments before resource binding. Rebind acquires the current native view
+// after resource preparation and is permitted only before GPU use;
+// disposal retains a used allocation through the submission that last consumed it.
+public interface IIndirectDispatchArguments : IDisposable
+{
+    void Rebind();
+}
+
 // The packet arguments of a draw the host keeps until the next flip.
 public readonly record struct TargetlessDrawArguments(ulong SubmitId, bool Indexed, GpuCommands.DrawIndexedArguments Indexed_, GpuCommands.DrawAutoArguments Auto);
 
@@ -225,6 +239,25 @@ public interface IRenderHost
     // Executes a dispatch from three uint32 group counts in guest memory when the backend can
     // consume the guest buffer directly. Backends without native indirect dispatch return false.
     bool TryDispatchIndirect(ulong argumentsAddress, ReadOnlySpan<int> physicalAxisOfLogical);
+
+    // Registers three uint32 argument words before binding; call Rebind after resource preparation. A backend that
+    // returns null takes the dispatch through TryDispatchIndirect(ulong, ...) or the direct dispatch fallback.
+    IIndirectDispatchArguments? PrepareIndirectDispatchArguments(ulong argumentsAddress) => null;
+
+    // Records the command from prepared arguments without acquiring more guest resources; the group counts are
+    // permuted to the pipeline's physical axis order as for TryDispatchIndirect(ulong, ...).
+    bool TryDispatchIndirect(IIndirectDispatchArguments arguments, ReadOnlySpan<int> physicalAxisOfLogical) => false;
+
+    // True when an indirect dispatch whose guest arguments count threads keeps the counts on the GPU (PrepareThreadDispatch),
+    // so the interpreter need not read them back first.
+    bool ResolvesIndirectThreadDispatchOnGpu => false;
+
+    // Records the groups (in the pipeline's physical axis order) and the thread limits of such a dispatch from its arguments,
+    // after final owner stabilization and before bindings are committed. Dispose the result even if the consumer fails.
+    // groupSize and physicalAxis are per logical axis.
+    IThreadDispatch PrepareThreadDispatch(IIndirectDispatchArguments arguments, IPreparedBindings bindings, ReadOnlySpan<uint> groupSize,
+        ReadOnlySpan<int> physicalAxis) =>
+        throw new NotSupportedException("The render host does not compute thread dispatch groups on the GPU.");
 
     // Orders the buffer writes of the given shader stages before every later access.
     void ShaderWriteBarrier(PipelineStageFlags sourceStages);

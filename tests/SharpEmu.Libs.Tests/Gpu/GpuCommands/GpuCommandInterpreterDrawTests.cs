@@ -340,7 +340,8 @@ public sealed class GpuCommandInterpreterDrawTests
 
     // A host that dispatches indirectly on the GPU gets the arguments address without the
     // counts, so the interpreter never waits for a GPU readback of them. Thread-unit
-    // dispatches (initiator bit 5) still read them to convert threads into groups.
+    // dispatches (initiator bit 5) still read them to convert threads into groups, unless
+    // the host converts them on the GPU too.
     [Fact]
     public void IndirectDispatches_LeaveWorkgroupCountsOnTheGpuWhenTheHostCan()
     {
@@ -361,6 +362,16 @@ public sealed class GpuCommandInterpreterDrawTests
             SetBase(Arguments, dispatch: true),
             StreamRunner.Packet(PacketOpcode.DispatchIndirect, 0, 0x61));
         Assert.Equal(new[] { $"dispatch 0 4 5 6 61 @{Arguments:X}" }, runner.Host.Calls);
+
+        var threads = new StreamRunner();
+        threads.Host.ResolvesIndirectDispatchOnGpu = true;
+        threads.Host.ResolvesIndirectThreadDispatchOnGpu = true;
+        threads.Host.WriteWords(Arguments, new uint[] { 4, 5, 6 });
+        threads.Run(
+            SetBase(Arguments, dispatch: true),
+            StreamRunner.Packet(PacketOpcode.DispatchIndirect, 0, 0x61));
+        Assert.Equal(new[] { $"dispatch 0 0 0 0 61 @{Arguments:X}" }, threads.Host.Calls);
+        Assert.DoesNotContain(Arguments, threads.Host.GuestReads);
     }
 
     [Fact]

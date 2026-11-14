@@ -148,5 +148,10 @@ public static class StageStaticKey
         key.Add(info.ThreadsZ);
         key.Add(Bit(info.GroupIdZ));
         key.Add(Bit(info.ThreadGroupSizeEnabled));
+        // A program whose thread counts are in GPU memory keeps its shader data out of push data.
+        if (info.IndirectThreadCounts)
+        {
+            key.Add(1);
+        }
     }
 }

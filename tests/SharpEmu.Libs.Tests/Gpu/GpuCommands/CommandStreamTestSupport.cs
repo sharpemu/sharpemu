@@ -261,6 +261,8 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     public bool ResolvesIndirectDispatchOnGpu { get; set; }
 
+    public bool ResolvesIndirectThreadDispatchOnGpu { get; set; }
+
     public bool ResolvesIndirectDrawOnGpu { get; set; }
 
     public void OnQueueReset(int queueId) => Calls.Add($"queue_reset {queueId}");
