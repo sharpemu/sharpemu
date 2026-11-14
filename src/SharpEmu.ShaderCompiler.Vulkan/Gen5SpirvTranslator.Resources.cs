@@ -2524,9 +2524,11 @@ public static partial class Gen5SpirvTranslator
         {
             var key = _indirectKeyScratch.TryGetValue(use.KeyMemoryIndex, out var scratch) ? Load(_uintType, scratch) : UInt(0);
             var shift = use.RecordBytes == BindlessHeap.SamplerRecordBytes ? 4u : 5u;
-            var index = BitwiseAnd(ShiftRightLogical(IAdd(key, UInt(use.Immediate)), UInt(shift)), UInt(BindlessHeap.Capacity - 1));
-            var inHeap = _module.AddInstruction(SpirvOp.ULessThan, _boolType, index, UInt(BindlessHeap.CallRecordFirstIndex));
-            return _module.AddInstruction(SpirvOp.Select, _uintType, inHeap, index, UInt(BindlessHeap.CallRecordNullIndex));
+            var record = ShiftRightLogical(IAdd(key, UInt(use.Immediate)), UInt(shift));
+            // Set 1 holds the heap's records below CallRecordFirstIndex (call records own the elements above); any other record
+            // reads the null element.
+            var inHeap = _module.AddInstruction(SpirvOp.ULessThan, _boolType, record, UInt(BindlessHeap.CallRecordFirstIndex));
+            return _module.AddInstruction(SpirvOp.Select, _uintType, inHeap, record, UInt(BindlessHeap.CallRecordNullIndex));
         }
 
         // One runtime array of set 1, declared at its first use.
