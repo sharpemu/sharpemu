@@ -1109,14 +1109,20 @@ internal sealed partial class ShaderPrewarmList : IDisposable
         typeof(ColorComponentMap), typeof(ResourceSpecialization), typeof(BufferSpecialization), typeof(ImageSpecialization),
         typeof(BufferCandidateTableSpecialization));
 
-    private static readonly uint GraphicsSchemaFingerprint = SchemaFingerprintOf(
+    internal static readonly uint GraphicsSchemaFingerprint = SchemaFingerprintOf(
         typeof(StageCompileOptions), typeof(VertexInputInfo), typeof(VertexInputBuffer), typeof(VertexAttributeResource),
         typeof(ClipSpaceTransform), typeof(PixelInputInfo), typeof(Gen5PixelOutputBinding), typeof(RegisteredShader),
         typeof(PipelineRenderingState), typeof(PipelineVertexInputState), typeof(PipelineStaticParameters),
         typeof(ResourceSpecialization), typeof(BufferSpecialization), typeof(ImageSpecialization),
         typeof(BufferCandidateTableSpecialization));
 
-    private static uint SchemaFingerprintOf(params Type[] types)
+    private static uint SchemaFingerprintOf(params Type[] types) =>
+        (uint)XxHash3.HashToUInt64(Encoding.UTF8.GetBytes(SchemaText(types)));
+
+    // Each type's public properties in name order, with their types. Types are named by Type.ToString, which qualifies
+    // generic type arguments by namespace but not by assembly; FullName names each argument's assembly with its version, so
+    // every release and every runtime version would change the fingerprints and discard the recorded lists.
+    internal static string SchemaText(params Type[] types)
     {
         var vertexRecord = types.Contains(typeof(VertexPrewarmRecord));
         var builder = new StringBuilder();
@@ -1126,11 +1132,11 @@ internal sealed partial class ShaderPrewarmList : IDisposable
             {
                 // Records keep a stride word in front of each buffer's format (written as 0, skipped on load) that the
                 // specialization has no property for, so the schema lists it with the specialization's properties.
-                builder.Append(type.FullName).Append("{System.UInt32 DescriptorFormat;System.UInt32 DescriptorSwizzle;System.UInt32 PackedStride;}");
+                builder.Append(type.ToString()).Append("{System.UInt32 DescriptorFormat;System.UInt32 DescriptorSwizzle;System.UInt32 PackedStride;}");
                 continue;
             }
 
-            builder.Append(type.FullName).Append('{');
+            builder.Append(type.ToString()).Append('{');
             foreach (var property in type.GetProperties().OrderBy(static property => property.Name, StringComparer.Ordinal))
             {
                 // A vertex record holds neither: tessellated programs are not recorded, and the start instance register
@@ -1141,13 +1147,13 @@ internal sealed partial class ShaderPrewarmList : IDisposable
                     continue;
                 }
 
-                builder.Append(property.PropertyType.FullName).Append(' ').Append(property.Name).Append(';');
+                builder.Append(property.PropertyType.ToString()).Append(' ').Append(property.Name).Append(';');
             }
 
             builder.Append('}');
         }
 
-        return (uint)XxHash3.HashToUInt64(Encoding.UTF8.GetBytes(builder.ToString()));
+        return builder.ToString();
     }
 
     private static byte[] SerializeCode(ShaderCodeCapture code)

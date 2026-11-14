@@ -245,10 +245,35 @@ public sealed class ShaderPrewarmListTests : IDisposable
     [Fact]
     public void TheSchemaFingerprintsKeepTheValuesOfTheRecordedLists()
     {
-        Assert.Equal(0xBE236E8Du, ShaderPrewarmList.SchemaFingerprint);
-        Assert.Equal(0x4049A4C8u, ShaderPrewarmList.PixelSchemaFingerprint);
+        Assert.Equal(0x24DB2A98u, ShaderPrewarmList.SchemaFingerprint);
+        Assert.Equal(0x31C0D60Du, ShaderPrewarmList.PixelSchemaFingerprint);
+        Assert.Equal(0x31C5863Bu, ShaderPrewarmList.VertexSchemaFingerprint);
+        Assert.Equal(0xD15F4A8Du, ShaderPrewarmList.GraphicsSchemaFingerprint);
     }
 
+    private sealed class SchemaSample
+    {
+        public List<BufferSpecialization> Buffers { get; init; } = [];
+        public uint? Optional { get; init; }
+        public (ulong Address, uint SizeBytes)[] Ranges { get; init; } = [];
+        public uint Plain { get; init; }
+    }
+
+    // Generic types are named without the assemblies of their arguments, whose versions change with every release and
+    // runtime, so the fingerprints stay those of the recorded lists.
+    [Fact]
+    public void TheSchemaTextNamesGenericTypesWithoutAssemblies()
+    {
+        Assert.Equal(
+            "SharpEmu.Libs.Tests.Gpu.Pipelines.ShaderPrewarmListTests+SchemaSample{" +
+            "System.Collections.Generic.List`1[SharpEmu.ShaderCompiler.Resources.BufferSpecialization] Buffers;" +
+            "System.Nullable`1[System.UInt32] Optional;" +
+            "System.UInt32 Plain;" +
+            "System.ValueTuple`2[System.UInt64,System.UInt32][] Ranges;}",
+            ShaderPrewarmList.SchemaText(typeof(SchemaSample)));
+    }
+
+    // Records that differ only in a buffer's stride word, which the loader skips, load as one record.
     [Fact]
     public void RecordsThatDifferOnlyInAnOldBufferStrideLoadAsOne()
     {
