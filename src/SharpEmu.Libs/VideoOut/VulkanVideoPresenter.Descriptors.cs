@@ -1977,12 +1977,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     return;
                 }
 
-                if (_worker)
-                {
-                    throw Serial("descriptor heap", resumable: true);
-                }
-
-                var set = _descriptorHeap.Commit(setLayout, in demand);
+                var set = _worker ? _sliceDescriptors!.Commit(setLayout, in demand) : _descriptorHeap.Commit(setLayout, in demand);
                 for (var index = 0; index < writes.Length; index++)
                 {
                     writes[index].DstSet = set;
