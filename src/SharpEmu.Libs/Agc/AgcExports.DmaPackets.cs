@@ -15,7 +15,12 @@ public static partial class AgcExports
         ExportName = "sceAgcDcbCopyData",
         Target = Generation.Gen5,
         LibraryName = "libSceAgc")]
-    public static int DcbCopyData(CpuContext ctx)
+    public static int DcbCopyData(CpuContext ctx) =>
+        CopyData(ctx, rawSelectors: false);
+
+    // The DCB selectors carry the CP engine in bit 0 above the hardware selector; the ACB selectors are the MEC's
+    // raw hardware values, with no engine.
+    private static int CopyData(CpuContext ctx, bool rawSelectors)
     {
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         var destinationSelector = (uint)(ctx[CpuRegister.Rsi] & 0xFF);
@@ -36,14 +41,15 @@ public static partial class AgcExports
 
         var elementSize = (uint)(elementSizeRaw & 0xFF);
         var confirmWrite = (uint)(confirmWriteRaw & 0xFF);
+        var selectors = rawSelectors
+            ? (sourceSelector & 0xFu) | ((destinationSelector & 0xFu) << 8)
+            : ((sourceSelector >> 1) & 0xFu) | (((destinationSelector >> 1) & 0xFu) << 8) | ((sourceSelector & 0x1u) << 30);
         var control =
-            ((sourceSelector >> 1) & 0xFu) |
-            (((destinationSelector >> 1) & 0xFu) << 8) |
+            selectors |
             ((sourcePolicy & 0x3u) << 13) |
             ((elementSize & 0x1u) << 16) |
             ((confirmWrite & 0x1u) << 20) |
-            ((destinationPolicy & 0x3u) << 25) |
-            ((sourceSelector & 0x1u) << 30);
+            ((destinationPolicy & 0x3u) << 25);
 
         if (!TryWriteUInt32(ctx, packetAddress, Pm4(6, ItCopyData, 0)) ||
             !TryWriteUInt32(ctx, packetAddress + 4, control) ||
@@ -56,11 +62,37 @@ public static partial class AgcExports
         }
 
         TraceAgc(
-            $"agc.dcb_copy_data buf=0x{commandBufferAddress:X16} cmd=0x{packetAddress:X16} " +
+            $"agc.{(rawSelectors ? "acb" : "dcb")}_copy_data buf=0x{commandBufferAddress:X16} cmd=0x{packetAddress:X16} " +
             $"dstSel=0x{destinationSelector:X2} srcSel=0x{sourceSelector:X2} " +
             $"dst=0x{destinationAddress:X16} src=0x{sourceValue:X16} control=0x{control:X8}");
         return ReturnPointer(ctx, packetAddress);
     }
+
+    // Matches the fixed 6-dword COPY_DATA packet DcbCopyData and AcbCopyData write.
+    [SysAbiExport(
+        Nid = "b5u0Jzm8TF8",
+        ExportName = "sceAgcDcbCopyDataGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    [SysAbiExport(
+        Nid = "CbQh3DKMSno",
+        ExportName = "sceAgcAcbCopyDataGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int CopyDataGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 6u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
+    // The ACB form takes the same arguments; its selectors are the raw MEC values.
+    [SysAbiExport(
+        Nid = "qzMN2XKGA4k",
+        ExportName = "sceAgcAcbCopyData",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int AcbCopyData(CpuContext ctx) =>
+        CopyData(ctx, rawSelectors: true);
 
     [SysAbiExport(
         Nid = "WmAc2MEj6Io",

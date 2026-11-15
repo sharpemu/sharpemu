@@ -5,6 +5,7 @@ using SharpEmu.HLE;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Gpu.Scheduling;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.Gpu.GpuCommands;
@@ -192,6 +193,42 @@ public sealed class GpuCommandInterpreterMemoryTests
 
         runner.Interpreter.Process(new PacketCursorStack(), StreamRunner.CommandAddress, 6);
         Assert.Equal(immediateValue, runner.Host.ReadQword(Label));
+    }
+
+    // The ACB selectors are the MEC's raw values: source 9 is the reference clock and destination 2 is memory through the L2, with no engine bit.
+    [Fact]
+    public void AcbCopyData_WritesRawSelectorsAndTheComputeQueueStoresTheClock()
+    {
+        var runner = new StreamRunner(queueId: 1);
+        var context = new CpuContext(runner.Host.Memory, Generation.Gen5);
+        const ulong commandBufferAddress = StreamRunner.TableAddress;
+        const ulong stackAddress = StreamRunner.TableAddress + 0x100;
+        runner.Host.WriteQword(commandBufferAddress + 0x10, StreamRunner.CommandAddress);
+        runner.Host.WriteQword(commandBufferAddress + 0x18, StreamRunner.CommandAddress + 0x100);
+        context[CpuRegister.Rdi] = commandBufferAddress;
+        context[CpuRegister.Rsi] = 2;
+        context[CpuRegister.Rdx] = 3;
+        context[CpuRegister.Rcx] = Label;
+        context[CpuRegister.R8] = 9;
+        context[CpuRegister.R9] = 3;
+        context[CpuRegister.Rsp] = stackAddress;
+        runner.Host.WriteQword(stackAddress + 8, 0);
+        runner.Host.WriteQword(stackAddress + 16, 1);
+        runner.Host.WriteQword(stackAddress + 24, 1);
+
+        AgcExports.AcbCopyData(context);
+
+        var control = runner.Host.ReadDword(StreamRunner.CommandAddress + 4);
+        Assert.Equal(9u, control & 0xFu);
+        Assert.Equal(2u, (control >> 8) & 0xFu);
+        Assert.Equal(0u, control >> 30);
+        Assert.Equal(
+            StreamRunner.CommandAddress + (ulong)AgcExports.CopyDataGetSize(context),
+            runner.Host.ReadQword(commandBufferAddress + 0x10));
+
+        var before = EndOfPipe.ReadReferenceClock();
+        runner.Interpreter.Process(new PacketCursorStack(), StreamRunner.CommandAddress, 6);
+        Assert.InRange(runner.Host.ReadQword(Label), before, EndOfPipe.ReadReferenceClock());
     }
 
     [Fact]

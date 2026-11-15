@@ -304,6 +304,10 @@ public sealed partial class GpuCommandInterpreter
             case 6:
                 CopyAtomicReturn(destinationSelect, destination, byteCount, usePfp: false);
                 return;
+            case 9 when dmaDestination == 3:
+                // Source 9: the GPU reference clock stored to memory (a timestamp).
+                WriteReferenceClock(destination, byteCount);
+                return;
             default:
                 throw _host.Fatal($"The copy-data source selector is not supported: selector=0x{sourceSelect:X2} queue={QueueId}.");
         }
