@@ -778,6 +778,7 @@ internal static unsafe partial class VulkanVideoPresenter
             slice.Done.Wait();
             _slicesRecorded.Increment();
             _scheduler.NoteSliceJoined(slice.Generation);
+            RetireSliceDescriptorPools(slice);
             if (slice.Chunks.Count == 0)
             {
                 return;
@@ -792,6 +793,26 @@ internal static unsafe partial class VulkanVideoPresenter
             else
             {
                 chunks.ForEach(_arenaPool!.Return);
+            }
+        }
+
+        private void RetireSliceDescriptorPools(RenderSlice slice)
+        {
+            if (slice.DescriptorPools.Count == 0)
+            {
+                return;
+            }
+
+            var pools = slice.DescriptorPools;
+            var stock = _descriptorPoolStock!;
+            slice.DescriptorPools = [];
+            if (slice.Submitted)
+            {
+                _scheduler.QueueCompletionAction(() => pools.ForEach(stock.Return));
+            }
+            else
+            {
+                pools.ForEach(stock.Return);
             }
         }
 
