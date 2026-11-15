@@ -49,6 +49,10 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         public bool DepthResolved;
         public readonly ResourceSlotIdentifier[] Found = new ResourceSlotIdentifier[RenderingState.ColorAttachmentCapacity];
         public ResourceSlotIdentifier FoundDepth;
+        public readonly ColorTargetResolution[] FoundResolutions = new ColorTargetResolution[RenderingState.ColorAttachmentCapacity];
+        public readonly uint[] FoundSlots = new uint[RenderingState.ColorAttachmentCapacity];
+        public bool FoundDepthTarget;
+        public DepthTargetState FoundDepthState;
         public uint AcquiredCount;
         public readonly ImageView[] Views = new ImageView[RenderingState.ColorAttachmentCapacity];
         public readonly uint[] Slots = new uint[RenderingState.ColorAttachmentCapacity];
@@ -57,13 +61,61 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         public RenderingState Rendering;
     }
 
+    private static readonly bool InPlaceByTargets = Environment.GetEnvironmentVariable("SHARPEMU_INPLACE_BY_TARGETS") != "0";
+
     private bool RepeatsPreviousTargets(ResolvedDraw record, in DrawState state, DrawScopeToken token)
     {
         var kept = _inPlace;
-        return kept.Valid && token.IsActive && token == kept.Token && !ImageClearTrace.Enabled && record.ContextStamp == kept.ContextStamp &&
-            record.DynamicStamp == kept.DynamicStamp && record.TargetVersion == kept.TargetVersion && state.PixelActive == kept.PixelActive &&
-            state.Programs.Vertex.Id == kept.VertexProgram && state.Programs.Pixel.Id == kept.PixelProgram && state.ColorCount == kept.FoundCount &&
-            state.DepthResolved == kept.DepthResolved;
+        if (!kept.Valid || !token.IsActive || token != kept.Token || ImageClearTrace.Enabled || state.PixelActive != kept.PixelActive ||
+            state.ColorCount != kept.FoundCount || state.DepthResolved != kept.DepthResolved)
+        {
+            return false;
+        }
+
+        if (!InPlaceByTargets)
+        {
+            return record.ContextStamp == kept.ContextStamp && record.DynamicStamp == kept.DynamicStamp && record.TargetVersion == kept.TargetVersion &&
+                state.Programs.Vertex.Id == kept.VertexProgram && state.Programs.Pixel.Id == kept.PixelProgram;
+        }
+
+        for (var index = 0; index < state.ColorCount; index++)
+        {
+            if (state.Colors[index].Slot != kept.FoundSlots[index] || !SameColorTarget(in state.Colors[index].Resolution, in kept.FoundResolutions[index]))
+            {
+                return false;
+            }
+        }
+
+        return state.Depth.HasTarget == kept.FoundDepthTarget && (!state.Depth.HasTarget || SameDepthAttachment(in state.Depth.Target, in kept.FoundDepthState));
+    }
+
+    private static bool SameColorTarget(in ColorTargetResolution current, in ColorTargetResolution kept) =>
+        current.BaseAddress == kept.BaseAddress && current.BackingSize == kept.BackingSize &&
+        current.Extent.Width == kept.Extent.Width && current.Extent.Height == kept.Extent.Height &&
+        current.BaseMipLevel == kept.BaseMipLevel && current.BaseArrayLayer == kept.BaseArrayLayer && current.Samples == kept.Samples &&
+        current.ExportMapping.Packed == kept.ExportMapping.Packed && current.MetadataClearSupported == kept.MetadataClearSupported &&
+        current.MetadataFixedClearSupported == kept.MetadataFixedClearSupported &&
+        current.ColorClearValue.Uint32_0 == kept.ColorClearValue.Uint32_0 && current.ColorClearValue.Uint32_1 == kept.ColorClearValue.Uint32_1 &&
+        current.ColorClearValue.Uint32_2 == kept.ColorClearValue.Uint32_2 && current.ColorClearValue.Uint32_3 == kept.ColorClearValue.Uint32_3 &&
+        GuestImageCache.SameRequest(current.Request, kept.Request);
+
+    private static bool SameDepthTarget(in DepthTargetResolution current, in DepthTargetResolution kept) =>
+        current.Format == kept.Format && current.Width == kept.Width && current.Height == kept.Height && current.Samples == kept.Samples &&
+        current.HasStencil == kept.HasStencil && current.HasHtile == kept.HasHtile && current.DepthAddress == kept.DepthAddress &&
+        current.DepthSize == kept.DepthSize && current.StencilAddress == kept.StencilAddress && current.StencilSize == kept.StencilSize &&
+        current.HtileAddress == kept.HtileAddress && current.HtileSize == kept.HtileSize && current.DepthClearEnabled == kept.DepthClearEnabled &&
+        current.StencilClearEnabled == kept.StencilClearEnabled && current.DepthWriteDisabled == kept.DepthWriteDisabled &&
+        current.StencilWriteDisabled == kept.StencilWriteDisabled && GuestImageCache.SameRequest(current.Request, kept.Request);
+
+    private static bool SameDepthAttachment(in DepthTargetState current, in DepthTargetState kept)
+    {
+        var format = current.Target.Format;
+        return SameDepthTarget(current.Target, kept.Target) &&
+            current.State.AttachmentWriteAspects(format) == kept.State.AttachmentWriteAspects(format) &&
+            current.State.DepthClearEnabled == kept.State.DepthClearEnabled &&
+            current.State.DepthClearValue.Equals(kept.State.DepthClearValue) &&
+            current.State.StencilClearEnabled == kept.State.StencilClearEnabled &&
+            current.State.StencilClearValue == kept.State.StencilClearValue;
     }
 
     private void RestoreFoundTargets(ref DrawState state)
@@ -121,7 +173,12 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         for (var index = 0; index < state.ColorCount; index++)
         {
             kept.Found[index] = state.Colors[index].Image;
+            kept.FoundResolutions[index] = state.Colors[index].Resolution;
+            kept.FoundSlots[index] = state.Colors[index].Slot;
         }
+
+        kept.FoundDepthTarget = state.Depth.HasTarget;
+        kept.FoundDepthState = state.Depth.Target;
 
         kept.DepthResolved = state.DepthResolved;
         kept.FoundDepth = state.DepthResolved ? state.Depth.Image : default;
