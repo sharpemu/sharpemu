@@ -24,6 +24,9 @@ internal static partial class VulkanVideoPresenter
         // two threads take turns waiting on each other (128 did, with draws resolving on the pool).
         private static readonly int MaxOutstanding =
             int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_COMMAND_QUEUE_DEPTH"), out var depth) && depth >= 128 ? depth : 1024;
+
+        private static readonly int SlicesAheadPerWorker =
+            int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_SLICES_AHEAD"), out var ahead) && ahead >= 1 ? ahead : 2;
         private const int ShadowSweepCount = 64;
         private const int StorePageShift = 12;
 
@@ -793,7 +796,7 @@ internal static partial class VulkanVideoPresenter
                 }
             }
 
-            var limit = slicing ? 2 * _presenter.WorkerCount : 0;
+            var limit = slicing ? SlicesAheadPerWorker * _presenter.WorkerCount : 0;
             var pulled = 0;
             while (slicesAhead <= limit && pulled < maxItems)
             {
