@@ -201,6 +201,14 @@ public sealed unsafe class DescriptorHeap : IDisposable
 
     private DescriptorPool CreatePool()
     {
+        var pool = CreatePool(_device);
+        _remaining = PoolCapacity;
+        _remainingSets = SetsPerPool;
+        return pool;
+    }
+
+    internal static DescriptorPool CreatePool(GpuDeviceInfo device)
+    {
         fixed (DescriptorPoolSize* poolSizes = PoolSizes)
         {
             var create = new DescriptorPoolCreateInfo
@@ -210,14 +218,12 @@ public sealed unsafe class DescriptorHeap : IDisposable
                 PoolSizeCount = (uint)PoolSizes.Length,
                 PPoolSizes = poolSizes,
             };
-            var result = _device.Vk.CreateDescriptorPool(_device.Device, &create, null, out var pool);
+            var result = device.Vk.CreateDescriptorPool(device.Device, &create, null, out var pool);
             if (result != Result.Success)
             {
                 throw SubmissionScheduler.Fatal($"vkCreateDescriptorPool failed: result={result}.");
             }
 
-            _remaining = PoolCapacity;
-            _remainingSets = SetsPerPool;
             return pool;
         }
     }
