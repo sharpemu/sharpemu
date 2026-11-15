@@ -962,18 +962,7 @@ internal static partial class VulkanVideoPresenter
             if (_presenter.SlicesEnabled && remaining >= RestInlineItems + MinimumSliceItems)
             {
                 inline = slice.Resume + RestInlineItems;
-                var chunks = (slice.Items.Count - inline + RestChunkItems - 1) / RestChunkItems;
-                var start = inline;
-                for (var chunk = 0; chunk < chunks; chunk++)
-                {
-                    var end = inline + (int)((long)(slice.Items.Count - inline) * (chunk + 1) / chunks);
-                    var rest = new RenderSlice { Origin = 2 };
-                    rest.Items.AddRange(slice.Items.GetRange(start, end - start));
-                    _units.Insert(_unitHead + chunk, new Unit { Slice = rest });
-                    _presenter.DispatchSlice(rest, urgent: true);
-                    Presenter.NoteRestChunk(rest.Items.Count);
-                    start = end;
-                }
+                QueueRestChunks(slice, inline);
             }
 
             for (var position = slice.Resume; position < inline; position++)
@@ -983,6 +972,24 @@ internal static partial class VulkanVideoPresenter
             }
 
             return ran;
+        }
+
+        private static readonly bool SplitStolenSlices = Environment.GetEnvironmentVariable("SHARPEMU_SPLIT_STOLEN_SLICES") != "0";
+
+        private void QueueRestChunks(RenderSlice slice, int inline)
+        {
+            var chunks = (slice.Items.Count - inline + RestChunkItems - 1) / RestChunkItems;
+            var start = inline;
+            for (var chunk = 0; chunk < chunks; chunk++)
+            {
+                var end = inline + (int)((long)(slice.Items.Count - inline) * (chunk + 1) / chunks);
+                var rest = new RenderSlice { Origin = 2 };
+                rest.Items.AddRange(slice.Items.GetRange(start, end - start));
+                _units.Insert(_unitHead + chunk, new Unit { Slice = rest });
+                _presenter.DispatchSlice(rest, urgent: true);
+                Presenter.NoteRestChunk(rest.Items.Count);
+                start = end;
+            }
         }
 
         private static void NoteItemCost(Item item, int stage, long started) =>
