@@ -514,6 +514,20 @@ public sealed unsafe partial class CachedImage : IDisposable
 
     public void ClearGpuModified() => _gpuModified = false;
 
+    private ulong _readbackUntilFrame;
+
+    internal bool HasReadbackWindow { get; private set; }
+
+    internal ulong ReadbackUntilFrame
+    {
+        get => _readbackUntilFrame;
+        set
+        {
+            _readbackUntilFrame = value;
+            HasReadbackWindow = true;
+        }
+    }
+
     public bool IsBufferModified => _bufferModified;
 
     // The guest buffer cache holds this image's current GPU contents.
