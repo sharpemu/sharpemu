@@ -459,6 +459,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private RenderWorkerPool? _workers;
         internal SliceArenaPool? _arenaPool;
+        internal DescriptorPoolStock? _descriptorPoolStock;
 
         private void CreateRenderWorkers()
         {
@@ -469,6 +470,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             _scheduler.MemoryBarrierRecorder ??= RecordRequestedMemoryBarrier;
             _arenaPool = new SliceArenaPool(_deviceInfo, _scheduler);
+            _descriptorPoolStock ??= new DescriptorPoolStock(_deviceInfo);
             _workers = new RenderWorkerPool(this, RenderWorkerCount);
             Console.Error.WriteLine($"[LOADER][INFO] Render workers: {RenderWorkerCount}");
         }
