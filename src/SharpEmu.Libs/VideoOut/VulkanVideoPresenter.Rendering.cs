@@ -356,10 +356,30 @@ internal static unsafe partial class VulkanVideoPresenter
             return imageIdentifier;
         }
 
-        private ResourceSlotIdentifier LookUpImage(ref ImageRequest request, bool exactFormat = false) =>
-            _worker
-                ? _imageCache.TryFindImageForSlice(ref request, exactFormat, out var found) ? found : throw Serial("image lookup", resumable: true)
-                : _imageCache.FindImage(ref request, exactFormat);
+        private ResourceSlotIdentifier LookUpImage(ref ImageRequest request, bool exactFormat = false)
+        {
+            if (!_worker)
+            {
+                return _imageCache.FindImage(ref request, exactFormat);
+            }
+
+            if (_imageCache.TryFindImageForSlice(ref request, exactFormat, out var found))
+            {
+                return found;
+            }
+
+            var address = request.Description.Data.Address;
+            var repeated = StopRepeatedLookupFailures && _failedSliceLookups.Contains(address);
+            if (!repeated)
+            {
+                _failedSliceLookups.Add(address);
+            }
+
+            throw Serial(repeated ? "repeated image lookup" : "image lookup", resumable: !repeated);
+        }
+
+        private static readonly bool StopRepeatedLookupFailures = Environment.GetEnvironmentVariable("SHARPEMU_STOP_REPEATED_LOOKUP_FAILURES") != "0";
+        private readonly List<ulong> _failedSliceLookups = new();
 
         public void ResetBindings()
         {

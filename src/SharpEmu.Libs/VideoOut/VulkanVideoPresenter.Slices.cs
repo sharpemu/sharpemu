@@ -899,6 +899,7 @@ internal static unsafe partial class VulkanVideoPresenter
         internal void RecordSlice(RenderSlice slice)
         {
             slice.Host = this;
+            _failedSliceLookups.Clear();
             _buffers = _bufferCache.Snapshot;
             SliceSegment? segment = null;
             slice.Resume = slice.Items.Count;
