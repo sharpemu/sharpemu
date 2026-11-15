@@ -113,6 +113,79 @@ public sealed partial class GuestImageCache
         return true;
     }
 
+    internal readonly record struct RememberedTexture(ResourceSlotIdentifier Image, bool Ranged, ulong Begin, ulong End);
+
+    internal bool TryTouchRememberedSet(ReadOnlySpan<RememberedTexture> textures, ref ulong generation)
+    {
+        using var held = _lock.Hold();
+        if (!RememberedSetHolds(textures, generation))
+        {
+            return false;
+        }
+
+        var tick = _scheduler.CurrentTick;
+        var ranged = false;
+        foreach (var texture in textures)
+        {
+            if (!texture.Ranged)
+            {
+                continue;
+            }
+
+            var image = _slots[texture.Image];
+            image.LastAccessTick = tick;
+            TouchImage(image);
+            ranged = true;
+        }
+
+        if (ranged)
+        {
+            generation = _lookupGeneration;
+        }
+
+        return true;
+    }
+
+    internal bool TryRememberedSetForSlice(ReadOnlySpan<RememberedTexture> textures, ref ulong generation)
+    {
+        using var held = _lock.Read();
+        if (!RememberedSetHolds(textures, generation))
+        {
+            return false;
+        }
+
+        foreach (var texture in textures)
+        {
+            if (texture.Ranged)
+            {
+                generation = _lookupGeneration;
+                break;
+            }
+        }
+
+        return true;
+    }
+
+    private bool RememberedSetHolds(ReadOnlySpan<RememberedTexture> textures, ulong generation)
+    {
+        foreach (var texture in textures)
+        {
+            if (_slots.TryGet(texture.Image) is not { } image ||
+                ((!image.Registered || image.DepthOwner.IsValid) && !ImageDescription.IsEmptyRange(image.Description.Data)) ||
+                image.Binding.NeedsRebind)
+            {
+                return false;
+            }
+
+            if (texture.Ranged && (!LookupUnchangedSince(generation, texture.Begin, texture.End) || image is not { Registered: true, Parked: false }))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     public GuestSpan RememberedRange(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
     {
         using var held = _lock.Read();
