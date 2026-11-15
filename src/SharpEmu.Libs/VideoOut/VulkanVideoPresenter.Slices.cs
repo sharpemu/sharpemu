@@ -497,10 +497,10 @@ internal static unsafe partial class VulkanVideoPresenter
             _workers!.Dispatch(slice, urgent);
         }
 
-        internal static void NoteStolen(RenderSlice slice)
+        internal static void NoteStolen(RenderSlice slice, int inlineItems)
         {
             _slicesStolen.Increment();
-            _stolenItems.Add(slice.Items.Count);
+            _stolenItems.Add(inlineItems);
             _stolenByOrigin[slice.Origin].Increment();
             var age = (System.Diagnostics.Stopwatch.GetTimestamp() - slice.DispatchedAt) * 1_000_000 / System.Diagnostics.Stopwatch.Frequency;
             _stolenByAge[age < 100 ? 0 : age < 1000 ? 1 : 2].Increment();

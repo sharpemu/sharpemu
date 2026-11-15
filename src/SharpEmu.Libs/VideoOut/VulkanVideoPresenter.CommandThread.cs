@@ -892,13 +892,20 @@ internal static partial class VulkanVideoPresenter
 
             if (slice.TryClaim())
             {
-                Presenter.NoteStolen(slice);
+                var stolenInline = slice.Items.Count;
+                if (SplitStolenSlices && _presenter.SlicesEnabled && stolenInline >= RestInlineItems + MinimumSliceItems)
+                {
+                    stolenInline = RestInlineItems;
+                    QueueRestChunks(slice, stolenInline);
+                }
+
+                Presenter.NoteStolen(slice, stolenInline);
                 slice.Done.Set();
                 try
                 {
-                    foreach (var item in slice.Items)
+                    for (var position = 0; position < stolenInline; position++)
                     {
-                        RunInline(item, betweenItems);
+                        RunInline(slice.Items[position], betweenItems);
                         ran++;
                     }
                 }
