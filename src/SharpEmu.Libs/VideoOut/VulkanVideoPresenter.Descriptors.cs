@@ -403,22 +403,28 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var generation = memo.LookupGeneration;
-            for (var index = 0; index < memo.Textures.Length; index++)
+            var textures = memo.Textures;
+            if (textures.Length != 0)
             {
-                var texture = memo.Textures[index];
-                var range = memo.TextureRanges[index];
-                var checkedGeneration = memo.LookupGeneration;
-                if (IsStaleImage(texture.ImageIdentifier, out _) ||
-                    !ImageDescription.IsEmptyRange(texture.Request.Description.Data) && !(_worker
-                        ? _imageCache.TryRememberedForSlice(texture.ImageIdentifier, ref checkedGeneration, range.Address, range.End)
-                        : _imageCache.TryTouchRemembered(texture.ImageIdentifier, ref checkedGeneration, range.Address, range.End)))
+                Span<GuestImageCache.RememberedTexture> remembered = textures.Length <= 64
+                    ? stackalloc GuestImageCache.RememberedTexture[textures.Length]
+                    : new GuestImageCache.RememberedTexture[textures.Length];
+                for (var index = 0; index < textures.Length; index++)
+                {
+                    var texture = textures[index];
+                    var range = memo.TextureRanges[index];
+                    remembered[index] = new GuestImageCache.RememberedTexture(texture.ImageIdentifier,
+                        !ImageDescription.IsEmptyRange(texture.Request.Description.Data), range.Address, range.End);
+                }
+
+                if (!(_worker
+                        ? _imageCache.TryRememberedSetForSlice(remembered, ref generation)
+                        : _imageCache.TryTouchRememberedSet(remembered, ref generation)))
                 {
                     memo.Invalidate();
                     Interlocked.Increment(ref _stageMemoStale);
                     return false;
                 }
-
-                generation = checkedGeneration;
             }
 
             memo.LookupGeneration = generation;
