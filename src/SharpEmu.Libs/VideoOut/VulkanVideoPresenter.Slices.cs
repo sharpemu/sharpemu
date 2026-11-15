@@ -850,6 +850,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private long _itemSequence;
         private readonly ConcurrentBag<RecordingBuffer>? _spareBuffers;
         private readonly SliceArena? _arena;
+        private readonly SliceDescriptorHeap? _sliceDescriptors;
         private readonly SliceHazards? _hazards;
         private readonly RenderRecorder? _workerRecorder;
         private readonly Dictionary<CachedImage, BindingBox> _workerBindings = new(ReferenceEqualityComparer.Instance);
