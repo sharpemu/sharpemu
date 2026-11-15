@@ -231,6 +231,9 @@ public sealed class WaveLaneTransferDeviceTests(HeadlessVulkanFixture fixture) :
     {
         var vulkan = fixture.Vulkan;
         if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+        // A one-wave workgroup runs as two host subgroups (Gen5SpirvTranslator.PairsWave64Lanes); two waves are paired.
+        var waves = pairedLanes ? 2u : 1u;
+        var threads = waves * waveSize;
         var instructions = new List<Gen5ShaderInstruction>();
         uint programCounter = 0;
         void Add(Gen5ShaderInstruction instruction)
@@ -274,7 +277,7 @@ public sealed class WaveLaneTransferDeviceTests(HeadlessVulkanFixture fixture) :
         var (plan, resources, layout) = Prepare(Program([.. instructions]));
         var request = new ShaderCompileRequest(plan, resources, layout)
         {
-            LocalSizeX = 8, LocalSizeY = waveSize / 8, ThreadCountX = 8, ThreadCountY = waveSize / 8,
+            LocalSizeX = 8, LocalSizeY = threads / 8, ThreadCountX = 8, ThreadCountY = threads / 8,
             WaveSize = waveSize,
             HostComputeSubgroup32 = pairedLanes, HostWave64Supported = false,
         };
@@ -288,7 +291,7 @@ public sealed class WaveLaneTransferDeviceTests(HeadlessVulkanFixture fixture) :
                 if ((instruction & 0xffff) == 16 &&
                     BinaryPrimitives.ReadUInt32LittleEndian(shader.Spirv.AsSpan(offset + 8)) == 17)
                 {
-                    Assert.Equal(32u, BinaryPrimitives.ReadUInt32LittleEndian(shader.Spirv.AsSpan(offset + 12)));
+                    Assert.Equal(32u * waves, BinaryPrimitives.ReadUInt32LittleEndian(shader.Spirv.AsSpan(offset + 12)));
                     found = true;
                 }
                 offset += checked((int)(instruction >> 16) * 4);
@@ -297,17 +300,17 @@ public sealed class WaveLaneTransferDeviceTests(HeadlessVulkanFixture fixture) :
         }
         using var harness = new ImageTestHarness(vulkan);
         using var runner = new LayoutComputeRunner(harness, request, shader.Spirv);
-        var output = runner.CreateBuffer(256);
+        var output = runner.CreateBuffer(threads * 4);
         var registers = new uint[256];
-        registers[6] = 256;
+        registers[6] = threads * 4;
         harness.Run(() => runner.Dispatch(registers,
             new Dictionary<DescriptorBindingKind, GpuBuffer[]> { [DescriptorBindingKind.Buffers] = [output] }, 1));
-        var bytes = runner.ReadBack(output, 0, 256);
+        var bytes = runner.ReadBack(output, 0, threads * 4);
         var selectedLane = selector % waveSize;
-        for (uint lane = 0; lane < waveSize; lane++)
+        for (uint lane = 0; lane < threads; lane++)
         {
             var expected = savedLane ? (overwriteVector ? 0x87654321u : 0x12345678u)
-                : writeLane ? (lane == selectedLane ? 0x12345678u : 1000 + lane) : 1000 + selectedLane;
+                : writeLane ? (lane % waveSize == selectedLane ? 0x12345678u : 1000 + lane) : 1000 + lane / waveSize * waveSize + selectedLane;
             Assert.Equal(expected, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan((int)lane * 4)));
         }
         harness.AssertNoValidationMessages();

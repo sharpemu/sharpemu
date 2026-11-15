@@ -288,7 +288,8 @@ public static partial class Gen5SpirvTranslator
             {
                 _waveLowering = new HalfWave64Lowering(this);
             }
-            else if (_stage == Gen5SpirvStage.Compute && request.HostComputeSubgroup32 && PairedWave64Enabled)
+            else if (_stage == Gen5SpirvStage.Compute && request.HostComputeSubgroup32 &&
+                     PairsWave64Lanes(PairedWave64Mode, (ulong)_localSizeX * _localSizeY * _localSizeZ))
             {
                 _pairedLanes = true;
                 _waveLowering = new PairedWave64Lowering(this);
