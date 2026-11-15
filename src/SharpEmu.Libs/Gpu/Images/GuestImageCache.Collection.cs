@@ -130,7 +130,7 @@ public sealed partial class GuestImageCache
         foreach (var imageIdentifier in _scheduledReadbacks)
         {
             var owner = _slots.TryGet(imageIdentifier);
-            if (owner != null && owner.Registered && owner.IsGpuModified)
+            if (owner != null && owner.Registered && owner.IsGpuModified && !HostLayoutTargets.Holds(owner.Description.Data.Address))
             {
                 _ = TryDownloadToGuest(imageIdentifier);
             }
