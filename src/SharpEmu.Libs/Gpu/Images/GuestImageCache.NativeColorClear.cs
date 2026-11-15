@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
@@ -24,6 +25,7 @@ public sealed unsafe partial class GuestImageCache
         }
     }
 
+    [SkipLocalsInit]
     internal void ApplyNativeColorClear(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
     {
         var description = request.Description;
@@ -88,6 +90,7 @@ public sealed unsafe partial class GuestImageCache
     }
 
     // True when ApplyNativeColorClear would change nothing: the registration is current and no slice holds a clear code.
+    [SkipLocalsInit]
     internal bool NativeColorClearSettled(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
     {
         var description = request.Description;
