@@ -134,6 +134,18 @@ public sealed unsafe class DescriptorHeap : IDisposable
     // Halves the batch until the pool has room for it; false when one set does not fit.
     private bool Allocate(DescriptorSetLayout layout, in DescriptorSetDemand demand, SetBatchState batch)
     {
+        if (!TryAllocateBatch(_device, _currentPool, layout, in demand, batch.Sets, ref batch.Allocation, ref _remainingSets, ref _remaining))
+        {
+            return false;
+        }
+
+        batch.Size = batch.Allocation;
+        return true;
+    }
+
+    internal static bool TryAllocateBatch(GpuDeviceInfo device, DescriptorPool pool, DescriptorSetLayout layout, in DescriptorSetDemand demand,
+        DescriptorSet[] sets, ref uint allocation, ref uint remainingSets, ref DescriptorSetDemand remaining)
+    {
         var layouts = stackalloc DescriptorSetLayout[(int)SetBatch];
         for (var index = 0; index < SetBatch; index++)
         {
@@ -142,35 +154,34 @@ public sealed unsafe class DescriptorHeap : IDisposable
 
         for (;;)
         {
-            if (batch.Allocation > _remainingSets || !demand.Scale(batch.Allocation).Fits(in _remaining))
+            if (allocation > remainingSets || !demand.Scale(allocation).Fits(in remaining))
             {
-                if (batch.Allocation == 1)
+                if (allocation == 1)
                 {
                     return false;
                 }
 
-                batch.Allocation /= 2;
+                allocation /= 2;
                 continue;
             }
 
             var allocate = new DescriptorSetAllocateInfo
             {
                 SType = StructureType.DescriptorSetAllocateInfo,
-                DescriptorPool = _currentPool,
-                DescriptorSetCount = batch.Allocation,
+                DescriptorPool = pool,
+                DescriptorSetCount = allocation,
                 PSetLayouts = layouts,
             };
             Result result;
-            fixed (DescriptorSet* sets = batch.Sets)
+            fixed (DescriptorSet* allocated = sets)
             {
-                result = _device.Vk.AllocateDescriptorSets(_device.Device, &allocate, sets);
+                result = device.Vk.AllocateDescriptorSets(device.Device, &allocate, allocated);
             }
 
             if (result == Result.Success)
             {
-                batch.Size = batch.Allocation;
-                _remaining = _remaining.Subtract(demand.Scale(batch.Allocation));
-                _remainingSets -= batch.Allocation;
+                remaining = remaining.Subtract(demand.Scale(allocation));
+                remainingSets -= allocation;
                 return true;
             }
 
@@ -179,12 +190,12 @@ public sealed unsafe class DescriptorHeap : IDisposable
                 throw SubmissionScheduler.Fatal($"vkAllocateDescriptorSets failed: result={result}.");
             }
 
-            if (batch.Allocation == 1)
+            if (allocation == 1)
             {
                 return false;
             }
 
-            batch.Allocation /= 2;
+            allocation /= 2;
         }
     }
 
