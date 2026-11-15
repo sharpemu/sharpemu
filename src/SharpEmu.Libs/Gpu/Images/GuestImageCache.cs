@@ -463,9 +463,10 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             image.MarkGpuModified();
         }
 
+        var cpuWritten = false;
         if (hasData)
         {
-            RefreshFromGuest(imageIdentifier, request);
+            cpuWritten = RefreshFromGuest(imageIdentifier, request);
             MergeMipTailBlock(image);
         }
 
@@ -484,7 +485,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
                     TakeGpuOwnership(image);
                 }
 
-                ScheduleReadback(imageIdentifier, image);
+                ScheduleReadbackAfterCpuWrite(imageIdentifier, image, cpuWritten);
                 break;
             default:
                 throw SubmissionScheduler.Fatal($"The texture role is invalid: role={request.Role}.");
