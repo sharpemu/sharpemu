@@ -345,6 +345,7 @@ internal static unsafe partial class VulkanVideoPresenter
         public int Resume;
         public RecordingHost? Host;
         public List<SliceArenaChunk> Chunks = [];
+        public List<DescriptorPool> DescriptorPools = [];
         public bool Submitted;
         public bool Dispatched;
         public long DispatchedAt;
@@ -947,6 +948,7 @@ internal static unsafe partial class VulkanVideoPresenter
             finally
             {
                 slice.Chunks = _arena!.TakeChunks();
+                slice.DescriptorPools = _sliceDescriptors!.TakePools();
                 _segment = null;
             }
         }
