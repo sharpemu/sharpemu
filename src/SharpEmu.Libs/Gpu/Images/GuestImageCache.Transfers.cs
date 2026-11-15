@@ -537,7 +537,7 @@ public sealed unsafe partial class GuestImageCache
     }
 
     // A maybe-dirty image resolves through its edge hash first; a dirty one is populated again.
-    private void RefreshFromGuest(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
+    private bool RefreshFromGuest(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageRefresh);
         WatchImage(imageIdentifier);
@@ -548,13 +548,14 @@ public sealed unsafe partial class GuestImageCache
             if (image.NeedsMaybeCpuHash)
             {
                 image.SetMaybeCpuHash(hash);
-                return;
+                return false;
             }
 
             _ = image.ResolveMaybeCpuHash(hash);
         }
 
-        var cpuDirty = image.IsBufferModified || image.IsDefinitelyCpuDirty;
+        var cpuWritten = image.IsDefinitelyCpuDirty;
+        var cpuDirty = image.IsBufferModified || cpuWritten;
         if (image.Description.Metadata.Compression != DisplayCompression.Uncompressed)
         {
             if (cpuDirty)
@@ -562,15 +563,16 @@ public sealed unsafe partial class GuestImageCache
                 throw SubmissionScheduler.Fatal($"A compressed guest image cannot be refreshed from guest memory: address=0x{image.Description.Data.Address:X16} bufferModified={image.IsBufferModified} cpuDirty={image.IsDefinitelyCpuDirty}.");
             }
 
-            return;
+            return false;
         }
 
         if (!cpuDirty)
         {
-            return;
+            return false;
         }
 
         PopulateFromGuest(imageIdentifier, request, "refresh");
+        return cpuWritten;
     }
 
     private void DownloadDepthToBuffer(CachedImage image, GpuBuffer destination, ulong destinationOffset)
