@@ -102,7 +102,7 @@ result filters, mutex warning sampling, and diagnostic selection.
 | Group | Variables |
 | --- | --- |
 | Behavior switches | 17 |
-| GPU and Vulkan | 61 |
+| GPU and Vulkan | 62 |
 | GnmMode | 4 (plus 2 shared switches listed below; trophy key also exposed in GUI) |
 | Audio and video | 6 |
 | Input | 5 |
@@ -224,6 +224,7 @@ These variables change the GPU path or the Vulkan presenter.
 | `SHARPEMU_FORCE_TITLE_SOLID_FRAGMENT` | `1` | The Vulkan presenter reads the value into a field. No code uses the field, so the variable has no effect at this time. | `VulkanVideoPresenter.Draws.Recording.cs` |
 | `SHARPEMU_FORCE_TITLE_VERTEX_OUTPUTS_ONE` | `1` | Vertex export targets 32 to 35 write the vector (1, 1, 1, 1). This applies only to the vertex shader at guest address 0x0000000500780000. Default is off. | `Gen5SpirvTranslator.cs` |
 | `SHARPEMU_GPU_WAIT_SPIN_US` | number (microseconds) | Sets how long a wait for GPU work polls before it blocks. A short poll saves the wake-up delay when the GPU finishes soon. `0` blocks at once. The default is 150. | `GpuWaitSpin.cs` |
+| `SHARPEMU_GRAPHICS_PIPELINE_LIBRARY` | `0` | `0` builds every graphics pipeline whole, with one descriptor set. By default, on a device that links `VK_EXT_graphics_pipeline_library` parts fast, the vertex input, vertex stage, pixel stage and color outputs compile once as separate parts and each pipeline links them: the vertex set is pushed, the bindless heap is set 1 and the pixel set comes from a descriptor pool. Render workers take pixel sets from their own pools, which return when the slice's submission completes. Enabling the extension changes the device, so the driver may compile every pipeline again after a change. | `VulkanVideoPresenter.PipelineLibraries.cs`, `VulkanVideoPresenter.Device.Setup.cs` |
 | `SHARPEMU_GRAPHICS_SUBGROUPS` | `0` or `1` | Set `1` to use native Vulkan subgroup operations in graphics shaders. Set `0` to use the fallback path. When unset, the presenter uses them only if the subgroup size is 32 and the vertex and fragment stages support subgroups. | `VulkanVideoPresenter.cs`, `VulkanVideoPresenter.Device.Setup.cs` |
 | `SHARPEMU_IMAGE_LOOKUP_MEMO` | `0` | `0` turns off the image lookup memo. The default keeps the result of each image lookup that found an image with the same backing, and gives it again for the same request until an image is registered or removed. | `GuestImageCache.Lookup.cs` |
 | `SHARPEMU_OCCLUSION_GPU_DUMPS` | `0` | `0` turns off GPU copies of pending occlusion results. By default, later GPU buffer reads receive these results without waiting for CPU publication. Guest memory publication remains ordered in both modes. | `VulkanVideoPresenter.Occlusion.cs`, `VulkanOcclusionQueries.GpuResults.cs` |
