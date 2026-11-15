@@ -39,8 +39,15 @@ public sealed unsafe partial class GuestImageCache
             layerCount > layers - metadata.ColorMetadataBaseLayer)
             throw SubmissionScheduler.Fatal("The native color metadata view is outside its slices.");
 
-        using (var held = _lock.Hold())
+        bool registered;
+        using (_lock.Read())
         {
+            registered = NativeColorClearRegistered(imageIdentifier, in metadata, metadataKind, layers);
+        }
+
+        if (!registered)
+        {
+            using var held = _lock.Hold();
             IncludeMetadataWriteRange(metadata.Range.Address, metadata.Range.Size);
             // A new metadata use must not retain another surface's clear state or ownership.
             var changed = false;
