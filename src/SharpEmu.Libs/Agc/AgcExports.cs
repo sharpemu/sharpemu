@@ -585,17 +585,15 @@ public static partial class AgcExports
         return true;
     }
 
+    // The free space is the dword distance between the cursors truncated to 32 bits,
+    // less the reserved space. Titles rely on the truncation: an allocator with a null down cursor still has room.
     private static uint GetRemainingCommandDwords(
         ulong cursorUp,
         ulong cursorDown,
         uint reservedDwords)
     {
-        var availableDwords = cursorDown >= cursorUp
-            ? Math.Min((cursorDown - cursorUp) / sizeof(uint), uint.MaxValue)
-            : 0;
-        return availableDwords > reservedDwords
-            ? (uint)availableDwords - reservedDwords
-            : 0;
+        var availableDwords = unchecked((uint)((long)(cursorDown - cursorUp) / sizeof(uint)));
+        return Math.Max(availableDwords, reservedDwords) - reservedDwords;
     }
 
     private static int ReturnPointer(CpuContext ctx, ulong pointer)
