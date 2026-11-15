@@ -424,7 +424,8 @@ public sealed partial class GuestImageCache
 
     private void ScheduleReadback(ResourceSlotIdentifier imageIdentifier, CachedImage image)
     {
-        if (_readbackLinearImages && !image.Description.IsTiled && !ImageDescription.IsEmptyRange(image.Description.Data))
+        if (_readbackLinearImages && !image.Description.IsTiled && !ImageDescription.IsEmptyRange(image.Description.Data) &&
+            !HostLayoutTargets.Holds(image.Description.Data.Address))
         {
             if (!image.IsGpuModified)
             {
