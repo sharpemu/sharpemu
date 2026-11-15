@@ -237,7 +237,7 @@ public sealed partial class GuestImageCache
         return hash & (LookupSlots - 1);
     }
 
-    private static bool SameRequest(in ImageRequest left, in ImageRequest right) =>
+    internal static bool SameRequest(in ImageRequest left, in ImageRequest right) =>
         SameDescription(left.Description, right.Description) && left.View == right.View && left.Role == right.Role &&
         left.TraceTextureMetadataAddress == right.TraceTextureMetadataAddress &&
         string.Equals(left.TraceTextureDescriptor, right.TraceTextureDescriptor, StringComparison.Ordinal) &&
