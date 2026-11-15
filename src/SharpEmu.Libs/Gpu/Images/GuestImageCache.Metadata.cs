@@ -404,8 +404,30 @@ public sealed partial class GuestImageCache
 
     public long MetadataGeneration => Volatile.Read(ref _metadataGeneration);
 
-    private void NoteMetadataChange(ulong address)
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _metadataChangeSites = new();
+
+    internal static string TakeMetadataChangeReport()
     {
+        var parts = new List<string>();
+        foreach (var site in _metadataChangeSites.Keys)
+        {
+            if (_metadataChangeSites.TryRemove(site, out var count) && count != 0)
+            {
+                parts.Add(FormattableString.Invariant($"{site}:{count}"));
+            }
+        }
+
+        return parts.Count == 0 ? "none" : string.Join(",", parts);
+    }
+
+    private void NoteMetadataChange(ulong address,
+        [System.Runtime.CompilerServices.CallerMemberName] string caller = "", [System.Runtime.CompilerServices.CallerLineNumber] int line = 0)
+    {
+        if (RenderPhaseProfile.Enabled)
+        {
+            _metadataChangeSites.AddOrUpdate(FormattableString.Invariant($"{caller}@{line}"), 1, static (_, count) => count + 1);
+        }
+
         var generation = _metadataGeneration + 1;
         _metadataEvents[generation & (MetadataEventSlots - 1)] = (generation, address);
         Volatile.Write(ref _metadataGeneration, generation);
