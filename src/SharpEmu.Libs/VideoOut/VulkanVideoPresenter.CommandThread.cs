@@ -487,8 +487,19 @@ internal static partial class VulkanVideoPresenter
         public bool ReadOverlayBefore(ulong address, Span<byte> destination, long sequence)
         {
             var size = (ulong)destination.Length;
-            if (_pendingRangeCount == 0 && !HasPendingStores(address, size))
+            if (!HasPendingStores(address, size))
             {
+                if (_pendingRangeCount != 0)
+                {
+                    foreach (var pending in _pendingRangeSnapshot)
+                    {
+                        if (pending.Sequence != 0 && pending.Sequence < sequence && address < pending.Address + pending.RangeSize && pending.Address < address + size)
+                        {
+                            throw new SerialResolveRequiredException("pending range read");
+                        }
+                    }
+                }
+
                 return _memory.TryRead(address, destination);
             }
             lock (_writeLock)
