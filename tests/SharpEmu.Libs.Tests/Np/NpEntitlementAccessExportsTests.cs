@@ -35,6 +35,45 @@ public sealed class NpEntitlementAccessExportsTests
         Assert.Equal(expected, NpEntitlementAccessExports.NpEntitlementAccessGetGameTrialsFlag(context));
     }
 
+    // A unified entitlement request finishes at once, signed out, with no entitlements; a deleted request is gone.
+    [Fact]
+    public void UnifiedEntitlementListRequestFinishesSignedOutUntilDeleted()
+    {
+        const int SignedOut = unchecked((int)0x817D0014);
+        const int RequestNotFound = unchecked((int)0x817D0015);
+        var memory = new FakeCpuMemory(MemoryBase, 0x1_000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        Assert.True(memory.TryWrite(MemoryBase, Enumerable.Repeat((byte)0xA5, 0x40).ToArray()));
+        context[CpuRegister.Rdi] = 0x1000_0000;
+        context[CpuRegister.Rsi] = 0;
+        context[CpuRegister.Rdx] = 0;
+        context[CpuRegister.Rcx] = 0;
+        context[CpuRegister.R8] = MemoryBase + 0x100;
+        context[CpuRegister.R9] = MemoryBase;
+        Assert.Equal(0, NpEntitlementAccessExports.NpEntitlementAccessRequestUnifiedEntitlementInfoList(context));
+        Assert.True(context.TryReadUInt64(MemoryBase, out var requestId));
+        Assert.NotEqual(0UL, requestId);
+
+        context[CpuRegister.Rdi] = requestId;
+        context[CpuRegister.Rsi] = MemoryBase + 0x10;
+        context[CpuRegister.Rdx] = MemoryBase + 0x200;
+        context[CpuRegister.Rcx] = 4;
+        context[CpuRegister.R8] = MemoryBase + 0x14;
+        context[CpuRegister.R9] = MemoryBase + 0x18;
+        Assert.Equal(0, NpEntitlementAccessExports.NpEntitlementAccessPollUnifiedEntitlementInfoList(context));
+        Span<byte> written = stackalloc byte[12];
+        Assert.True(memory.TryRead(MemoryBase + 0x10, written));
+        Assert.Equal(SignedOut, BinaryPrimitives.ReadInt32LittleEndian(written));
+        Assert.Equal(0, BinaryPrimitives.ReadInt32LittleEndian(written[4..]));
+        Assert.Equal(0, BinaryPrimitives.ReadInt32LittleEndian(written[8..]));
+
+        context[CpuRegister.Rdi] = requestId;
+        Assert.Equal(0, NpEntitlementAccessExports.NpEntitlementAccessDeleteRequest(context));
+        context[CpuRegister.Rdi] = requestId;
+        context[CpuRegister.Rsi] = MemoryBase + 0x10;
+        Assert.Equal(RequestNotFound, NpEntitlementAccessExports.NpEntitlementAccessPollUnifiedEntitlementInfoList(context));
+    }
+
     [Theory]
     [InlineData("GHOST2APP0000000")]
     [InlineData("GHOST2BASE000000")]

@@ -21,7 +21,6 @@ internal sealed partial class RenderRecorder
         var draw = record.Draw;
         var count = draw.Count;
         var instances = draw.InstanceCount;
-        var firstInstance = draw.FirstInstance;
         var indexAddress = record.TessellationIndexAddress;
         var indexSize = record.TessellationIndexSize;
         var vertexOffset = record.TessellationVertexOffset;
@@ -52,7 +51,10 @@ internal sealed partial class RenderRecorder
             localDataSlotBytes = System.Numerics.BitOperations.RoundUpToPowerOf2(Math.Max(input.LocalDataShareDwords, 1u)) * sizeof(uint);
             if (ringAddress == 0 || ringBytes < localDataSlotBytes)
                 throw _host.Fatal("The tessellation local data ring is unavailable or smaller than one hull group.");
-            offchipBuffers = (uint)Math.Min(ringBytes / localDataSlotBytes, uint.MaxValue);
+            // A group also takes a slot of the local data ring, so the ring bounds the groups as well. It does not lift
+            // the off-chip bound: a group past the guest's off-chip buffers would write its off-chip data beyond them.
+            var ringSlots = (uint)Math.Min(ringBytes / localDataSlotBytes, uint.MaxValue);
+            offchipBuffers = offchipBuffers == 0 ? ringSlots : Math.Min(offchipBuffers, ringSlots);
         }
         var groupsPerBatch = offchipBuffers == 0 ? 1u : (uint)Math.Clamp(Math.Min(offchipBuffers, factorSize / groupFactorBytes), 1, uint.MaxValue);
         var batchCapacity = groupsPerBatch * layout.PatchesPerGroup;
@@ -80,7 +82,6 @@ internal sealed partial class RenderRecorder
                 data[Gen5TessellationData.FirstPatch] = firstPatch;
                 data[Gen5TessellationData.PatchCount] = batchPatches;
                 data[Gen5TessellationData.VertexOffset] = unchecked((uint)vertexOffset);
-                data[Gen5TessellationData.InstanceId] = firstInstance;
                 data[Gen5TessellationData.PatchesPerInstance] = patches;
                 data[Gen5TessellationData.IndexSize] = indexSize;
                 data[Gen5TessellationData.FactorBytes] = batchPatches * patchFactorBytes;

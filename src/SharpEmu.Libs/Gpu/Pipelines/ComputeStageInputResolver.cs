@@ -20,7 +20,8 @@ public static class ComputeStageInputResolver
         bool needsLocalDataShareBarriers,
         uint dispatchX,
         uint dispatchY,
-        uint dispatchZ)
+        uint dispatchZ,
+        bool gpuThreadCounts = false)
     {
         var threadDimensions = (dispatchInitiator & UseThreadDimensionsBit) != 0;
         return new ComputeInputInfo
@@ -29,6 +30,7 @@ public static class ComputeStageInputResolver
             ThreadsY = compute.ThreadsY & 0xFFFFu,
             ThreadsZ = compute.ThreadsZ & 0xFFFFu,
             DispatchThreadDimensions = threadDimensions,
+            IndirectThreadCounts = threadDimensions && gpuThreadCounts,
             DispatchThreadsX = threadDimensions ? dispatchX : 0,
             DispatchThreadsY = threadDimensions ? dispatchY : 0,
             DispatchThreadsZ = threadDimensions ? dispatchZ : 0,

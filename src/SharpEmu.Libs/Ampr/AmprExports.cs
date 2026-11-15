@@ -13,7 +13,7 @@ using Microsoft.Win32.SafeHandles;
 
 namespace SharpEmu.Libs.Ampr;
 
-public static class AmprExports
+public static partial class AmprExports
 {
     private const int CommandBufferHeaderSize = 0x18;
     private const ulong CommandBufferTypeOffset = 0x00;
@@ -37,6 +37,7 @@ public static class AmprExports
     private const ulong AprMaxAppAddress = 0x0000f00000000000;
     private const ulong KernelEventQueueRecordSize = 0x20;
     private const ulong WriteAddressRecordSize = 0x20;
+    private const ulong MarkerRecordSize = 0x40;
     private const ulong WaitAddressRecordSizeWithoutReference = 0x08;
     private const ulong WaitAddressRecordSizeWith32BitReference = 0x0C;
     private const ulong WaitAddressRecordSizeWith64BitReference = 0x10;
@@ -61,6 +62,7 @@ public static class AmprExports
         public readonly List<KernelEventCommand> KernelEventCommands = [];
         public readonly List<WriteAddressCommand> WriteAddressCommands = [];
         public readonly List<WaitAddressCommand> WaitAddressCommands = [];
+        public readonly List<AmmCommand> AmmCommands = [];
         public bool GatherScatterValid;
         public uint GatherScatterFileId;
         public ulong GatherScatterDestination;
@@ -689,6 +691,55 @@ public static class AmprExports
     }
 
     [SysAbiExport(
+        Nid = "RPCAhx-aabE",
+        ExportName = "sceAmprCommandBufferGetBufferBaseAddress",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int CommandBufferGetBufferBaseAddress(CpuContext ctx)
+    {
+        var commandBuffer = ctx[CpuRegister.Rdi];
+        if (commandBuffer == 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        if (!TryGetCommandBufferState(ctx, commandBuffer, out var buffer, out _, out _))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        TraceAmpr(ctx, "get_buffer_base", commandBuffer, buffer, 0);
+        ctx[CpuRegister.Rax] = buffer;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // A marker only feeds the trace: it takes the place of one no-op record and does nothing when it runs.
+    [SysAbiExport(
+        Nid = "4quckD2y7Pg",
+        ExportName = "sceAmprCommandBufferSetMarker",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int CommandBufferSetMarker(CpuContext ctx)
+    {
+        var commandBuffer = ctx[CpuRegister.Rdi];
+        if (commandBuffer == 0)
+        {
+            return SetAmprResult(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        Span<byte> record = stackalloc byte[(int)MarkerRecordSize];
+        record.Clear();
+        if (!AppendCommandBufferRecord(ctx, commandBuffer, record))
+        {
+            return SetAmprResult(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY);
+        }
+
+        TraceAmpr(ctx, "set_marker", commandBuffer, ctx[CpuRegister.Rsi], 0);
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
         Nid = "gzndltBEzWc",
         ExportName = "sceAmprCommandBufferGetNumCommands",
         Target = Generation.Gen5,
@@ -882,7 +933,34 @@ public static class AmprExports
     {
         executionResult = (int)OrbisGen2Result.ORBIS_GEN2_OK;
         errorOffset = 0;
+        var status = TryCaptureCommands(ctx, commandBuffer, out var captured);
+        if (status != (int)OrbisGen2Result.ORBIS_GEN2_OK)
+        {
+            return status;
+        }
 
+        var next = 0;
+        RunCommands(ctx, captured!, ref next, stopAtUnmetWait: false, out executionResult, out errorOffset);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // The commands of a buffer as they were when it was submitted, in record order.
+    private sealed class CapturedCommands
+    {
+        public required ulong CommandBuffer { get; init; }
+        public required ulong Buffer { get; init; }
+        public required ulong WriteOffset { get; init; }
+        public required ReadFileCommand[] ReadCommands { get; init; }
+        public required KernelEventCommand[] KernelEventCommands { get; init; }
+        public required WriteAddressCommand[] WriteAddressCommands { get; init; }
+        public required WaitAddressCommand[] WaitAddressCommands { get; init; }
+        public required AmmCommand[] AmmCommands { get; init; }
+        public required (ulong Offset, int Kind, int Index)[] Order { get; init; }
+    }
+
+    private static int TryCaptureCommands(CpuContext ctx, ulong commandBuffer, out CapturedCommands? captured)
+    {
+        captured = null;
         if (commandBuffer == 0)
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
@@ -898,6 +976,7 @@ public static class AmprExports
         KernelEventCommand[] kernelEventCommands;
         WriteAddressCommand[] writeAddressCommands;
         WaitAddressCommand[] waitAddressCommands;
+        AmmCommand[] ammCommands;
         lock (state)
         {
             writeOffset = state.WriteOffset;
@@ -905,10 +984,12 @@ public static class AmprExports
             kernelEventCommands = state.KernelEventCommands.ToArray();
             writeAddressCommands = state.WriteAddressCommands.ToArray();
             waitAddressCommands = state.WaitAddressCommands.ToArray();
+            ammCommands = state.AmmCommands.ToArray();
         }
 
         var commands = new List<(ulong Offset, int Kind, int Index)>(
-            readCommands.Length + kernelEventCommands.Length + writeAddressCommands.Length + waitAddressCommands.Length);
+            readCommands.Length + kernelEventCommands.Length + writeAddressCommands.Length + waitAddressCommands.Length +
+            ammCommands.Length);
         for (var i = 0; i < readCommands.Length; i++)
         {
             commands.Add((readCommands[i].RecordOffset, 0, i));
@@ -925,27 +1006,59 @@ public static class AmprExports
         {
             commands.Add((waitAddressCommands[i].RecordOffset, 3, i));
         }
-        commands.Sort(static (left, right) => left.Offset.CompareTo(right.Offset));
-
-        foreach (var commandEntry in commands)
+        for (var i = 0; i < ammCommands.Length; i++)
         {
+            commands.Add((ammCommands[i].RecordOffset, 4, i));
+        }
+        commands.Sort(static (left, right) => left.Offset.CompareTo(right.Offset));
+        captured = new CapturedCommands
+        {
+            CommandBuffer = commandBuffer,
+            Buffer = buffer,
+            WriteOffset = writeOffset,
+            ReadCommands = readCommands,
+            KernelEventCommands = kernelEventCommands,
+            WriteAddressCommands = writeAddressCommands,
+            WaitAddressCommands = waitAddressCommands,
+            AmmCommands = ammCommands,
+            Order = commands.ToArray(),
+        };
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // Runs the captured commands from next on. A failed command stops the buffer, and executionResult and
+    // errorOffset report it. With stopAtUnmetWait, a wait whose condition does not hold yet stops the run there
+    // and returns false, so the rest can run where waiting holds up no guest thread.
+    private static bool RunCommands(
+        CpuContext ctx,
+        CapturedCommands captured,
+        ref int next,
+        bool stopAtUnmetWait,
+        out int executionResult,
+        out uint errorOffset)
+    {
+        executionResult = (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        errorOffset = 0;
+        for (; next < captured.Order.Length; next++)
+        {
+            var commandEntry = captured.Order[next];
             switch (commandEntry.Kind)
             {
                 case 0:
                     {
-                        var readCommand = readCommands[commandEntry.Index];
-                        var readResult = CompleteReadFileRecord(ctx, commandBuffer, readCommand);
+                        var readCommand = captured.ReadCommands[commandEntry.Index];
+                        var readResult = CompleteReadFileRecord(ctx, captured.CommandBuffer, readCommand);
                         if (readResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
                         {
                             executionResult = readResult;
                             errorOffset = checked((uint)commandEntry.Offset);
-                            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                            return true;
                         }
                         break;
                     }
 
                 case 1:
-                    var eventCommand = kernelEventCommands[commandEntry.Index];
+                    var eventCommand = captured.KernelEventCommands[commandEntry.Index];
                     if (!KernelEventQueueCompatExports.TriggerAmprEvent(
                             eventCommand.Equeue,
                             unchecked((uint)eventCommand.Id),
@@ -953,35 +1066,62 @@ public static class AmprExports
                     {
                         executionResult = (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
                         errorOffset = checked((uint)commandEntry.Offset);
-                        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                        return true;
                     }
                     break;
 
                 case 2:
-                    var writeCommand = writeAddressCommands[commandEntry.Index];
+                    var writeCommand = captured.WriteAddressCommands[commandEntry.Index];
                     if (!ctx.TryWriteUInt64(writeCommand.Address, writeCommand.Value))
                     {
                         executionResult = (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
                         errorOffset = checked((uint)commandEntry.Offset);
-                        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                        return true;
                     }
                     break;
 
                 case 3:
-                    var waitCommand = waitAddressCommands[commandEntry.Index];
+                    var waitCommand = captured.WaitAddressCommands[commandEntry.Index];
+                    if (stopAtUnmetWait && !IsWaitMet(ctx, waitCommand))
+                    {
+                        return false;
+                    }
+
                     var waitResult = WaitForAddress(ctx, waitCommand);
                     if (waitResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
                     {
                         executionResult = waitResult;
                         errorOffset = checked((uint)commandEntry.Offset);
-                        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                        return true;
+                    }
+                    break;
+
+                case 4:
+                    var ammResult = ExecuteAmmCommand(ctx, captured.AmmCommands[commandEntry.Index]);
+                    if (ammResult != (int)OrbisGen2Result.ORBIS_GEN2_OK)
+                    {
+                        executionResult = ammResult;
+                        errorOffset = checked((uint)commandEntry.Offset);
+                        return true;
                     }
                     break;
             }
         }
 
-        TraceAmpr(ctx, "complete", commandBuffer, buffer, writeOffset);
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        TraceAmpr(ctx, "complete", captured.CommandBuffer, captured.Buffer, captured.WriteOffset);
+        return true;
+    }
+
+    // An address that cannot be read counts as met, so the wait reports the fault where it runs.
+    private static bool IsWaitMet(CpuContext ctx, WaitAddressCommand command)
+    {
+        if (command.Flush != 0)
+        {
+            Thread.MemoryBarrier();
+        }
+
+        return !ctx.TryReadUInt64(command.Address, out var value) ||
+            IsWaitConditionSatisfied(value, command.Reference, command.Compare);
     }
 
     private static int _unknownReadFileIdWarnings;
@@ -1084,6 +1224,7 @@ public static class AmprExports
             state.KernelEventCommands.Clear();
             state.WriteAddressCommands.Clear();
             state.WaitAddressCommands.Clear();
+            state.AmmCommands.Clear();
             state.GatherScatterValid = false;
             state.GatherScatterFileId = 0;
             state.GatherScatterDestination = 0;
@@ -1151,6 +1292,7 @@ public static class AmprExports
                 state.KernelEventCommands.Clear();
                 state.WriteAddressCommands.Clear();
                 state.WaitAddressCommands.Clear();
+                state.AmmCommands.Clear();
                 state.GatherScatterValid = false;
                 state.GatherScatterFileId = 0;
                 state.GatherScatterDestination = 0;
@@ -1173,7 +1315,8 @@ public static class AmprExports
             return state.ReadFileCommands.Count != 0 ||
                    state.KernelEventCommands.Count != 0 ||
                    state.WriteAddressCommands.Count != 0 ||
-                   state.WaitAddressCommands.Count != 0;
+                   state.WaitAddressCommands.Count != 0 ||
+                   state.AmmCommands.Count != 0;
         }
     }
 

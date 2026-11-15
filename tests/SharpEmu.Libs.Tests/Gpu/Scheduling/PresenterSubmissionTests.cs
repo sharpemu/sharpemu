@@ -196,6 +196,73 @@ public sealed class PresenterSubmissionTests
     }
 
     [Fact]
+    public void AcquireTimeout_DiscardsTheTakenOlderFlipAndReopensItsBuffer()
+    {
+        var context = new CpuContext(new FakeCpuMemory(0x10000, 0x1000), Generation.Gen5);
+        var handle = VideoOutExports.VideoOutOpen(context);
+        Assert.True(handle > 0);
+        const BindingFlags staticMembers = BindingFlags.Static | BindingFlags.NonPublic;
+        var queue = typeof(VulkanVideoPresenter).GetField("_pendingGuestImagePresentations", staticMembers)!.GetValue(null)!;
+        var presentationType = queue.GetType().GenericTypeArguments[0];
+        var enqueue = queue.GetType().GetMethod("Enqueue")!;
+        var clear = queue.GetType().GetMethod("Clear")!;
+        var presenter = RuntimeHelpers.GetUninitializedObject(PresenterType);
+        var commands = new CommandStreamQueue((ICommandStreamHost)presenter);
+        Set(presenter, "_commandStream", commands);
+        Assert.Empty((IEnumerable)queue);
+        try
+        {
+            // Register display buffers 0 and 1 without starting a native presenter.
+            var ports = (IDictionary)typeof(VideoOutExports).GetField("_ports", staticMembers)!.GetValue(null)!;
+            var port = ports[handle]!;
+            var slots = (Array)port.GetType().GetProperty("BufferSlots")!.GetValue(port)!;
+            foreach (var index in new[] { 0, 1 })
+            {
+                var slot = slots.GetValue(index)!;
+                slot.GetType().GetProperty("GroupIndex")!.SetValue(slot, 0);
+            }
+
+            // An older flip on buffer 0 and a newer one on buffer 1, neither paced by the display clock.
+            Assert.Equal(0, VideoOutExports.TryReserveFlipRequest(handle, 0, 0, 0, false, out var olderRequest));
+            Assert.Equal(0, VideoOutExports.TryReserveFlipRequest(handle, 1, 0, 0, false, out var newerRequest));
+            foreach (var (sequence, requestId) in new[] { (1L, olderRequest), (2L, newerRequest) })
+            {
+                var frame = Activator.CreateInstance(presentationType)!;
+                presentationType.GetProperty("Sequence")!.SetValue(frame, sequence);
+                presentationType.GetProperty("FlipRequestId")!.SetValue(frame, requestId);
+                enqueue.Invoke(queue, new[] { frame });
+            }
+
+            // The render loop takes the older frame, then gets no swapchain image within the acquire timeout.
+            var take = PresenterType.GetMethod("TryTakePresentation", InstanceMembers)!;
+            var arguments = new object?[] { null };
+            Assert.True((bool)take.Invoke(presenter, arguments)!);
+            var taken = arguments[0]!;
+            Assert.Equal(olderRequest, presentationType.GetProperty("FlipRequestId")!.GetValue(taken));
+            Assert.False(VideoOutExports.IsFlipDone(handle, 0));
+            var retries = (long)commands.BlockedRetries;
+
+            Invoke(presenter, "DropPresentationAfterAcquireTimeout", taken, 0, false, null);
+
+            Assert.Equal(VideoOutExports.FlipOutcome.Discarded, VideoOutExports.GetFlipOutcomeForTests(olderRequest));
+            Assert.True(VideoOutExports.IsFlipDone(handle, 0));
+            Assert.Equal(retries + 1, (long)commands.BlockedRetries);
+
+            // Only the taken frame is dropped: the newer flip still waits for the presenter.
+            Assert.Equal(VideoOutExports.FlipOutcome.Pending, VideoOutExports.GetFlipOutcomeForTests(newerRequest));
+            Assert.False(VideoOutExports.IsFlipDone(handle, 1));
+            var remaining = Assert.Single(((IEnumerable)queue).Cast<object>());
+            Assert.Equal(newerRequest, presentationType.GetProperty("FlipRequestId")!.GetValue(remaining));
+        }
+        finally
+        {
+            clear.Invoke(queue, null);
+            context[CpuRegister.Rdi] = (ulong)handle;
+            VideoOutExports.VideoOutClose(context);
+        }
+    }
+
+    [Fact]
     public void ImageUploadProfile_AddsBytesAndSeparatesPreparationCosts()
     {
         var statistics = new RenderPhaseProfile.ImageUploadStatistics();

@@ -221,7 +221,7 @@ public sealed partial class GuestImageCache
 
         ref var memo = ref lookups[LookupSlot(request, exactFormat)];
         if (memo.ExactFormat != exactFormat || !SameRequest(memo.Request, request) || !LookupUnchangedSince(memo.Generation, memo.Begin, memo.End) ||
-            _slots.TryGet(memo.Result) is not { Registered: true, Parked: false } image)
+            _slots.TryGet(memo.Result) is not { Registered: true, Parked: false, DimensionTwinStale: false } image)
         {
             _lookupMisses++;
             _totalLookupMisses.Increment();

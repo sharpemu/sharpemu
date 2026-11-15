@@ -165,7 +165,6 @@ public sealed class TessellationWaveDeviceTests(HeadlessVulkanFixture fixture) :
         data[Gen5TessellationData.FirstPatch] = 7;
         data[Gen5TessellationData.PatchCount] = 63;
         data[Gen5TessellationData.VertexOffset] = 11;
-        data[Gen5TessellationData.InstanceId] = 100;
         data[Gen5TessellationData.PatchesPerInstance] = 10;
         harness.Run(() => runner.Dispatch(scalar,
             new Dictionary<DescriptorBindingKind, GpuBuffer[]> { [DescriptorBindingKind.Buffers] = [buffer] }, 1,
@@ -178,7 +177,7 @@ public sealed class TessellationWaveDeviceTests(HeadlessVulkanFixture fixture) :
             Assert.Equal((lane / 4) | ((lane % 4) << 8), Read(0));
             Assert.Equal(patch % 10, Read(1));
             Assert.Equal(patch % 10 * 4 + lane % 4 + 11, Read(2));
-            Assert.Equal(100 + patch / 10, Read(3));
+            Assert.Equal(patch / 10, Read(3));
         }
         harness.AssertNoValidationMessages();
     }

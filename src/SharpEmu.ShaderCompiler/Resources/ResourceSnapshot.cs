@@ -21,6 +21,9 @@ public sealed class ResourceSnapshot
     public uint[]? MipStatistics { get; init; }
     public object? Origin { get; set; }
 
+    // The heap V#s the draw's bindless heap records are read from, one per heap.
+    public BindlessHeapDescriptor[] Heaps { get; init; } = [];
+
     public static uint MipStatisticsOf(uint word5, uint word6) =>
         (word6 & MipStatisticsSlotWordMask) | ((word5 & MipStatisticsEnableWordMask) != 0 ? MipStatisticsEnabled : 0u);
 }

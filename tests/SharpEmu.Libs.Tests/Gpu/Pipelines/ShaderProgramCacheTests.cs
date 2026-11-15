@@ -92,6 +92,55 @@ public sealed class ShaderProgramCacheTests : IDisposable
         Assert.Equal("SNop", request.Program.Instructions[0].Opcode);
     }
 
+    [Theory]
+    [InlineData(16u, 1)]
+    [InlineData(15u, 2)]
+    public void ImageAliasPartitionsReuseOnePermutationWhenUncoalescedDemandFits(uint imageLimit, int permutations)
+    {
+        _guest.Host.ComputeImageDescriptorLimits = ImageBindingTestProgram.Limits with { SampledImages = imageLimit };
+        _guest.RegisterProgram(CodeA, HeaderA, ImageBindingTestProgram.Code());
+        var ids = new List<ulong>();
+        foreach (var partition in ImageBindingTestProgram.Partitions)
+        {
+            ImageBindingTestProgram.WriteDescriptors(_guest, DataBase, partition);
+            var cursor = 0u;
+            var program = Compile(CodeA, [unchecked((uint)DataBase), (uint)(DataBase >> 32)], ref cursor, out var stage);
+            ids.Add(program.Id);
+            Assert.Equal(16, stage.Resources.Images.Length);
+        }
+        Assert.Equal(permutations, ids.Distinct().Count());
+        Assert.Equal(permutations, Assert.Single(_guest.Programs.Entries).Permutations.Count);
+        Assert.Equal(permutations, _guest.Compiler.Requests.Count);
+        Assert.Equal(permutations, _guest.Host.Modules.Count);
+    }
+
+    // A pixel program's images bind one per slot as a compute program's do, within the graphics budget; the compute
+    // budget does not admit it.
+    [Theory]
+    [InlineData(16u, 0u, 1)]
+    [InlineData(15u, 0u, 2)]
+    [InlineData(0u, 16u, 2)]
+    public void PixelImageAliasPartitionsReuseOnePermutationWhenTheGraphicsBudgetFits(uint graphicsLimit, uint computeLimit,
+        int permutations)
+    {
+        _guest.Host.GraphicsImageDescriptorLimits = ImageBindingTestProgram.Limits with { SampledImages = graphicsLimit };
+        _guest.Host.ComputeImageDescriptorLimits = ImageBindingTestProgram.Limits with { SampledImages = computeLimit };
+        _guest.RegisterProgram(CodeA, HeaderA, ImageBindingTestProgram.Code());
+        var ids = new List<ulong>();
+        foreach (var partition in ImageBindingTestProgram.Partitions)
+        {
+            ImageBindingTestProgram.WriteDescriptors(_guest, DataBase, partition);
+            var cursor = 0u;
+            var program = _guest.Programs.GetOrCompile(
+                _guest.Source(CodeA, ShaderStage.Pixel, [unchecked((uint)DataBase), (uint)(DataBase >> 32)]),
+                new StageCompileOptions { PixelInfo = new PixelInputInfo(), PixelOutputs = [] }, ref cursor, out var stage);
+            ids.Add(program.Id);
+            Assert.Equal(16, stage.Resources.Images.Length);
+        }
+        Assert.Equal(permutations, ids.Distinct().Count());
+        Assert.Equal(permutations, _guest.Compiler.Requests.Count);
+    }
+
     private readonly FatalScope _fatal = new();
     private readonly PipelineTestGuest _guest = new();
 

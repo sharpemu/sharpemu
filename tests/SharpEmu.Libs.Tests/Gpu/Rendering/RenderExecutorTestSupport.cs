@@ -370,6 +370,9 @@ internal sealed class RecordingRenderHost : IRenderHost
     public void DrawIndexedIndirect(BufferBinding arguments) =>
         Calls.Add($"draw_indexed_indirect {arguments.Handle:X}:{arguments.Offset:X}");
 
+    public void DrawIndirect(BufferBinding arguments) =>
+        Calls.Add($"draw_indirect {arguments.Handle:X}:{arguments.Offset:X}");
+
     public void DrawMeshTasks(uint groupCountX, uint groupCountY, uint groupCountZ) =>
         Calls.Add($"draw_mesh {groupCountX} {groupCountY} {groupCountZ}");
 
@@ -589,6 +592,13 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
         CompletionRequested?.Invoke();
         return PendingComputeCompletion;
     }
+
+    public HashSet<ulong> SlowLinkedPrograms { get; } = [];
+    public List<(ulong Hash, bool Slow)> RecordedLinkedCompiles { get; } = [];
+
+    public bool IsSlowLinkedCompile(ulong hash) => SlowLinkedPrograms.Contains(hash);
+
+    public void RecordLinkedCompile(ulong hash, bool slow, long milliseconds) => RecordedLinkedCompiles.Add((hash, slow));
 
     public bool TryCreateComputePipeline(ComputeInputInfo input, ShaderProgram program, out PipelineHandle handle)
     {

@@ -180,6 +180,15 @@ public static class GuestGpuMemoryHook
         return false;
     }
 
+    // Capture the attached manager once, and hold its reservation through the landed notification.
+    internal static GuestGpuMemory.ManagedWriteLease BeginCpuWrite(ulong address, ulong size, bool emulatorWrite = false)
+    {
+        if (size == 0) return default;
+        if (_current is { } current) return current.BeginManagedWrite(address, size, emulatorWrite);
+        GuestImageWriteTracker.NotifyManagedWrite(address, size);
+        return default;
+    }
+
     // Notify the stores before a managed write changes guest memory.
     public static void MarkCpuWrite(ulong address, ulong size)
     {

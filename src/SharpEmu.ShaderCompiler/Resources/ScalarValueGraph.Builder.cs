@@ -272,7 +272,8 @@ public sealed partial class ScalarValueGraph
 
             foreach (var key in laneKeys)
             {
-                var value = MergeSlot(block, RegisterState.LaneSlot(key.Register, key.Lane), visited, pending, (state, _) => state.Lanes[key]);
+                var value = MergeSlot(block, RegisterState.LaneSlot(key.Register, key.Lane), visited, pending,
+                    static (state, slot) => state.Lanes[RegisterState.LaneOfSlot(slot)]);
                 if (!value.IsUndefined)
                 {
                     merged.Lanes[key] = value;
@@ -287,7 +288,8 @@ public sealed partial class ScalarValueGraph
 
             foreach (var key in maskKeys)
             {
-                var value = MergeSlot(block, RegisterState.MaskSlot(key), visited, pending, (state, _) => state.ThreadBits[key]);
+                var value = MergeSlot(block, RegisterState.MaskSlot(key), visited, pending,
+                    static (state, slot) => state.ThreadBits[RegisterState.MaskOfSlot(slot)]);
                 if (!value.IsUndefined)
                 {
                     merged.ThreadBits[key] = value;
@@ -1997,6 +1999,12 @@ public sealed partial class ScalarValueGraph
         public static int LaneSlot(uint register, uint lane) => 8192 + (int)(register * 64 + lane);
 
         public static int MaskSlot(uint register) => 32768 + (int)register;
+
+        // The keys back from their slots (a lane key is always below 64), so a merge reads them with a static lambda
+        // instead of a closure per key.
+        public static (uint Register, uint Lane) LaneOfSlot(int slot) => ((uint)(slot - 8192) / 64, (uint)(slot - 8192) % 64);
+
+        public static uint MaskOfSlot(int slot) => (uint)(slot - 32768);
 
         public ScalarValue Read(uint register) =>
             register < ScalarRegisterCount ? Scalars[register] : _graph.Undefined(ScalarValueType.U32);

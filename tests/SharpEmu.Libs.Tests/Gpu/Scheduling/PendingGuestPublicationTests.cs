@@ -91,6 +91,26 @@ public sealed class PendingGuestPublicationTests
         Assert.False(pending.TryOverlayLabels(0x2004, bytes, out _));
     }
 
+    // A held write is visible to command-processor reads at once, which keep their order after it when it belongs to
+    // another queue; a CPU read (no queue) and any read over a pending dump still wait.
+    [Fact]
+    public void CommandProcessorReadsHeldWriteButCpuReadsWait()
+    {
+        var pending = new PendingGuestPublications();
+        var held = pending.AddWrite(1, 0x1000, 4, [0x44, 0x33, 0x22, 0x11]);
+        var bytes = new byte[4];
+        Assert.True(pending.TryOverlayLabels(0, 0x1000, bytes, out var covered, out var foreign));
+        Assert.Equal(0xF, covered);
+        Assert.Equal(0x1122_3344u, System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(bytes));
+        Assert.Same(held, foreign);
+        Assert.True(pending.TryOverlayLabels(1, 0x1002, new byte[4], out covered, out foreign));
+        Assert.Equal(0x3, covered);
+        Assert.Null(foreign);
+        Assert.False(pending.TryOverlayLabels(0x1000, new byte[4], out _));
+        pending.Add(2, 0x1000, 8);
+        Assert.False(pending.TryOverlayLabels(0, 0x1000, new byte[4], out _, out _));
+    }
+
     [Fact]
     public void PageIndexFindsEntryAcrossPagesUntilPublished()
     {

@@ -43,6 +43,20 @@ internal sealed class ShaderCallUnionStore(string? path)
         return callees;
     }
 
+    // Whether the callees kept for the caller are the ones the recorded library links, site by site, so a session's first
+    // link of the caller asks for that library's program.
+    public bool KeepsCalleesOf(ShaderStage stage, ulong hash, LinkedShaderPrewarm linked)
+    {
+        EnsureLoaded();
+        if (!_callers.TryGetValue((stage, hash), out var sites))
+        {
+            return false;
+        }
+
+        var kept = sites.SelectMany(static site => site.Value.Select(callee => (site.Key, callee.Target.Address))).ToHashSet();
+        return kept.SetEquals(linked.Sites.SelectMany(static site => site.Targets.Select(target => (site.Pc, target.Address))));
+    }
+
     public void Save(ShaderStage stage, ulong hash, Dictionary<uint, UnitedCallee[]> sites)
     {
         if (path is null)

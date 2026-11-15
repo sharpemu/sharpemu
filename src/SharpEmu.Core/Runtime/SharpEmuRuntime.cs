@@ -200,6 +200,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         KernelMemoryCompatExports.ConfigureApplicationInfo(image.TitleId);
         SaveDataExports.ConfigureApplicationInfo(image.TitleId);
         SystemServiceExports.ConfigureApplicationInfo(image.TitleId, _systemLanguage);
+        VideoOutExports.StartPresenter();
         _ = RegisterLoadedModule(normalizedEbootPath, image, isMain: true, isSystemModule: false);
         KernelRuntimeCompatExports.ConfigureProcessProcParamAddress(image.ProcParamAddress);
         Console.Error.WriteLine($"[RUNTIME] Entry: 0x{image.EntryPoint:X16}");
@@ -1338,9 +1339,36 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             isMain,
             isSystemModule);
         KernelModuleRegistry.RegisterModuleSymbols(handle, image.RuntimeSymbols);
+        KernelModuleRegistry.RegisterModuleSegments(handle, ComputeImageSegments(image));
         Console.Error.WriteLine(
             $"[RUNTIME] Registered module handle={handle} name={Path.GetFileName(modulePath)} base=0x{baseAddress:X16} size=0x{size:X16}");
         return handle;
+    }
+
+    // The loaded segments in whole 16 KiB pages, each with the kernel protection of its ELF flags (CPU read 0x1,
+    // write 0x2, execute 0x4).
+    private static KernelModuleRegistry.ModuleSegment[] ComputeImageSegments(SelfImage image)
+    {
+        const ulong PageMask = 0x3FFF;
+        var imageBase = image.EntryPoint >= image.ElfHeader.EntryPoint
+            ? image.EntryPoint - image.ElfHeader.EntryPoint
+            : 0UL;
+        var segments = new List<KernelModuleRegistry.ModuleSegment>();
+        foreach (var header in image.ProgramHeaders)
+        {
+            if (header.HeaderType != ProgramHeaderType.Load || header.MemorySize == 0)
+            {
+                continue;
+            }
+
+            var start = unchecked(imageBase + header.VirtualAddress);
+            var protection = ((header.Flags & ProgramHeaderFlags.Read) != 0 ? 0x1 : 0) |
+                ((header.Flags & ProgramHeaderFlags.Write) != 0 ? 0x2 : 0) |
+                ((header.Flags & ProgramHeaderFlags.Execute) != 0 ? 0x4 : 0);
+            segments.Add(new(start & ~PageMask, unchecked(start + header.MemorySize + PageMask) & ~PageMask, protection));
+        }
+
+        return [.. segments];
     }
 
     private static bool TryComputeImageRange(SelfImage image, out ulong baseAddress, out ulong size)
@@ -1515,6 +1543,16 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             // hosts the GUI launcher in embedded sessions.
             Console.Error.WriteLine(
                 "[RUNTIME] Guest workers were still active at teardown; keeping the guest address space mapped.");
+            return;
+        }
+
+        if (HostSessionControl.IsShutdownRequested)
+        {
+            // A host shutdown tears the presentation down on its own thread, which still returns pages to their guest
+            // protection and downloads GPU results into guest memory; the process exits after it. Releasing the page
+            // guard or unmapping the guest space here would race that teardown.
+            Console.Error.WriteLine(
+                "[RUNTIME] Host shutdown: the presentation tears down guest GPU memory; keeping the guest address space mapped.");
             return;
         }
 

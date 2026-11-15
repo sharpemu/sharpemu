@@ -341,12 +341,26 @@ public static partial class AgcExports
         var cachePolicy = (uint)(ctx[CpuRegister.R8] & 0xFF);
         var destinationAddress = ctx[CpuRegister.R9];
         var stackAddress = ctx[CpuRegister.Rsp];
-        if (!TryReadUInt64(ctx, stackAddress + 8, out var dataSelectionRaw) ||
-            !TryReadUInt64(ctx, stackAddress + 16, out var data) ||
-            !TryReadUInt64(ctx, stackAddress + 24, out var gdsOffsetRaw) ||
-            !TryReadUInt64(ctx, stackAddress + 32, out var gdsSizeRaw) ||
-            !TryReadUInt64(ctx, stackAddress + 40, out var interruptRaw) ||
-            !TryReadUInt64(ctx, stackAddress + 48, out var interruptContextIdRaw))
+        ulong dataSelectionRaw, data, gdsOffsetRaw, gdsSizeRaw, interruptRaw, interruptContextIdRaw;
+        // AgcPacketWrites: the six stack words (Rsp + 8 to Rsp + 48) in one read of the same bytes; when it fails, the
+        // six reads below.
+        Span<byte> stackWords = stackalloc byte[6 * sizeof(ulong)];
+        if (AgcPacketWrites.Active && stackAddress <= ulong.MaxValue - 7 * sizeof(ulong) &&
+            ctx.Memory.TryRead(stackAddress + 8, stackWords))
+        {
+            dataSelectionRaw = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(stackWords);
+            data = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(stackWords[8..]);
+            gdsOffsetRaw = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(stackWords[16..]);
+            gdsSizeRaw = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(stackWords[24..]);
+            interruptRaw = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(stackWords[32..]);
+            interruptContextIdRaw = System.Buffers.Binary.BinaryPrimitives.ReadUInt64LittleEndian(stackWords[40..]);
+        }
+        else if (!TryReadUInt64(ctx, stackAddress + 8, out dataSelectionRaw) ||
+            !TryReadUInt64(ctx, stackAddress + 16, out data) ||
+            !TryReadUInt64(ctx, stackAddress + 24, out gdsOffsetRaw) ||
+            !TryReadUInt64(ctx, stackAddress + 32, out gdsSizeRaw) ||
+            !TryReadUInt64(ctx, stackAddress + 40, out interruptRaw) ||
+            !TryReadUInt64(ctx, stackAddress + 48, out interruptContextIdRaw))
         {
             return ReturnPointer(ctx, 0);
         }
@@ -807,8 +821,12 @@ public static partial class AgcExports
     {
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         var markerAddress = ctx[CpuRegister.Rsi];
+        var atOnce = AgcPacketWrites.Active;
+        byte[] marker;
         if (commandBufferAddress == 0 ||
-            !TryReadGuestCString(ctx, markerAddress, 4095, out var marker))
+            !(atOnce
+                ? TryReadGuestCStringInChunks(ctx, markerAddress, 4095, out marker)
+                : TryReadGuestCString(ctx, markerAddress, 4095, out marker)))
         {
             return ReturnPointer(ctx, 0);
         }

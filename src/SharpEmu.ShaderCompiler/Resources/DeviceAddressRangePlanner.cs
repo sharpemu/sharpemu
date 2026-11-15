@@ -22,6 +22,8 @@ public sealed record DeviceAddressRangePlan(
     DeviceAddressUnboundedReason UnboundedReason = DeviceAddressUnboundedReason.None)
 {
     public ulong Extent => Bounded && EndByte > FirstByte ? (ulong)(EndByte - FirstByte) : 0;
+    // Scalar dword loads mask the effective address down to a dword in the emitter.
+    public bool AlignScalarReads { get; init; }
 }
 
 public enum DeviceAddressUnboundedReason
@@ -111,7 +113,8 @@ public static class DeviceAddressRangePlanner
                 slot = handles.Count;
                 hashSlots.Add(slot);
                 handles.Add(handle);
-                ranges.Add(new DeviceAddressRangePlan((uint)slot, handle.Operands[0], handle.Operands[1], [], false, true, long.MaxValue, long.MinValue, false));
+                ranges.Add(new DeviceAddressRangePlan((uint)slot, handle.Operands[0], handle.Operands[1], [], false, true, long.MaxValue, long.MinValue, false)
+                    { AlignScalarReads = true });
             }
 
             // The immediate offset is signed; the span keeps the lowest and highest byte.
@@ -123,6 +126,7 @@ public static class DeviceAddressRangePlanner
             {
                 MemoryIndices = [.. ranges[slot].MemoryIndices, index],
                 Written = ranges[slot].Written || written,
+                AlignScalarReads = ranges[slot].AlignScalarReads && memory.Kind == MemoryResourceKind.ScalarAddress && !written,
                 Bounded = ranges[slot].Bounded && reason == DeviceAddressUnboundedReason.None,
                 UnboundedReason = ranges[slot].UnboundedReason != DeviceAddressUnboundedReason.None ? ranges[slot].UnboundedReason : reason,
                 FirstByte = Math.Min(ranges[slot].FirstByte, firstByte),
@@ -367,9 +371,23 @@ public static class DeviceAddressRangePlanner
         };
     }
 
+    internal const string MissingFunctionDescriptor = "The shader function buffer has no descriptor.";
+    internal const string UnresolvedFunctionBuffer = "The shader function buffer range cannot be resolved.";
+    internal const string SwizzledFunctionBuffer = "The shader function uses an unsupported swizzled buffer.";
+    internal const string WrappingFunctionBuffer = "The shader function buffer range wraps the guest address space.";
+
     // Evaluates the planned ranges for one draw. A bounded range spans its lowest byte to
     // its extent; an unbounded one starts at the lowest immediate and takes the cap.
     public static DeviceAddressRange[] Evaluate(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
+    {
+        var ranges = CompiledDeviceAddressRanges.Configured == CompiledDeviceAddressRanges.Mode.Off
+            ? EvaluateInterpreted(plan, inputs)
+            : CompiledDeviceAddressRanges.Serve(plan, inputs);
+        return plan.DeviceRecordCounts?.Append(plan, inputs, ranges) ?? ranges;
+    }
+
+    // One evaluator for every range and then the function V#s; the reference of CompiledDeviceAddressRanges.
+    internal static DeviceAddressRange[] EvaluateInterpreted(ShaderResourcePlan plan, ResourceRuntimeInputs inputs)
     {
         var ranges = plan.DeviceAddressRanges;
         var result = new DeviceAddressRange[ranges.Count];
@@ -381,20 +399,7 @@ public static class DeviceAddressRangePlanner
             uint low = 0;
             uint high = 0;
             var planned = range.Plannable && evaluator.Evaluate(range.BaseLow, out low) && evaluator.Evaluate(range.BaseHigh, out high);
-            var handleBase = (low | ((ulong)high << 32)) & AddressMask;
-            var firstByte = range.Bounded ? range.FirstByte : Math.Min(range.FirstByte, 0);
-            var baseAddress = planned ? unchecked(handleBase + (ulong)firstByte) & AddressMask : 0;
-            var size = range.Bounded ? range.Extent : MaxRangeBytes;
-            if (range.Bounded)
-            {
-                BoundedEvaluations.Increment();
-            }
-            else
-            {
-                UnboundedEvaluations[(int)range.UnboundedReason].Increment();
-            }
-
-            result[index] = new DeviceAddressRange(range.Handle, baseAddress, planned ? size : 0, planned, range.Written);
+            result[index] = EvaluateRange(range, planned, low, high);
         }
 
         if (plan.Graph.Program.FunctionBufferAccesses.Count == 0) return result;
@@ -405,7 +410,7 @@ public static class DeviceAddressRangePlanner
             if (!memory.DeviceDescriptor || !plan.Graph.Program.FunctionBufferAccesses.Contains(memory.Pc)) continue;
             if (!plan.Memory.TryGetIndex(memory.Pc, memory.ComponentIndex, out var memoryIndex) ||
                 plan.Accesses[memoryIndex]?.Handle is not { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } handle)
-                throw new ResourcePlanException("The shader function buffer has no descriptor.");
+                throw new ResourcePlanException(MissingFunctionDescriptor);
             var words = new uint[4];
             var resolved = true;
             for (var component = 0; component < 4 && resolved; component++)
@@ -414,20 +419,45 @@ public static class DeviceAddressRangePlanner
             {
                 // A V# of a callee linked with run-time arguments: the host resolves it for each record (CallRecordCallee).
                 if (plan.CallRecordCallees.Count != 0) continue;
-                throw new ResourcePlanException("The shader function buffer range cannot be resolved.");
+                throw new ResourcePlanException(UnresolvedFunctionBuffer);
             }
             var address = words[0] | ((ulong)(words[1] & 0xFFFF) << 32);
             if ((words[1] & 0x80000000) != 0)
-                throw new ResourcePlanException("The shader function uses an unsupported swizzled buffer.");
+                throw new ResourcePlanException(SwizzledFunctionBuffer);
             var stride = (words[1] >> 16) & 0x3FFF;
             var size = (ulong)words[2] * Math.Max(stride, 1u);
             var written = memory.Access is MemoryAccess.Write or MemoryAccess.Atomic;
             if (size == 0) continue;
             if (size > AddressMask - address + 1)
-                throw new ResourcePlanException("The shader function buffer range wraps the guest address space.");
+                throw new ResourcePlanException(WrappingFunctionBuffer);
             if (seen.Add((address, size, written)))
                 functionRanges.Add(new((uint)functionRanges.Count, address, size, true, written));
         }
         return functionRanges.ToArray();
+    }
+
+    // Shared by interpreted and compiled evaluators. Widen a scalar read's residency range down to the exact
+    // first dword the GPU can touch; aligned reads retain their original extent (e.g. six bounds words = 24 bytes).
+    internal static DeviceAddressRange EvaluateRange(DeviceAddressRangePlan range, bool planned, uint low, uint high)
+    {
+        var handleBase = (low | ((ulong)high << 32)) & AddressMask;
+        var firstByte = range.Bounded ? range.FirstByte : Math.Min(range.FirstByte, 0);
+        var baseAddress = planned ? unchecked(handleBase + (ulong)firstByte) & AddressMask : 0;
+        var size = range.Bounded ? range.Extent : MaxRangeBytes;
+        if (range.Bounded)
+        {
+            BoundedEvaluations.Increment();
+        }
+        else
+        {
+            UnboundedEvaluations[(int)range.UnboundedReason].Increment();
+        }
+
+        if (planned && range.AlignScalarReads)
+        {
+            size += baseAddress & 3;
+            baseAddress &= ~3ul;
+        }
+        return new DeviceAddressRange(range.Handle, baseAddress, planned ? size : 0, planned, range.Written);
     }
 }

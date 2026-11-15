@@ -6,6 +6,12 @@ using SharpEmu.ShaderCompiler.Ir;
 namespace SharpEmu.ShaderCompiler;
 
 public sealed record ShaderCallTarget(ulong Address, ulong Argument, Gen5ShaderProgram Program);
+
+// A call target whose code cannot be inlined; the message names the target and the instruction.
+public sealed class ShaderCallLinkException(string message, ShaderCallTarget target) : InvalidOperationException(message)
+{
+    public ShaderCallTarget Target { get; } = target;
+}
 public sealed record ShaderCallSite(uint Pc, uint AddressRegister, uint ArgumentRegister, uint ReturnRegister,
     ulong ReturnAddress, IReadOnlyList<ShaderCallTarget> Targets);
 // With RuntimeArgument, the test of the callee alone: every record of it matches.
@@ -43,7 +49,7 @@ public static class Gen5ShaderCallLinker
     // the records; otherwise one copy per record, whose argument the plan reads.
     public static Gen5ShaderProgram Link(Gen5ShaderProgram caller, IReadOnlyList<ShaderCallSite> calls, bool runtimeArguments = false)
     {
-        if (caller.IsFusedProgram || caller.Instructions.Any(instruction => instruction.Opcode is "SGetpcB64" or "SSetpcB64"))
+        if (caller.IsFusedProgram || caller.Instructions.Any(instruction => instruction.Opcode is "SSetpcB64"))
             throw new InvalidOperationException("The caller uses an unsupported program-address operation.");
         var instructions = new List<Gen5ShaderInstruction>();
         var functionBuffers = new HashSet<uint>();
@@ -64,14 +70,16 @@ public static class Gen5ShaderCallLinker
             branches.Add((instructions.Count, body, target));
             Append(new(0, Gen5ShaderEncoding.Sopp, "SBranch", [0xBF820000], [], [], null));
         }
-        foreach (var instruction in caller.Instructions)
+        foreach (var instruction in caller.Instructions.Select(WithoutDebuggerBranch))
         {
             labels.Add((0, instruction.Pc), pc);
             if (instruction.Opcode != "SSwappcB64")
             {
                 if (Gen5IrBranchResolver.Instance.TryGetBranchTarget(instruction, out var target))
                     branches.Add((instructions.Count, 0, target));
-                Append(instruction);
+                // S_GETPC_B64 reads the shader base plus the instruction's offset in the caller's code, to address the
+                // constants placed after the code, say. The copy keeps that offset after the callee bodies before it moved it.
+                Append(instruction.Opcode == "SGetpcB64" ? instruction with { AddressOffset = instruction.ProgramOffset } : instruction);
                 continue;
             }
             // A site whose table holds only null records has no target: it links to its fault, which the
@@ -98,13 +106,15 @@ public static class Gen5ShaderCallLinker
                         RuntimeArgument = runtimeArguments,
                         Callee = target.Address,
                     }));
-                foreach (var operation in target.Program.Instructions)
+                foreach (var operation in target.Program.Instructions.Select(WithoutDebuggerBranch))
                 {
                     labels.Add((body, operation.Pc), pc);
-                    if (operation.Opcode == "SSetpcB64")
+                    // A function may also return with s_swappc_b64 null, s[ret:ret+1], which jumps without saving an address.
+                    if (operation.Opcode == "SSetpcB64" || Gen5ShaderTranslator.IsSwapProgramCounterWithoutReturnAddress(operation))
                     {
                         if (operation.Sources.Count != 1 || operation.Sources[0] != Gen5Operand.Scalar(call.ReturnRegister))
-                            throw new InvalidOperationException("The shader function has an unresolved return target.");
+                            throw new ShaderCallLinkException(
+                                $"The shader function has an unresolved return target: {Describe(target, operation)}.", target);
                         Branch(0, returnPc);
                         continue;
                     }
@@ -112,7 +122,8 @@ public static class Gen5ShaderCallLinker
                         "SMovreldB32" or "SMovreldB64" or "SMovrelsd2B32" ||
                         operation.Destinations.Any(destination => destination.Kind == Gen5OperandKind.ScalarRegister &&
                             destination.Value < call.ReturnRegister + 2 && destination.Value + operation.DestinationWidth > call.ReturnRegister))
-                        throw new InvalidOperationException("The shader function changes its return address or calls another function.");
+                        throw new ShaderCallLinkException(
+                            $"The shader function changes its return address or calls another function: {Describe(target, operation)}.", target);
                     if (Gen5IrBranchResolver.Instance.TryGetBranchTarget(operation, out var destinationPc))
                         branches.Add((instructions.Count, body, destinationPc));
                     if (operation.Control is Gen5BufferMemoryControl || operation.Opcode.StartsWith("SBufferLoad", StringComparison.Ordinal))
@@ -128,8 +139,9 @@ public static class Gen5ShaderCallLinker
                         }
                         : operation);
                 }
-                if (target.Program.Instructions.LastOrDefault()?.Opcode is not ("SSetpcB64" or "SEndpgm"))
-                    throw new InvalidOperationException("The shader function has no terminal return.");
+                if (target.Program.Instructions.LastOrDefault() is not { } last ||
+                    last.Opcode is not ("SSetpcB64" or "SEndpgm") && !Gen5ShaderTranslator.IsSwapProgramCounterWithoutReturnAddress(last))
+                    throw new ShaderCallLinkException($"The shader function has no terminal return: target=0x{target.Address:X}.", target);
                 var test = instructions[testIndex];
                 instructions[testIndex] = test with { Control = ((ShaderCallMatchControl)test.Control!) with { TargetPc = pc } };
             }
@@ -184,4 +196,15 @@ public static class Gen5ShaderCallLinker
     // Whether a program was linked with its shader calls: every site of a linked program holds call entries or a fault.
     public static bool IsLinked(Gen5ShaderProgram program) =>
         program.Instructions.Any(static instruction => instruction.Control is ShaderCallEntryControl or ShaderCallFaultControl);
+
+    // S_CBRANCH_CDBG* branch only under an attached GPU debugger, and the translators emit them as never taken. Their targets
+    // are debugger stubs past S_ENDPGM that the decode leaves out, so a linked program holds them as S_NOP.
+    private static Gen5ShaderInstruction WithoutDebuggerBranch(Gen5ShaderInstruction instruction) =>
+        instruction.Opcode.StartsWith("SCbranchCdbg", StringComparison.Ordinal)
+            ? instruction with { Opcode = "SNop", Words = [0xBF800000], Sources = [], Destinations = [], Control = null }
+            : instruction;
+
+    private static string Describe(ShaderCallTarget target, Gen5ShaderInstruction operation) =>
+        $"target=0x{target.Address:X} pc=0x{operation.Pc:X} {operation.Opcode} {string.Join(',', operation.Destinations)} <- " +
+        string.Join(',', operation.Sources);
 }

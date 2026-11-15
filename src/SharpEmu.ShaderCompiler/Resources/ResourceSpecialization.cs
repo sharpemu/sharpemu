@@ -6,7 +6,8 @@ using System.Linq;
 
 namespace SharpEmu.ShaderCompiler.Resources;
 
-public readonly record struct BufferSpecialization(uint PackedStride, uint DescriptorFormat, uint DescriptorSwizzle);
+// A buffer's stride is not part of its specialization; an indexed access reads it from the binding's V# at run time.
+public readonly record struct BufferSpecialization(uint DescriptorFormat, uint DescriptorSwizzle);
 
 // The module-affecting layout of one bounded runtime V# table. Candidate descriptors
 // themselves are appended to Buffers; this names their contiguous run and the flattened
@@ -36,6 +37,7 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
 {
     // The plan's base buffer count; Buffers beyond it are materialized candidates.
     public int BaseBufferCount { get; init; }
+    public bool StableImageBindings { get; init; }
     public List<BufferSpecialization> Buffers { get; init; } = [];
     public List<ImageSpecialization> Images { get; init; } = [];
     public List<BufferCandidateTableSpecialization> BufferCandidateTables { get; init; } = [];
@@ -43,7 +45,8 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
     public List<uint> SamplerDescriptorGroups { get; init; } = [];
 
     public bool Equals(ResourceSpecialization? other) =>
-        ReferenceEquals(this, other) || other is not null && BaseBufferCount == other.BaseBufferCount && Buffers.SequenceEqual(other.Buffers) &&
+        ReferenceEquals(this, other) || other is not null && StableImageBindings == other.StableImageBindings &&
+        BaseBufferCount == other.BaseBufferCount && Buffers.SequenceEqual(other.Buffers) &&
         Images.SequenceEqual(other.Images) && BufferCandidateTables.SequenceEqual(other.BufferCandidateTables) &&
         ImageDescriptorGroups.SequenceEqual(other.ImageDescriptorGroups) &&
         SamplerDescriptorGroups.SequenceEqual(other.SamplerDescriptorGroups);
@@ -54,6 +57,7 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
     {
         var hash = new HashCode();
         hash.Add(BaseBufferCount);
+        hash.Add(StableImageBindings);
         foreach (var buffer in Buffers)
         {
             hash.Add(buffer);
@@ -77,6 +81,7 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
     public ResourceSpecialization Clone() => new()
     {
         BaseBufferCount = BaseBufferCount,
+        StableImageBindings = StableImageBindings,
         Buffers = [.. Buffers],
         Images = [.. Images],
         BufferCandidateTables = [.. BufferCandidateTables],
@@ -88,7 +93,7 @@ public sealed class ResourceSpecialization : IEquatable<ResourceSpecialization>
     public static ResourceSpecialization Default(ShaderResourceInfo info) => new()
     {
         BaseBufferCount = info.Buffers.Count,
-        Buffers = info.Buffers.Select(_ => new BufferSpecialization(0, DescriptorConstants.InvalidFormat, DescriptorConstants.IdentityDestinationSelect)).ToList(),
+        Buffers = info.Buffers.Select(_ => new BufferSpecialization(DescriptorConstants.InvalidFormat, DescriptorConstants.IdentityDestinationSelect)).ToList(),
         Images = info.Images.Select(image => new ImageSpecialization(
             image.NumericClass == ImageNumericClass.Unsupported
                 ? (image.Atomic64 ? ImageNumericClass.Uint64 : image.Atomic ? ImageNumericClass.Uint : ImageNumericClass.Float)

@@ -43,6 +43,9 @@ internal static partial class Program
         ("DOTNET_gcServer", "1"),
         ("DOTNET_GCHeapCount", "4"),
         ("DOTNET_GCNoAffinitize", "1"),
+        // Guest memory keeps the machine's memory load above the GC's high-memory thresholds, where it runs a blocking
+        // compacting generation-2 collection of most of a second every few seconds. The value is hexadecimal (99 percent).
+        ("DOTNET_GCHighMemPercent", "63"),
     ];
     private const int ATTACH_PARENT_PROCESS = -1;
     private const int STD_INPUT_HANDLE = -10;

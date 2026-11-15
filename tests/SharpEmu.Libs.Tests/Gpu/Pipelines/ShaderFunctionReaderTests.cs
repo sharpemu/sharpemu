@@ -114,4 +114,22 @@ public sealed class ShaderFunctionReaderTests
         readable = true;
         Assert.True(cache.Read(0x10000, Read).Complete);
     }
+
+    // Words that do not decode (a stale table record naming other data) are decoded again only once they change.
+    [Fact]
+    public void FunctionCache_KeepsAFailedDecodeUntilItsWordsChange()
+    {
+        var code = new Dictionary<ulong, uint> { [0x10000] = 0x7A005800 };
+        bool Read(ulong address, out uint word) => code.TryGetValue(address, out word);
+        var cache = new ShaderFunctionCache(null);
+
+        var first = cache.Read(0x10000, Read);
+        Assert.False(first.Complete);
+        Assert.DoesNotContain("read-failed", first.Error);
+        Assert.Same(first, cache.Read(0x10000, Read));
+
+        code[0x10000] = 0xBE80200E;
+        var changed = cache.Read(0x10000, Read);
+        Assert.True(changed.Complete, changed.Error);
+    }
 }

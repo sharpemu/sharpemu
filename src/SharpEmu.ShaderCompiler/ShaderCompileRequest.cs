@@ -72,7 +72,10 @@ public readonly record struct MeshShaderConfiguration(
     bool InputTriangleStrip = false,
     uint DeviceSubgroupLaneCount = 0,
     bool InputPointList = false,
-    bool InputLineList = false)
+    bool InputLineList = false,
+    // The task stage of an automatic draw launches the groups and passes the draw parameters in
+    // its payload (SpirvMeshTask), in place of the shader data.
+    bool TaskLaunched = false)
 {
     public static uint[] ParameterLocations(Gen5ShaderProgram program, int requiredOutputCount) =>
         program.Instructions.Select(instruction => instruction.Control).OfType<Gen5ExportControl>()
@@ -123,10 +126,22 @@ public sealed class ShaderCompileRequest
 
         FlattenedSlotByMemoryIndex = new Dictionary<int, uint>(plan.FlattenedSlotByMemoryIndex);
         FlattenedTableReservedWords = (uint)plan.FlattenedTableReservedCount;
+        var heapImages = new Dictionary<int, HeapRecordUse>();
+        var heapSamplers = new Dictionary<int, HeapRecordUse>();
+        foreach (var record in plan.HeapRecords)
+        {
+            var heap = plan.DescriptorSources[(int)record.Source].Heap!;
+            (record.Sampler ? heapSamplers : heapImages)[record.MemoryIndex] =
+                new HeapRecordUse(heap.KeyMemoryIndex, heap.Immediate, heap.RecordBytes);
+        }
+
+        HeapImageByMemoryIndex = heapImages;
+        HeapSamplerByMemoryIndex = heapSamplers;
         (CallRecordImageByMemoryIndex, CallRecordSamplerByMemoryIndex, CallRecordCallees) = PlanCallRecordFields(plan, resources);
-        IndirectKeyMemoryIndices = plan.IndirectImages.Select(access => access.Key.MemoryIndex).ToHashSet();
+        var heapKeys = heapImages.Values.Concat(heapSamplers.Values).Select(use => use.KeyMemoryIndex).ToList();
+        IndirectKeyMemoryIndices = plan.IndirectImages.Select(access => access.Key.MemoryIndex).Concat(heapKeys).ToHashSet();
         IndirectOffsetKeyMemoryIndices = plan.IndirectImages.Where(access => access.KeyIsAddressOffset)
-            .Select(access => access.Key.MemoryIndex).ToHashSet();
+            .Select(access => access.Key.MemoryIndex).Concat(heapKeys).ToHashSet();
         IndirectRootByMemoryIndex = plan.IndirectImages.ToDictionary(access => access.MemoryIndex, access => access.Key.MemoryIndex);
 
         var writtenSlots = new Dictionary<int, uint>();
@@ -205,8 +220,13 @@ public sealed class ShaderCompileRequest
 
     public IReadOnlySet<int> IndirectOffsetKeyMemoryIndices { get; }
 
-    // The program reads call records through descriptor set 1 (BindlessHeap).
-    public bool UsesBindlessHeap => CallRecordImageByMemoryIndex.Count != 0 || CallRecordSamplerByMemoryIndex.Count != 0;
+    // Image accesses whose image or sampler is a bindless heap record: memory index → how the record is read.
+    public IReadOnlyDictionary<int, HeapRecordUse> HeapImageByMemoryIndex { get; }
+
+    public IReadOnlyDictionary<int, HeapRecordUse> HeapSamplerByMemoryIndex { get; }
+
+    public bool UsesBindlessHeap => HeapImageByMemoryIndex.Count != 0 || HeapSamplerByMemoryIndex.Count != 0 ||
+        CallRecordImageByMemoryIndex.Count != 0 || CallRecordSamplerByMemoryIndex.Count != 0;
 
     // Image accesses whose image or sampler a call record holds: memory index → its field and set-1 array.
     public IReadOnlyDictionary<int, CallRecordFieldUse> CallRecordImageByMemoryIndex { get; }
@@ -292,16 +312,38 @@ public sealed class ShaderCompileRequest
 
     public bool MipStatisticsSubgroupReduction { get; init; }
 
+    // The host subgroup of this stage is one guest wave32 and has arithmetic operations: wave32 MIN/MAX scans then
+    // become subgroup reductions (Gen5SpirvTranslator.WaveReductions).
+    public bool SubgroupArithmetic { get; init; }
+
     // The device supports 64-bit integer atomics on workgroup memory
     // (VkPhysicalDeviceFeatures.shaderSharedInt64Atomics). When set, the LDS
     // 64-bit atomics are emitted as real 64-bit atomics instead of a pair of
     // 32-bit ones, which is not atomic as a pair.
     public bool SupportsSharedInt64Atomics { get; init; }
 
+    // The device supports 64-bit integer atomics on storage buffers (shaderBufferInt64Atomics). When set, an
+    // aligned X2 buffer atomic (SWAP, AND, OR) is one 64-bit atomic, as on the GPU; as two 32-bit atomics another
+    // thread group can read one half of a pair from one update and the other half from another.
+    public bool SupportsBufferInt64Atomics { get; init; }
+
     // The device supports 64-bit integer atomics on images (shaderImageInt64Atomics). Without
     // it a program that uses an atomic on a 64-bit texel is rejected at compile time.
     public bool SupportsImageInt64Atomics { get; init; }
+
+    // The device has a shader-readable device clock (shaderDeviceClock), which S_MEMTIME and
+    // S_MEMREALTIME read.
+    public bool SupportsShaderDeviceClock { get; init; }
     public bool ShaderSignedZeroInfNanPreserveFloat32Supported { get; init; }
+
+    // The device bounds every storage buffer access by its descriptor's range and reads zero past it (robustBufferAccess2),
+    // so a guest buffer load needs no bounds check of its own.
+    public bool RobustBufferAccess2 { get; init; }
+
+    // The device has 16-bit floats (shaderFloat16) and float controls that can give them alone round-to-nearest-even, kept
+    // denormals and kept signed zero, infinity and NaN, so an f16 value widens and narrows with OpFConvert as the guest
+    // converts it.
+    public bool NativeFloat16Conversions { get; init; }
     public Gen5ComputeSystemRegisters? ComputeSystemRegisters { get; init; }
 
     public IReadOnlyList<Gen5PixelOutputBinding> PixelOutputs { get; init; } = [];

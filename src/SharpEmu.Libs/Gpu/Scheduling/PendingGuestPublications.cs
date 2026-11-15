@@ -15,8 +15,10 @@ internal sealed class PendingGuestPublications
         internal bool Registered;
         internal volatile bool Completed;
         internal bool DeferredLabel;
-        // A held-back command write: command-processor reads wait for it, unlike a label they forward.
+        // A held-back command write: CPU reads wait for its publication; command-processor reads take Payload, as
+        // they take a deferred label, and keep their order after it (ForwardHeldWrites).
         internal bool HeldWrite;
+        internal byte[]? Payload;
         internal ulong Value;
         // A dump with a GPU slot can be copied into a reading buffer instead of waited for.
         internal long GpuSlot = -1;
@@ -57,6 +59,17 @@ internal sealed class PendingGuestPublications
     // Pending dumps are few; resource reads scan this copy without the lock.
     private volatile Entry[] _dumps = [];
     private volatile Exception? _failure;
+
+    // A dump lookup remembers, per thread, the empty gap between pending dumps that its range fell in, and a later lookup
+    // inside that gap of the same dump array answers without a scan. SHARPEMU_PUBLICATION_GAPS=0 scans every lookup.
+    internal bool ReusePublicationGaps { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_PUBLICATION_GAPS") != "0";
+
+    // Only immutable range membership is cached, never Tick/Publishing/GpuSlot.
+    // Index replaces the array on every ranged dump addition and removal. One
+    // thread cannot borrow or mutate another thread's proof, even for this owner.
+    private readonly record struct DumpGap(PendingGuestPublications Owner, Entry[] Snapshot, ulong Start, ulong End);
+    [ThreadStatic] private static DumpGap _lastDumpGap;
 
     private static int FilterSlot(ulong page) => (int)((page * 0x9E37_79B9_7F4A_7C15UL) >> (64 - PageFilterBits));
 
@@ -101,13 +114,48 @@ internal sealed class PendingGuestPublications
     {
         var found = false;
         tick = 0;
-        foreach (var dump in _dumps)
+        var dumps = _dumps;
+        if (dumps.Length == 0) return false;
+        var reuse = ReusePublicationGaps;
+        if (!reuse)
         {
-            if (address >= dump.Address + dump.Size || dump.Address >= address + size) continue;
+            foreach (var dump in dumps)
+            {
+                if (address >= dump.Address + dump.Size || dump.Address >= address + size) continue;
+                if (skipGpuSlots && dump.GpuSlot >= 0) continue;
+                found = true;
+                if (!dump.Publishing) tick = Math.Max(tick, dump.Tick);
+            }
+            return found;
+        }
+        var end = address + size; // The callers already rejected overflow/empty ranges.
+        var gap = _lastDumpGap;
+        if (ReferenceEquals(gap.Owner, this) && ReferenceEquals(gap.Snapshot, dumps) &&
+            address >= gap.Start && end <= gap.End)
+        {
+            return false;
+        }
+
+        ulong left = 0, right = ulong.MaxValue;
+        var rawOverlap = false;
+        foreach (var dump in dumps)
+        {
+            if (address >= dump.Address + dump.Size)
+            {
+                left = Math.Max(left, dump.Address + dump.Size);
+                continue;
+            }
+            if (dump.Address >= end)
+            {
+                right = Math.Min(right, dump.Address);
+                continue;
+            }
+            rawOverlap = true;
             if (skipGpuSlots && dump.GpuSlot >= 0) continue;
             found = true;
             if (!dump.Publishing) tick = Math.Max(tick, dump.Tick);
         }
+        if (!rawOverlap) _lastDumpGap = new(this, dumps, left, right);
         return found;
     }
 
@@ -160,7 +208,27 @@ internal sealed class PendingGuestPublications
             foreach (var entry in _entries)
             {
                 if (entry.Size == 0 || address >= entry.Address + entry.Size || entry.Address >= address + size) continue;
-                if (!entry.DeferredLabel) return false;
+                if (!entry.DeferredLabel)
+                {
+                    // A command-processor reader may take a held write's known bytes; the CPU never does.
+                    if (!(entry.HeldWrite && entry.Payload is { } payload && readerQueue >= 0 && ForwardHeldWrites))
+                    {
+                        return false;
+                    }
+
+                    if (entry.Queue != readerQueue) newestForeign = entry;
+                    var heldFirst = Math.Max(address, entry.Address);
+                    var heldLast = Math.Min(address + size, entry.Address + entry.Size);
+                    for (var byteAddress = heldFirst; byteAddress < heldLast; byteAddress++)
+                    {
+                        var index = (int)(byteAddress - address);
+                        bytes[index] = payload[byteAddress - entry.Address];
+                        coveredMask |= 1 << index;
+                    }
+
+                    continue;
+                }
+
                 if (readerQueue >= 0 && entry.Queue != readerQueue) newestForeign = entry;
                 var first = Math.Max(address, entry.Address);
                 var last = Math.Min(address + size, entry.Address + entry.Size);
@@ -204,14 +272,21 @@ internal sealed class PendingGuestPublications
     }
 
     // A held-back command-processor write; readers wait for it like a dump.
-    internal Entry AddWrite(int queue, ulong address, ulong size)
+    // A command-processor label read takes a held write's bytes instead of waiting for its publication: the write was
+    // held only so the CPU sees it after the foreign label it follows, and the reading queue keeps its own order after
+    // it. SHARPEMU_FORWARD_HELD_WRITES=0 makes the reads wait again.
+    private static readonly bool DefaultForwardHeldWrites = Environment.GetEnvironmentVariable("SHARPEMU_FORWARD_HELD_WRITES") != "0";
+
+    internal bool ForwardHeldWrites { get; set; } = DefaultForwardHeldWrites;
+
+    internal Entry AddWrite(int queue, ulong address, ulong size, byte[]? payload = null)
     {
         if (size == 0 || address > ulong.MaxValue - size)
             throw new ArgumentOutOfRangeException(nameof(size));
         lock (_gate)
         {
             ThrowIfFailed();
-            var entry = new Entry(queue, address, size) { HeldWrite = true };
+            var entry = new Entry(queue, address, size) { HeldWrite = true, Payload = payload };
             _entries.Add(entry);
             Track(entry);
             Index(entry, 1);

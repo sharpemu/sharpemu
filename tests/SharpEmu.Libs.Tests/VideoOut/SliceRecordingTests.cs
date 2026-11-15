@@ -41,6 +41,7 @@ public sealed class SliceRecordingTests : IClassFixture<HeadlessVulkanFixture>
         SetHostField(host, "_presenter", presenter);
         SetHostField(host, "_bufferCache", RuntimeHelpers.GetUninitializedObject(typeof(GuestBufferCache)));
         SetHostField(host, "_arena", new SliceArena(null!, 1));
+        SetHostField(host, "_sliceDescriptors", new SharpEmu.Libs.Gpu.Pipelines.SliceDescriptorHeap(null!, null!));
         var slice = Activator.CreateInstance(SliceType, nonPublic: true)!;
         var items = (IList)SliceType.GetField("Items")!.GetValue(slice)!;
         var itemType = items.GetType().GetGenericArguments()[0];

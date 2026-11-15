@@ -345,6 +345,7 @@ internal static unsafe partial class VulkanVideoPresenter
         public int Resume;
         public RecordingHost? Host;
         public List<SliceArenaChunk> Chunks = [];
+        public List<DescriptorPool> DescriptorPools = [];
         public bool Submitted;
         public bool Dispatched;
         public long DispatchedAt;
@@ -459,6 +460,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private RenderWorkerPool? _workers;
         internal SliceArenaPool? _arenaPool;
+        internal DescriptorPoolStock? _descriptorPoolStock;
 
         private void CreateRenderWorkers()
         {
@@ -469,6 +471,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             _scheduler.MemoryBarrierRecorder ??= RecordRequestedMemoryBarrier;
             _arenaPool = new SliceArenaPool(_deviceInfo, _scheduler);
+            _descriptorPoolStock ??= new DescriptorPoolStock(_deviceInfo);
             _workers = new RenderWorkerPool(this, RenderWorkerCount);
             Console.Error.WriteLine($"[LOADER][INFO] Render workers: {RenderWorkerCount}");
         }
@@ -775,6 +778,7 @@ internal static unsafe partial class VulkanVideoPresenter
             slice.Done.Wait();
             _slicesRecorded.Increment();
             _scheduler.NoteSliceJoined(slice.Generation);
+            RetireSliceDescriptorPools(slice);
             if (slice.Chunks.Count == 0)
             {
                 return;
@@ -789,6 +793,26 @@ internal static unsafe partial class VulkanVideoPresenter
             else
             {
                 chunks.ForEach(_arenaPool!.Return);
+            }
+        }
+
+        private void RetireSliceDescriptorPools(RenderSlice slice)
+        {
+            if (slice.DescriptorPools.Count == 0)
+            {
+                return;
+            }
+
+            var pools = slice.DescriptorPools;
+            var stock = _descriptorPoolStock!;
+            slice.DescriptorPools = [];
+            if (slice.Submitted)
+            {
+                _scheduler.QueueCompletionAction(() => pools.ForEach(stock.Return));
+            }
+            else
+            {
+                pools.ForEach(stock.Return);
             }
         }
 
@@ -848,6 +872,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private long _itemSequence;
         private readonly ConcurrentBag<RecordingBuffer>? _spareBuffers;
         private readonly SliceArena? _arena;
+        private readonly SliceDescriptorHeap? _sliceDescriptors;
         private readonly SliceHazards? _hazards;
         private readonly RenderRecorder? _workerRecorder;
         private readonly Dictionary<CachedImage, BindingBox> _workerBindings = new(ReferenceEqualityComparer.Instance);
@@ -944,6 +969,7 @@ internal static unsafe partial class VulkanVideoPresenter
             finally
             {
                 slice.Chunks = _arena!.TakeChunks();
+                slice.DescriptorPools = _sliceDescriptors!.TakePools();
                 _segment = null;
             }
         }

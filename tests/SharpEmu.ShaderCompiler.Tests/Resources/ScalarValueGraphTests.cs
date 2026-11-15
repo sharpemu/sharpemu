@@ -327,12 +327,15 @@ public sealed class ScalarValueGraphTests
 
         var memory = new TestWordMemory { Base = 0x3000 };
         memory.At(0x300C) = 0xA5A5A5A5;
+        memory.At(0x3010) = 0x5A5A5A5A;
         var plan = Extract(Read(12), userDataCount: 0);
         Assert.True(RuntimeValueEvaluator.FlattenResourceTable(plan, Inputs([], memory.Read), out var table));
         Assert.Equal([0xA5A5A5A5u], table);
 
+        // Past the 16-byte buffer the load reads zero, as on the GPU, not the memory that follows the buffer.
         var overflow = Extract(Read(16), userDataCount: 0);
-        Assert.False(RuntimeValueEvaluator.FlattenResourceTable(overflow, Inputs([], memory.Read), out _));
+        Assert.True(RuntimeValueEvaluator.FlattenResourceTable(overflow, Inputs([], memory.Read), out var overflowTable));
+        Assert.Equal([0u], overflowTable);
     }
 
     // A loop whose body runs under a divergent mask still reaches a fixpoint: the

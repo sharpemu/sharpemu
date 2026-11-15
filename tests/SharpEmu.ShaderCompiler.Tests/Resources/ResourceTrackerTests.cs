@@ -31,6 +31,122 @@ public sealed class ResourceTrackerTests
         Assert.Equal(wide, image.Atomic64);
     }
 
+    // A descriptor word that 40 branches each change on both sides is a web with 2^40 paths. Planning and evaluating
+    // it must look at each node once: walking every path did not finish.
+    [Fact]
+    public void ADescriptorWordMergedThroughManyBranchesIsPlannedQuickly()
+    {
+        var instructions = new List<Gen5ShaderInstruction>
+        {
+            // s5..s7 are loaded words; s4 starts as user data.
+            ScalarLoad(0, 0, 8, count: 4),
+            MoveScalarRegister(8, 5, 9),
+            MoveScalarRegister(12, 6, 10),
+            MoveScalarRegister(16, 7, 11),
+            MoveScalarRegister(20, 4, 2),
+        };
+        var pc = 24u;
+        for (var branch = 0; branch < 40; branch++, pc += 20)
+        {
+            // if (s3 == 0) s4 += 1; else s4 += 2;
+            instructions.Add(Sopc(pc, "SCmpEqU32", Gen5Operand.Scalar(3), Operand(0)));
+            instructions.Add(Branch(pc + 4, "SCbranchScc0", 2));
+            instructions.Add(Sop2(pc + 8, "SAddU32", 4, Gen5Operand.Scalar(4), Operand(1)));
+            instructions.Add(Branch(pc + 12, "SBranch", 1));
+            instructions.Add(Sop2(pc + 16, "SAddU32", 4, Gen5Operand.Scalar(4), Operand(2)));
+        }
+
+        instructions.Add(BufferLoad(pc, 4));
+        instructions.Add(EndProgram(pc + 8));
+        var program = Program([.. instructions]);
+
+        // The V# words s5..s7 are read at 0x1000; s2 = 0x2000 and s3 = 0, so every branch adds 1.
+        var memory = new TestWordMemory { Words = [0, 0, 16, 0] };
+        var userData = new uint[64];
+        userData[0] = 0x1000;
+        userData[2] = 0x2000;
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        var materialized = false;
+        Exception? failure = null;
+        var planning = new Thread(() =>
+        {
+            try
+            {
+                var plan = Extract(program);
+                materialized = ResourceMaterializer.Materialize(plan, Inputs(userData, memory.Read, memory.Read),
+                    ref snapshot, ref specialization);
+            }
+            catch (Exception exception)
+            {
+                failure = exception;
+            }
+        })
+        {
+            IsBackground = true,
+        };
+        planning.Start();
+
+        Assert.True(planning.Join(TimeSpan.FromSeconds(30)), "planning did not finish");
+        Assert.Null(failure);
+        Assert.True(materialized);
+        Assert.Equal(0x2000u + 40u, Assert.Single(snapshot.Buffers)[0]);
+    }
+
+    // Behind exec branches the same word is a web of phis, which the runtime-descriptor check walks for a memory read.
+    // A buffer base that differs per lane cannot be bound, so the plan is rejected, at once.
+    [Fact]
+    public void ADescriptorWordMergedThroughManyExecBranchesIsPlannedQuickly()
+    {
+        var instructions = new List<Gen5ShaderInstruction>
+        {
+            ScalarLoad(0, 0, 8, count: 4),
+            MoveScalarRegister(8, 5, 9),
+            MoveScalarRegister(12, 6, 10),
+            MoveScalarRegister(16, 7, 11),
+            MoveScalarRegister(20, 4, 2),
+            // One more exec branch makes s5..s7 phis too, which the check accepts as runtime words.
+            Vopc(24, "VCmpxEqU32", Operand(1), 24),
+            Branch(28, "SCbranchExecz", 3),
+            Sop2(32, "SAddU32", 5, Gen5Operand.Scalar(5), Operand(1)),
+            Sop2(36, "SAddU32", 6, Gen5Operand.Scalar(6), Operand(1)),
+            Sop2(40, "SAddU32", 7, Gen5Operand.Scalar(7), Operand(1)),
+        };
+        var pc = 44u;
+        for (var branch = 0; branch < 40; branch++, pc += 12)
+        {
+            // Lanes where v24 == 1 add 1 to s4; with none, the block is skipped.
+            instructions.Add(Vopc(pc, "VCmpxEqU32", Operand(1), 24));
+            instructions.Add(Branch(pc + 4, "SCbranchExecz", 1));
+            instructions.Add(Sop2(pc + 8, "SAddU32", 4, Gen5Operand.Scalar(4), Operand(1)));
+        }
+
+        instructions.Add(BufferLoad(pc, 4));
+        instructions.Add(EndProgram(pc + 8));
+        var program = Program([.. instructions]);
+
+        Exception? failure = null;
+        var planning = new Thread(() =>
+        {
+            try
+            {
+                Extract(program);
+            }
+            catch (Exception exception)
+            {
+                failure = exception;
+            }
+        })
+        {
+            IsBackground = true,
+        };
+        planning.Start();
+
+        Assert.True(planning.Join(TimeSpan.FromSeconds(30)), "planning did not finish");
+        var rejection = Assert.IsType<ResourcePlanException>(failure);
+        Assert.Contains("BufferHandle dword 0 is not a valid runtime value", rejection.Message);
+    }
+
     [Fact]
     public void DenseBufferTracking()
     {
@@ -199,22 +315,64 @@ public sealed class ResourceTrackerTests
     [Fact]
     public void SamplerLoadedAtALaneChosenIndex_IsStillRejected()
     {
-        var program = Program(
-            MoveScalarRegister(0, 16, 0),
-            MoveScalarRegister(4, 17, 1),
-            MoveScalarRegister(8, 18, 2),
-            MoveScalarRegister(12, 19, 3),
-            Vop2(16, "VLshlrevB32", 1, Operand(12), Gen5Operand.Vector(0)),
-            ReadFirstLane(20, 106, 1),
-            ScalarBufferLoad(24, 16, destination: 24, count: 4, dynamicOffsetRegister: 106),
-            Image(32, "ImageSample", 8, 24),
-            EndProgram(40));
+        var program = LaneIndexedSamplerProgram();
 
         var error = Assert.Throws<ResourcePlanException>(() => Extract(program, stage: ShaderStage.Pixel));
         Assert.Contains("not a valid runtime value", error.Message);
     }
 
-    private static Gen5ShaderProgram LaneIndexedImageProgram() => Program(
+    // Opted in to the bindless fallback, the same heap entry reads as a null image in compute too, and the plan names
+    // the access.
+    [Fact]
+    public void ImageDescriptorLoadedAtALaneChosenIndexInCompute_ReadsAsNullWhenOptedIn()
+    {
+        var program = LaneIndexedImageProgram();
+
+        var plan = Extract(program, stage: ShaderStage.Compute, bindlessNullDescriptors: true);
+
+        var image = Assert.Single(plan.DescriptorSources, source => source.DwordCount == 8);
+        Assert.All(image.Dwords, dword => Assert.True(dword.IsConstant && dword.ConstantU32 == 0));
+        Assert.Equal([48u], plan.NullBindlessDescriptorPcs);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(Request(program, bindlessNullDescriptors: true), out var shader, out var error), error);
+        Assert.NotEmpty(shader.Spirv);
+    }
+
+    // A sampler read from a heap at a lane-chosen index reads as a null sampler when opted in.
+    [Fact]
+    public void SamplerLoadedAtALaneChosenIndex_ReadsAsNullWhenOptedIn()
+    {
+        var program = LaneIndexedSamplerProgram();
+
+        var plan = Extract(program, stage: ShaderStage.Pixel, bindlessNullDescriptors: true);
+
+        Assert.Single(plan.DescriptorSources, source =>
+            source.DwordCount == 4 && source.Dwords.All(dword => dword.IsConstant && dword.ConstantU32 == 0));
+        Assert.Equal([32u], plan.NullBindlessDescriptorPcs);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(Request(program, ShaderStage.Pixel, bindlessNullDescriptors: true), out var shader, out var error), error);
+        Assert.NotEmpty(shader.Spirv);
+    }
+
+    // The plan lists only what the opt-in added: a pixel shader's lane-chosen image reads as null without it.
+    [Fact]
+    public void ThePlanListsOnlyTheOptedInFallbacks()
+    {
+        var plan = Extract(LaneIndexedImageProgram(), stage: ShaderStage.Pixel, bindlessNullDescriptors: true);
+
+        Assert.Empty(plan.NullBindlessDescriptorPcs);
+    }
+
+    internal static Gen5ShaderProgram LaneIndexedSamplerProgram() => Program(
+        MoveScalarRegister(0, 16, 0),
+        MoveScalarRegister(4, 17, 1),
+        MoveScalarRegister(8, 18, 2),
+        MoveScalarRegister(12, 19, 3),
+        Vop2(16, "VLshlrevB32", 1, Operand(12), Gen5Operand.Vector(0)),
+        ReadFirstLane(20, 106, 1),
+        ScalarBufferLoad(24, 16, destination: 24, count: 4, dynamicOffsetRegister: 106),
+        Image(32, "ImageSample", 8, 24),
+        EndProgram(40));
+
+    internal static Gen5ShaderProgram LaneIndexedImageProgram(uint dimension = 1) => Program(
         // The table V# in s16..s19 and the sampler in s24..s27 come from user data.
         MoveScalarRegister(0, 16, 0),
         MoveScalarRegister(4, 17, 1),
@@ -228,7 +386,7 @@ public sealed class ResourceTrackerTests
         ReadFirstLane(32, 106, 7),
         Sop2(36, "SLshlB32", 106, Gen5Operand.Scalar(106), Operand(5)),
         ScalarBufferLoad(40, 16, destination: 0, count: 8, dynamicOffsetRegister: 106),
-        Image(48, "ImageSample", 0, 24),
+        Image(48, "ImageSample", 0, 24, dimension: dimension),
         EndProgram(56));
     // A shader that selects among states with v_cmpx and s_cbranch_execz sets a constant sampler up in the first state's block and samples
     // with it in a later state's block. The skip edge of the first branch reaches the join with the sampler registers unwritten, so the host
@@ -700,13 +858,22 @@ public sealed class ResourceTrackerTests
         memory.Reads = 0;
         memory.FailAfter = 0;
         var snapshot = new ResourceSnapshot { UserData = [1] };
-        var specialization = new ResourceSpecialization { Buffers = [new BufferSpecialization(7, 0, 0)] };
+        var specialization = new ResourceSpecialization { Buffers = [new BufferSpecialization(7, 0)] };
         Assert.False(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
         Assert.Equal([1u], snapshot.UserData);
-        Assert.Equal(7u, specialization.Buffers[0].PackedStride);
+        Assert.Equal(7u, specialization.Buffers[0].DescriptorFormat);
 
         var layout = BindingLayout.Allocate(plan.Info, BindingLayout.CollectUserDataRegisters(program, 0, 64), false, plan.TableReads.Count != 0, false);
         Assert.NotNull(layout.Find(DescriptorBindingKind.FlattenedResourceTable));
+    }
+
+    // An indexed buffer access (idxen) makes the program read its buffers' strides at run time; offsets alone do not.
+    [Fact]
+    public void AnIndexedBufferAccessReadsTheBufferStridesAtRunTime()
+    {
+        Assert.True(Extract(Program(BufferAccess(0, "BufferLoadDword", 0, indexEnabled: true, vectorAddress: 1), EndProgram(8)))
+            .Info.UsesIndexedBuffers);
+        Assert.False(Extract(Program(BufferLoad(0, 0), EndProgram(8))).Info.UsesIndexedBuffers);
     }
 
     [Fact]

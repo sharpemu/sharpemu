@@ -71,12 +71,9 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             cache._gpuModifiedGate.ExitWriteLock();
         }
     }
-    private const int ObtainMemoSlots = 4096;
-    private readonly ObtainMemo[] _obtainMemos = new ObtainMemo[ObtainMemoSlots];
-
-    private readonly record struct ObtainMemo(ulong Address, ulong Size, ResourceSlotIdentifier Identifier, ulong Offset, GpuBuffer? Buffer);
     private long _gpuModifiedVersion;
     private readonly GuestPageTracker _tracker;
+    private readonly GuestWriteReservations _managedWrites;
     private readonly GpuRingBuffer _staging;
     private readonly ParallelGuestCopy _sweepCopy;
     private readonly GpuRingBuffer _stream;
@@ -107,10 +104,11 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         _gds = new GpuBuffer(device, scheduler, GpuBufferUsage.Stream, 0, GpuBuffer.AllFlags, GdsBufferSize);
         _bdaPageTable = new GpuBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AllFlags, BdaPageTableSize);
         _tracker = new GuestPageTracker(pages);
+        _managedWrites = pages.ManagedWrites;
         _staging = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Upload, 512 * MiB);
-        _uploader = new GuestBufferUploader(device, scheduler, guest, _staging);
-        // Up to three helper threads copy a large sweep's guest bytes with the render thread.
+        // Up to three helper threads copy a large sweep's guest bytes with the render thread, and a large upload's.
         _sweepCopy = new ParallelGuestCopy(guest, Math.Clamp(Environment.ProcessorCount - 1, 0, 3));
+        _uploader = new GuestBufferUploader(device, scheduler, guest, _staging, _sweepCopy);
         _stream = new GpuRingBuffer(device, scheduler, GpuMemoryPlacement.StreamRing, 64 * MiB, GpuBuffer.AddressedFlags);
         _download = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Download, 64 * MiB);
         _deviceRing = new GpuRingBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 128 * MiB);
@@ -341,19 +339,17 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             throw SubmissionScheduler.Fatal("A buffer request requires a command buffer that is recording.");
         }
 
-        var memoSlot = -1;
-        if (!isWritten)
+        // Admission precedes all tracker/image/backing locks and lasts through GPU ownership publication.
+        using var managedWriteClaim = isWritten ? _managedWrites.BeginGpuClaim(guestAddress, size) : default;
+
+        var memoSet = -1;
+        (GpuBuffer? Buffer, ulong Offset) remembered = default;
+        if (!isWritten && ObtainMemoUse != ObtainMemoMode.Off)
         {
-            memoSlot = (int)(((guestAddress >> 4) ^ (guestAddress >> 17) ^ (size * 0x9E3779B1UL)) & (ObtainMemoSlots - 1));
-            ref var memo = ref _obtainMemos[memoSlot];
-            if (memo.Buffer is { } kept && memo.Address == guestAddress && memo.Size == size &&
-                ReferenceEquals(_registry.TryGetRegisteredBuffer(memo.Identifier), kept) && kept.IsInBounds(guestAddress, size) &&
-                !_tracker.MayHaveCpuDirtyPages(guestAddress, size) &&
-                (!isTexelBuffer || !RequireImageCache().MayHaveImageBytes(guestAddress, size)))
+            memoSet = ObtainMemoSet(guestAddress, size);
+            if (TryServeObtainMemo(memoSet, guestAddress, size, isTexelBuffer, out remembered))
             {
-                TouchBuffer(memo.Identifier);
-                OverlayGuestPublications?.Invoke(kept, memo.Offset, guestAddress, size);
-                return (kept, memo.Offset);
+                return (remembered.Buffer!, remembered.Offset);
             }
         }
 
@@ -439,9 +435,9 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         }
         else OverlayGuestPublications?.Invoke(buffer, buffer.Offset(guestAddress), guestAddress, size);
 
-        if (memoSlot >= 0)
+        if (memoSet >= 0)
         {
-            _obtainMemos[memoSlot] = new ObtainMemo(guestAddress, size, bufferIdentifier, buffer.Offset(guestAddress), buffer);
+            RememberObtain(memoSet, guestAddress, size, bufferIdentifier, buffer, remembered);
         }
 
         return (buffer, buffer.Offset(guestAddress));
@@ -557,6 +553,11 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         return (owner, owner.Offset(guestAddress));
     }
 
+    // A GPU-side write into guest memory waits out overlapping reserved managed CPU writes (GuestWriteReservations); entered
+    // before the tracker, image and backing locks and held through the write's publication.
+    private GuestWriteReservations.GpuClaim ReserveGpuWrite(ulong address, ulong size) =>
+        IsValidRange(address, size) ? _managedWrites.BeginGpuClaim(address, size) : default;
+
     public void WriteHostMemory(ulong guestAddress, ReadOnlySpan<byte> data)
     {
         CompleteGuestPublications?.Invoke(guestAddress, (ulong)data.Length, PublicationAccess.Write);
@@ -565,6 +566,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             throw SubmissionScheduler.Fatal("The host DMA write range is invalid.");
         }
 
+        using var managedWriteClaim = ReserveGpuWrite(guestAddress, (ulong)data.Length);
         if (!_backing.TryWriteBacking(guestAddress, data))
         {
             throw SubmissionScheduler.Fatal($"Could not write the required direct backing: addr=0x{guestAddress:X16} size=0x{data.Length:X16}");
@@ -618,6 +620,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             throw SubmissionScheduler.Fatal("The fill memory address is invalid.");
         }
 
+        using var managedWriteClaim = ReserveGpuWrite(guestAddress, size);
         var images = RequireImageCache();
         if (ImageClearTrace.Enabled) images.TraceGuestWrite("command-fill", guestAddress, size, value);
         images.TraceMetadataFill(guestAddress, size, value);
@@ -720,6 +723,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             return;
         }
 
+        using var managedWriteClaim = ReserveGpuWrite(guestAddress, size);
         // Images over the range read it again; only GPU-owned image bytes need the general fill.
         // The buffer copy is filled on the GPU rather than uploaded from the written bytes.
         var images = RequireImageCache();
@@ -794,6 +798,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             return false;
         }
 
+        using var managedWriteClaim = ReserveGpuWrite(destination, size);
         var images = RequireImageCache();
         var sourceRegion = images.QueryRegion(source, sourceSize);
         var destinationRegion = images.QueryRegion(destination, size);
@@ -858,6 +863,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                 $"The buffer copy range is invalid: src=0x{srcVaddr:X16} dst=0x{dstVaddr:X16} size=0x{size:X16} src_gds={(srcGds ? 1 : 0)} dst_gds={(dstGds ? 1 : 0)}");
         }
 
+        using var managedWriteClaim = dstMemory ? ReserveGpuWrite(dstVaddr, size) : default;
         var images = RequireImageCache();
         if (ImageClearTrace.Enabled && dstMemory) images.TraceGuestWrite("command-copy", dstVaddr, size, srcGds ? 0 : srcVaddr);
         var srcRegion = srcMemory ? images.QueryRegion(srcVaddr, size) : default;
@@ -1055,7 +1061,9 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             }
 
             var epoch = _tracker.CpuDirtyEpoch;
-            if (mapping != _bdaSweepMapping || (epoch != _bdaSweepEpoch && (!ObservationGated || _observation != _bdaSweepObservation)))
+            var registrations = _registrationGeneration;
+            if (mapping != _bdaSweepMapping || registrations != _bdaSweepRegistrations ||
+                (epoch != _bdaSweepEpoch && (!ObservationGated || _observation != _bdaSweepObservation)))
             {
                 if (!_bdaSweepPlanBuilt || mapping != _bdaSweepPlanMapping)
                 {
@@ -1103,6 +1111,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
                 _bdaSweepEpoch = epoch;
                 _bdaSweepMapping = mapping;
+                _bdaSweepRegistrations = registrations;
                 _bdaSweepObservation = _observation;
                 Interlocked.Increment(ref BdaSweeps);
             }
@@ -1250,6 +1259,10 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     }
 
     private long _bdaSweepEpoch = -1;
+
+    // Every registration advances it: a new owner needs its first upload even when no CPU write moved the epoch.
+    private long _registrationGeneration;
+    private long _bdaSweepRegistrations = -1;
     private long _bdaSweepObservation = -1;
     private long _observation;
     public static long BdaSweeps;
@@ -1760,6 +1773,11 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
     private readonly record struct HotWindow(ulong Address, ulong Size, long LastHit, int Strikes = 0, long MutedUntil = 0);
 
+    // Eager readbacks are off unless SHARPEMU_EAGER_READBACKS=1: the CPU consumes few of them, while each still ends
+    // rendering early to flush its batch and downloads its whole window.
+    internal bool EagerReadbacksEnabled { get; set; } =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_EAGER_READBACKS"), "1", StringComparison.Ordinal);
+
     internal long EagerReadbacksStarted { get; private set; }
 
     internal long EagerReadbacksUsed { get; private set; }
@@ -1808,7 +1826,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
     private void NoteHotWindowWrite(ulong guestAddress, ulong size)
     {
-        if (_hotWindows.Count == 0 || size == 0)
+        if (!EagerReadbacksEnabled || _hotWindows.Count == 0 || size == 0)
         {
             return;
         }
@@ -2412,6 +2430,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         {
             _bufferPages.Set(buffer.CpuAddress, buffer.Size, covered: true);
             _registry.RegisterBuffer(bufferIdentifier, _retirementPolicy.CurrentTick);
+            _registrationGeneration++;
             var addresses = new ulong[sizePages];
             for (ulong page = 0; page < sizePages; page++)
             {
@@ -2424,6 +2443,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         {
             _bufferPages.Set(buffer.CpuAddress, buffer.Size, covered: false);
             _registry.BeginRetirement(bufferIdentifier);
+            _unregistrations++;
             _bdaPageTable.Fill(first * sizeof(ulong), sizePages * sizeof(ulong), 0);
         }
     }
@@ -2451,12 +2471,45 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         CompleteRetirementAfterSubmittedWork(bufferIdentifier);
     }
 
+    private long _unregistrations;
+    private int _preparationsOpen;
+    private readonly List<ResourceSlotIdentifier> _retireAfterPreparation = [];
+
+    // Changes whenever an owner is unregistered. A binding made before a change may name a retired owner.
+    internal long OwnerGeneration => _unregistrations;
+
+    // A draw or dispatch being prepared can still name an owner unregistered during its own preparation, and a wait
+    // inside the preparation can complete the tick a retirement was queued on. Such retirements are queued when the
+    // preparation closes, behind everything it recorded.
+    internal void BeginPreparation() => _preparationsOpen++;
+
+    internal void EndPreparation()
+    {
+        if (--_preparationsOpen != 0 || _retireAfterPreparation.Count == 0)
+        {
+            return;
+        }
+
+        var retired = _retireAfterPreparation.ToArray();
+        _retireAfterPreparation.Clear();
+        foreach (var bufferIdentifier in retired)
+        {
+            CompleteRetirementAfterSubmittedWork(bufferIdentifier);
+        }
+    }
+
     // Unregistering clears the buffer's page-table entries only for work recorded from now
     // on. Work already recorded or in flight can still reach it through its device address
     // (an async readback waits only for its last recorded writer), so it is destroyed once
     // that work completes.
     private void CompleteRetirementAfterSubmittedWork(ResourceSlotIdentifier bufferIdentifier)
     {
+        if (_preparationsOpen != 0)
+        {
+            _retireAfterPreparation.Add(bufferIdentifier);
+            return;
+        }
+
         if (_scheduler.Active)
         {
             _scheduler.QueueCompletionAction(() => _registry.CompleteRetirement(bufferIdentifier));
@@ -2629,6 +2682,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         }
 
         CompleteGuestPublications?.Invoke(guestAddress, size, PublicationAccess.Write);
+        using var managedWriteClaim = ReserveGpuWrite(guestAddress, size);
         if (RequireImageCache().MayHaveImageBytes(guestAddress, size) && RequireImageCache().QueryRegion(guestAddress, size).ImageBytes)
         {
             return false;
@@ -3058,7 +3112,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                 if (_defer)
                     _cache.DeferSweepUpload(_buffer, _guestAddress, _size, Copies, TotalSize);
                 else
-                    Source = _cache._uploader.PrepareSource(_buffer.CpuAddress, CollectionsMarshal.AsSpan(Copies), TotalSize, _guestAddress, _size);
+                    Source = _cache.StageCollectedUpload(this, _buffer, _guestAddress, _size);
             };
         }
 
@@ -3090,6 +3144,80 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     }
 
     [ThreadStatic] private static UploadCollector? _uploadCollector;
+
+    // An upload larger than the staging ring goes through the ring in pieces of half its size instead of through a new
+    // buffer of the whole size, whose first writes fault in every page. Each piece is recorded before the next one is
+    // staged, so staging a later piece may submit the earlier ones and wait for them. The last piece stays with the
+    // collector for the caller to record.
+    private GpuBuffer? StageCollectedUpload(UploadCollector collector, GpuBuffer buffer, ulong guestAddress, ulong size)
+    {
+        var copies = collector.Copies;
+        var pieceBytes = _staging.Size / 2;
+        if (collector.TotalSize <= _staging.Size || pieceBytes == 0)
+        {
+            return _uploader.PrepareSource(buffer.CpuAddress, CollectionsMarshal.AsSpan(copies), collector.TotalSize, guestAddress, size);
+        }
+
+        var pieces = SplitUploadPieces(CollectionsMarshal.AsSpan(copies), pieceBytes);
+        for (var index = 0; index < pieces.Count - 1; index++)
+        {
+            var regions = CollectionsMarshal.AsSpan(pieces[index]);
+            var bytes = UploadPieceBytes(regions);
+            if (_uploader.PrepareSource(buffer.CpuAddress, regions, bytes, guestAddress, size) is { } source)
+            {
+                RecordUpload(buffer, source, regions, guestAddress, size, bytes);
+                BufferUploadProfile.NoteUpload(regions.Length, bytes, size);
+            }
+        }
+
+        copies.Clear();
+        copies.AddRange(pieces[^1]);
+        collector.TotalSize = UploadPieceBytes(CollectionsMarshal.AsSpan(copies));
+        return _uploader.PrepareSource(buffer.CpuAddress, CollectionsMarshal.AsSpan(copies), collector.TotalSize, guestAddress, size);
+    }
+
+    // Splits staged copies into pieces of at most pieceBytes staged bytes each; a copy that crosses a piece boundary is
+    // split there. Source offsets restart at zero in every piece.
+    internal static List<List<BufferCopy>> SplitUploadPieces(ReadOnlySpan<BufferCopy> copies, ulong pieceBytes)
+    {
+        var pieces = new List<List<BufferCopy>>();
+        var piece = new List<BufferCopy>();
+        ulong staged = 0;
+        foreach (var copy in copies)
+        {
+            for (ulong done = 0; done < copy.Size;)
+            {
+                var take = Math.Min(copy.Size - done, pieceBytes - staged);
+                piece.Add(new BufferCopy(staged, copy.DstOffset + done, take));
+                staged += take;
+                done += take;
+                if (staged == pieceBytes)
+                {
+                    pieces.Add(piece);
+                    piece = new List<BufferCopy>();
+                    staged = 0;
+                }
+            }
+        }
+
+        if (piece.Count != 0)
+        {
+            pieces.Add(piece);
+        }
+
+        return pieces;
+    }
+
+    private static ulong UploadPieceBytes(ReadOnlySpan<BufferCopy> regions)
+    {
+        ulong bytes = 0;
+        foreach (var region in regions)
+        {
+            bytes += region.Size;
+        }
+
+        return bytes;
+    }
 
     private bool SynchronizeBufferCore(UploadCollector collector, GpuBuffer buffer, ulong guestAddress, ulong size, bool isWritten,
         bool isTexelBuffer, bool preserveCpuWriteHotPages, long startedAt)

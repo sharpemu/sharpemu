@@ -24,6 +24,11 @@ public sealed partial class RenderExecutor
     private const uint ImageClearStride = 16;
     private const uint ImageClearUserDataCount = 8;
 
+    // Thread counts a shader wrote stay on the GPU, which converts them to groups (IRenderHost.PrepareThreadDispatch).
+    internal bool GpuThreadCountsFor(uint dispatchInitiator, ulong indirectArgumentsAddress) =>
+        (dispatchInitiator & DispatchInitiatorUseThreadDimensions) != 0 && indirectArgumentsAddress != 0 &&
+        _host.ResolvesIndirectThreadDispatchOnGpu;
+
     public void Dispatch(ulong submitId, RegisterBanks banks, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator, ulong indirectArgumentsAddress = 0)
     {
         var compute = banks.Shader.Compute;
@@ -51,7 +56,9 @@ public sealed partial class RenderExecutor
         }
 
         var useThreadDimensions = (dispatchInitiator & DispatchInitiatorUseThreadDimensions) != 0;
-        if ((indirectArgumentsAddress == 0 || useThreadDimensions) && IsEmptyDispatch(compute, useThreadDimensions, groupsX, groupsY, groupsZ))
+        var gpuThreadCounts = GpuThreadCountsFor(dispatchInitiator, indirectArgumentsAddress);
+        if (!gpuThreadCounts && (indirectArgumentsAddress == 0 || useThreadDimensions) &&
+            IsEmptyDispatch(compute, useThreadDimensions, groupsX, groupsY, groupsZ))
         {
             if (RenderTrace.Enabled && RenderTrace.ZeroDispatch())
             {
@@ -66,7 +73,8 @@ public sealed partial class RenderExecutor
         ComputeProgram computeProgram;
         using (VideoOut.RenderPhaseProfile.MeasureDetail(VideoOut.RenderPhaseProfile.Phase.DrawProgramResolution))
         {
-            computeProgram = _pipelines.GetComputeProgram(banks, dispatchInitiator, groupsX, groupsY, groupsZ, indirectArgumentsAddress != 0);
+            computeProgram = _pipelines.GetComputeProgram(banks, dispatchInitiator, groupsX, groupsY, groupsZ, indirectArgumentsAddress != 0,
+                gpuThreadCounts);
         }
 
         if (computeProgram.ImageCopy is not null)
@@ -136,7 +144,7 @@ public sealed partial class RenderExecutor
             }
         }
 
-        if (useThreadDimensions)
+        if (useThreadDimensions && !gpuThreadCounts)
         {
             indirectArgumentsAddress = 0;
             var threadsX = groupsX;
@@ -176,6 +184,7 @@ public sealed partial class RenderExecutor
         record.GroupsY = groupsY;
         record.GroupsZ = groupsZ;
         record.IndirectArgumentsAddress = indirectArgumentsAddress;
+        record.GpuThreadCounts = gpuThreadCounts;
         record.HasStorageWrites = hasStorageWrites;
         var resources = input.Stage.Resources;
         Diagnostics.DispatchRunTally.NoteResolved(computeProgram.Program.Id, resources.Images, resources.Samplers, program.Bindings?.UsesTableBlock == true,
@@ -191,14 +200,124 @@ public sealed partial class RenderExecutor
     // frames.
     private static readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, long> LinkedCompileSkips = new();
 
+    // Not every linked program is such a pass. A skipped dispatch that set up later work is lost for good (a
+    // shader-call path whose first dispatches are skipped during its compile can leave an object out for the rest of
+    // the session), so a dispatch first waits for its module, as an unlinked dispatch does, for at most
+    // SHARPEMU_LINKED_COMPILE_WAIT_MS (default 5000, 0 = skip at once, at most 600000). A program whose compile
+    // outlasts the bound is skipped while it compiles and never waited for again.
+    internal static readonly long LinkedCompileWaitTicks =
+        (long.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_LINKED_COMPILE_WAIT_MS"), out var waitMs) ? Math.Clamp(waitMs, 0, 600_000) : 5000) *
+        System.Diagnostics.Stopwatch.Frequency / 1000;
+    // This executor's bound (tests change it) and the programs whose compile outlasted it.
+    internal long LinkedCompileWait = LinkedCompileWaitTicks;
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, byte> _linkedCompileSlow = new();
+
+    // A program whose module a session saw compile for minutes waits at most this long for it (default 250 ms,
+    // SHARPEMU_LINKED_KNOWN_SLOW_WAIT_MS, never longer than LinkedCompileWait). That is time enough for a module
+    // created from stored data, while a fresh compile would outlast LinkedCompileWait anyway and hold the stream for
+    // nothing.
+    internal static readonly long KnownSlowLinkedCompileWaitTicks =
+        (long.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_LINKED_KNOWN_SLOW_WAIT_MS"), out var knownSlowMs) ? Math.Clamp(knownSlowMs, 0, 600_000) : 250) *
+        System.Diagnostics.Stopwatch.Frequency / 1000;
+    internal long KnownSlowLinkedCompileWait = KnownSlowLinkedCompileWaitTicks;
+    // A module still compiling this long after its program's first dispatch waited is recorded as slow.
+    internal long SlowLinkedCompileRecordTicks = 60 * System.Diagnostics.Stopwatch.Frequency;
+    // When this session's first dispatch of each linked program began waiting for its module, and whether the program
+    // was known slow then; removed once the module is ready.
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, (long Started, bool KnownSlow)> _linkedCompileWaits = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, byte> _linkedCompileRecorded = new();
+
+    // Polls until ready() holds, sleeping on the compile's completion when there is one, for at most boundTicks.
+    internal static bool WaitForLinkedModule(Func<bool> ready, Func<Task?> completion, long boundTicks)
+    {
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        while (true)
+        {
+            var left = boundTicks - (System.Diagnostics.Stopwatch.GetTimestamp() - started);
+            if (left <= 0) return ready();
+            // A completed compile whose pipeline is not ready yet polls with sleeps, as no compile does: the wait never spins.
+            if (completion() is { IsCompleted: false } task)
+            {
+                try
+                {
+                    task.Wait(TimeSpan.FromSeconds((double)left / System.Diagnostics.Stopwatch.Frequency));
+                }
+                catch (AggregateException)
+                {
+                    // A failed compile surfaces where the pipeline is taken, as for an unlinked dispatch.
+                }
+            }
+            else
+            {
+                Thread.Sleep(1);
+            }
+
+            if (ready()) return true;
+        }
+    }
+
     private bool SkipWhileLinkedModuleCompiles(ComputeInputInfo input, ShaderProgram handle, ShaderProgramInfo program)
     {
-        if (program.Bindings is not { CallTargetCount: not 0 } ||
-            _pipelines.TryCreateComputePipeline(input, handle, out _)) return false;
+        if (program.Bindings is not { CallTargetCount: not 0 }) return false;
+        var ready = _pipelines.TryCreateComputePipeline(input, handle, out _);
+        if (!ready && LinkedCompileWait > 0 && !_linkedCompileSlow.ContainsKey(program.Hash))
+        {
+            var waiting = System.Diagnostics.Stopwatch.GetTimestamp();
+            var knownSlow = _pipelines.IsSlowLinkedCompile(program.Hash);
+            _linkedCompileWaits.TryAdd(program.Hash, (waiting, knownSlow));
+            var bound = knownSlow ? Math.Min(LinkedCompileWait, KnownSlowLinkedCompileWait) : LinkedCompileWait;
+            using (VideoOut.RenderPhaseProfile.MeasureDetail(VideoOut.RenderPhaseProfile.Phase.ComputePipelineWait))
+            {
+                ready = WaitForLinkedModule(() => _pipelines.TryCreateComputePipeline(input, handle, out _),
+                    () => _pipelines.GetComputePipelineCompletion(handle), bound);
+            }
+
+            var waitedMs = (System.Diagnostics.Stopwatch.GetTimestamp() - waiting) * 1000 / System.Diagnostics.Stopwatch.Frequency;
+            if (!ready) _linkedCompileSlow.TryAdd(program.Hash, 0);
+            Console.Error.WriteLine(ready
+                ? $"[GPU][INFO][LINKED_COMPILE] A dispatch waited {waitedMs} ms for its linked module: hash=0x{program.Hash:X16}."
+                : knownSlow
+                    ? $"[GPU][INFO][LINKED_COMPILE] A linked module a session saw compile for minutes still compiles after {waitedMs} ms; its dispatches are skipped until it is ready: hash=0x{program.Hash:X16}."
+                    : $"[GPU][WARN][LINKED_COMPILE] A linked module still compiles after {waitedMs} ms; its dispatches are skipped until it is ready: hash=0x{program.Hash:X16}.");
+        }
+
+        if (_linkedCompileWaits.TryGetValue(program.Hash, out var wait))
+        {
+            NoteLinkedCompileWait(program.Hash, wait, ready);
+        }
+
+        if (ready) return false;
         var skipped = LinkedCompileSkips.AddOrUpdate(program.Hash, 1, static (_, count) => count + 1);
         if ((skipped & (skipped - 1)) == 0)
             Console.Error.WriteLine($"[GPU][WARN][LINKED_COMPILE] Dispatches of a linked program are skipped while its module compiles: hash=0x{program.Hash:X16} skipped={skipped}.");
         return true;
+    }
+
+    // What later sessions learn from a module this session waited for. Still compiling SlowLinkedCompileRecordTicks
+    // after the first wait: slow (unless already known). Ready within LinkedCompileWait once the short bound of a known
+    // slow program had run out: not slow. A module ready within the short bound was created from stored data and says
+    // nothing about a fresh compile.
+    private void NoteLinkedCompileWait(ulong hash, (long Started, bool KnownSlow) wait, bool ready)
+    {
+        var elapsed = System.Diagnostics.Stopwatch.GetTimestamp() - wait.Started;
+        var milliseconds = elapsed * 1000 / System.Diagnostics.Stopwatch.Frequency;
+        if (!ready)
+        {
+            if (!wait.KnownSlow && elapsed >= SlowLinkedCompileRecordTicks && _linkedCompileRecorded.TryAdd(hash, 0))
+            {
+                _pipelines.RecordLinkedCompile(hash, slow: true, milliseconds);
+                Console.Error.WriteLine($"[GPU][INFO][LINKED_COMPILE] Recorded a linked module that compiles for minutes: hash=0x{hash:X16} compiling_ms={milliseconds}.");
+            }
+
+            return;
+        }
+
+        _linkedCompileWaits.TryRemove(hash, out _);
+        if (wait.KnownSlow && _linkedCompileSlow.ContainsKey(hash) && elapsed < LinkedCompileWait)
+        {
+            _pipelines.RecordLinkedCompile(hash, slow: false, milliseconds);
+            Console.Error.WriteLine($"[GPU][INFO][LINKED_COMPILE] Recorded a linked module that no longer compiles for minutes: hash=0x{hash:X16} ready_ms={milliseconds}.");
+        }
     }
 
     // The dispatch counts threads; the host counts groups of the shader's thread size.
@@ -370,7 +489,7 @@ public sealed partial class RenderExecutor
         var descriptor = BufferDescriptorWords.From(words);
         if (!resource.Formatted || !resource.Written || resource.Read || resource.Atomic || resource.Scalar || resource.MaxByteExtent != ImageClearStride ||
             descriptor.Stride != ImageClearStride || descriptor.Format != BufferDescriptorWords.Format32x4UInt || descriptor.SwizzleEnabled ||
-            descriptor.IndexStride != 0 || descriptor.AddThreadId || resource.PackedStride != descriptor.PackedStride ||
+            descriptor.IndexStride != 0 || descriptor.AddThreadId ||
             program.UserDataBase != 0 || resources.UserData.Length != ImageClearUserDataCount)
         {
             return null;

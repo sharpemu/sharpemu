@@ -143,6 +143,58 @@ public sealed class RenderExecutorDrawTests : IDisposable
 
     private const ulong IndirectArguments = RecordingRenderHost.MemoryBase + 0x60_0000;
 
+    // A GPU-culled automatic draw of a mesh program reads its counts on the GPU; without the
+    // indirect mesh command it reads them here and draws from them.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void AutoIndirectMeshDrawReadsItsArgumentsOnTheGpu(bool gpuIndirect)
+    {
+        _host.SupportsIndirectMeshDraw = gpuIndirect;
+        _pipelines.MeshShadersSupported = true;
+        _pipelines.Graphics = new GraphicsPrograms
+        {
+            Vertex = new ShaderProgram(0x11), Pixel = new ShaderProgram(0x22),
+            VertexInput = new VertexInputInfo { Stage = Stage(Program(ShaderStageKind.Mesh)) },
+            PixelInput = new PixelInputInfo { Stage = Stage(Program(ShaderStageKind.Pixel)) },
+            MeshInput = new MeshDrawConfiguration
+            {
+                Geometry = new GuestGeometryConfiguration { InputPrimitiveCountPerWorkgroup = 1, InputPointList = true },
+                Execution = new MeshExecutionLimits
+                {
+                    MaxGroupCountX = 65535, MaxGroupCountY = 65535, MaxGroupTotalCount = 65535,
+                },
+            },
+        };
+        MeshDrawParameters? parameters = null;
+        _host.PreparationFailure = stage =>
+        {
+            if (stage.Program?.Stage == ShaderStageKind.Mesh) parameters = stage.MeshDraw;
+            return null;
+        };
+        var banks = Banks(primitiveType: 1, withDepth: true);
+        banks.Context.ShaderStages = 0x2030u;
+        WriteIndirectArguments(6, 2, 4, 5);
+
+        _executor.DrawAuto(1, banks, Auto(0, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments });
+
+        if (gpuIndirect)
+        {
+            Assert.Equal(0, _host.GuestReads);
+            var request = _host.IndirectMeshRequest!.Value;
+            Assert.True(request.Automatic);
+            Assert.Equal((IndirectArguments, true, 1u), (request.ArgumentsAddress, request.PointList, request.PrimitivesPerGroup));
+            Assert.Equal(new MeshDrawParameters(0, 0, 0, uint.MaxValue, 0x9000), parameters);
+            AssertOrder("preparation_begin", "acquire_indirect_mesh", "prepare_bindings",
+                "prepare_indirect_mesh", "draw_indirect_mesh", "dispose_indirect_mesh", "preparation_end");
+            return;
+        }
+
+        Assert.Null(_host.IndirectMeshRequest);
+        Assert.Equal(new MeshDrawParameters(6, 4, 5, 0, 0), parameters);
+        AssertOrder("preparation_begin", "prepare_bindings", "draw_mesh 6 2 1", "preparation_end");
+    }
+
     private void WriteIndirectArguments(params uint[] words)
     {
         var bytes = new byte[words.Length * 4];
@@ -169,6 +221,27 @@ public sealed class RenderExecutorDrawTests : IDisposable
             "draw_indexed_indirect",
             "reset_bindings");
         Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw_indexed ", StringComparison.Ordinal));
+    }
+
+    // A GPU-culled automatic draw reads its four arguments on the GPU, so nothing here waits for the culling pass. So does a
+    // triangle strip whose state cannot make it a metadata clear quad (RenderExecutorAdaptationTests).
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void IndirectAutoDraw_LetsTheGpuReadTheArguments(bool strip)
+    {
+        WriteIndirectArguments(6, 2, 4, 3);
+        var arguments = Auto(0, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
+        _executor.DrawAuto(7, strip ? Banks(PrimitiveTriangleStrip) : Banks(), arguments);
+
+        Assert.Equal(0, _host.GuestReads);
+        AssertOrder(
+            "obtain 100600000 10 written=False",
+            "begin_rendering",
+            "bind_pipeline Graphics A1",
+            "draw_indirect",
+            "reset_bindings");
+        Assert.DoesNotContain(_host.Calls, c => c.StartsWith("draw ", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -249,9 +322,8 @@ public sealed class RenderExecutorDrawTests : IDisposable
 
         if (totalLimit < (triangleStrip ? 8u : 4u))
         {
-            var error = Assert.Throws<RenderExecutorFatalException>(() =>
-                _executor.DrawAuto(1, banks, Auto(30, instances: 2, firstVertex: 5)));
-            Assert.Contains("total=8/7", error.Message);
+            // A draw over the device group limits is left out, as the GPU preparation leaves out an indirect one.
+            _executor.DrawAuto(1, banks, Auto(30, instances: 2, firstVertex: 5));
             Assert.DoesNotContain(_host.Calls, call => call.StartsWith("draw_mesh", StringComparison.Ordinal));
             return;
         }
@@ -1153,7 +1225,7 @@ public sealed class RenderExecutorDrawTests : IDisposable
     [Fact]
     public void ShaderBufferWrites_EndRenderingAndBarrierAfterTheDraw()
     {
-        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        var written = new BufferResourceInfo(false, true, false, false, false, 4);
         var descriptor = BufferDescriptor(VertexBase, 4, 16);
         _pipelines.Graphics = Programs(
             vertexStage: Stage(Program(ShaderStageKind.Vertex, buffers: [written]), buffers: [descriptor]),
@@ -1166,7 +1238,7 @@ public sealed class RenderExecutorDrawTests : IDisposable
     [Fact]
     public void ShaderBufferWrites_WithoutAnAddressOrFootprintNeedNoBarrier()
     {
-        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        var written = new BufferResourceInfo(false, true, false, false, false, 4);
         _pipelines.Graphics = Programs(vertexStage: Stage(Program(ShaderStageKind.Vertex, buffers: [written]), buffers: [BufferDescriptor(0, 4, 16)]));
         _executor.DrawIndexed(1, Banks(), Indexed(3));
         Assert.DoesNotContain(_host.Calls, c => c.StartsWith("write_barrier", StringComparison.Ordinal));

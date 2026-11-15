@@ -20,6 +20,7 @@ public static partial class Gen5SpirvTranslator
         private uint _meshAllocation;
         private uint _meshBarrierWaiting;
         private uint _meshAnyActive;
+        private uint _meshTaskPayload;
         private bool _directMeshBlocks;
         private readonly List<(int Start, int End)> _meshLoopRegions = [];
         private bool _convergedMeshDispatch;
@@ -97,6 +98,15 @@ public static partial class Gen5SpirvTranslator
                     SpirvStorageClass.Private, _module.ConstantNull(_vec4Type));
                 _interfaces.Add(value);
                 _meshParameters.Add(location, (output, value));
+            }
+
+            if (mesh.TaskLaunched)
+            {
+                // The task stage's payload, which carries the draw parameters (SpirvMeshTask).
+                _meshTaskPayload = _module.AddGlobalVariable(
+                    _module.TypePointer(SpirvStorageClass.TaskPayloadWorkgroupExt, SpirvMeshTask.PayloadType(_module, _uintType)),
+                    SpirvStorageClass.TaskPayloadWorkgroupExt);
+                _interfaces.Add(_meshTaskPayload);
             }
         }
 
@@ -402,19 +412,23 @@ public static partial class Gen5SpirvTranslator
             for (var index = 0; index < parameters.Length; index++)
             {
                 parameters[index] = DeclarePrivateValue(_uintType);
-                Store(parameters[index], LoadShaderDataDword(UInt(parameterBase + (uint)index)));
+                Store(parameters[index], mesh.TaskLaunched ? TaskPayloadParameter(index)
+                    : LoadShaderDataDword(UInt(parameterBase + (uint)index)));
             }
-            // The reserved index-size tag selects a submission-owned parameter block.
-            // Both modes keep the same six-word shader-data layout.
-            var dynamicParameters = _module.AddInstruction(SpirvOp.IEqual, _boolType,
-                Load(_uintType, parameters[3]), UInt(uint.MaxValue));
-            EmitConditional(dynamicParameters, () =>
+            if (!mesh.TaskLaunched)
             {
-                var address = Pair64(Load(_uintType, parameters[4]), Load(_uintType, parameters[5]));
-                for (var index = 0; index < parameters.Length; index++)
-                    Store(parameters[index], _module.AddInstruction(SpirvOp.Load, _uintType,
-                        DeviceWordPointer(IAdd64(address, ULong((ulong)index * 4))), 2u, 4u));
-            });
+                // The reserved index-size tag selects a submission-owned parameter block.
+                // Both modes keep the same six-word shader-data layout.
+                var dynamicParameters = _module.AddInstruction(SpirvOp.IEqual, _boolType,
+                    Load(_uintType, parameters[3]), UInt(uint.MaxValue));
+                EmitConditional(dynamicParameters, () =>
+                {
+                    var address = Pair64(Load(_uintType, parameters[4]), Load(_uintType, parameters[5]));
+                    for (var index = 0; index < parameters.Length; index++)
+                        Store(parameters[index], _module.AddInstruction(SpirvOp.Load, _uintType,
+                            DeviceWordPointer(IAdd64(address, ULong((ulong)index * 4))), 2u, 4u));
+                });
+            }
             var drawCount = Load(_uintType, parameters[0]);
             var firstVertex = Load(_uintType, parameters[1]);
             var firstInstance = Load(_uintType, parameters[2]);
@@ -476,6 +490,13 @@ public static partial class Gen5SpirvTranslator
             StoreV(5, Load(_uintType, vertexIndex), guardWithExec: false);
             StoreV(8, IAdd(firstInstance, groupY), guardWithExec: false);
         }
+
+        // A draw parameter of a task-launched draw. The payload holds the first three (SpirvMeshTask);
+        // the draw is not indexed, so the others are 0.
+        private uint TaskPayloadParameter(int index) => index < SpirvMeshTask.PayloadWordCount
+            ? Load(_uintType, _module.AddInstruction(SpirvOp.AccessChain,
+                _module.TypePointer(SpirvStorageClass.TaskPayloadWorkgroupExt, _uintType), _meshTaskPayload, UInt((uint)index)))
+            : UInt(0);
 
         private uint SaturatingSubtract(uint value, uint decrement) =>
             _module.AddInstruction(SpirvOp.Select, _uintType,
@@ -638,8 +659,9 @@ public static partial class Gen5SpirvTranslator
             EmitConditional(_module.AddInstruction(SpirvOp.ULessThan, _boolType, lane, primitives), () =>
             {
                 var packed = Load(_uintType, _meshPrimitiveValue);
+                // Three 9-bit vertex indices at bits 0, 10 and 20; bit 9 of each field is that vertex's edge flag.
                 uint Vertex(uint bit) => _module.AddInstruction(SpirvOp.BitFieldUExtract,
-                    _uintType, packed, UInt(bit), UInt(10));
+                    _uintType, packed, UInt(bit), UInt(9));
                 var indices = _module.AddInstruction(SpirvOp.CompositeConstruct, _uvec3Type,
                     Vertex(0), Vertex(10), Vertex(20));
                 Store(MeshArrayElement(_meshPrimitiveIndicesOutput, _uvec3Type, lane,

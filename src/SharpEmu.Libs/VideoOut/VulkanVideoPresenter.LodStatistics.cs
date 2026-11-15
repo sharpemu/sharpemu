@@ -37,6 +37,12 @@ internal static unsafe partial class VulkanVideoPresenter
 
         bool Gpu.Pipelines.IShaderPipelineHost.MipStatisticsSubgroupReduction => FragmentSubgroupArithmetic && GraphicsSubgroupOperationsEnabled;
 
+        bool Gpu.Pipelines.IShaderPipelineHost.PixelSubgroupArithmetic =>
+            VulkanGraphicsSubgroupPolicy.ShouldUsePixelSubgroupArithmetic(
+                unchecked((uint)Volatile.Read(ref _nativeSubgroupSize)),
+                GraphicsSubgroupOperationsEnabled,
+                FragmentSubgroupArithmetic);
+
         bool Gpu.GpuCommands.ICommandStreamHost.TryRecordLodStatistics(ulong destination, uint size)
         {
             if (!ResourceMaterializer.RecordMipStatistics)

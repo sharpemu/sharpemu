@@ -21,6 +21,7 @@ public static class SaveDataExports
     private const int OrbisSaveDataErrorResourceFull = unchecked((int)0x809F001A);
     private const int OrbisSaveDataErrorResourceBusy = unchecked((int)0x809F001B);
     private const int OrbisSaveDataErrorResourceInvalid = unchecked((int)0x809F001C);
+    private const int OrbisSaveDataErrorNoNeedConvert = unchecked((int)0x809F001E);
     private const int SaveDataTitleIdSize = 10;
     private const int SaveDataDirNameSize = 32;
     private const int SaveDataParamSize = 0x530;
@@ -553,6 +554,52 @@ public static class SaveDataExports
 
     [SysAbiExport(Nid = "dQ2GohUHXzk", ExportName = "sceSaveDataAbort", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceSaveData")]
     public static int SaveDataAbort(CpuContext ctx) => SetReturn(ctx, 0);
+
+    // Converts a save directory written in the previous format. This emulator writes one format only, so an existing
+    // directory needs no conversion and a missing one is not found; titles treat both as "mount as usual".
+    [SysAbiExport(Nid = "2mfSRGdshtk", ExportName = "sceSaveDataConvert", Target = Generation.Gen5, LibraryName = "libSceSaveData")]
+    public static int SaveDataConvert(CpuContext ctx)
+    {
+        // SceSaveDataConvert: +0x00 userId, +0x08 source dirName*, +0x10 destination dirName* (or null), +0x18 blocks.
+        var convertAddress = ctx[CpuRegister.Rdi];
+        if (convertAddress == 0 ||
+            !TryReadInt32(ctx, convertAddress, out var userId) ||
+            !ctx.TryReadUInt64(convertAddress + 0x08, out var sourceAddress) ||
+            sourceAddress == 0 ||
+            !TryReadFixedAscii(ctx, sourceAddress, SaveDataDirNameSize, out var source) ||
+            string.IsNullOrWhiteSpace(source))
+        {
+            return SetReturn(ctx, OrbisSaveDataErrorParameter);
+        }
+
+        var slotDir = SaveDataStorage.SlotDir(ResolveTitleSaveRoot(userId, ResolveConfiguredTitleId()), source);
+        var exists = Directory.Exists(slotDir);
+        TraceSaveData($"convert user={userId} dir='{source}' exists={exists}");
+        return SetReturn(ctx, exists ? OrbisSaveDataErrorNoNeedConvert : OrbisSaveDataErrorNotFound);
+    }
+
+    // No conversion ever runs (see sceSaveDataConvert), so none is in flight.
+    [SysAbiExport(Nid = "8EA5OMIL1lQ", ExportName = "sceSaveDataGetConvertProgress", Target = Generation.Gen5, LibraryName = "libSceSaveData")]
+    public static int SaveDataGetConvertProgress(CpuContext ctx) => SaveDataGetProgress(ctx);
+
+    // Cancels a prepared update. Writes go straight to the host directory, so only the prepared state is released.
+    [SysAbiExport(Nid = "e6y3WMBYbiM", ExportName = "sceSaveDataCancel", Target = Generation.Gen5, LibraryName = "libSceSaveData")]
+    public static int SaveDataCancel(CpuContext ctx)
+    {
+        var resource = unchecked((int)ctx[CpuRegister.Rdi]);
+        lock (_stateGate)
+        {
+            if (!_transactionResources.Contains(resource))
+            {
+                return SetReturn(ctx, OrbisSaveDataErrorResourceInvalid);
+            }
+
+            _preparedTransactionResources.Remove(resource);
+        }
+
+        TraceSaveData($"cancel resource={resource}");
+        return SetReturn(ctx, 0);
+    }
 
     [SysAbiExport(Nid = "eBSSNIG6hMk", ExportName = "sceSaveDataGetEventInfo", Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libSceSaveData")]
     public static int SaveDataGetEventInfo(CpuContext ctx) => SetReturn(ctx, 0);

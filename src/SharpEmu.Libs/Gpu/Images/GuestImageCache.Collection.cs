@@ -130,13 +130,31 @@ public sealed partial class GuestImageCache
         foreach (var imageIdentifier in _scheduledReadbacks)
         {
             var owner = _slots.TryGet(imageIdentifier);
-            if (owner != null && owner.Registered && owner.IsGpuModified)
+            if (owner != null && owner.Registered && owner.IsGpuModified && !HostLayoutTargets.Holds(owner.Description.Data.Address) &&
+                TryDownloadToGuest(imageIdentifier))
             {
-                _ = TryDownloadToGuest(imageIdentifier);
+                ReportLinearReadback(owner);
             }
         }
 
         _scheduledReadbacks.Clear();
+    }
+
+    private const int MaxReportedLinearReadbacks = 16;
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<ulong, byte> ReportedLinearReadbacks = new();
+
+    private static void ReportLinearReadback(CachedImage image)
+    {
+        var description = image.Description;
+        if (ReportedLinearReadbacks.Count >= MaxReportedLinearReadbacks || !ReportedLinearReadbacks.TryAdd(description.Data.Address, 0))
+        {
+            return;
+        }
+
+        Console.Error.WriteLine(
+            $"[GPU][INFO] linear image readback address=0x{description.Data.Address:X16} bytes=0x{description.Data.Size:X} " +
+            $"extent={description.Extent.Width}x{description.Extent.Height}x{description.Extent.Depth} layers={description.Resources.Layers} " +
+            $"levels={description.Resources.Levels} format={description.PixelFormat} guest_format={description.GuestFormat} render_target={image.Uses.RenderTarget}");
     }
 
     private long _pendingDestroyBytes;

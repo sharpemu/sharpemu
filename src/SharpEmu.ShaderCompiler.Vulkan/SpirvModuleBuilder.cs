@@ -35,6 +35,7 @@ public enum SpirvOp : ushort
     Constant = 43,
     ConstantComposite = 44,
     ConstantNull = 46,
+    SpecConstant = 50,
     Function = 54,
     FunctionParameter = 55,
     FunctionEnd = 56,
@@ -177,13 +178,23 @@ public enum SpirvOp : ushort
     GroupNonUniformBroadcast = 337,
     GroupNonUniformBroadcastFirst = 338,
     GroupNonUniformBallot = 339,
+    GroupNonUniformBallotBitExtract = 341,
     GroupNonUniformBallotBitCount = 342,
     GroupNonUniformShuffle = 345,
     GroupNonUniformShuffleXor = 346,
     GroupNonUniformShuffleUp = 347,
     GroupNonUniformShuffleDown = 348,
+    GroupNonUniformIAdd = 349,
+    GroupNonUniformSMin = 353,
     GroupNonUniformUMin = 354,
+    GroupNonUniformSMax = 356,
+    GroupNonUniformUMax = 357,
+    GroupNonUniformBitwiseAnd = 359,
+    GroupNonUniformBitwiseOr = 360,
+    GroupNonUniformBitwiseXor = 361,
+    EmitMeshTasksExt = 5294,
     SetMeshOutputsExt = 5295,
+    ReadClockKhr = 5056,
 }
 
 public enum SpirvCapability : uint
@@ -223,8 +234,11 @@ public enum SpirvCapability : uint
     RuntimeDescriptorArray = 5302,
     SampledImageArrayNonUniformIndexing = 5307,
     PhysicalStorageBufferAddresses = 5347,
+    DenormPreserve = 4464,
     SignedZeroInfNanPreserve = 4466,
+    RoundingModeRte = 4467,
     MeshShadingExt = 5283,
+    ShaderClockKhr = 5055,
 }
 
 public enum SpirvStorageClass : uint
@@ -240,6 +254,7 @@ public enum SpirvStorageClass : uint
     Image = 11,
     StorageBuffer = 12,
     PhysicalStorageBuffer = 5349,
+    TaskPayloadWorkgroupExt = 5402,
 }
 
 public enum SpirvExecutionModel : uint
@@ -249,6 +264,7 @@ public enum SpirvExecutionModel : uint
     TessellationEvaluation = 2,
     Fragment = 4,
     GLCompute = 5,
+    TaskExt = 5364,
     MeshExt = 5365,
 }
 
@@ -266,7 +282,9 @@ public enum SpirvExecutionMode : uint
     OriginUpperLeft = 7,
     DepthReplacing = 12,
     LocalSize = 17,
+    DenormPreserve = 4459,
     SignedZeroInfNanPreserve = 4461,
+    RoundingModeRte = 4462,
     OutputVertices = 26,
     OutputPrimitivesExt = 5270,
     OutputTrianglesExt = 5298,
@@ -274,6 +292,7 @@ public enum SpirvExecutionMode : uint
 
 public enum SpirvDecoration : uint
 {
+    SpecId = 1,
     Block = 2,
     ArrayStride = 6,
     BuiltIn = 11,
@@ -849,6 +868,16 @@ public sealed partial class SpirvModuleBuilder
         return id;
     }
 
+    // A 32-bit specialization constant. It is never folded or shared with a constant, because
+    // the pipeline sets its value.
+    public uint SpecConstant(uint type, uint specId, uint defaultValue)
+    {
+        var id = AllocateId();
+        Emit(_typesConstantsGlobals, SpirvOp.SpecConstant, type, id, defaultValue);
+        AddDecoration(id, SpirvDecoration.SpecId, specId);
+        return id;
+    }
+
     public uint AddGlobalVariable(
         uint pointerType,
         SpirvStorageClass storageClass,
@@ -878,6 +907,10 @@ public sealed partial class SpirvModuleBuilder
         {
             _inputVariables.Add(id);
         }
+        else if (storageClass is SpirvStorageClass.UniformConstant or SpirvStorageClass.PushConstant)
+        {
+            _immutableVariables.Add(id);
+        }
 
         return id;
     }
@@ -900,6 +933,9 @@ public sealed partial class SpirvModuleBuilder
 
     public uint AddFunctionParameter(uint type) =>
         EmitResult(_functions, SpirvOp.FunctionParameter, type);
+
+    // The label of the block being emitted.
+    public uint CurrentBlock => _currentBlock;
 
     public uint AddLabel(uint? id = null)
     {
@@ -1157,11 +1193,10 @@ public sealed partial class SpirvModuleBuilder
         params uint[] operands)
     {
         var result = AllocateId();
-        var values = new uint[operands.Length + 2];
-        values[0] = resultType;
-        values[1] = result;
-        operands.CopyTo(values, 2);
-        Emit(section, opcode, values);
+        section.Add(((uint)(operands.Length + 3) << 16) | (ushort)opcode);
+        section.Add(resultType);
+        section.Add(result);
+        section.AddRange(operands);
         NoteResultType(result, resultType);
         return result;
     }

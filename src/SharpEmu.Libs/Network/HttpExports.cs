@@ -14,6 +14,7 @@ public static partial class HttpExports
     private static readonly ConcurrentDictionary<int, HttpContext> Contexts = new();
     private static readonly ConcurrentDictionary<int, HttpTemplate> Templates = new();
     private static int _nextContextId;
+    // Templates, connections and requests share these ids: the setters accept any of the three.
     private static int _nextTemplateId = 0x1000;
 
     private sealed record HttpContext(int NetMemoryId, int SslContextId, ulong PoolSize);

@@ -3691,6 +3691,16 @@ public static partial class KernelMemoryCompatExports
             }
         }
 
+        // A loaded module's own segments (its code and data) are mapped by the loader, not by these calls.
+        if (KernelModuleRegistry.TryGetModuleSegment(queryAddress, out var segment))
+        {
+            return (startOut != 0 && !ctx.TryWriteUInt64(startOut, segment.Start)) ||
+                (endOut != 0 && !ctx.TryWriteUInt64(endOut, segment.End - 1)) ||
+                (protectionOut != 0 && !TryWriteInt32(ctx, protectionOut, segment.Protection))
+                ? (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT
+                : (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
         return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
     }
 
@@ -6059,7 +6069,7 @@ public static partial class KernelMemoryCompatExports
         return result;
     }
 
-    private static int InvokeKernelMemoryOperation(
+    internal static int InvokeKernelMemoryOperation(
         CpuContext ctx,
         Func<CpuContext, int> operation,
         ulong rdi = 0,

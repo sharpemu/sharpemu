@@ -367,6 +367,43 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
         harness.Shutdown();
     }
 
+    // An upload of ParallelSweepCopyBytes or more copies with the parallel copy's helpers, into the ring or a temporary source.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ALargeUploadCopiesTheSameBytesInParallel(bool useTemporaryBuffer)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        const int length = 0x60000;
+        var address = harness.MapBacked(0x100000, ReadWrite);
+        var pattern = new byte[length];
+        for (var index = 0; index < length; index++) pattern[index] = (byte)(index * 7 + index / 4096);
+        harness.Write(address, pattern);
+        harness.Write(address + 0x80000, pattern);
+        harness.Worker.Run(() =>
+        {
+            using var staging = new GpuRingBuffer(_vulkan.DeviceInfo, harness.Scheduler,
+                GpuBufferUsage.Upload, useTemporaryBuffer ? 8UL : 2UL * length);
+            using var parallel = new ParallelGuestCopy(harness.Memory, 3);
+            var uploader = new GuestBufferUploader(_vulkan.DeviceInfo, harness.Scheduler, harness.Memory, staging, parallel);
+            BufferCopy[] regions = [new(0, 0, length), new(length, 0x80000, length)];
+            var source = uploader.PrepareSource(address, regions, 2 * length, address, 0x80000 + length);
+            Assert.NotNull(source);
+            Assert.Equal(useTemporaryBuffer, !ReferenceEquals(staging, source));
+            using var download = new GpuBuffer(_vulkan.DeviceInfo, harness.Scheduler,
+                GpuBufferUsage.Download, 0, GpuBuffer.AllFlags, 2 * length);
+            download.CopyFrom(harness.Scheduler.Current, source, regions[0].SrcOffset, 0, 2 * length,
+                AccessFlags.HostWriteBit, AccessFlags.None,
+                AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit, AccessFlags.HostReadBit);
+            harness.Scheduler.Finish();
+            download.Invalidate(0, 2 * length);
+            Assert.Equal(pattern, download.Mapped[..length].ToArray());
+            Assert.Equal(pattern, download.Mapped[length..(2 * length)].ToArray());
+        });
+        harness.Shutdown();
+    }
+
     [Fact]
     public void EmptyUploadDoesNotReserveStagingBytes()
     {

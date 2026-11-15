@@ -614,6 +614,8 @@ internal static class GnmCommandPackets
             Attrib3 = (1u << 24) | ((uint)hostTile << 14),
         };
         interpreter.TypedRegisters.MarkWritten(1u << (int)RegisterStamp.ColorTargets);
+        if (!linear && hostTile == GuestTileMode.Linear)
+            HostLayoutTargets.Mark(target.BaseAddress);
         GcnImageDescriptor.ObserveColorTarget(guestAddress, in target, pitch, height, tileIndex);
     }
 

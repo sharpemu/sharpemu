@@ -33,6 +33,7 @@ public static partial class AgcExports
     private const uint ItDrawIndexMultiAuto = 0x30;
     private const uint ItDrawIndexOffset2 = 0x35;
     private const uint ItDrawIndexIndirectMulti = 0x38;
+    private const uint ItDrawIndirectMulti = 0x2C;
     private const uint DrawIndexedIndirectArgsSize = 20;
     private const uint DrawIndexedIndirectMaxScan = 1024;
     private const uint ItWriteData = 0x37;
@@ -644,8 +645,55 @@ public static partial class AgcExports
         return true;
     }
 
+    // AgcPacketWrites: the submitted command buffer the capture scan walks on this thread. TryReadUInt32 serves its
+    // words from a copy that is loaded one 4 KiB page at a time, when a word there is first read, so the walk touches
+    // the pages its word reads would. A page that cannot be loaded leaves its words to the ordinary read.
+    private const int ScanPageBytes = 4096;
+    [ThreadStatic]
+    private static byte[]? _scanWindow;
+    [ThreadStatic]
+    private static ulong _scanWindowStart;
+    [ThreadStatic]
+    private static int _scanWindowLength;
+    // One bit per 4 KiB page the window overlaps, from the page that holds its start: set once the page is in the copy.
+    [ThreadStatic]
+    private static ulong[]? _scanLoaded;
+
+    private static bool TryLoadScanPages(CpuContext ctx, byte[] window, ulong address, int length)
+    {
+        var loaded = _scanLoaded!;
+        var firstPage = _scanWindowStart / ScanPageBytes;
+        var windowEnd = _scanWindowStart + (ulong)_scanWindowLength;
+        for (var page = address / ScanPageBytes; page <= (address + (ulong)length - 1) / ScanPageBytes; page++)
+        {
+            var index = (int)(page - firstPage);
+            if ((loaded[index >> 6] & (1UL << (index & 63))) != 0)
+            {
+                continue;
+            }
+
+            var begin = Math.Max(_scanWindowStart, page * ScanPageBytes);
+            var end = Math.Min(windowEnd, (page + 1) * ScanPageBytes);
+            if (!ctx.Memory.TryRead(begin, window.AsSpan((int)(begin - _scanWindowStart), (int)(end - begin))))
+            {
+                return false;
+            }
+
+            loaded[index >> 6] |= 1UL << (index & 63);
+        }
+
+        return true;
+    }
+
     private static bool TryReadUInt32(CpuContext ctx, ulong address, out uint value)
     {
+        if (_scanWindow is { } window && address >= _scanWindowStart && address - _scanWindowStart < (ulong)_scanWindowLength &&
+            _scanWindowLength - (int)(address - _scanWindowStart) >= sizeof(uint) && TryLoadScanPages(ctx, window, address, sizeof(uint)))
+        {
+            value = BinaryPrimitives.ReadUInt32LittleEndian(window.AsSpan((int)(address - _scanWindowStart)));
+            return true;
+        }
+
         Span<byte> buffer = stackalloc byte[sizeof(uint)];
         if (!ctx.Memory.TryRead(address, buffer))
         {
@@ -717,6 +765,67 @@ public static partial class AgcExports
 
         var values = new List<byte>(Math.Min(maximumLength, 128));
         for (var index = 0; index < maximumLength; index++)
+        {
+            if (!TryReadByte(ctx, address + (ulong)index, out var value))
+            {
+                bytes = [];
+                return false;
+            }
+
+            if (value == 0)
+            {
+                bytes = [.. values];
+                return true;
+            }
+
+            values.Add(value);
+        }
+
+        bytes = [];
+        return false;
+    }
+
+    // AgcPacketWrites: TryReadGuestCString with the bytes read up to 64 at a time, each chunk within one 4 KiB page, so
+    // it touches the pages the byte reads touch (those up to the terminator). From a chunk that cannot be read, it goes
+    // on byte by byte as there, so a name that ends just before unreadable memory gives the same result.
+    private static bool TryReadGuestCStringInChunks(
+        CpuContext ctx,
+        ulong address,
+        int maximumLength,
+        out byte[] bytes)
+    {
+        if (address == 0)
+        {
+            bytes = [];
+            return true;
+        }
+
+        var values = new List<byte>(Math.Min(maximumLength, 128));
+        Span<byte> chunk = stackalloc byte[64];
+        var index = 0;
+        while (index < maximumLength)
+        {
+            var at = address + (ulong)index;
+            var toPageEnd = ScanPageBytes - (int)(at % ScanPageBytes);
+            var piece = chunk[..Math.Min(Math.Min(chunk.Length, maximumLength - index), toPageEnd)];
+            if (address > ulong.MaxValue - (ulong)maximumLength || !ctx.Memory.TryRead(at, piece))
+            {
+                break;
+            }
+
+            var end = piece.IndexOf((byte)0);
+            if (end >= 0)
+            {
+                values.AddRange(piece[..end]);
+                bytes = [.. values];
+                return true;
+            }
+
+            values.AddRange(piece);
+            index += piece.Length;
+        }
+
+        for (; index < maximumLength; index++)
         {
             if (!TryReadByte(ctx, address + (ulong)index, out var value))
             {

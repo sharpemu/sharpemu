@@ -688,7 +688,7 @@ public sealed class RenderExecutorStateTests : IDisposable
     [Fact]
     public void Preparation_CoversTheBufferWriteBarrier()
     {
-        var written = new BufferResourceInfo(false, true, false, false, false, 4, 0);
+        var written = new BufferResourceInfo(false, true, false, false, false, 4);
         _pipelines.Graphics = Programs(vertexStage: Stage(Program(ShaderStageKind.Vertex, buffers: [written]), buffers: [BufferDescriptor(VertexBase, 4, 16)]));
         _executor.DrawIndexed(1, Banks(), Indexed(3));
 

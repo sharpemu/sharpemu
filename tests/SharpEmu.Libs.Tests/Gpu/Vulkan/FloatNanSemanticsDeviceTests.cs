@@ -64,4 +64,60 @@ public sealed class FloatNanSemanticsDeviceTests(HeadlessVulkanFixture fixture) 
             Enumerable.Range(0, 4).Select(index => BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(index * sizeof(uint)))).ToArray());
         harness.AssertNoValidationMessages();
     }
+
+    // v_cvt_u32_f32 for every sign and exponent with the 64 lowest and 64 highest mantissas: NaN and every negative value
+    // (-0 and negative NaN included) give zero, +Inf and values from 2^32 saturate, the rest truncate.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void UnsignedConversionFollowsTheGuestForEveryExponent(bool preserveNan)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true)) return;
+        const uint lanes = 1024;
+        var rows = new byte[512 * 128 * 8];
+        for (var head = 0u; head < 512; head++)
+        for (var low = 0u; low < 128; low++)
+        {
+            var bits = (head << 23) | (low < 64 ? low : 0x7F_FFFF - (low - 64));
+            BinaryPrimitives.WriteUInt32LittleEndian(rows.AsSpan((int)((head * 128 + low) * 8)), bits);
+        }
+
+        var program = Program(
+            Vop2(0, "VAddU32", 1, Gen5Operand.Scalar(8), Gen5Operand.Vector(0)),
+            Vop2(4, "VLshlrevB32", 7, Operand(3), Gen5Operand.Vector(1)),
+            BufferAccess(8, "BufferLoadDword", 4, vectorData: 2, offsetEnabled: true, vectorAddress: 7),
+            Vop1(16, "VCvtU32F32", 3, Gen5Operand.Vector(2)),
+            BufferAccess(20, "BufferStoreDword", 4, offset: 4, vectorData: 3, offsetEnabled: true, vectorAddress: 7),
+            EndProgram(28));
+        var (plan, resources, layout) = Prepare(program);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            LocalSizeX = lanes, ThreadCountX = lanes, WaveSize = 32, ShaderSignedZeroInfNanPreserveFloat32Supported = preserveNan,
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        using var harness = new ImageTestHarness(vulkan);
+        using var runner = new LayoutComputeRunner(harness, request, shader.Spirv);
+        var buffer = runner.CreateBuffer(rows);
+        var registers = new uint[256];
+        registers[6] = (uint)rows.Length;
+        for (uint first = 0; first < rows.Length / 8; first += lanes)
+        {
+            registers[8] = first;
+            harness.Run(() => runner.Dispatch(registers,
+                new Dictionary<DescriptorBindingKind, GpuBuffer[]> { [DescriptorBindingKind.Buffers] = [buffer] }, 1));
+        }
+
+        var result = runner.ReadBack(buffer, 0, (ulong)rows.Length);
+        for (var row = 0; row < rows.Length / 8; row++)
+        {
+            var bits = BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(row * 8));
+            var value = BitConverter.UInt32BitsToSingle(bits);
+            var expected = float.IsNaN(value) || bits >= 0x8000_0000 ? 0u : value >= 4294967296f ? uint.MaxValue : (uint)value;
+            Assert.True(expected == BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(row * 8 + 4)),
+                $"0x{bits:X8} converted to 0x{BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(row * 8 + 4)):X8}, not 0x{expected:X8}");
+        }
+
+        harness.AssertNoValidationMessages();
+    }
 }

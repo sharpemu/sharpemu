@@ -41,7 +41,8 @@ public sealed class FlattenedReadReuseTests
     public void EquivalentReads_ShareHostReadsAndPreserveEveryDestination(uint components)
     {
         var program = RepeatedReadProgram(components);
-        var (plan, resources, layout) = Prepare(program, userDataCount: 9);
+        // The host-flattened table, independent of the process policy (SHARPEMU_GPU_SCALAR_DATA).
+        var (plan, resources, layout) = Prepare(program, userDataCount: 9, scalarDataOnDevice: false);
         var request = new ShaderCompileRequest(plan, resources, layout);
         Assert.Equal((int)components, plan.TableReads.Count);
         Assert.False(plan.Info.UsesDeviceAddresses);
@@ -68,7 +69,8 @@ public sealed class FlattenedReadReuseTests
     [InlineData(4u)]
     public void EquivalentReads_CompileWithoutDeviceAddressBindings(uint components)
     {
-        var request = Request(RepeatedReadProgram(components), userDataCount: 9);
+        // The host-flattened table, independent of the process policy (SHARPEMU_GPU_SCALAR_DATA).
+        var request = Request(RepeatedReadProgram(components), userDataCount: 9, scalarDataOnDevice: false);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var spirv, out var spirvError), spirvError);
         var module = new SpirvModuleInspector(spirv.Spirv);
         Assert.Equal(0u, module.AddressingModel);

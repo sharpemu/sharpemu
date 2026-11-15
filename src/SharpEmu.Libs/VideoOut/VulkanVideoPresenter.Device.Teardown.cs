@@ -28,8 +28,12 @@ internal static unsafe partial class VulkanVideoPresenter
                 _vk.DeviceWaitIdle(_device);
             }
 
+            // Linked compiles still waiting for admission give up, so neither the prewarm's stop nor the drain below waits for
+            // them.
+            _linkedAdmissionClosed = true;
             StopShaderPrewarm();
             DrainPendingComputePipelines();
+            DrainPendingGraphicsPipelines();
             SavePipelineCache(force: true);
             DrainFrameSlots();
             CollectCompletedGuestSubmissions(waitForOldest: false);
@@ -38,6 +42,8 @@ internal static unsafe partial class VulkanVideoPresenter
             DestroyBindlessHeap();
             DestroyCallMarks();
             _descriptorHeap.Dispose();
+            _descriptorPoolStock?.Dispose();
+            _descriptorPoolStock = null;
             _contentUploads.Dispose();
             _imageCache.Dispose();
             _samplerStore.Dispose();
@@ -71,6 +77,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     _vk.DestroyPipelineCache(_device, _pipelineCache, null);
                     _pipelineCache = default;
                 }
+                SharpEmu.Libs.Gpu.Vulkan.DeviceFaultReport.Detach(_device);
                 _vk.DestroyDevice(_device, null);
                 _device = default;
             }

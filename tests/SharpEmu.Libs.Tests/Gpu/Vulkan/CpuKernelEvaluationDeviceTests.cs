@@ -310,6 +310,7 @@ public sealed class CpuKernelEvaluationDeviceTests(HeadlessVulkanFixture fixture
         var controlBuffer = runner.CreateBuffer(MemoryMarshal.AsBytes<uint>(control));
         var bound = new List<GpuBuffer>();
         var ranges = new List<ulong>();
+        var strides = new List<uint>();
         foreach (var buffer in request.Resources.Info.Buffers)
         {
             var register = BufferRegister(plan.Graph.Program, buffer.FirstUsePc);
@@ -321,12 +322,14 @@ public sealed class CpuKernelEvaluationDeviceTests(HeadlessVulkanFixture fixture
             };
             bound.Add(gpu);
             ranges.Add(range);
+            strides.Add((userData[(int)register + 1] >> 16) & 0x3FFF);
         }
 
         var registers = new uint[256];
         userData.CopyTo(registers, 0);
         harness.Run(() => runner.Dispatch(registers, new Dictionary<DescriptorBindingKind, GpuBuffer[]> { [DescriptorBindingKind.Buffers] = [.. bound] },
-            groups, dispatchThreadLimits: [limit, 1, 1], bufferRanges: [.. ranges]));
+            groups, dispatchThreadLimits: [limit, 1, 1], bufferRanges: [.. ranges],
+            bufferStrides: request.Bindings.BufferStrideCount != 0 ? [.. strides] : null));
         var bytes = runner.ReadBack(destinationBuffer, 0, DestinationRecords * sizeof(uint));
         return MemoryMarshal.Cast<byte, uint>(bytes).ToArray();
     }

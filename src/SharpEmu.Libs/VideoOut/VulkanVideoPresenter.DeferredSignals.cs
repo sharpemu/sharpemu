@@ -107,19 +107,24 @@ internal static unsafe partial class VulkanVideoPresenter
             return false;
         }
 
+        // Test hook: runs between MustHoldForCrossQueueOrder's window check and its wake arm.
+        internal Action? CrossQueueHoldCheckedForTest;
+
         public bool MustHoldForCrossQueueOrder(int queueId)
         {
             if (!InCrossQueueOrderWindow(queueId)) return false;
-            // The foreign label is deferred, so its publication must wake this suspended queue.
+            CrossQueueHoldCheckedForTest?.Invoke();
+            // The foreign label is deferred, so its publication must wake this suspended queue. Check again after arming: a
+            // publication that completed the entry before the arm saw no armed wake, so holding then would never be woken.
             Volatile.Write(ref _partialLabelReadBlocked, 1);
-            return true;
+            return InCrossQueueOrderWindow(queueId);
         }
 
         public bool TryDeferOrderedWrite(int queueId, ulong address, ReadOnlySpan<byte> source)
         {
             if (!InCrossQueueOrderWindow(queueId)) return false;
-            var entry = _guestPublications.AddWrite(queueId, address, (ulong)source.Length);
             var payload = source.ToArray();
+            var entry = _guestPublications.AddWrite(queueId, address, (ulong)source.Length, payload);
             try
             {
                 if (OnCommandThread) _commandThread!.Post(() => RecordDeferredWrite(entry, payload));

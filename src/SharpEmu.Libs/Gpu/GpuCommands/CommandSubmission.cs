@@ -160,6 +160,12 @@ public sealed class CommandSubmission
 
     public bool Blocked { get; internal set; }
 
+    // SHARPEMU_END_OF_PIPE_SOFT_WAITS: the slice stopped at a wait whose release has not completed on the GPU; the head
+    // stays runnable behind every other head until the release completes or the cap passes.
+    internal EndOfPipeLanding? Deferral { get; set; }
+
+    internal long DeferredSinceTicks { get; set; }
+
     // Host timestamp of the slice that left this submission blocked; diagnostics only.
     public long BlockedSinceTicks { get; internal set; }
 

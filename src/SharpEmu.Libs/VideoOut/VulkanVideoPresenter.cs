@@ -47,6 +47,11 @@ internal static class VulkanGraphicsSubgroupPolicy
                 (supportedShaderStages & (ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit)) ==
                 (ShaderStageFlags.VertexBit | ShaderStageFlags.FragmentBit),
         };
+
+    // Pixel row reductions (Gen5SpirvTranslator.WaveReductions) need one host subgroup per guest wave32: a native
+    // subgroup of 32 lanes, which the diagnostic override of graphics subgroups does not provide.
+    internal static bool ShouldUsePixelSubgroupArithmetic(uint nativeSubgroupSize, bool graphicsSubgroups, bool fragmentArithmetic) =>
+        nativeSubgroupSize == 32 && graphicsSubgroups && fragmentArithmetic;
 }
 
 internal sealed record VulkanOffscreenColorClear(
@@ -82,7 +87,9 @@ internal static unsafe partial class VulkanVideoPresenter
     private static int _nativeSubgroupSize;
     private static int _nativeSubgroupShaderStages;
     private static int _sharedInt64AtomicsSupported;
+    private static int _bufferInt64AtomicsSupported;
     private static int _imageInt64AtomicsSupported;
+    private static int _shaderDeviceClockSupported;
 
     // True when the device supports shaderSharedInt64Atomics, so LDS 64-bit
     // atomics can be emitted as real 64-bit atomics.
@@ -92,6 +99,14 @@ internal static unsafe partial class VulkanVideoPresenter
     private static void SetSharedInt64AtomicsCapability(bool supported) =>
         Volatile.Write(ref _sharedInt64AtomicsSupported, supported ? 1 : 0);
 
+    // True when the device supports shaderBufferInt64Atomics, so a 64-bit buffer atomic
+    // (BUFFER_ATOMIC_*_X2) can be one 64-bit atomic instead of two 32-bit ones.
+    internal static bool BufferInt64AtomicsEnabled =>
+        Volatile.Read(ref _bufferInt64AtomicsSupported) != 0;
+
+    private static void SetBufferInt64AtomicsCapability(bool supported) =>
+        Volatile.Write(ref _bufferInt64AtomicsSupported, supported ? 1 : 0);
+
     // True when the device supports shaderImageInt64Atomics, so an atomic on a 64-bit
     // image texel can be compiled.
     internal static bool ImageInt64AtomicsEnabled =>
@@ -99,6 +114,12 @@ internal static unsafe partial class VulkanVideoPresenter
 
     private static void SetImageInt64AtomicsCapability(bool supported) =>
         Volatile.Write(ref _imageInt64AtomicsSupported, supported ? 1 : 0);
+
+    internal static bool ShaderDeviceClockEnabled =>
+        Volatile.Read(ref _shaderDeviceClockSupported) != 0;
+
+    private static void SetShaderDeviceClockCapability(bool supported) =>
+        Volatile.Write(ref _shaderDeviceClockSupported, supported ? 1 : 0);
 
     internal static bool GraphicsSubgroupOperationsEnabled =>
         VulkanGraphicsSubgroupPolicy.ShouldUseNativeGraphicsSubgroups(
@@ -446,6 +467,22 @@ internal static unsafe partial class VulkanVideoPresenter
 
             _frameGuestImageVersions[frameSlot] = null;
             DestroyGuestImage(presentedGuestImage);
+        }
+
+        // No swapchain image within the acquire timeout: the taken frame is dropped as after ErrorOutOfDateKhr.
+        // Discarding its flip ends the request's wait for the presenter, so a guest queue waiting on that display
+        // buffer (WaitForFlip) runs again instead of staying suspended.
+        private void DropPresentationAfterAcquireTimeout(
+            in Presentation presentation,
+            int frameSlot,
+            bool ownsPresentedGuestImageVersion,
+            GuestImageResource? presentedGuestImage)
+        {
+            ReleaseUnsubmittedPresentationResources(
+                frameSlot,
+                ownsPresentedGuestImageVersion,
+                presentedGuestImage);
+            CompletePresentation(in presentation, presented: false);
         }
 
         // Metal cannot blend into integer render targets or 32-bit-per-channel

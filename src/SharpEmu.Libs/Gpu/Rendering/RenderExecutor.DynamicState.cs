@@ -170,6 +170,8 @@ public sealed partial class RenderExecutor
             (uint)position,
             colorWriteMask,
             context.DepthCountControl,
+            depthState.FrontOperations,
+            depthState.BackOperations,
             depthState.DepthBoundsTestEnabled,
             depthState.DepthMinBounds,
             depthState.DepthMaxBounds);

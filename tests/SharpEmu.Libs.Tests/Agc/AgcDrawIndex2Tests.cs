@@ -22,8 +22,11 @@ public sealed class AgcDrawIndex2Tests
     [Theory]
     [InlineData(0u, 0u, 0UL, 0x280u, 0x280u, 2u, 3)]
     [InlineData(1u, 0u, 0UL, 0x280u, 0x280u, 2u, 0)]
-    [InlineData(1u, 1u, 0x60180707UL, 0x010C010Fu, 0x0800010Fu, 0x22u, 1)]
-    [InlineData(1u, 5u, 0x160180707UL, 0x010C010Fu, 0x0800010Fu, 2u, 3)]
+    [InlineData(1u, 1u, 0x60180707UL, 0x0000010Fu, 0x0000010Fu, 0x22u, 1)]
+    [InlineData(1u, 5u, 0x160180707UL, 0x0000010Fu, 0x0000010Fu, 2u, 3)]
+    [InlineData(0u, 0u, 0x5C000008UL, 0x00A80280u, 0x08000280u, 2u, 3)]
+    [InlineData(0u, 0u, 0x5C000018UL, 0x00000280u, 0x00000280u, 2u, 3)]
+    [InlineData(0u, 0u, 0x60180705UL | 0x0F000008UL, 0x011B010Fu, 0x0800010Fu, 0x22u, 3)]
     public void IndexedMultiDrawPreservesCountAddressStrideAndModifier(
         uint countFromMemory, uint memoryCount, ulong modifier, uint vertexLocations,
         uint instanceLocation, uint initiator, int expectedDraws)
@@ -71,6 +74,56 @@ public sealed class AgcDrawIndex2Tests
             Assert.Equal((uint)(7 + draw), runner.Host.IndexedDraws[draw].IndexCount);
             Assert.Equal(2u, runner.Host.IndexedDraws[draw].InstanceCount);
         }
+
+        // The CP writes each draw's ordinal to the draw index register.
+        if ((instanceLocation & (1u << 27)) != 0)
+        {
+            Assert.Equal((uint)expectedDraws - 1, runner.Interpreter.Registers.Shader[vertexLocations >> 16]);
+        }
+    }
+
+    [Theory]
+    [InlineData(0u, 0u, 3)]
+    [InlineData(1u, 2u, 2)]
+    public void NonIndexedMultiDrawWritesItsPacketAndDrawsEachRecord(uint countFromMemory, uint memoryCount, int expectedDraws)
+    {
+        var memory = new FakeCpuMemory(BaseAddress, 0x1000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        var commandBufferAddress = BaseAddress + 0x80;
+        var stackAddress = BaseAddress + 0x500;
+        WriteUInt64(memory, commandBufferAddress + 0x10, CommandAddress);
+        WriteUInt64(memory, commandBufferAddress + 0x18, CommandAddress + 40);
+        WriteUInt64(memory, stackAddress + 8, 0);
+        context[CpuRegister.Rdi] = commandBufferAddress;
+        context[CpuRegister.Rsi] = 16;
+        context[CpuRegister.Rdx] = countFromMemory;
+        context[CpuRegister.Rcx] = 3;
+        context[CpuRegister.R8] = StreamRunner.LabelAddress;
+        context[CpuRegister.R9] = 32;
+        context[CpuRegister.Rsp] = stackAddress;
+        AgcExports.DcbDrawIndirectMulti(context);
+        Assert.Equal(CommandAddress, context[CpuRegister.Rax]);
+        Span<byte> bytes = stackalloc byte[40];
+        Assert.True(memory.TryRead(CommandAddress, bytes));
+        var packet = new uint[10];
+        for (var index = 0; index < packet.Length; index++)
+            packet[index] = BinaryPrimitives.ReadUInt32LittleEndian(bytes[(index * 4)..]);
+        Assert.Equal(new uint[] { PacketHeader.Make(10, PacketOpcode.DrawIndirectMulti),
+            16, 0x280, 0x280, countFromMemory << 30, 3,
+            StreamRunner.Low(StreamRunner.LabelAddress), StreamRunner.High(StreamRunner.LabelAddress), 32, 2 }, packet);
+
+        var runner = new StreamRunner();
+        runner.Host.WriteDword(StreamRunner.LabelAddress, memoryCount);
+        for (var draw = 0u; draw < 3; draw++)
+            runner.Host.WriteWords(StreamRunner.DataAddress + 16 + draw * 32, new uint[] { 7 + draw, 2, 0, 0 });
+        Assert.Equal(SubmissionProgress.Complete, runner.Run(
+            StreamRunner.Packet(PacketOpcode.SetBase, 1, StreamRunner.Low(StreamRunner.DataAddress), StreamRunner.High(StreamRunner.DataAddress)), packet));
+        Assert.Equal(expectedDraws, runner.Host.AutoDraws.Count);
+        for (var draw = 0; draw < expectedDraws; draw++)
+        {
+            Assert.Equal((uint)(7 + draw), runner.Host.AutoDraws[draw].VertexCount);
+            Assert.Equal(2u, runner.Host.AutoDraws[draw].InstanceCount);
+        }
     }
 
     [Theory]
@@ -80,6 +133,7 @@ public sealed class AgcDrawIndex2Tests
     [InlineData(0x60180705UL, 0x10Fu, 0x10Fu, 0x22u)]
     [InlineData(0xA0180605UL, 0x10Fu, 0x10Fu, 2u)]
     [InlineData(0x40180605UL, 0x8Fu, 0x8Fu, 2u)]
+    [InlineData(0x40180615UL, 0x280u, 0x280u, 2u)]
     public void DrawIndirectEncodesTheModifierBeforeInterpretation(
         ulong drawModifier, uint firstVertexRegister, uint firstInstanceRegister, uint drawInitiator)
     {
@@ -111,14 +165,24 @@ public sealed class AgcDrawIndex2Tests
             StreamRunner.Packet(PacketOpcode.SetBase, 1,
                 StreamRunner.Low(StreamRunner.DataAddress), StreamRunner.High(StreamRunner.DataAddress)), packet));
         var draw = Assert.Single(runner.Host.AutoDraws);
-        Assert.Equal((9u, 3u, 1u, 2u), (draw.VertexCount, draw.InstanceCount, draw.FirstVertex, draw.FirstInstance));
+        // A start the packet names a register for reaches the shader there (the start instance is written last), and
+        // the draw counts from 0.
+        var named = firstVertexRegister != 0x280u;
+        Assert.Equal((9u, 3u, named ? 0u : 1u, named ? 0u : 2u), (draw.VertexCount, draw.InstanceCount, draw.FirstVertex, draw.FirstInstance));
+        if (named)
+        {
+            Assert.Equal(2u, runner.Interpreter.Registers.Shader[firstInstanceRegister]);
+        }
     }
 
     [Theory]
     [InlineData(0x40000000UL, 0x280u, 0x280u, 2u)]
     [InlineData(0x40000100UL, 0x280u, 0x280u, 0x22u)]
     [InlineData(0x140000100UL, 0x280u, 0x280u, 2u)]
-    [InlineData(0x60180707UL, 0x010C010Fu, 0x0800010Fu, 0x22u)]
+    [InlineData(0x60180707UL, 0x0000010Fu, 0x0000010Fu, 0x22u)]
+    [InlineData(0x5C000008UL, 0x00000280u, 0x00000280u, 2u)]
+    [InlineData(0x60180715UL, 0x00000280u, 0x00000280u, 0x22u)]
+    [InlineData(0x40180605UL | 0x0F000008UL, 0x0000008Fu, 0x0000008Fu, 2u)]
     public void IndexedIndirectDrawEncodesTheModifierBeforeInterpretation(
         ulong modifier, uint vertexLocations, uint instanceLocation, uint initiator)
     {
@@ -151,8 +215,15 @@ public sealed class AgcDrawIndex2Tests
         Assert.Equal(7u, draw.IndexCount);
         Assert.Equal(2u, draw.InstanceCount);
         Assert.Equal(StreamRunner.DataAddress + 6, draw.IndexAddress);
-        Assert.Equal(4, draw.BaseVertex);
-        Assert.Equal(5u, draw.FirstInstance);
+        var named = (vertexLocations & 0xFFFFu) != 0x280u;
+        Assert.Equal(named ? 0 : 4, draw.BaseVertex);
+        Assert.Equal(named ? 0u : 5u, draw.FirstInstance);
+        if (named)
+        {
+            Assert.Equal(5u, runner.Interpreter.Registers.Shader[instanceLocation & 0xFFFFu]);
+        }
+
+        Assert.Equal(0u, vertexLocations >> 16);
     }
 
     [Theory]

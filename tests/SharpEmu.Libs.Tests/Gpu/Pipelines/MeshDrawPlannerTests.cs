@@ -138,6 +138,48 @@ public sealed class MeshDrawPlannerTests
         Assert.Equal(triangleStrip, plan.Geometry.InputTriangleStrip);
     }
 
+    // A mesh-style primitive shader: one input point per subgroup, 32 output vertices, VGT_GS_MAX_VERT_OUT 32 and
+    // 48 output primitives (a 4x3 grid of cells, four triangles around each cell centre).
+    [Theory]
+    [InlineData(0u, 30u, 32u)]
+    [InlineData(48u, 48u, 64u)]
+    [InlineData(16u, 30u, 32u)]
+    public void PrimitiveAmplificationSizesTheOutputAndTheLanes(uint amplification, uint primitives, uint threads)
+    {
+        var banks = MeshStyleBanks(amplification);
+        var plan = Assert.IsType<MeshDrawPlan>(Create(banks));
+        Assert.True(plan.Geometry.InputPointList);
+        Assert.Equal(1u, plan.Geometry.InputPrimitiveCountPerWorkgroup);
+        Assert.Equal(32u, plan.Geometry.OutputVertexCapacity);
+        Assert.Equal(primitives, plan.Geometry.OutputPrimitiveCapacity);
+        Assert.Equal(threads, plan.Geometry.ThreadsPerGroup);
+    }
+
+    [Theory]
+    [InlineData("invocations")]
+    [InlineData("primitives")]
+    public void PrimitiveAmplificationBeyondTheDeviceKeepsTheStripPlan(string limit)
+    {
+        var limits = limit == "invocations" ? Limits with { MaxInvocations = 32, MaxWorkGroupSizeX = 32 }
+            : Limits with { OutputPrimitiveCapacity = 40 };
+        var plan = Assert.IsType<MeshDrawPlan>(Create(MeshStyleBanks(48), limits));
+        Assert.Equal(30u, plan.Geometry.OutputPrimitiveCapacity);
+        Assert.Equal(32u, plan.Geometry.ThreadsPerGroup);
+    }
+
+    private static RegisterBanks MeshStyleBanks(uint amplification)
+    {
+        var banks = Banks();
+        banks.Context.ShaderStages = 0x20u | 1u << 22;
+        banks.Context.ShaderInterface.MaxOutputPerSubgroup = 32;
+        banks.Context.ShaderInterface.GeometryMaxVerticesOut = 32;
+        banks.Context.ShaderInterface.PrimitiveShaderSubgroupControl = amplification;
+        banks.UserConfig.PrimitiveType = 1;
+        banks.UserConfig.GeometryEngineControl.PrimitiveGroupSize = 1;
+        banks.UserConfig.GeometryEngineControl.VertexGroupSize = 1;
+        return banks;
+    }
+
     private static MeshDrawPlan? Create(RegisterBanks banks, MeshShaderLimits? limits = null, uint subgroup = 32) =>
         MeshDrawPlanner.Create(banks.Shader.Vertex, banks.Context.ShaderInterface,
             banks.Context, banks.UserConfig, limits ?? Limits, subgroup);

@@ -9,7 +9,7 @@ namespace SharpEmu.Libs.VideoOut;
 
 // The call records of a program linked with run-time record arguments (CallRecordSelector). For every record of a dispatch's
 // tables, the host reads each image and sampler its callee reads through the record's argument, gives each distinct
-// descriptor an element of set 1, and writes the table the shader's call entries
+// descriptor an element of set 1 from BindlessHeap.CallRecordFirstIndex on, and writes the table the shader's call entries
 // search (BindlessHeap.CallRecordKeyWords). The memory a callee reads through its record, its own reads and its buffers, is
 // made resident through the device-address table as a planned range would be.
 internal static unsafe partial class VulkanVideoPresenter
@@ -23,7 +23,8 @@ internal static unsafe partial class VulkanVideoPresenter
         private readonly uint[] _callRecordNext = new uint[BindlessHeap.ArrayCount];
         private int _callRecordReports;
 
-        internal (uint[] Words, DeviceAddressRange[] Ranges) PrepareCallRecords(ShaderProgramInfo program, ShaderStageResources stage)
+        // The preparation without call record spans (VulkanVideoPresenter.CallRecordSpans.cs), which is also their reference.
+        private (uint[] Words, DeviceAddressRange[] Ranges) PrepareCallRecordsOriginal(ShaderProgramInfo program, ShaderStageResources stage)
         {
             var callees = program.CallRecordCallees;
             var targets = stage.CallTargets ?? [];
@@ -36,7 +37,8 @@ internal static unsafe partial class VulkanVideoPresenter
             var rows = new List<(uint Low, uint High, uint Callee, ulong Argument)>(stage.CallRecords?.Length ?? 0);
             foreach (var (target, argument) in stage.CallRecords ?? [])
             {
-                if (slotOf.TryGetValue(target, out var slot) && slot < callees.Count)
+                if (slotOf.TryGetValue(target, out var slot) && slot < callees.Count &&
+                    !LeavesRecordOut(callees[slot], target, argument, program.Hash))
                 {
                     rows.Add(((uint)argument, (uint)(argument >> 32), (uint)slot, argument));
                 }
@@ -98,7 +100,8 @@ internal static unsafe partial class VulkanVideoPresenter
                     var address = buffer[0] | ((ulong)(buffer[1] & 0xFFFF) << 32);
                     var stride = (buffer[1] >> 16) & 0x3FFF;
                     var size = (ulong)buffer[2] * Math.Max(stride, 1u);
-                    if (size != 0 && address != 0)
+                    if (Gpu.Pipelines.ShaderProgramCache.ClassifyRecordBuffer(address, size, field.Written) ==
+                        Gpu.Pipelines.ShaderProgramCache.RecordBuffer.Resident)
                     {
                         ranges.Add(new DeviceAddressRange(uint.MaxValue, address, size, true, field.Written));
                     }
@@ -107,6 +110,36 @@ internal static unsafe partial class VulkanVideoPresenter
 
             ranges.AddRange(stage.CallRecordRanges ?? []);
             return (words, MergeCallRecordRanges(ranges));
+        }
+
+        // Whether a record is left out because a buffer its callee writes holds no buffer descriptor
+        // (ShaderProgramCache.ClassifyRecordBuffer): its call returns at once instead of storing through it.
+        private bool LeavesRecordOut(CallRecordCallee callee, ulong target, ulong argument, ulong hash)
+        {
+            Span<uint> buffer = stackalloc uint[4];
+            foreach (var field in callee.Buffers)
+            {
+                if (!_guestMemory.TryRead(argument + field.Immediate, MemoryMarshal.AsBytes(buffer)))
+                {
+                    continue;
+                }
+
+                var address = buffer[0] | ((ulong)(buffer[1] & 0xFFFF) << 32);
+                var size = (ulong)buffer[2] * Math.Max((buffer[1] >> 16) & 0x3FFF, 1u);
+                if (Gpu.Pipelines.ShaderProgramCache.ClassifyRecordBuffer(address, size, field.Written) ==
+                    Gpu.Pipelines.ShaderProgramCache.RecordBuffer.LeaveRecordOut)
+                {
+                    if (_callRecordReports++ < 8)
+                    {
+                        Console.Error.WriteLine($"[GPU][WARN][LINKED_PROGRAM] A call record's buffer describes no buffer; its call returns at once: " +
+                            $"hash=0x{hash:X16} target=0x{target:X} argument=0x{argument:X} base=0x{address:X} size=0x{size:X}.");
+                    }
+
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         // The element of set 1 that holds the descriptor a record's callee reads Immediate bytes past its argument: one per
@@ -120,6 +153,18 @@ internal static unsafe partial class VulkanVideoPresenter
                 return BindlessHeap.CallRecordNullIndex;
             }
 
+            return CallRecordElement(field, words);
+        }
+
+        // The element of a field whose descriptor words were read: eight words, a sampler's last four zero.
+        private uint CallRecordElement(CallRecordField field, ReadOnlySpan<uint> words)
+        {
+            var count = field.Sampler ? 4 : 8;
+            if (CallRecordElementForTests is { } element)
+            {
+                return element(field.Slot, words.ToArray());
+            }
+
             static ulong Pair(uint low, uint high) => low | ((ulong)high << 32);
             var key = (field.Slot, new CallRecordWords(Pair(words[0], words[1]), Pair(words[2], words[3]),
                 Pair(words[4], words[5]), Pair(words[6], words[7])));
@@ -129,7 +174,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var next = _callRecordNext[field.Slot];
-            if (next >= BindlessHeap.CallRecordNullIndex)
+            if (BindlessHeap.CallRecordFirstIndex + next >= BindlessHeap.CallRecordNullIndex)
             {
                 if (_callRecordReports++ < 8)
                 {
@@ -140,7 +185,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _callRecordNext[field.Slot] = next + 1;
-            entry = new HeapEntry { Slot = field.Slot, Index = next, Words = words[..count].ToArray() };
+            entry = new HeapEntry { Slot = field.Slot, Index = BindlessHeap.CallRecordFirstIndex + next, Words = words[..count].ToArray() };
             _callRecordEntries.Add(key, entry);
             ResolveHeapEntry(entry);
             return entry.Index;

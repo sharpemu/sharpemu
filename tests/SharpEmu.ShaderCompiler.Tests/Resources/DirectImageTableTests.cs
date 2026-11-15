@@ -311,14 +311,13 @@ public sealed class DirectImageTableTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
-    public void MixedDimensionsRetainEveryCandidateAndUseSeparateBindings(bool arrayFirst)
+    public void MixedDimensionsRetainEveryCandidateAsArrayReads(bool arrayFirst)
     {
         var (snapshot, request) = PrepareMixedDimensions(1, arrayFirst);
         Assert.Equal(3, snapshot.Images.Length);
         var images = request.Resources.Info.Images;
         Assert.Equal(3, images[0].IndirectResources.Count);
-        Assert.Contains(images, image => image.Dimension == ImageDimension.Dim2D);
-        Assert.Contains(images, image => image.Dimension == ImageDimension.Dim2DArray);
+        Assert.All(images, image => Assert.Equal(ImageDimension.Dim2DArray, image.Dimension));
         var mapping = (int)images[0].IndirectMappingOffset;
         Assert.Equal(32u, snapshot.FlattenedResourceTable[mapping]);
         Assert.Equal(344u + 31 * 32, snapshot.FlattenedResourceTable[mapping + 63]);

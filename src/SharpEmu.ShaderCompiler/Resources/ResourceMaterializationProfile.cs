@@ -13,7 +13,7 @@ public static class ResourceMaterializationProfile
         SourceEvaluation, BranchSelection, DescriptorPrefetch, DescriptorEvaluation, TablePrefetch, TableEvaluation,
         CompiledEvaluation, CompiledTableEvaluation, SpecializationGuardHit,
         CompiledOutputAllocation, CompiledBody, CompiledWordRead, CompiledGroupRead,
-        ReadRecording, ConsumerLookup, ConsumerGraph, Count
+        ReadRecording, ConsumerLookup, ConsumerGraph, CompiledBranchEvaluation, Count
     }
 
     public static readonly bool Enabled = IsEnabled(

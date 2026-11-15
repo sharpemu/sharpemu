@@ -34,7 +34,7 @@ public sealed class ResolvedCommandReplayTests : IDisposable
         var pipelines = new FakePipelineProvider
         {
             Graphics = Programs(vertexBuffers: [new VertexInputBuffer(VertexBase, 16, 4)]),
-            Compute = ComputeProgram(Stage(Program(ShaderStageKind.Compute, buffers: [new BufferResourceInfo(false, true, false, false, false, 4, 0)]),
+            Compute = ComputeProgram(Stage(Program(ShaderStageKind.Compute, buffers: [new BufferResourceInfo(false, true, false, false, false, 4)]),
                 buffers: [BufferDescriptor(VertexBase, 4, 16)])),
         };
         return (new RecordingRenderHost(), pipelines);

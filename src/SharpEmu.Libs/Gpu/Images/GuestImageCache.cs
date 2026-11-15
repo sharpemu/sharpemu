@@ -238,6 +238,11 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         if (ImageClearTrace.Enabled) ImageTraceRange.NoteImageLookup(request.Description.Data.Address, request.Description.Data.Size);
         PrintResourceHistory(request);
         var candidates = FindImagesInRange(request.Description.Data.Address, request.Description.Data.Size, pageOverlap: false);
+        if (ReleaseStaleDimensionTwins(candidates))
+        {
+            candidates = FindImagesInRange(request.Description.Data.Address, request.Description.Data.Size, pageOverlap: false);
+        }
+
         if (ImageClearTrace.Enabled && request.TraceTextureMetadataAddress != 0)
         {
             ImageClearTrace.Write($"texture-owner-search image=0x{request.Description.Data.Address:X16} candidates={candidates.Count}");
@@ -302,7 +307,14 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
                 var replacement = resolved.Description;
                 replacement.Type = request.View.Type is ImageViewType.Type1D or ImageViewType.Type1DArray
                     ? GuestImageType.Color1D : GuestImageType.Color2D;
-                result = GrowImage(replacement, result);
+                // A texture read both as 1D and as 2D keeps an image of each type while both hold the guest's contents.
+                // Replacing one with the other on every lookup recreated the image endlessly when both types were read.
+                result = request.Role == ImageRole.Texture && !resolved.IsGpuModified && !resolved.IsBufferModified &&
+                    !resolved.DimensionTwinStale
+                    ? FindDimensionTwin(candidates, resolved, request.View) is { IsValid: true } twin
+                        ? twin
+                        : InsertDimensionTwin(replacement, resolved)
+                    : GrowImage(replacement, result);
             }
             else if (request.View.Type == ImageViewType.Type3D && resolved.Backing.ImageType != ImageType.Type3D)
             {
@@ -451,9 +463,10 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             image.MarkGpuModified();
         }
 
+        var cpuWritten = false;
         if (hasData)
         {
-            RefreshFromGuest(imageIdentifier, request);
+            cpuWritten = RefreshFromGuest(imageIdentifier, request);
             MergeMipTailBlock(image);
         }
 
@@ -472,7 +485,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
                     TakeGpuOwnership(image);
                 }
 
-                ScheduleReadback(imageIdentifier, image);
+                ScheduleReadbackAfterCpuWrite(imageIdentifier, image, cpuWritten);
                 break;
             default:
                 throw SubmissionScheduler.Fatal($"The texture role is invalid: role={request.Role}.");
@@ -512,7 +525,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         image.MarkGpuModified();
         image.Uses.RenderTarget = true;
         TraceVolumeState("color-acquire", image, request);
-        RefreshFromGuest(imageIdentifier, request);
+        var cpuWritten = RefreshFromGuest(imageIdentifier, request);
         TraceMetadataBinding(request);
         if (request.Description.Metadata.Kind == MetadataKind.Dcc && request.Description.Metadata.Range.Size == 0)
         {
@@ -544,7 +557,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         }
 
         TakeGpuOwnership(image);
-        ScheduleReadback(imageIdentifier, image);
+        ScheduleReadbackAfterCpuWrite(imageIdentifier, image, cpuWritten);
     }
 
     public ImageView AcquireDepthTargetView(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)

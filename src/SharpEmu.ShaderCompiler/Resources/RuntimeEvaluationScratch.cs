@@ -81,6 +81,18 @@ internal sealed class CompiledValueCache
 
     internal bool Contains(int index) => _stamps[index] == _generation;
 
+    internal bool TryGet(int index, out ulong result)
+    {
+        if (_stamps[index] == _generation)
+        {
+            result = _values[index];
+            return true;
+        }
+
+        result = 0;
+        return false;
+    }
+
     internal void Store(int index, ulong value)
     {
         _values[index] = value;

@@ -145,6 +145,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
 
                 owner._preparation = null;
+                if (!owner._worker)
+                {
+                    owner._bufferCache.EndPreparation();
+                }
+
                 owner._preparedTextures.Clear();
                 try
                 {
@@ -471,8 +476,14 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw Serial("mesh index upload", resumable: true);
             }
 
+            return UploadHostBufferAddress(System.Runtime.InteropServices.MemoryMarshal.AsBytes(indices), "mesh index buffer");
+        }
+
+        // A host buffer of the open preparation holds bytes that a shader reads through their device address; the draw
+        // that consumes them retires it.
+        private ulong UploadHostBufferAddress(ReadOnlySpan<byte> bytes, string label)
+        {
             var preparation = RequirePreparation();
-            var bytes = System.Runtime.InteropServices.MemoryMarshal.AsBytes(indices);
             var buffer = _presenter.CreateHostBuffer(bytes,
                 BufferUsageFlags.StorageBufferBit | BufferUsageFlags.ShaderDeviceAddressBit,
                 out var memory, out _);
@@ -483,7 +494,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 Buffer = buffer,
             };
             var address = _vk.GetBufferDeviceAddress(_device, &addressInfo);
-            if (address == 0) throw new InvalidOperationException("The mesh index buffer has no device address.");
+            if (address == 0) throw new InvalidOperationException($"The {label} has no device address.");
             return address;
         }
 
@@ -607,6 +618,8 @@ internal static unsafe partial class VulkanVideoPresenter
             EnsureGuestSubmissionCapacity();
             EnsureBatchedGuestCommands();
             _preparation = (_sparePreparation ??= new RenderPreparation(this)).Open(_bufferCache.GetUtilityBuffer(GpuBufferUsage.Stream).RetainUpcomingAllocations());
+            // An owner merged while the scope is open retires only after it closes: the scope's bindings may still name it.
+            _bufferCache.BeginPreparation();
             return _preparation;
         }
 
@@ -711,9 +724,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 var view = binding.Request.View;
                 var range = new SubresourceRange(view.BaseLevel, view.LevelCount, view.BaseLayer, view.LayerCount);
                 var storage = binding.IsStorage;
+                ref var imageBinding = ref BindingOf(image);
                 if (ImageDescription.IsEmptyRange(image.Description.Data))
                 {
-                    TransitionImage(image, storage || image.Binding.ShaderWrite ? AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit : AccessFlags.ShaderReadBit, range, command);
+                    TransitionImage(image, storage || imageBinding.ShaderWrite ? AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit : AccessFlags.ShaderReadBit, range, command);
                 }
                 else if (depthImage is not null && ReferenceEquals(image, depthImage))
                 {
@@ -736,9 +750,9 @@ internal static unsafe partial class VulkanVideoPresenter
                         : 0;
                     TransitionImage(image, AccessFlags.ShaderReadBit | attachmentAccess, range, command);
                 }
-                else if ((image.Binding.ForceGeneral || image.Binding.IsTarget) && !image.Description.IsDepth)
+                else if ((imageBinding.ForceGeneral || imageBinding.IsTarget) && !image.Description.IsDepth)
                 {
-                    var storageAccess = image.Binding.ShaderWrite ? AccessFlags.ShaderWriteBit : 0;
+                    var storageAccess = imageBinding.ShaderWrite ? AccessFlags.ShaderWriteBit : 0;
                     TransitionImage(image,
                         AccessFlags.ShaderReadBit | storageAccess | AccessFlags.ColorAttachmentReadBit | AccessFlags.ColorAttachmentWriteBit,
                         null,
@@ -995,12 +1009,51 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
             }
 
-            if (state.DepthBoundsTestEnabled && _presenter._supportsDepthBounds && (!known || !last.DepthBoundsTestEnabled ||
-                state.DepthMinBounds != last.DepthMinBounds || state.DepthMaxBounds != last.DepthMaxBounds))
+            // Pipelines built from libraries keep the stencil test, the stencil operations and the depth bounds test dynamic.
+            if (!known || state.StencilTestEnabled != last.StencilTestEnabled)
             {
                 using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
                 {
-                    _vk.CmdSetDepthBounds(command, state.DepthMinBounds, state.DepthMaxBounds);
+                    _vk.CmdSetStencilTestEnable(command, state.StencilTestEnabled);
+                }
+            }
+
+            if (!known || state.FrontStencilOperations != last.FrontStencilOperations)
+            {
+                var front = state.FrontStencilOperations;
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdSetStencilOp(command, StencilFaceFlags.FaceFrontBit, front.FailOperation, front.PassOperation, front.DepthFailOperation, front.Compare);
+                }
+            }
+
+            if (!known || state.BackStencilOperations != last.BackStencilOperations)
+            {
+                var back = state.BackStencilOperations;
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdSetStencilOp(command, StencilFaceFlags.FaceBackBit, back.FailOperation, back.PassOperation, back.DepthFailOperation, back.Compare);
+                }
+            }
+
+            if (_presenter._supportsDepthBounds)
+            {
+                if (!known || state.DepthBoundsTestEnabled != last.DepthBoundsTestEnabled)
+                {
+                    using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                    {
+                        _vk.CmdSetDepthBoundsTestEnable(command, state.DepthBoundsTestEnabled);
+                    }
+                }
+
+                // The bounds only matter while the test is on.
+                if (state.DepthBoundsTestEnabled && (!known || !last.DepthBoundsTestEnabled ||
+                    state.DepthMinBounds != last.DepthMinBounds || state.DepthMaxBounds != last.DepthMaxBounds))
+                {
+                    using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                    {
+                        _vk.CmdSetDepthBounds(command, Math.Clamp(state.DepthMinBounds, 0f, 1f), Math.Clamp(state.DepthMaxBounds, 0f, 1f));
+                    }
                 }
             }
 
@@ -1546,7 +1599,28 @@ internal static unsafe partial class VulkanVideoPresenter
             var (obtainedBuffer, offset) = _worker
                 ? ObtainBufferForSlice(argumentsAddress, 3u * sizeof(uint), isWritten: false, isTexelBuffer: false)
                 : _bufferCache.ObtainBuffer(argumentsAddress, 3u * sizeof(uint), false);
-            var buffer = obtainedBuffer.Handle;
+            RecordIndirectDispatch(obtainedBuffer.Handle, offset, physicalAxisOfLogical);
+            return true;
+        }
+
+        // The arguments were registered before the stage's resources (PrepareIndirectDispatchArguments), so the dispatch
+        // acquires no guest range here: an acquisition after binding could merge an owner the shader already writes.
+        public bool TryDispatchIndirect(IIndirectDispatchArguments arguments, ReadOnlySpan<int> physicalAxisOfLogical)
+        {
+            if (arguments is SliceDispatchArguments slice)
+            {
+                return TryDispatchIndirect(slice.Address, physicalAxisOfLogical);
+            }
+
+            using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawRecording);
+            var binding = ((PreparedDispatchArguments)arguments).Use();
+            RecordIndirectDispatch(new VkBuffer(binding.Handle), binding.Offset, physicalAxisOfLogical);
+            return true;
+        }
+
+        private void RecordIndirectDispatch(VkBuffer buffer, ulong offset, ReadOnlySpan<int> physicalAxisOfLogical)
+        {
+            var permuted = physicalAxisOfLogical is not [0, 1, 2];
             var permutedArguments = permuted ? UploadTransient(stackalloc byte[3 * sizeof(uint)], 16) : default;
             var command = BeginBatchedGuestCommands();
             var barrier = new BufferMemoryBarrier2
@@ -1589,7 +1663,6 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             CountDraw();
             NoteShaderMayWriteMappedMemory();
-            return true;
         }
 
         internal static readonly bool BatchBarriers =
@@ -1620,6 +1693,7 @@ internal static unsafe partial class VulkanVideoPresenter
             VulkanSynchronization.PipelineBarrier(_vk,command, sourceStages, destinationStages, 0, 1, &barrier, 0, null, 0, null, BarrierSource.Requested);
         }
 
+        // A task stage reads the automatic indirect arguments of task-launched mesh draws (MeshTaskLaunch).
         public void ShaderWriteBarrier(PipelineStageFlags sourceStages)
         {
             NoteShaderMayWriteMappedMemory();
@@ -1627,7 +1701,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 sourceStages,
                 PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.VertexInputBit | PipelineStageFlags.VertexShaderBit |
                 PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.TransferBit | PipelineStageFlags.ColorAttachmentOutputBit |
-                (_presenter._supportsMeshShader ? PipelineStageFlags.MeshShaderBitExt : PipelineStageFlags.None),
+                (_presenter._supportsMeshShader ? PipelineStageFlags.MeshShaderBitExt : PipelineStageFlags.None) |
+                (_presenter._supportsTaskShader ? PipelineStageFlags.TaskShaderBitExt : PipelineStageFlags.None) |
+                (_presenter._supportsTessellation
+                    ? PipelineStageFlags.TessellationControlShaderBit | PipelineStageFlags.TessellationEvaluationShaderBit
+                    : PipelineStageFlags.None),
                 AccessFlags.ShaderWriteBit,
                 AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit | AccessFlags.VertexAttributeReadBit | AccessFlags.IndexReadBit |
                 AccessFlags.UniformReadBit | AccessFlags.TransferReadBit | AccessFlags.TransferWriteBit |

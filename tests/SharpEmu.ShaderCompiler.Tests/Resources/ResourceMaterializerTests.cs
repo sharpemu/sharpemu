@@ -323,7 +323,7 @@ public sealed class ResourceMaterializerTests
     {
         var plan = Extract(Program(BufferLoad(0, 0), EndProgram(8)));
         var snapshot = new ResourceSnapshot { UserData = [0xFEEDBEEF] };
-        var specialization = new ResourceSpecialization { Buffers = [new BufferSpecialization(7, 0, 0)] };
+        var specialization = new ResourceSpecialization { Buffers = [new BufferSpecialization(7, 0)] };
         var priorSnapshot = snapshot;
         var priorSpecialization = specialization;
 
@@ -331,7 +331,7 @@ public sealed class ResourceMaterializerTests
         Assert.Same(priorSnapshot, snapshot);
         Assert.Same(priorSpecialization, specialization);
         Assert.Equal([0xFEEDBEEFu], snapshot.UserData);
-        Assert.Equal(7u, specialization.Buffers[0].PackedStride);
+        Assert.Equal(7u, specialization.Buffers[0].DescriptorFormat);
     }
 
     [Fact]

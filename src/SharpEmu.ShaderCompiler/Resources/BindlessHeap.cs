@@ -3,16 +3,22 @@
 
 namespace SharpEmu.ShaderCompiler.Resources;
 
-// Descriptor set 1: the images and samplers of call records (CallRecordSelector), which a program linked with run-time call
-// records reads at elements the host assigns. It holds one array per supported image class and two sampler arrays (plain
-// and depth compare).
+// The descriptor heaps a bindless shader indexes at run time: a texture heap of 32-byte T# records and a sampler heap of
+// 16-byte S# records, each read at a record only the shader knows. Descriptor set 1 holds one array per supported image
+// class and two sampler arrays (plain and depth compare), indexed by the record number, and a bitset per array in which
+// the shader marks every record it reads, so that the host can give that record a view.
 public static class BindlessHeap
 {
     public const uint DescriptorSet = 1;
-    public const uint Capacity = 16384;
+    public const uint Capacity = 65536;
+    public const uint ImageRecordBytes = 32;
+    public const uint SamplerRecordBytes = 16;
+    public const uint FeedbackBinding = 63;
+    public const uint FeedbackWordsPerArray = Capacity / 32;
 
-    // The host gives each distinct call record descriptor an element of its array, by the descriptor's words.
-    // CallRecordNullIndex stays null.
+    // Set-1 elements from CallRecordFirstIndex on hold the views and samplers of call records (CallRecordSelector), which the
+    // host assigns by their descriptor words; guest heap records use the elements below. CallRecordNullIndex stays null.
+    public const uint CallRecordFirstIndex = 49152;
     public const uint CallRecordNullIndex = Capacity - 1;
 
     // The call records buffer of a dispatch (DescriptorBindingKind.CallRecords): word 0 holds the row count N, then N rows of
@@ -26,17 +32,26 @@ public static class BindlessHeap
     // The buffer holds at least this many words, so the lookup of an empty table reads inside it.
     public const uint CallRecordMinimumWords = 8;
 
-    // The image classes set 1 declares, in binding order; the sampler arrays follow them. A record's image is sampled as
-    // float, since its format is unknown until the shader finds its record.
+    // The image classes set 1 declares, in binding order; the sampler arrays follow them. A heap image is sampled as
+    // float, since its format is unknown until the shader picks its record.
     public static readonly HeapImageClass[] ImageClasses = BuildImageClasses();
 
     public static readonly DescriptorBindingKind[] ImageKinds = ImageClasses.Select(static heapClass => heapClass.Kind).ToArray();
+
+    // A 3D read of a record that holds a 2D texture reads it through the float 2D-array class: the hardware takes the
+    // third coordinate as the layer.
+    public static readonly int VolumeSlot = Array.FindIndex(ImageClasses, static heapClass => heapClass.Dimension == ImageDimension.Dim3D);
+
+    public static readonly int VolumeLayerSlot = Array.FindIndex(ImageClasses, static heapClass =>
+        heapClass is { Dimension: ImageDimension.Dim2DArray, Cube: false, Compare: false });
 
     public static int SamplerSlot => ImageKinds.Length;
 
     public static int CompareSamplerSlot => ImageKinds.Length + 1;
 
     public static int ArrayCount => ImageKinds.Length + 2;
+
+    public static uint FeedbackWords => (uint)ArrayCount * FeedbackWordsPerArray;
 
     // The binding of an image class in set 1, or -1 when set 1 has no array for it.
     public static int ImageSlot(DescriptorBindingKind kind) => Array.IndexOf(ImageKinds, kind);
@@ -69,6 +84,17 @@ public static class BindlessHeap
 
 // One image array of set 1: its binding kind and the view it holds.
 public readonly record struct HeapImageClass(DescriptorBindingKind Kind, ImageDimension Dimension, bool Cube, bool Compare);
+
+// A descriptor the shader reads from a bindless heap at a record it picks at run time: the heap V# source, the scalar
+// read of the record's first dword (whose dynamic offset the shader keeps), that read's immediate offset and the record
+// size. A cube image is sampled through a cube view.
+public sealed record HeapRecordSelector(uint HeapSource, int KeyMemoryIndex, uint Immediate, uint RecordBytes)
+{
+    public bool Cube { get; init; }
+}
+
+// One image access whose image or sampler is a heap record.
+public sealed record HeapRecordAccess(int MemoryIndex, uint Source, bool Sampler);
 
 // An image or sampler a linked callee reads through its record's run-time argument (ShaderCallEntryControl.RuntimeArgument),
 // Immediate bytes past it. Every record of the callee has its own; the host resolves them into set 1 for the records of each
@@ -104,3 +130,16 @@ public sealed record CallRecordBufferWords(ScalarValue[] Words, bool Written);
 // its buffers, which the host makes resident through the device-address table, and the bytes past the argument the callee
 // reads itself.
 public sealed record CallRecordCallee(CallRecordField[] Fields, CallRecordBuffer[] Buffers, uint ArgumentBytes);
+
+// A heap V# the plan evaluates for every draw, and whether it holds samplers.
+public sealed record HeapRecordSource(uint Source, bool Sampler);
+
+// One heap V# a draw's bindless accesses read: its base address, record count and stride.
+public readonly record struct BindlessHeapDescriptor(bool Sampler, ulong Base, uint Records, uint Stride)
+{
+    public static BindlessHeapDescriptor FromWords(bool sampler, ReadOnlySpan<uint> words) =>
+        new(sampler, words[0] | ((ulong)(words[1] & 0xFFFF) << 32), words[2], (words[1] >> 16) & 0x3FFF);
+}
+
+// How the shader reads one heap record: the key read whose dynamic offset it kept, the immediate offset and the record size.
+public readonly record struct HeapRecordUse(int KeyMemoryIndex, uint Immediate, uint RecordBytes);

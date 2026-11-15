@@ -30,6 +30,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     private readonly ShaderHeaderRegistry _registry;
     private readonly ShaderProgramCache _programs;
     private readonly System.Collections.Concurrent.ConcurrentDictionary<GraphicsPipelineKey, PipelineHandle> _graphicsPipelines = new();
+    // The pipelines the host is still compiling (IShaderPipelineHost.TryCreateGraphicsPipeline), each with the key and the
+    // description that started its compile; under _pipelineGate.
+    private readonly Dictionary<GraphicsPipelineKey, (GraphicsPipelineKey Key, GraphicsPipelineDescription Description)> _pendingGraphicsPipelines = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<ComputePipelineKey, PipelineHandle> _computePipelines = new();
     private readonly Dictionary<Gen5ShaderProgram, bool> _rayTracingComputePrograms = new();
     private readonly object _pipelineGate = new();
@@ -162,7 +165,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
     public static string TakeFastPathReport() =>
         FormattableString.Invariant($"[PERF][FAST_PATHS] zero_group_skips={Interlocked.Exchange(ref Rendering.RenderExecutor.ZeroGroupSkips, 0)} shader_hash_memo={_identityMemoHits.Take()} ") +
-        FormattableString.Invariant($"stream_cleaned={Interlocked.Exchange(ref Buffers.GuestBufferCache.StreamCleaned, 0)} stream_uses={Interlocked.Exchange(ref Buffers.GuestBufferCache.StreamUses, 0)}");
+        FormattableString.Invariant($"stream_cleaned={Interlocked.Exchange(ref Buffers.GuestBufferCache.StreamCleaned, 0)} stream_uses={Interlocked.Exchange(ref Buffers.GuestBufferCache.StreamUses, 0)} ") +
+        Buffers.GuestBufferCache.TakeObtainMemoReport();
 
     private uint[]? InputSemantics(ShaderHeaderEntry header)
     {
@@ -201,12 +205,22 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         UserConfigRegisters userConfig,
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
-        bool depthBound)
+        bool depthBound) =>
+        GetMeshGraphicsPrograms(banks, userConfig, targetExportMapping, pixelActive, depthBound, taskLaunch: false);
+
+    // taskLaunch: an automatic indirect draw launched by the task stage (MeshTaskLaunch).
+    public GraphicsPrograms GetMeshGraphicsPrograms(
+        RegisterBanks banks,
+        UserConfigRegisters userConfig,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        bool pixelActive,
+        bool depthBound,
+        bool taskLaunch)
     {
         var vertex = banks.Shader.Vertex;
         var context = banks.Context;
         var shaderInterface = context.ShaderInterface;
-        var mesh = PrepareMeshInput(vertex, shaderInterface, context, userConfig);
+        var mesh = PrepareMeshInput(vertex, shaderInterface, context, userConfig, taskLaunch);
         if (MeshDrawTrace.Active)
         {
             var group = userConfig.GeometryEngineControl;
@@ -521,7 +535,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             DropUnwrittenColorTargets = dropUnwritten,
             PositionStream = mesh is null ? FindPositionStream(vertexInfo) : null,
         };
-        if (keptGraphics is not null)
+        // A program with shader calls reads its call tables at every draw: its call records, targets and ready fallback can
+        // change while its registers and resources stay the same.
+        if (keptGraphics is not null && pair.Vertex.Entry is not { HasShaderCalls: true } &&
+            (pixelSource is null || pair.Pixel.Entry is not { HasShaderCalls: true }))
         {
             KeepGraphicsPrograms(keptGraphics, programs, programsStamp, vertexUserDataStamp, pixelUserDataStamp, interfaceStamp,
                 blendDependent ? banks.Stamp(RegisterStamp.PipelineState) : 0, pixelActive ? PixelOutputBlend(context) : 0, targetExportMapping, pixelActive,
@@ -531,9 +548,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         return programs;
     }
 
+    // The task stage's payload (SpirvMeshTask): three words, rounded up.
+    private const uint MeshTaskPayloadBytes = 16;
+
     private MeshDrawConfiguration? PrepareMeshInput(VertexStageRegisters vertex,
         ShaderInterfaceRegisters shaderInterface, ContextRegisters context,
-        UserConfigRegisters userConfig)
+        UserConfigRegisters userConfig, bool taskLaunch = false)
     {
         var planned = MeshDrawPlanner.Create(vertex, shaderInterface, context, userConfig,
             _host.MeshLimits, _host.MeshSubgroupSize);
@@ -547,6 +567,10 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 IeeeMode = vertex.GeometryResource1.IeeeMode,
                 ScratchDwords = Math.Max(registered.ScratchDwords, registered.ContinuationScratchDwords),
                 ClipSpace = ResolveClipSpace(context),
+                // The task payload shares the mesh workgroup's payload-and-shared memory with the planned shared memory.
+                TaskLaunched = taskLaunch &&
+                    (configuration.Geometry.LocalDataShareDwords + configuration.Geometry.OutputVertexCapacity + 5) * 4 + MeshTaskPayloadBytes <=
+                    _host.MeshLimits.MaxSharedMemoryBytes,
             },
         };
     }
@@ -1037,8 +1061,15 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
     public ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ) =>
         GetComputeProgram(banks, dispatchInitiator, dimensionX, dimensionY, dimensionZ, indirect: false);
 
-    public ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ, bool indirect)
+    public ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ, bool indirect) =>
+        GetComputeProgram(banks, dispatchInitiator, dimensionX, dimensionY, dimensionZ, indirect, gpuThreadCounts: false);
+
+    // gpuThreadCounts: the thread counts are in GPU memory (zero here); the program reads its thread limits from shader data
+    // the GPU writes (ComputeInputInfo.IndirectThreadCounts).
+    public ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ, bool indirect,
+        bool gpuThreadCounts)
     {
+        indirect |= gpuThreadCounts;
         var compute = banks.Shader.Compute;
         var registrations = ShaderHeaderRegistry.Registrations;
         var all = _keptComputes ??= new Dictionary<ulong, List<KeptComputeProgram>>();
@@ -1051,7 +1082,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         KeptComputeProgram? kept = null;
         foreach (var candidate in keptList)
         {
-            if (candidate.Registrations == registrations && candidate.DispatchInitiator == dispatchInitiator && SameComputeShape(candidate.Registers, compute))
+            if (candidate.Registrations == registrations && candidate.DispatchInitiator == dispatchInitiator &&
+                candidate.GpuThreadCounts == gpuThreadCounts && SameComputeShape(candidate.Registers, compute))
             {
                 kept = candidate;
                 break;
@@ -1077,7 +1109,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         _computeResolved.Increment();
-        var program = ResolveComputeProgram(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, out var source, out var systemRegisters, out var decoded);
+        var program = ResolveComputeProgram(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, gpuThreadCounts, out var source,
+            out var systemRegisters, out var decoded);
         if (program.ImageCopy is not null)
             return program;
         if (kept is null)
@@ -1087,7 +1120,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 keptList.RemoveAt(0);
             }
 
-            kept = new KeptComputeProgram { Registrations = registrations, DispatchInitiator = dispatchInitiator };
+            kept = new KeptComputeProgram { Registrations = registrations, DispatchInitiator = dispatchInitiator, GpuThreadCounts = gpuThreadCounts };
             keptList.Add(kept);
         }
 
@@ -1101,7 +1134,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
     private static void KeepComputeProgram(KeptComputeProgram kept, ComputeProgram program, ComputeStageRegisters compute, uint dimensionX, uint dimensionY, uint dimensionZ)
     {
-        kept.Program = program.Available && !program.Consumed ? program : null;
+        // A program with shader calls reads its call tables at every dispatch (its entry rebinds instead).
+        kept.Program = program.Available && !program.Consumed && kept.Entry is not { HasShaderCalls: true } ? program : null;
         if (kept.Registers is { } registers && SameComputeShape(registers, compute))
         {
             registers.UserScalars.CopyFrom(compute.UserScalars, compute.UserScalarCount);
@@ -1122,9 +1156,14 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var userData = UserData(compute.UserScalars, compute.UserScalarCount, probeWrittenRegisters: false, compute.Address, "compute").ToArray();
         var source = kept.Source! with { UserData = userData };
         kept.Source = source;
-        var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !_host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ);
-        var pushDataCursor = 0u;
-        var options = new StageCompileOptions { ComputeInfo = input, ComputeSystemRegisters = kept.SystemRegisters };
+        var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !_host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ,
+            kept.GpuThreadCounts);
+        var pushDataCursor = ComputePushDataCursor(input);
+        var options = new StageCompileOptions
+        {
+            ComputeInfo = input, ComputeSystemRegisters = kept.SystemRegisters,
+            ComputeDispatch = CountedDispatch(input, kept.SystemRegisters, dimensionX, dimensionY, dimensionZ, kept.GpuThreadCounts),
+        };
         if (!_programs.TryGetProgramForEntry(entry, source, options, _strictShaders, ref pushDataCursor, out var handle, out var stage, out var rejection))
         {
             ReportShaderSkip(source, rejection);
@@ -1160,13 +1199,14 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         uint dimensionY,
         uint dimensionZ)
     {
-        var program = ResolveComputeProgram(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, out var source, out var systemRegisters, out var decoded);
+        var program = ResolveComputeProgram(compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ, gpuThreadCounts: false, out var source,
+            out var systemRegisters, out var decoded);
         var kernel = decoded is not null && program.Available && !program.Consumed ? KernelFor(decoded) : null;
         return WithPrediction(program, kernel, source, systemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect: false);
     }
 
     private ComputeProgram ResolveComputeProgram(ComputeStageRegisters compute, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ,
-        out ShaderSource? resolvedSource, out Gen5ComputeSystemRegisters resolvedSystemRegisters, out Gen5ShaderProgram? decoded)
+        bool gpuThreadCounts, out ShaderSource? resolvedSource, out Gen5ComputeSystemRegisters resolvedSystemRegisters, out Gen5ShaderProgram? decoded)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
         var userData = UserData(compute.UserScalars, compute.UserScalarCount, probeWrittenRegisters: false, compute.Address, "compute").ToArray();
@@ -1193,7 +1233,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 if (usesRayTracing) return new ComputeProgram { Available = false };
             }
         }
-        var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !_host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ);
+        var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !_host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ,
+            gpuThreadCounts);
+        var dispatch = CountedDispatch(input, systemRegisters, dimensionX, dimensionY, dimensionZ, gpuThreadCounts);
         if (source.Registered.Frontend is { } frontend &&
             frontend.TryResolveImageCopy(_context, source.Registered, source.UserData, input, systemRegisters, dimensionX, dimensionY, dimensionZ,
                 out var copySource, out var copyDestination))
@@ -1201,19 +1243,20 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             return new ComputeProgram
             {
                 Input = input,
-                ImageCopy = new(copySource, copyDestination, () => CompileComputeProgram(source, input, systemRegisters)),
+                ImageCopy = new(copySource, copyDestination, () => CompileComputeProgram(source, input, systemRegisters, dispatch)),
             };
         }
-        return CompileComputeProgram(source, input, systemRegisters);
+        return CompileComputeProgram(source, input, systemRegisters, dispatch);
     }
 
-    private ComputeProgram CompileComputeProgram(ShaderSource source, ComputeInputInfo input, Gen5ComputeSystemRegisters systemRegisters)
+    private ComputeProgram CompileComputeProgram(ShaderSource source, ComputeInputInfo input, Gen5ComputeSystemRegisters systemRegisters,
+        DispatchBufferFootprint.Dispatch? dispatch)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
-        var pushDataCursor = 0u;
+        var pushDataCursor = ComputePushDataCursor(input);
         if (!TryPrepareProgram(
             source,
-            new StageCompileOptions { ComputeInfo = input, ComputeSystemRegisters = systemRegisters },
+            new StageCompileOptions { ComputeInfo = input, ComputeSystemRegisters = systemRegisters, ComputeDispatch = dispatch },
             ref pushDataCursor,
             out var handle,
             out var stage))
@@ -1224,6 +1267,18 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         input.Stage = stage;
         return new ComputeProgram { Program = handle, Input = input };
     }
+
+    // Thread limits the GPU writes need shader data in a buffer: a cursor at the end of the push range keeps it out.
+    private static uint ComputePushDataCursor(ComputeInputInfo input) => input.IndirectThreadCounts ? PushData.DwordCount : 0u;
+
+    // The dispatch whose GPU-loaded record counts a footprint proof bounds (DeviceRecordCountPlan); none when the thread
+    // counts are in GPU memory or the initiator counts threads.
+    private static DispatchBufferFootprint.Dispatch? CountedDispatch(ComputeInputInfo input, Gen5ComputeSystemRegisters systemRegisters,
+        uint dimensionX, uint dimensionY, uint dimensionZ, bool gpuThreadCounts) =>
+        DeviceRecordCountPlan.Enabled && !gpuThreadCounts && !input.DispatchThreadDimensions
+            ? new(dimensionX, dimensionY, dimensionZ, Math.Max(input.ThreadsX, 1), Math.Max(input.ThreadsY, 1), Math.Max(input.ThreadsZ, 1),
+                input.WaveSize, input.ThreadIdCount, systemRegisters)
+            : null;
 
     private bool TryPrepareProgram(ShaderSource source, StageCompileOptions options, ref uint pushDataCursor,
         out ShaderProgram program, out ShaderStageResources stage)
@@ -1300,6 +1355,41 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         ShaderProgram vertexProgram,
         ShaderProgram pixelProgram)
     {
+        // A draw waits for a compile the host runs off this thread, outside the cache's lock: programs and pipelines of
+        // other draws resolve meanwhile.
+        PipelineHandle handle;
+        while (!TryCreateGraphicsPipeline(colors, in depth, vertexInput, pixelInput, context, in rendering, topology,
+            primitiveRestartEnabled, disableBlending, vertexProgram, pixelProgram, out handle, out var compiling))
+        {
+            if (compiling is null)
+            {
+                Thread.Sleep(1);
+                continue;
+            }
+
+            _host.WaitForGraphicsPipeline(compiling);
+        }
+
+        return handle;
+    }
+
+    // compiling: the description of the compile the host still runs when this returns false.
+    private bool TryCreateGraphicsPipeline(
+        ReadOnlySpan<ColorTargetState> colors,
+        in DepthAttachmentState depth,
+        VertexInputInfo vertexInput,
+        PixelInputInfo? pixelInput,
+        ContextRegisters context,
+        in RenderingState rendering,
+        PrimitiveTopology topology,
+        bool primitiveRestartEnabled,
+        bool disableBlending,
+        ShaderProgram vertexProgram,
+        ShaderProgram pixelProgram,
+        out PipelineHandle handle,
+        out GraphicsPipelineDescription? compiling)
+    {
+        compiling = null;
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.PipelineCreation);
         // The lookup fills objects this thread reuses for every draw; only a new pipeline gets its own.
         var lookup = _graphicsLookup ??= new GraphicsPipelineKey
@@ -1316,24 +1406,38 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         lookup.VertexProgramId = vertexProgram.Id;
         lookup.PixelProgramId = pixelInput is not null ? pixelProgram.Id : 0;
         lookup.Tessellation = vertexInput.Tessellation;
-        if (_graphicsPipelines.TryGetValue(lookup, out var known))
+        if (_graphicsPipelines.TryGetValue(lookup, out handle))
         {
-            return known;
+            return true;
         }
 
-        var description = BuildGraphicsDescription(
-            colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, disableBlending,
-            vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts);
-        var key = KeyOf(description);
         profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineSharedGateWait);
         lock (_pipelineGate)
         {
             profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineCreation);
-            if (_graphicsPipelines.TryGetValue(key, out var cached))
+            if (_graphicsPipelines.TryGetValue(lookup, out handle))
             {
-                return cached;
+                return true;
             }
 
+            // A pipeline the host is still compiling is asked for with the description that started its compile.
+            if (_pendingGraphicsPipelines.TryGetValue(lookup, out var pending))
+            {
+                if (!_host.TryCreateGraphicsPipeline(pending.Description, out handle))
+                {
+                    compiling = pending.Description;
+                    return false;
+                }
+
+                _pendingGraphicsPipelines.Remove(pending.Key);
+                AddGraphicsPipeline(pending.Key, pending.Description, handle);
+                return true;
+            }
+
+            var description = BuildGraphicsDescription(
+                colors, in depth, vertexInput, pixelInput, context, in rendering, topology, primitiveRestartEnabled, disableBlending,
+                vertexProgram, pixelProgram, _host.NoAttachmentSampleCounts);
+            var key = KeyOf(description);
             if (RenderTrace.Enabled && RenderTrace.Pipeline())
             {
                 RenderTrace.Write(
@@ -1342,21 +1446,29 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
             }
 
-            var created = _host.CreateGraphicsPipeline(description);
-            lock (_pipelineGate)
+            if (!_host.TryCreateGraphicsPipeline(description, out handle))
             {
-                _graphicsPipelines.TryAdd(key, created);
+                _pendingGraphicsPipelines.Add(key, (key, description));
+                compiling = description;
+                return false;
             }
 
-            if (_host.ShaderPrewarm is { } prewarm && description.Tessellation is null &&
-                description.VertexStage.Stage == ShaderStageKind.Vertex)
-            {
-                prewarm.RecordGraphics(description);
-            }
-
-            ShaderCacheCounters.CountGraphicsPipeline();
-            return created;
+            AddGraphicsPipeline(key, description, handle);
+            return true;
         }
+    }
+
+    // Caller holds _pipelineGate.
+    private void AddGraphicsPipeline(GraphicsPipelineKey key, GraphicsPipelineDescription description, PipelineHandle handle)
+    {
+        _graphicsPipelines.TryAdd(key, handle);
+        if (_host.ShaderPrewarm is { } prewarm && description.Tessellation is null &&
+            description.VertexStage.Stage == ShaderStageKind.Vertex)
+        {
+            prewarm.RecordGraphics(description);
+        }
+
+        ShaderCacheCounters.CountGraphicsPipeline();
     }
 
     [ThreadStatic]
@@ -1659,6 +1771,11 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             return _host.GetComputePipelineCompletion(program);
         }
     }
+
+    public bool IsSlowLinkedCompile(ulong hash) => _host.ShaderPrewarm?.IsSlowLinkedCompile(hash) ?? false;
+
+    public void RecordLinkedCompile(ulong hash, bool slow, long milliseconds) =>
+        _host.ShaderPrewarm?.RecordLinkedCompile(hash, slow, milliseconds);
 }
 
 internal sealed class KeptGraphicsPrograms
@@ -1689,6 +1806,7 @@ internal sealed class KeptComputeProgram
     public long Rebinds;
     public long Registrations;
     public uint DispatchInitiator;
+    public bool GpuThreadCounts;
     public uint DimensionX;
     public uint DimensionY;
     public uint DimensionZ;

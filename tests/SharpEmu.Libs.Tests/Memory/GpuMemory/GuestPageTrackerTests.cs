@@ -229,6 +229,31 @@ public sealed class GuestPageTrackerTests : IDisposable
         Release(address, Region);
     }
 
+    // The lock-free query over several blocks: clean blocks pass on their summary bits, a dirty page in any one block is
+    // found, and a block without a region (here the last block of the summary word below) is never known clean.
+    [NativePageProtectionFact]
+    public void LockFreeCpuDirtyQuerySpansBlocksAndSummaryWords()
+    {
+        var address = AllocateAligned(Region * 3, Region * 64);
+        _tracker.ForEachUploadRange(address, Region * 3, false, NoRange, NoUpload, preserveCpuWriteHotPages: false);
+        Assert.False(_tracker.MayHaveCpuDirtyPages(address, Region * 3));
+        Assert.True(_tracker.MayHaveCpuDirtyPages(address - Region + Page, Region));
+
+        _tracker.MarkCpuDirtyPages(address + Region * 2 + Page * 7, 8);
+        Assert.True(_tracker.MayHaveCpuDirtyPages(address, Region * 3));
+        Assert.False(_tracker.MayHaveCpuDirtyPages(address, Region * 2));
+        Assert.False(_tracker.MayHaveCpuDirtyPages(address + Region * 2, Page * 7));
+        Assert.True(_tracker.MayHaveCpuDirtyPages(address + Region, Region + Page * 8));
+
+        _tracker.ForEachUploadRange(address, Region * 3, false, NoRange, NoUpload, preserveCpuWriteHotPages: false);
+        _tracker.MarkCpuDirtyPages(address + 16, 8);
+        Assert.True(_tracker.MayHaveCpuDirtyPages(address, Region * 3));
+        Assert.False(_tracker.MayHaveCpuDirtyPages(address + Page, Region * 3 - Page));
+
+        _tracker.UntrackMemory(address, Region * 3);
+        Release(address, Region * 3);
+    }
+
     [NativePageProtectionFact]
     public void PossiblyCpuDirtyRangesSkipOnlyBlocksKnownClean()
     {

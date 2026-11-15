@@ -143,4 +143,69 @@ public sealed class ShaderCalleeTiersTests
         third.Observe(Named((First, FirstCode), (Second, SecondCode)), Caller, host);
         Assert.Equal([First, Second], third.Choose(union, fallbackGeneration: 1, snapshots: 167)[0x40].Keys.Order());
     }
+
+    private static Dictionary<uint, Dictionary<ulong, UnitedCallee>> Sites(params (uint Pc, UnitedCallee Callee)[] entries)
+    {
+        var sites = new Dictionary<uint, Dictionary<ulong, UnitedCallee>>();
+        foreach (var (pc, callee) in entries)
+        {
+            if (!sites.TryGetValue(pc, out var callees)) sites[pc] = callees = [];
+            callees[callee.Target.Address] = callee;
+        }
+
+        return sites;
+    }
+
+    // A body already called at one site that the tables also name at another site moves the choice like a call: otherwise
+    // the ready program keeps no target at the new site, and its calls there return at once.
+    [Fact]
+    public void A_called_body_named_at_another_site_moves_the_choice()
+    {
+        var tiers = new ShaderCalleeTiers(Sites((0x40, Callee(First, FirstCode))));
+        tiers.LinkedGeneration = 3;
+        var union = Sites((0x40, Callee(First, FirstCode)), (0x80, Callee(First, FirstCode)));
+        Assert.False(tiers.Choose(union, 3, 10).ContainsKey(0x80));
+        Assert.False(tiers.Choose(union, 3, 10 + ShaderCalleeTiers.Settle - 1).ContainsKey(0x80));
+        var chosen = tiers.Choose(union, 3, 10 + ShaderCalleeTiers.Settle);
+        Assert.Equal([First], chosen[0x40].Keys);
+        Assert.Equal([First], chosen[0x80].Keys);
+        Assert.Null(tiers.LinkedGeneration);
+    }
+
+    // The scan runs again once the program cache reports a union change after a scan that found every called body chosen.
+    [Fact]
+    public void A_union_that_later_names_a_called_body_at_a_new_site_moves_the_choice()
+    {
+        var tiers = new ShaderCalleeTiers(Sites((0x40, Callee(First, FirstCode))));
+        tiers.LinkedGeneration = 3;
+        var union = Sites((0x40, Callee(First, FirstCode)));
+        for (var snapshots = 10; snapshots < 10 + 2 * ShaderCalleeTiers.Settle; snapshots++)
+        {
+            Assert.Equal([0x40u], tiers.Choose(union, 3, snapshots).Keys);
+        }
+
+        Assert.Equal(3, tiers.LinkedGeneration);
+        union[0x80] = new() { [First] = Callee(First, FirstCode) };
+        tiers.NoteUnionChanged();
+        Assert.False(tiers.Choose(union, 3, 40).ContainsKey(0x80));
+        Assert.Equal([First], tiers.Choose(union, 3, 40 + ShaderCalleeTiers.Settle)[0x80].Keys);
+    }
+
+    // A site whose body only moved to another address keeps its slot (CurrentTargets serves the address that holds the code),
+    // so it does not move the choice; neither does a body nobody called.
+    [Fact]
+    public void A_moved_body_or_an_uncalled_body_at_a_new_site_keeps_the_choice()
+    {
+        var tiers = new ShaderCalleeTiers(Sites((0x40, Callee(First, FirstCode))));
+        tiers.LinkedGeneration = 3;
+        var union = Sites((0x40, Callee(Second, FirstCode)), (0x80, Callee(Second + 0x10000, SecondCode)));
+        for (var snapshots = 10; snapshots < 10 + 2 * ShaderCalleeTiers.Settle; snapshots++)
+        {
+            var chosen = tiers.Choose(union, 3, snapshots);
+            Assert.Equal([First], chosen[0x40].Keys);
+            Assert.False(chosen.ContainsKey(0x80));
+        }
+
+        Assert.Equal(3, tiers.LinkedGeneration);
+    }
 }

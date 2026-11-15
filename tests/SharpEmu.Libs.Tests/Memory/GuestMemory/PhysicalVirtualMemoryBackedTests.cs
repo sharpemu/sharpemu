@@ -370,8 +370,76 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
         }
     }
 
-    [Fact]
-    public void MixedCopyWithProtectedPrivateMemoryDoesNotUpgradeUnderTheReadLock()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void MixedCopyWithProtectedPrivateMemoryDoesNotUpgradeUnderTheReadLock(bool direct)
+    {
+        var saved = HostCallTrims.MixedCopyOverrideForTests;
+        HostCallTrims.MixedCopyOverrideForTests = direct;
+        try
+        {
+            MixedCopyWithProtectedPrivateMemory();
+        }
+        finally
+        {
+            HostCallTrims.MixedCopyOverrideForTests = saved;
+        }
+    }
+
+    // Copies between backed and private memory leave the same bytes and results with the direct copy as through
+    // staging: backed to private (whole and unaligned), private to backed, and a copy that runs past the backed mapping.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void MixedCopiesLeaveTheSameBytesDirectlyAsThroughStaging(bool direct)
+    {
+        if (!Supported) return;
+        var saved = HostCallTrims.MixedCopyOverrideForTests;
+        HostCallTrims.MixedCopyOverrideForTests = direct;
+        try
+        {
+            var host = HostViewMemory.Create();
+            using var memory = new PhysicalVirtualMemory(viewHost: host, backingBytes: BackingSize);
+            var view = Hold(memory, host);
+            Assert.True(memory.TryMapBacked(view, Segment, 0, GuestPageProtection.Read | GuestPageProtection.Write, out _));
+            var writable = MapPrivate(memory, host, 2 * Segment, ProgramHeaderFlags.Read | ProgramHeaderFlags.Write);
+            var pattern = new byte[Segment];
+            for (var i = 0; i < pattern.Length; i++) pattern[i] = (byte)(i * 7 + 1);
+            Assert.True(memory.TryWrite(view, pattern));
+
+            Assert.True(memory.TryCopy(writable, view, Segment));
+            Assert.Equal(pattern, Read(memory, writable, (int)Segment));
+            Assert.True(memory.TryCopy(writable + Segment + 3, view + 5, 0x1001));
+            Assert.Equal(pattern.AsSpan(5, 0x1001).ToArray(), Read(memory, writable + Segment + 3, 0x1001));
+
+            var inverted = new byte[0x2003];
+            for (var i = 0; i < inverted.Length; i++) inverted[i] = (byte)~pattern[i];
+            Assert.True(memory.TryWrite(writable + 0x100, inverted));
+            Assert.True(memory.TryCopy(view + 0x11, writable + 0x100, (ulong)inverted.Length));
+            Assert.Equal(inverted, Read(memory, view + 0x11, inverted.Length));
+
+            // Past the backed mapping: fails, and the destination keeps its bytes.
+            var sentinel = new byte[0x40];
+            Array.Fill(sentinel, (byte)0x5A);
+            Assert.True(memory.TryWrite(writable + 0x3000, sentinel));
+            Assert.False(memory.TryCopy(writable + 0x3000, view + Segment - 0x10, 0x40));
+            Assert.Equal(sentinel, Read(memory, writable + 0x3000, sentinel.Length));
+        }
+        finally
+        {
+            HostCallTrims.MixedCopyOverrideForTests = saved;
+        }
+    }
+
+    private static byte[] Read(PhysicalVirtualMemory memory, ulong address, int length)
+    {
+        var bytes = new byte[length];
+        Assert.True(memory.TryRead(address, bytes));
+        return bytes;
+    }
+
+    private void MixedCopyWithProtectedPrivateMemory()
     {
         if (!Supported) return;
         var host = HostViewMemory.Create();

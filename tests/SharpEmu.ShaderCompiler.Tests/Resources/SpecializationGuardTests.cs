@@ -79,7 +79,9 @@ public sealed class SpecializationGuardTests
             uint[] words = [(uint)(0x8000 + index * 4096), (uint)(index % 4) << 16, 64, 0];
             Assert.True(ResourceMaterializer.Materialize(plan, Inputs(words), ref snapshot, ref specialization));
             Assert.Equal(words, Assert.Single(snapshot.Buffers));
-            Assert.Equal((uint)(index % 4), Assert.Single(specialization.Buffers).PackedStride);
+            // The stride does not reach the specialization.
+            Assert.Equal(new BufferSpecialization(DescriptorConstants.InvalidFormat, DescriptorConstants.IdentityDestinationSelect),
+                Assert.Single(specialization.Buffers));
             specialization.Buffers.Clear();
         });
     }

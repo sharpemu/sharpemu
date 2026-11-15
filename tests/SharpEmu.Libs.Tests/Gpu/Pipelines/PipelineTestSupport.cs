@@ -28,7 +28,7 @@ internal sealed class FakeCompiledShader(ShaderCompileRequest request, byte[]? s
 }
 
 // Counts modules and pipelines; every guest read comes straight from the fake memory.
-internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
+internal class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
 {
     private ulong _nextHandle = 1;
 
@@ -53,11 +53,17 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
 
     public uint MaxPushDescriptors => 32;
 
+    public StableImageDescriptorLimits ComputeImageDescriptorLimits { get; set; }
+
+    public StableImageDescriptorLimits GraphicsImageDescriptorLimits { get; set; }
+
     public bool ComputeWave64Supported => true;
 
     public bool GraphicsSubgroupOperationsEnabled => true;
 
     public bool SharedInt64AtomicsEnabled => false;
+
+    public bool RuntimeCallRecordsSupported { get; set; }
 
     public bool CallMarksSupported { get; set; }
 
@@ -78,6 +84,10 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
     public bool ShaderSignedZeroInfNanPreserveFloat32Supported { get; set; }
 
     public ShaderPrewarmList? ShaderPrewarm { get; set; }
+
+    public List<(ulong Module, ulong Identity)> RecordedVertexPrograms { get; } = new();
+
+    public void VertexProgramRecorded(ulong module, ulong prewarmIdentity) => RecordedVertexPrograms.Add((module, prewarmIdentity));
 
     public RenderHostLimits Limits => new(16384, 16384, 16384, 16384);
 
@@ -186,6 +196,31 @@ internal sealed class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
         handle = CreateComputePipeline(description);
         return true;
     }
+
+    // How many requests for graphics pipelines report "still compiling" before one is handed over, and the description
+    // each request named.
+    public int PendingGraphicsCompiles { get; set; }
+
+    public List<GraphicsPipelineDescription> GraphicsPipelineRequests { get; } = new();
+
+    public bool TryCreateGraphicsPipeline(GraphicsPipelineDescription description, out PipelineHandle handle)
+    {
+        GraphicsPipelineRequests.Add(description);
+        handle = default;
+        if (PendingGraphicsCompiles > 0)
+        {
+            PendingGraphicsCompiles--;
+            return false;
+        }
+
+        handle = CreateGraphicsPipeline(description);
+        return true;
+    }
+
+    // The descriptions a caller waited for, outside the pipeline cache's lock.
+    public List<GraphicsPipelineDescription> GraphicsPipelineWaits { get; } = new();
+
+    public void WaitForGraphicsPipeline(GraphicsPipelineDescription description) => GraphicsPipelineWaits.Add(description);
 }
 
 // Remembers every request; compiles nothing unless a module factory was given.

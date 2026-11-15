@@ -5,6 +5,17 @@ using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 
 namespace SharpEmu.Libs.Gpu.GpuCommands;
 
+// The shader registers an indirect draw packet names for the CP to fill from the arguments as the draw executes:
+// the base vertex (the start vertex of a non-indexed draw) in DW2[15:0], the start instance in DW3[15:0] and, when
+// DW3 bit 27 is set, the draw's index in DW2[31:16]. Location 0 and ShaderRegisterNop name no register.
+internal readonly record struct DrawRegisterLocations(uint BaseVertex, uint StartInstance, uint DrawIndex)
+{
+    public static DrawRegisterLocations FromPacket(uint vertexWord, uint instanceWord) =>
+        new(vertexWord & 0xFFFFu, instanceWord & 0xFFFFu, (instanceWord & (1u << 27)) != 0 ? vertexWord >> 16 : 0);
+
+    public static bool Names(uint location) => location != 0 && location != RegisterBankLayout.ShaderRegisterNop;
+}
+
 public sealed partial class GpuCommandInterpreter
 {
     private const uint DrawIndirectArgumentsSize = 16;
@@ -26,7 +37,8 @@ public sealed partial class GpuCommandInterpreter
         _ => throw _host.Fatal($"The index type is unknown: type={IndexTypeAndSize}."),
     };
 
-    internal void DrawIndexed(ulong packetAddress, uint opcode, uint indexCount, ulong indexAddress, uint instanceCount = 0, int baseVertex = 0, uint firstInstance = 0, DrawOffsetSource offsetSource = DrawOffsetSource.Packet, int startInstanceUserData = -1)
+    internal void DrawIndexed(ulong packetAddress, uint opcode, uint indexCount, ulong indexAddress, uint instanceCount = 0, int baseVertex = 0, uint firstInstance = 0, DrawOffsetSource offsetSource = DrawOffsetSource.Packet,
+        bool baseVertexInRegister = false, bool firstInstanceInRegister = false, int startInstanceUserData = -1)
     {
         if (instanceCount == 0)
         {
@@ -40,7 +52,8 @@ public sealed partial class GpuCommandInterpreter
         }
         if (Rendering.ScissorTrace.Instance is { Active: true } trace)
             trace.DrawIssued(TypedRegisters, SubmitId, QueueId, packetAddress);
-        _host.DrawIndexed(SubmitId, new DrawIndexedArguments(packetAddress, opcode, indexCount, indexAddress, IndexTypeAndSize, instanceCount, baseVertex, firstInstance, offsetSource, StartInstanceUserData: startInstanceUserData));
+        _host.DrawIndexed(SubmitId, new DrawIndexedArguments(packetAddress, opcode, indexCount, indexAddress, IndexTypeAndSize, instanceCount, baseVertex, firstInstance, offsetSource,
+            StartInstanceUserData: startInstanceUserData, BaseVertexInRegister: baseVertexInRegister, FirstInstanceInRegister: firstInstanceInRegister));
     }
 
     internal void DrawIndexedOffset(ulong packetAddress, uint indexOffset, uint indexCount)
@@ -49,7 +62,8 @@ public sealed partial class GpuCommandInterpreter
         DrawIndexed(packetAddress, PacketOpcode.DrawIndexOffset2, indexCount, IndexBaseAddress + (indexOffset * IndexElementSize));
     }
 
-    internal void DrawAuto(ulong packetAddress, uint opcode, uint vertexCount, uint instanceCount = 0, uint firstVertex = 0, uint firstInstance = 0, DrawOffsetSource offsetSource = DrawOffsetSource.Packet, int startInstanceUserData = -1)
+    internal void DrawAuto(ulong packetAddress, uint opcode, uint vertexCount, uint instanceCount = 0, uint firstVertex = 0, uint firstInstance = 0, DrawOffsetSource offsetSource = DrawOffsetSource.Packet,
+        bool firstVertexInRegister = false, bool firstInstanceInRegister = false, int startInstanceUserData = -1)
     {
         if (instanceCount == 0)
         {
@@ -58,11 +72,13 @@ public sealed partial class GpuCommandInterpreter
 
         if (Rendering.ScissorTrace.Instance is { Active: true } trace)
             trace.DrawIssued(TypedRegisters, SubmitId, QueueId, packetAddress);
-        _host.DrawAuto(SubmitId, new DrawAutoArguments(packetAddress, opcode, vertexCount, instanceCount, firstVertex, firstInstance, offsetSource, startInstanceUserData));
+        _host.DrawAuto(SubmitId, new DrawAutoArguments(packetAddress, opcode, vertexCount, instanceCount, firstVertex, firstInstance, offsetSource, startInstanceUserData,
+            FirstVertexInRegister: firstVertexInRegister, FirstInstanceInRegister: firstInstanceInRegister));
     }
 
     // Indirect arguments are read from guest memory now, as the packet executes.
-    internal void DrawIndirect(ulong packetAddress, uint opcode, uint dataOffset, uint drawInitiator, bool indexed, int startInstanceUserData)
+    internal void DrawIndirect(ulong packetAddress, uint opcode, uint dataOffset, uint drawInitiator, bool indexed,
+        DrawRegisterLocations locations = default)
     {
         if ((drawInitiator & ~0x20u) != 2u)
         {
@@ -74,10 +90,11 @@ public sealed partial class GpuCommandInterpreter
             throw _host.Fatal($"The indirect draw arguments base is zero: address=0x{packetAddress:X16}.");
         }
 
-        DrawIndirectArguments(packetAddress, opcode, DrawIndirectArgumentsBase + dataOffset, indexed, startInstanceUserData);
+        DrawIndirectArguments(packetAddress, opcode, DrawIndirectArgumentsBase + dataOffset, indexed, locations, 0);
     }
 
-    internal void DrawIndirectMulti(ulong packetAddress, uint opcode, uint dataOffset, uint maxCountOrCount, ulong countAddress, uint strideInBytes, uint drawInitiator, bool indexed, int startInstanceUserData)
+    internal void DrawIndirectMulti(ulong packetAddress, uint opcode, uint dataOffset, uint maxCountOrCount, ulong countAddress, uint strideInBytes, uint drawInitiator, bool indexed,
+        DrawRegisterLocations locations = default)
     {
         if ((drawInitiator & ~0x20u) != 2u)
         {
@@ -108,35 +125,50 @@ public sealed partial class GpuCommandInterpreter
 
         for (var draw = 0u; draw < drawCount; draw++)
         {
-            DrawIndirectArguments(packetAddress, opcode, DrawIndirectArgumentsBase + dataOffset + ((ulong)draw * strideInBytes), indexed, startInstanceUserData);
+            DrawIndirectArguments(packetAddress, opcode, DrawIndirectArgumentsBase + dataOffset + ((ulong)draw * strideInBytes), indexed, locations, draw);
         }
     }
 
-    private void DrawIndirectArguments(ulong packetAddress, uint opcode, ulong argumentsAddress, bool indexed, int startInstanceUserData)
+    // A value the CP writes to a register reaches the shader there, which adds it to its vertex or instance id; the
+    // draw then counts those from 0. A start instance in the vertex program's live user data stays in the arguments
+    // instead: the draw passes it as its first instance and the program stores its base instance in that user data
+    // (StartInstanceUserData), so the host can leave the arguments on the GPU. A named base vertex, or a start instance
+    // in another register, takes its value here, so the draw reads its arguments now.
+    private void DrawIndirectArguments(ulong packetAddress, uint opcode, ulong argumentsAddress, bool indexed, DrawRegisterLocations locations, uint drawIndex)
     {
-        if (!indexed && _host.ResolvesIndirectDrawOnGpu)
-        {
-            _deferredInstanceCountAddress = argumentsAddress + 4;
-            if (Rendering.ScissorTrace.Instance is { Active: true } gpuTrace)
-                gpuTrace.DrawIssued(TypedRegisters, SubmitId, QueueId, packetAddress);
-            _host.DrawAuto(SubmitId, new DrawAutoArguments(packetAddress, opcode, uint.MaxValue, 1, 0, 0,
-                DrawOffsetSource.IndirectArguments, startInstanceUserData, argumentsAddress));
-            return;
-        }
-
+        var startInstanceUserData = StartInstanceUserData(locations.StartInstance);
+        var vertexInRegister = DrawRegisterLocations.Names(locations.BaseVertex);
+        var instanceInRegister = DrawRegisterLocations.Names(locations.StartInstance) && startInstanceUserData < 0;
+        var registersNeedArguments = vertexInRegister || instanceInRegister;
         if (!indexed)
         {
+            if (!registersNeedArguments && _host.ResolvesIndirectDrawOnGpu)
+            {
+                WriteDrawRegister(locations.DrawIndex, drawIndex);
+                // The host reads the four arguments on the GPU, or itself when the draw needs the counts.
+                _deferredInstanceCountAddress = argumentsAddress + 4;
+                if (Rendering.ScissorTrace.Instance is { Active: true } gpuTrace)
+                    gpuTrace.DrawIssued(TypedRegisters, SubmitId, QueueId, packetAddress);
+                _host.DrawAuto(SubmitId, new DrawAutoArguments(packetAddress, opcode, uint.MaxValue, 1, 0, 0,
+                    DrawOffsetSource.IndirectArguments, startInstanceUserData, argumentsAddress));
+                return;
+            }
+
             var vertexCount = ReadDword(argumentsAddress);
             var instanceCount = ReadDword(argumentsAddress + 4);
             var startVertex = ReadDword(argumentsAddress + 8);
             var startInstance = ReadDword(argumentsAddress + 12);
             InstanceCount = instanceCount;
-            DrawAuto(packetAddress, opcode, vertexCount, instanceCount, startVertex, startInstance, DrawOffsetSource.IndirectArguments, startInstanceUserData);
+            WriteDrawRegisters(locations, startVertex, startInstance, drawIndex, instanceInRegister);
+            DrawAuto(packetAddress, opcode, vertexCount, instanceCount, vertexInRegister ? 0 : startVertex,
+                instanceInRegister ? 0 : startInstance, DrawOffsetSource.IndirectArguments, vertexInRegister, instanceInRegister,
+                startInstanceUserData);
             return;
         }
 
-        if (_host.ResolvesIndirectDrawOnGpu && IndexTypeAndSize is 0 or 1 && TryGetGpuIndexRange(out var gpuIndexCount))
+        if (!registersNeedArguments && _host.ResolvesIndirectDrawOnGpu && IndexTypeAndSize is 0 or 1 && TryGetGpuIndexRange(out var gpuIndexCount))
         {
+            WriteDrawRegister(locations.DrawIndex, drawIndex);
             // The host reads the five arguments on the GPU. It draws from the whole index
             // range; the arguments pick the indices. The host falls back to reading them
             // itself when the draw needs the counts.
@@ -145,7 +177,8 @@ public sealed partial class GpuCommandInterpreter
                 trace.DrawIssued(TypedRegisters, SubmitId, QueueId, packetAddress);
             _host.DrawIndexed(SubmitId, new DrawIndexedArguments(
                 packetAddress, opcode, gpuIndexCount, IndexBaseAddress, IndexTypeAndSize, 1, 0, 0,
-                DrawOffsetSource.IndirectArguments, argumentsAddress, UnboundedIndexBuffer: IndexBufferSize == 0, StartInstanceUserData: startInstanceUserData));
+                DrawOffsetSource.IndirectArguments, argumentsAddress, UnboundedIndexBuffer: IndexBufferSize == 0,
+                StartInstanceUserData: startInstanceUserData));
             return;
         }
 
@@ -162,13 +195,46 @@ public sealed partial class GpuCommandInterpreter
             LearnIndexExtent(startIndex, indexCountPerInstance);
         }
 
-        DrawIndexed(packetAddress, opcode, indexCount, indexAddress, indexedInstanceCount, unchecked((int)baseVertex), indexedStartInstance, DrawOffsetSource.IndirectArguments, startInstanceUserData);
+        WriteDrawRegisters(locations, baseVertex, indexedStartInstance, drawIndex, instanceInRegister);
+        DrawIndexed(packetAddress, opcode, indexCount, indexAddress, indexedInstanceCount,
+            vertexInRegister ? 0 : unchecked((int)baseVertex),
+            instanceInRegister ? 0 : indexedStartInstance, DrawOffsetSource.IndirectArguments, vertexInRegister, instanceInRegister,
+            startInstanceUserData);
     }
 
+    private void WriteDrawRegisters(DrawRegisterLocations locations, uint baseVertex, uint startInstance, uint drawIndex, bool instanceInRegister)
+    {
+        WriteDrawRegister(locations.BaseVertex, baseVertex);
+        if (instanceInRegister)
+        {
+            WriteDrawRegister(locations.StartInstance, startInstance);
+        }
+
+        WriteDrawRegister(locations.DrawIndex, drawIndex);
+    }
+
+    // The vertex program's user data index of a start instance register, or -1 when the register is not one of the
+    // user data registers the program loads.
     private int StartInstanceUserData(uint location)
     {
         var index = location - ShaderRegisterOffset.SpiShaderUserDataGs0;
         return index < TypedRegisters.Shader.Vertex.GeometryResource2.UserScalarCount ? (int)index : -1;
+    }
+
+    private void WriteDrawRegister(uint offset, uint value)
+    {
+        if (!DrawRegisterLocations.Names(offset))
+        {
+            return;
+        }
+
+        if (offset >= RegisterBankLayout.ShaderRegisterCount)
+        {
+            throw _host.Fatal($"The draw register is outside the bank: offset=0x{offset:X8}.");
+        }
+
+        Registers.Shader[offset] = value;
+        RegisterWriteTable.WriteShaderEntry(TypedRegisters, offset, value, 0);
     }
 
     // An index buffer without a size (INDEX_BUFFER_SIZE never set) has no bound the GPU
@@ -244,11 +310,12 @@ public sealed partial class GpuCommandInterpreter
     private const uint DispatchInitiatorUseThreadDimensions = 1u << 5;
 
     // Group counts written by an earlier shader are only in GPU memory; reading them
-    // here waits for the GPU. When the host dispatches indirectly they stay there.
-    // Thread-unit dispatches still need the counts to convert them to groups.
+    // here waits for the GPU. When the host dispatches indirectly they stay there, and
+    // thread counts too when the host converts them to groups on the GPU.
     private void DispatchIndirectAt(ulong argumentsAddress, uint dispatchInitiator)
     {
-        if (_host.ResolvesIndirectDispatchOnGpu && (dispatchInitiator & DispatchInitiatorUseThreadDimensions) == 0)
+        if (_host.ResolvesIndirectDispatchOnGpu &&
+            ((dispatchInitiator & DispatchInitiatorUseThreadDimensions) == 0 || _host.ResolvesIndirectThreadDispatchOnGpu))
         {
             DispatchDirect(0, 0, 0, dispatchInitiator, argumentsAddress);
             return;
@@ -301,7 +368,8 @@ public sealed partial class GpuCommandInterpreter
             throw _host.Fatal($"The indirect draw header is not supported: header=0x{packet.Header:X8} address=0x{packet.PacketAddress:X16}.");
         }
 
-        DrawIndirect(packet.PacketAddress, packet.Opcode, payload[0], payload[3], indexed, StartInstanceUserData(payload[2] & 0xFFFFu));
+        DrawIndirect(packet.PacketAddress, packet.Opcode, payload[0], payload[3], indexed,
+            DrawRegisterLocations.FromPacket(payload[1], payload[2]));
         return 4;
     }
 
@@ -315,7 +383,8 @@ public sealed partial class GpuCommandInterpreter
 
         var countIndirect = (payload[3] >> 30) & 0x1u;
         var countAddress = countIndirect != 0 ? Address(payload[5], payload[6]) : 0;
-        DrawIndirectMulti(packet.PacketAddress, packet.Opcode, payload[0], payload[4], countAddress, payload[7], payload[8], indexed, StartInstanceUserData(payload[2] & 0xFFFFu));
+        DrawIndirectMulti(packet.PacketAddress, packet.Opcode, payload[0], payload[4], countAddress, payload[7], payload[8], indexed,
+            DrawRegisterLocations.FromPacket(payload[1], payload[2]));
         return 9;
     }
 

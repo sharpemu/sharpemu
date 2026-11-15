@@ -20,6 +20,7 @@ public static class KernelModuleRegistry
     private static readonly object _gate = new();
     private static readonly Dictionary<int, ModuleEntry> _modulesByHandle = new();
     private static readonly Dictionary<int, Dictionary<string, ulong>> _symbolsByHandle = new();
+    private static readonly Dictionary<int, ModuleSegment[]> _segmentsByHandle = new();
     private static readonly Dictionary<string, int> _handleByPath = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<string, int> _handleByName = new(StringComparer.OrdinalIgnoreCase);
     private static readonly Dictionary<int, int> _sysmoduleHandleById = new();
@@ -63,6 +64,7 @@ public static class KernelModuleRegistry
         {
             _modulesByHandle.Clear();
             _symbolsByHandle.Clear();
+            _segmentsByHandle.Clear();
             _handleByPath.Clear();
             _handleByName.Clear();
             _sysmoduleHandleById.Clear();
@@ -339,6 +341,41 @@ public static class KernelModuleRegistry
                 }
             }
         }
+    }
+
+    // A loaded segment of a module: its page range and the kernel protection (SCE_KERNEL_PROT_*) it was mapped with.
+    public readonly record struct ModuleSegment(ulong Start, ulong End, int Protection);
+
+    public static void RegisterModuleSegments(int handle, ModuleSegment[] segments)
+    {
+        lock (_gate)
+        {
+            if (_modulesByHandle.ContainsKey(handle))
+            {
+                _segmentsByHandle[handle] = segments;
+            }
+        }
+    }
+
+    public static bool TryGetModuleSegment(ulong address, out ModuleSegment segment)
+    {
+        lock (_gate)
+        {
+            foreach (var segments in _segmentsByHandle.Values)
+            {
+                foreach (var candidate in segments)
+                {
+                    if (address >= candidate.Start && address < candidate.End)
+                    {
+                        segment = candidate;
+                        return true;
+                    }
+                }
+            }
+        }
+
+        segment = default;
+        return false;
     }
 
     public static bool TryResolveModuleSymbol(int handle, string symbolName, out ulong address)

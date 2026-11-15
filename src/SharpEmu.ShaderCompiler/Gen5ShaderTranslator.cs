@@ -354,7 +354,7 @@ public static partial class Gen5ShaderTranslator
 
     // S_SWAPPC_B64 stores the address of the next instruction in its destination. With the NULL destination
     // it stores nothing, so it jumps like S_SETPC_B64 does and the code after it is not reached from here.
-    private static bool IsSwapProgramCounterWithoutReturnAddress(Gen5ShaderInstruction instruction) =>
+    internal static bool IsSwapProgramCounterWithoutReturnAddress(Gen5ShaderInstruction instruction) =>
         string.Equals(instruction.Opcode, "SSwappcB64", StringComparison.Ordinal) &&
         instruction.Destinations is [{ Kind: Gen5OperandKind.ScalarRegister, Value: NullScalarRegister }];
 
@@ -1642,6 +1642,7 @@ public static partial class Gen5ShaderTranslator
             0x4F => "DsWrite2St64B64",
             0x76 => "DsReadB64",
             0x77 => "DsRead2B64",
+            0x78 => "DsRead2St64B64",
             0xA0 => "DsWriteB8D16Hi",
             0xA1 => "DsWriteB16D16Hi",
             0xA2 => "DsReadU8D16",
@@ -1810,6 +1811,7 @@ public static partial class Gen5ShaderTranslator
             0x4B => "BufferAtomicXor",
             0x4C => "BufferAtomicInc",
             0x50 => "BufferAtomicSwapX2",
+            0x59 => "BufferAtomicAndX2",
             0x5A => "BufferAtomicOrX2",
             0x71 => "BufferGl0Inv",
             0x72 => "BufferGl1Inv",
@@ -1925,6 +1927,8 @@ public static partial class Gen5ShaderTranslator
             0x0A => "SBufferLoadDwordx4",
             0x0B => "SBufferLoadDwordx8",
             0x0C => "SBufferLoadDwordx16",
+            0x24 => "SMemtime",
+            0x25 => "SMemrealtime",
             _ => string.Empty,
         };
 
@@ -2437,6 +2441,13 @@ public static partial class Gen5ShaderTranslator
                     dynamicOffsetRegister);
                 break;
             }
+            case Gen5ShaderEncoding.Smem when opcode is "SMemtime" or "SMemrealtime":
+            {
+                // A clock read writes an SGPR pair and touches no memory.
+                var clockDestination = (word >> 6) & 0x7F;
+                destinations = [Gen5Operand.Scalar(clockDestination), Gen5Operand.Scalar(clockDestination + 1)];
+                break;
+            }
             case Gen5ShaderEncoding.Smem:
             {
                 var extra = words[1];
@@ -2791,7 +2802,7 @@ public static partial class Gen5ShaderTranslator
                         Gen5Operand.Vector(vectorDestination + 1),
                         Gen5Operand.Vector(vectorDestination + 2),
                     ],
-                    "DsReadB128" or "DsRead2B64" => [
+                    "DsReadB128" or "DsRead2B64" or "DsRead2St64B64" => [
                         Gen5Operand.Vector(vectorDestination),
                         Gen5Operand.Vector(vectorDestination + 1),
                         Gen5Operand.Vector(vectorDestination + 2),
@@ -2951,7 +2962,7 @@ public static partial class Gen5ShaderTranslator
                     "BufferStoreDwordx2" => 2u,
                     "BufferStoreDwordx3" => 3u,
                     "BufferStoreDwordx4" => 4u,
-                    "BufferAtomicCmpswap" or "BufferAtomicSwapX2" or "BufferAtomicOrX2" => 2u,
+                    "BufferAtomicCmpswap" or "BufferAtomicSwapX2" or "BufferAtomicAndX2" or "BufferAtomicOrX2" => 2u,
                     _ when opcode.StartsWith("BufferAtomic", StringComparison.Ordinal) => 1u,
                     _ => 0u,
                 };

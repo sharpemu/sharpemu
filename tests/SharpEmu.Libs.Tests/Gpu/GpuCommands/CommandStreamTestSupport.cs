@@ -90,6 +90,9 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     public List<DrawAutoArguments> AutoDraws { get; } = new();
 
+    // Runs at every draw, while the interpreter's registers hold the draw's state.
+    public Action? OnDraw { get; set; }
+
     public Queue<Action> PendingCommands { get; } = new();
 
     public int PendingCommandRuns { get; private set; }
@@ -118,6 +121,16 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
         OperandReads.Add(address);
         BeforeOperandRead?.Invoke(address);
         return TryReadGuest(address, destination);
+    }
+
+    // Deterministically inject a completion after the predicate bytes were copied, before requeue.
+    public Action<ulong>? AfterWaitOperandRead { get; set; }
+
+    public bool TryReadGuestWaitOperand(ulong address, Span<byte> destination)
+    {
+        var read = TryReadGuestOperand(address, destination);
+        AfterWaitOperandRead?.Invoke(address);
+        return read;
     }
 
     public bool TryReadGuest(ulong address, Span<byte> destination)
@@ -230,12 +243,14 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
     public void DrawIndexed(ulong submitId, in DrawIndexedArguments arguments)
     {
         IndexedDraws.Add(arguments);
+        OnDraw?.Invoke();
         Calls.Add($"draw_indexed {submitId} {arguments.IndexCount}");
     }
 
     public void DrawAuto(ulong submitId, in DrawAutoArguments arguments)
     {
         AutoDraws.Add(arguments);
+        OnDraw?.Invoke();
         Calls.Add($"draw_auto {submitId} {arguments.VertexCount}");
     }
 
@@ -245,6 +260,8 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
             : $"dispatch {submitId} {groupsX} {groupsY} {groupsZ} {dispatchInitiator:X} @{indirectArgumentsAddress:X}");
 
     public bool ResolvesIndirectDispatchOnGpu { get; set; }
+
+    public bool ResolvesIndirectThreadDispatchOnGpu { get; set; }
 
     public bool ResolvesIndirectDrawOnGpu { get; set; }
 

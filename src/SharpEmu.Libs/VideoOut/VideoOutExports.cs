@@ -159,6 +159,24 @@ public static partial class VideoOutExports
         RenderDocCapture.SetCaptureDirectory(GetApplicationTitleId());
     }
 
+    // Once the runtime knows the game, the presenter (window, Vulkan device and shader prewarm) starts at the size the
+    // host configured, while the game's modules load and initialize. Started at the guest's first video call instead,
+    // it begins seconds after the process, and the compute programs the game asks for right after that hold the boot
+    // while they compile. Hosts that configure no video (tests, tools) start nothing here.
+    // SHARPEMU_EARLY_PRESENTER=0 keeps the start at the first video call.
+    private static readonly bool EarlyPresenter = Environment.GetEnvironmentVariable("SHARPEMU_EARLY_PRESENTER") != "0";
+
+    public static void StartPresenter()
+    {
+        if (!EarlyPresenter || !HostVideoHost.IsVideoConfigured)
+        {
+            return;
+        }
+
+        var options = HostVideoHost.CurrentOptions;
+        GuestGpu.Current.EnsureStarted((uint)options.Width, (uint)options.Height);
+    }
+
     internal static string GetApplicationTitleId()
     {
         lock (_stateGate)

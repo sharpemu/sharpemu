@@ -13,6 +13,8 @@ public sealed class ResourceTableReadPlanner
     private readonly ScalarValueGraph _graph;
     private readonly ShaderStage _stage;
     private readonly ulong _hash;
+    private readonly bool _scalarDataOnDevice;
+    private readonly DeviceRecordCountPlan? _deviceRecordCounts;
     private readonly List<ResourceTableRead> _reads = [];
     private readonly List<ScalarValue> _dynamicReads = [];
     private readonly HashSet<ScalarValue> _dynamicReadSet = [];
@@ -23,11 +25,16 @@ public sealed class ResourceTableReadPlanner
     private readonly HashSet<ScalarValue> _visited = [];
     private readonly Dictionary<ScalarValue, ScalarValue> _replacements = [];
 
-    private ResourceTableReadPlanner(ScalarValueGraph graph, ShaderStage stage, ulong hash)
+    private ResourceTableReadPlanner(ScalarValueGraph graph, ShaderStage stage, ulong hash, bool scalarDataOnDevice,
+        DeviceRecordCountPlan? deviceRecordCounts)
     {
         _graph = graph;
         _stage = stage;
         _hash = hash;
+        _deviceRecordCounts = deviceRecordCounts;
+        _scalarDataOnDevice = scalarDataOnDevice && stage == ShaderStage.Compute && graph.CallArgumentRegisters == 0 &&
+            !Gen5ShaderCallLinker.IsLinked(graph.Program) &&
+            !graph.Program.Instructions.Any(instruction => instruction.Opcode is "SSetpcB64" or "SSwappcB64" or "SRfeB64");
     }
 
     public sealed record Result(
@@ -36,8 +43,9 @@ public sealed class ResourceTableReadPlanner
         IReadOnlyDictionary<ScalarValue, ScalarValue> Replacements,
         IReadOnlyDictionary<int, uint> FlattenedSlotByMemoryIndex);
 
-    public static Result Plan(ScalarValueGraph graph, ShaderStage stage, ulong hash) =>
-        new ResourceTableReadPlanner(graph, stage, hash).Run();
+    public static Result Plan(ScalarValueGraph graph, ShaderStage stage, ulong hash, bool scalarDataOnDevice = false,
+        DeviceRecordCountPlan? deviceRecordCounts = null) =>
+        new ResourceTableReadPlanner(graph, stage, hash, scalarDataOnDevice, deviceRecordCounts).Run();
 
     private Result Run()
     {
@@ -60,9 +68,10 @@ public sealed class ResourceTableReadPlanner
         {
             if (access?.Handle is { } handle)
             {
-                foreach (var dword in handle.Operands)
+                for (var component = 0; component < handle.Operands.Length; component++)
                 {
-                    Collect(dword, 0);
+                    if (component != 2 || _deviceRecordCounts?.SkipCount(handle) != true)
+                        Collect(handle.Operands[component], 0);
                 }
             }
 
@@ -76,18 +85,69 @@ public sealed class ResourceTableReadPlanner
         }
 
         var validatorReadCount = _reads.Count;
+        var hostValues = _scalarDataOnDevice ? HostConsumerValues() : null;
         foreach (var access in _graph.Accesses)
         {
             if (access?.Read is { Kind: ScalarValueKind.ScalarAddressWord } read &&
                 IsRawRead(read) && read.Operands[1].IsConstant &&
                 new RuntimeValueValidator(_graph, _graph.UserDataBase, _graph.UserDataCount, validatorReadCount).Validate(read))
             {
+                // Leave data-only reads in the shader. The existing scalar-address lowering and bounded
+                // DeviceAddressRangePlanner path own residency and producer visibility for these exact bytes.
+                if (hostValues is not null && CanReadOnDevice(read, hostValues)) continue;
                 Collect(read, _graph.Memory[read.MemoryIndex].Pc);
             }
         }
 
         PatchReads();
         return new Result(_reads, _dynamicReads, _replacements, _flattenedSlotByMemoryIndex);
+    }
+
+    private HashSet<ScalarValue> HostConsumerValues()
+    {
+        var values = new HashSet<ScalarValue>(_visited); // All descriptor/address/sampler ancestors already collected.
+        void Visit(ScalarValue? value)
+        {
+            if (value is null || !values.Add(value)) return;
+            foreach (var operand in value.Operands) Visit(operand);
+        }
+        foreach (var access in _graph.Accesses)
+        {
+            // Range bounds and resource activation can be evaluated by the host too.
+            Visit(access?.Offset);
+            Visit(access?.Active);
+        }
+        foreach (var condition in _graph.BranchConditions.Values) Visit(condition);
+        foreach (var argument in _graph.CallRecordArguments.Values)
+        {
+            Visit(argument.Low);
+            Visit(argument.High);
+        }
+        return values;
+    }
+
+    private bool CanReadOnDevice(ScalarValue read, HashSet<ScalarValue> hostValues)
+    {
+        if (hostValues.Contains(read)) return false;
+        var memory = _graph.Memory[read.MemoryIndex];
+        if (memory.Kind != MemoryResourceKind.ScalarAddress || memory.Access != MemoryAccess.Read ||
+            memory.DataBits != 32 || memory.DataDwords != 1 ||
+            read.Operands[1].ConstantU32 != 0 ||
+            memory.Offset > DeviceAddressRangePlanner.MaxRangeBytes - sizeof(uint) ||
+            read.Operands[0] is not { Kind: ScalarValueKind.AddressHandle, Operands.Length: 2 } handle)
+            return false;
+        // A pointer loaded from memory would reintroduce host reads to plan residency. Admit only an address
+        // computed entirely from immutable dispatch inputs; no first-lane, loop, memory, or descriptor chain.
+        bool MemoryFree(ScalarValue value, HashSet<ScalarValue> visiting)
+        {
+            if (value.IsConstant || value.Kind is ScalarValueKind.UserData or ScalarValueKind.ShaderBase) return true;
+            if (value.Kind != ScalarValueKind.Operation || !RuntimeValueValidator.IsUniformOperation(value.Operation) ||
+                !visiting.Add(value)) return false;
+            var valid = value.Operands.All(operand => MemoryFree(operand, visiting));
+            visiting.Remove(value);
+            return valid;
+        }
+        return handle.Operands.All(value => MemoryFree(value, []));
     }
 
     private void Fail(uint pc, string message) =>

@@ -14,6 +14,9 @@ internal readonly record struct MeshDrawPlan
 
 internal static class MeshDrawPlanner
 {
+    // A primitive shader subgroup exports at most 256 primitives.
+    private const uint MaximumSubgroupPrimitives = 256;
+
     internal static MeshDrawPlan? Create(VertexStageRegisters vertex,
         ShaderInterfaceRegisters shaderInterface, ContextRegisters context,
         UserConfigRegisters userConfig, MeshShaderLimits limits, uint subgroupSize)
@@ -47,8 +50,25 @@ internal static class MeshDrawPlanner
         var outputPrimitiveCapacity = fusedGeometry
             ? checked((uint)group.PrimitiveGroupSize * (verticesPerPrimitive - 2))
             : (uint)group.PrimitiveGroupSize;
-        var threadsPerGroup = checked(((outputVertexCapacity + waveSize - 1) / waveSize) * waveSize);
-        var deviceInvocationCount = waveSize == 64 && subgroupSize == 32 ? threadsPerGroup / 2 : threadsPerGroup;
+        var threadsPerGroup = WholeWaves(outputVertexCapacity, waveSize);
+        // GE_NGG_SUBGRP_CNTL.PRIM_AMP_FACTOR bounds the primitives one input primitive produces. A mesh-style primitive
+        // shader (one input point per subgroup) exports its own triangles, more than a strip of VGT_GS_MAX_VERT_OUT
+        // vertices holds, and each lane exports one of them, so the subgroup needs a lane per primitive too. The plan
+        // only grows, and only while the device can run it.
+        var amplification = shaderInterface.PrimitiveShaderSubgroupControl & 0x1FFu;
+        if (fusedGeometry && amplification != 0)
+        {
+            var amplified = Math.Min(MaximumSubgroupPrimitives, checked((uint)group.PrimitiveGroupSize * amplification));
+            var amplifiedThreads = WholeWaves(Math.Max(outputVertexCapacity, amplified), waveSize);
+            var amplifiedInvocations = DeviceInvocations(amplifiedThreads, waveSize, subgroupSize);
+            if (amplified > outputPrimitiveCapacity && amplified <= limits.OutputPrimitiveCapacity &&
+                amplifiedInvocations <= limits.MaxInvocations && amplifiedInvocations <= limits.MaxWorkGroupSizeX)
+            {
+                outputPrimitiveCapacity = amplified;
+                threadsPerGroup = amplifiedThreads;
+            }
+        }
+        var deviceInvocationCount = DeviceInvocations(threadsPerGroup, waveSize, subgroupSize);
         var localDataShareDwords = (uint)vertex.GeometryResource2.LocalDataShareSize * 128;
         var sharedBytes = checked((localDataShareDwords + outputVertexCapacity + 5) * sizeof(uint));
         if (inputPrimitiveCountPerWorkgroup == 0 || deviceInvocationCount > limits.MaxInvocations || deviceInvocationCount > limits.MaxWorkGroupSizeX ||
@@ -87,4 +107,10 @@ internal static class MeshDrawPlanner
             },
         };
     }
+
+    private static uint WholeWaves(uint threads, uint waveSize) => checked((threads + waveSize - 1) / waveSize * waveSize);
+
+    // A wave64 subgroup runs as two 32-lane halves on a 32-lane device.
+    private static uint DeviceInvocations(uint threads, uint waveSize, uint subgroupSize) =>
+        waveSize == 64 && subgroupSize == 32 ? threads / 2 : threads;
 }

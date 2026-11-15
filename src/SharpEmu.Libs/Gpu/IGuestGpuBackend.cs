@@ -30,6 +30,9 @@ internal interface IGuestGpuBackend
     // Compiles one permutation of a program over its resource plan and binding layout.
     bool TryCompileProgram(ShaderCompileRequest request, out IGuestCompiledShader? shader, out string error);
 
+    // The shader of a translation the translation disk cache kept (TranslationDiskCache); null when the backend keeps none.
+    IGuestCompiledShader? CreateCachedShader(byte[] payload, uint? inputLocationMask) => null;
+
     // The vertex stage a tessellated pipeline requires and the control stage that feeds the guest's hull factors to the tessellator.
     (IGuestCompiledShader Vertex, IGuestCompiledShader Control) CompileTessellationBridge(
         SharpEmu.ShaderCompiler.Resources.BindingLayout layout, Gen5TessellationDomain domain) =>

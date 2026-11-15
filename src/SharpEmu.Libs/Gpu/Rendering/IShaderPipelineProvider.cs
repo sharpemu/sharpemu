@@ -157,6 +157,17 @@ public interface IShaderPipelineProvider
         int startInstanceUserData) =>
         GetGraphicsPrograms(banks, targetExportMapping, pixelActive, depthBound);
 
+    // taskLaunch: an automatic indirect draw launched by the task stage (MeshTaskLaunch). Providers without task launches
+    // never see it: the decision is made only while MeshTaskLaunch is active.
+    GraphicsPrograms GetMeshGraphicsPrograms(
+        RegisterBanks banks,
+        UserConfigRegisters userConfig,
+        ReadOnlySpan<ColorComponentMap> targetExportMapping,
+        bool pixelActive,
+        bool depthBound,
+        bool taskLaunch) =>
+        GetMeshGraphicsPrograms(banks, userConfig, targetExportMapping, pixelActive, depthBound);
+
     PipelineHandle CreateGraphicsPipeline(
         ReadOnlySpan<ColorTargetState> colors,
         in DepthAttachmentState depth,
@@ -186,9 +197,23 @@ public interface IShaderPipelineProvider
     ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ, bool indirect) =>
         GetComputeProgram(banks, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
 
+    // gpuThreadCounts: the thread counts are in GPU memory (the dimensions are zero); the program reads its thread limits
+    // from shader data the GPU writes (ComputeInputInfo.IndirectThreadCounts).
+    ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ, bool indirect,
+        bool gpuThreadCounts) =>
+        GetComputeProgram(banks, dispatchInitiator, dimensionX, dimensionY, dimensionZ, indirect);
+
     PipelineHandle CreateComputePipeline(ComputeInputInfo input, ShaderProgram program);
 
     Task? GetComputePipelineCompletion(ShaderProgram program) => null;
+
+    // Whether a session saw this linked program's module compile for minutes (ShaderPrewarmList.IsSlowLinkedCompile).
+    bool IsSlowLinkedCompile(ulong hash) => false;
+
+    // Records what this session learned about a linked program's module compile.
+    void RecordLinkedCompile(ulong hash, bool slow, long milliseconds)
+    {
+    }
 
     // False means the host is still compiling this pipeline; asking again returns it once
     // the compile finishes, without starting a second one.

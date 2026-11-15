@@ -372,18 +372,21 @@ public sealed partial class DirectExecutionBackend
 			Console.Error.WriteLine($"[LOADER][TRACE] Raw sentinel recoveries: {num2} (last import index={importIndex})");
 			_lastReportedRawSentinelRecoveries = num2;
 		}
-		if (importStubEntry.IsLeaf &&
+		// After a host shutdown request every import takes the full path below, whose shutdown check ends the guest
+		// thread's slice before a service being torn down can fail it.
+		var leafDispatch = !_forcedGuestExit;
+		if (leafDispatch && importStubEntry.IsLeaf &&
 			TryDispatchHotMemoryLeaf(cpuContext, importStubEntry, argPackPtr, out var hotMemoryResult))
 		{
 			return hotMemoryResult;
 		}
 
-		if (importStubEntry.IsTrivialLeaf && !_disableTrivialLeafDispatch)
+		if (leafDispatch && importStubEntry.IsTrivialLeaf && !_disableTrivialLeafDispatch)
 		{
 			return DispatchTrivialLeaf(cpuContext, in importStubEntry, argPackPtr, num);
 		}
 
-		if (importStubEntry.IsLeaf &&
+		if (leafDispatch && importStubEntry.IsLeaf &&
 			TryDispatchLeafImport(cpuContext, importStubEntry, argPackPtr, num, out var leafResult))
 		{
 			return leafResult;
@@ -523,7 +526,9 @@ public sealed partial class DirectExecutionBackend
 		// Once the host is shutting down, a guest thread still running reaches no more HLE: the
 		// services behind the imports are being torn down, and a title that sees them fail (a null
 		// command buffer from the GPU library, say) crashes the process on its way out.
-		if (_forcedGuestExit && !ActiveForcedGuestExit && TryEndGuestSliceForShutdown(argPackPtr))
+		// The thread's own exit flag: ActiveForcedGuestExit also reads the backend-wide _forcedGuestExit, so testing it
+		// here would never let the slice end.
+		if (_forcedGuestExit && !(HasActiveExecutionThread && _activeForcedGuestExit) && TryEndGuestSliceForShutdown(argPackPtr))
 		{
 			cpuContext[CpuRegister.Rax] = 1uL;
 			return 1uL;
@@ -1866,6 +1871,11 @@ public sealed partial class DirectExecutionBackend
 		var expectedPlayGoChunkEnumerationEnd =
 			string.Equals(nid, "uWIYLFkkwqk", StringComparison.Ordinal) &&
 			resultValue == unchecked((int)0x80B2000C);
+		// sceSaveDataConvert reports a save directory that is missing or already in the current format; titles
+		// then mount it as usual.
+		var expectedSaveDataNoConversion =
+			string.Equals(nid, "2mfSRGdshtk", StringComparison.Ordinal) &&
+			(resultValue == unchecked((int)0x809F0008) || resultValue == unchecked((int)0x809F001E));
 		if (!expectedFileProbeMiss &&
 			!expectedTimedWaitTimeout &&
 			!expectedEqueueTimeout &&
@@ -1878,7 +1888,8 @@ public sealed partial class DirectExecutionBackend
 			!expectedNetAcceptWouldBlock &&
 			!expectedUserServiceNoEvent &&
 			!expectedPrivacyInvalidParameter &&
-			!expectedPlayGoChunkEnumerationEnd)
+			!expectedPlayGoChunkEnumerationEnd &&
+			!expectedSaveDataNoConversion)
 		{
 			return ShouldSampleImportResult(nid, resultValue, out mutexOccurrence);
 		}

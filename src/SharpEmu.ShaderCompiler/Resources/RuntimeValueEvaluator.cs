@@ -7,7 +7,7 @@ namespace SharpEmu.ShaderCompiler.Resources;
 
 // Evaluates graph values against one draw's inputs. Results are memoised so values
 // shared by several descriptors and flattened reads are computed once.
-public sealed class RuntimeValueEvaluator
+public sealed class RuntimeValueEvaluator : IEvaluatedValues
 {
     private const ulong AddressMask = 0x0000_FFFF_FFFF_FFFFul;
 
@@ -297,8 +297,9 @@ public sealed class RuntimeValueEvaluator
             var size = stride == 0 ? (ulong)(uint)records : (ulong)stride * (uint)records;
             if (aligned > size || size - aligned < sizeof(uint))
             {
-                // An unbound (empty) V# reads as zero; overrunning a bound buffer stays a failure.
-                return (uint)records == 0 || offset >= 0x8000_0000u ? RawAddress.Zero : RawAddress.Failed;
+                // The GPU does not read a dword past the V#'s records (scalar memory bounds checking): it reads as zero, as
+                // every dword of an unbound (empty) V# does.
+                return RawAddress.Zero;
             }
 
             address = ((baseAddress & ~3ul) + byteOffset) & ~3ul;
@@ -370,6 +371,20 @@ public sealed class RuntimeValueEvaluator
     internal bool IsEvaluated(ScalarValue value) =>
         _compiled is not null && _compiled.TryGetIndex(value, out var index)
             ? _compiledValues.Contains(index) : _cache.TryGetValue(value, out _);
+
+    // A value this evaluator already holds, without evaluating it.
+    bool IEvaluatedValues.TryGetEvaluated(ScalarValue value, out ulong result)
+    {
+        if (value.IsConstant)
+        {
+            result = value.Payload;
+            return true;
+        }
+
+        return _compiled is not null && _compiled.TryGetIndex(value, out var index)
+            ? _compiledValues.TryGet(index, out result)
+            : _cache.TryGetValue(value, out result);
+    }
 
     internal void Seed(ScalarValue value, ulong result)
     {
@@ -493,10 +508,22 @@ public sealed class RuntimeValueEvaluator
             // A failed transaction must not replay guest reads through the fallback evaluator.
             return transaction.Evaluate(inputs, additionalTableWords, out results, out table);
         }
-        ResourceMaterializationCache.RecordEvaluationPath(plan,
-            plan.ResourceBranches.Count != 0 ? "fallback_branches" :
-            plan.IndirectImages.Count != 0 ? "fallback_indirect_images" :
-            plan.BufferCandidateTables.Count != 0 ? "fallback_buffer_candidates" : "fallback_other_or_unavailable");
+        // A branch plan's selected sources: its compiled branch transaction (on by default, SHARPEMU_COMPILED_BRANCHES).
+        var branchMode = evaluateTable && plan.ResourceBranches.Count != 0 && ReferenceEquals(sources, plan.MaterializationSources) &&
+            ReferenceEquals(cleanFlatSlots, plan.CleanFlatSlots) ? BranchMode : CompiledBranchMode.Off;
+        var branches = branchMode != CompiledBranchMode.Off ? plan.CompiledBranches : null;
+        if (branches is not null)
+        {
+            ResourceMaterializationCache.RecordEvaluationPath(plan, "compiled_branches");
+        }
+        else
+        {
+            ResourceMaterializationCache.RecordEvaluationPath(plan,
+                plan.ResourceBranches.Count != 0 ? "fallback_branches" :
+                plan.IndirectImages.Count != 0 ? "fallback_indirect_images" :
+                plan.BufferCandidateTables.Count != 0 ? "fallback_buffer_candidates" : "fallback_other_or_unavailable");
+        }
+
         var anyClean = false;
         foreach (var clean in cleanFlatSlots)
         {
@@ -517,6 +544,24 @@ public sealed class RuntimeValueEvaluator
             using var branchProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.BranchSelection);
             activeSources = EvaluateActiveSources(plan, inputs, cleanEvaluator, cleanScratch);
         }
+
+        if (branches is not null)
+        {
+            BranchesServedOnThread++;
+            return branches.Evaluate(inputs, additionalTableWords, activeSources, cleanEvaluator, out results, out table);
+        }
+
+        return EvaluateSelected(plan, sources, inputs, cleanFlatSlots, evaluateTable, activeSources, evaluator,
+            cleanEvaluator, additionalTableWords, out results, out table);
+    }
+
+    // The fallback after its selection: the active sources' words, then the table, through the two memoised evaluators.
+    private static bool EvaluateSelected(ShaderResourcePlan plan, IReadOnlyList<uint> sources, ResourceRuntimeInputs inputs,
+        IReadOnlyList<byte> cleanFlatSlots, bool evaluateTable, bool[] activeSources, RuntimeValueEvaluator evaluator,
+        RuntimeValueEvaluator cleanEvaluator, int additionalTableWords, out List<DescriptorWords> results, out uint[] table)
+    {
+        results = [];
+        table = [];
         var evaluated = new List<DescriptorWords>(sources.Count);
         using (ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.DescriptorPrefetch))
             RawReadPrefetch.PrefetchSources(plan, sources, activeSources, evaluator);
@@ -595,6 +640,10 @@ public sealed class RuntimeValueEvaluator
         foreach (var block in plan.ResourceBranches)
             foreach (var source in block.Sources) activeSources[source] = false;
 
+        // A plan that writes memory reads its predicates through a guard that keeps their addresses.
+        using var guard = plan.ResourceBranchesWithWrites && inputs.ReadCleanMemory is not null
+            ? new ResourceBranchWriteGuard(plan, inputs) : null;
+        var predicates = guard?.Evaluator ?? cleanEvaluator;
         var visited = scratch.PrepareBranches(plan.ResourceBranches.Count);
         var pending = scratch.PendingBranches;
         pending.Push(0);
@@ -605,12 +654,13 @@ public sealed class RuntimeValueEvaluator
             var block = plan.ResourceBranches[blockIndex];
             foreach (var source in block.Sources) activeSources[source] = true;
             // An unreadable predicate keeps both paths; never use the general reader to choose one.
-            if (block.Condition is { } condition && inputs.ReadCleanMemory is not null && cleanEvaluator.Evaluate(condition, out var value))
+            if (block.Condition is { } condition && inputs.ReadCleanMemory is not null && predicates.Evaluate(condition, out var value))
                 pending.Push(block.Successors[value != 0 ? 0 : 1]);
             else
                 foreach (var successor in block.Successors) pending.Push(successor);
         }
 
+        if (guard is not null && !guard.Holds()) Array.Fill(activeSources, true);
         ResourceMaterializationProfile.RecordActivity(activeSources);
         return activeSources;
     }
@@ -629,4 +679,23 @@ public sealed class RuntimeValueEvaluator
 
     public static bool FlattenResourceTable(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, out uint[] table) =>
         EvaluateSources(plan, [], inputs, [], evaluateTable: true, out _, out table);
+
+    // ---- compiled branch transactions ----
+
+    // A branch plan's selected sources are evaluated with its CompiledBranchTransaction, on by default;
+    // SHARPEMU_COMPILED_BRANCHES=0, or any value but 1, turns it off.
+    internal enum CompiledBranchMode { Off, On }
+
+    private static readonly CompiledBranchMode ConfiguredBranchMode =
+        Environment.GetEnvironmentVariable("SHARPEMU_COMPILED_BRANCHES") switch
+        {
+            null or "" or "1" => CompiledBranchMode.On,
+            _ => CompiledBranchMode.Off,
+        };
+
+    // Tests: a mode for the calling thread, and the calls the compiled form served on it.
+    [ThreadStatic] internal static CompiledBranchMode? BranchModeOverride;
+    [ThreadStatic] internal static int BranchesServedOnThread;
+
+    internal static CompiledBranchMode BranchMode => BranchModeOverride ?? ConfiguredBranchMode;
 }

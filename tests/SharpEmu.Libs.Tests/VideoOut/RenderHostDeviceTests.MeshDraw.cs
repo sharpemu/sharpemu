@@ -37,13 +37,25 @@ public sealed unsafe partial class RenderHostDeviceTests
     public void IndirectMeshDrawRendersGuestInputs(uint waveSize, bool wideIndices)
         => RenderMeshDraw(waveSize, true, indirect: true, wideIndices: wideIndices);
 
+    // A task-launched automatic indirect draw (MeshTaskLaunch): no conversion dispatch; the task stage reads the current
+    // arguments, by device address when a GPU copy wrote them, and from the push words when the CPU wrote them (the host
+    // ring holds them without a device address).
+    [Theory]
+    [InlineData(32u, true)]
+    [InlineData(64u, true)]
+    [InlineData(32u, false)]
+    [InlineData(64u, false)]
+    public void TaskLaunchedIndirectMeshDrawRendersGuestInputs(uint waveSize, bool gpuArguments)
+        => RenderMeshDraw(waveSize, false, indirect: true, taskLaunched: true, gpuArguments: gpuArguments);
+
     private void RenderMeshDraw(uint waveSize, bool indexed, ulong? traceShaderAddress = null,
-        bool indirect = false, bool wideIndices = false)
+        bool indirect = false, bool wideIndices = false, bool taskLaunched = false, bool gpuArguments = false)
     {
         if (!GatePrerequisites.Ready(_vulkan, shaderInt64: true)) return;
-        if (!_vulkan.SupportsMeshShaders || !_vulkan.SupportsDynamicRendering || _vulkan.SubgroupSize != 32)
+        if (!_vulkan.SupportsMeshShaders || !_vulkan.SupportsDynamicRendering || _vulkan.SubgroupSize != 32 ||
+            (taskLaunched && !_vulkan.SupportsTaskShaders))
         {
-            Assert.False(GatePrerequisites.DeviceRequired, "This test requires mesh rendering with 32-lane subgroups.");
+            Assert.False(GatePrerequisites.DeviceRequired, "This test requires mesh (and task) rendering with 32-lane subgroups.");
             return;
         }
         using var presenter = new PresenterUnderTest(_vulkan);
@@ -52,6 +64,12 @@ public sealed unsafe partial class RenderHostDeviceTests
         var command = (IntPtr)(void*)_vulkan.Vk.GetDeviceProcAddr(_vulkan.Device, "vkCmdDrawMeshTasksEXT");
         Assert.NotEqual(IntPtr.Zero, command);
         presenter.SetField("_cmdDrawMeshTasks", command);
+        if (taskLaunched)
+        {
+            presenter.SetField("_supportsTaskShader", true);
+            presenter.SetField("_meshShaderLimits", new MeshShaderLimits(128, 256, 256, 28672, 65535, 65535, 1u << 22, 128,
+                32768, 49152, 1, 1, 128));
+        }
         if (indirect)
         {
             var indirectCommand = (IntPtr)(void*)_vulkan.Vk.GetDeviceProcAddr(_vulkan.Device, "vkCmdDrawMeshTasksIndirectEXT");
@@ -64,7 +82,7 @@ public sealed unsafe partial class RenderHostDeviceTests
         var banks = Banks(words);
         if (traceShaderAddress is { } shaderAddress) banks.Shader.Vertex.ExportAddress = shaderAddress;
         banks.Context.ShaderStages = 0x20;
-        var provider = new MeshFrameProgramProvider((IShaderPipelineHost)presenter.Instance, waveSize);
+        var provider = new MeshFrameProgramProvider((IShaderPipelineHost)presenter.Instance, waveSize, taskLaunched);
         var executor = new RenderExecutor(presenter.RenderHost, provider);
         if (indexed)
         {
@@ -91,6 +109,22 @@ public sealed unsafe partial class RenderHostDeviceTests
                 Assert.Equal(0UL, presenter.HostBuffers.CachedBytes);
             }
         }
+        else if (indirect)
+        {
+            var arguments = harness.MapBacked(0x10000, ReadWrite);
+            if (gpuArguments)
+            {
+                var sourceArguments = harness.MapBacked(0x10000, ReadWrite);
+                harness.Write(sourceArguments, [3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+                presenter.Run(() => harness.Cache.CopyBuffer(arguments, sourceArguments, 16, false, false));
+            }
+            else
+            {
+                harness.Write(arguments, [3, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+            }
+
+            presenter.Run(() => executor.DrawAuto(1, banks, Draw() with { IndirectArgumentsAddress = arguments }));
+        }
         else
         {
             presenter.Run(() => executor.DrawAuto(1, banks, Draw()));
@@ -105,7 +139,7 @@ public sealed unsafe partial class RenderHostDeviceTests
         harness.Shutdown();
     }
 
-    private sealed class MeshFrameProgramProvider(IShaderPipelineHost host, uint waveSize) : IShaderPipelineProvider
+    private sealed class MeshFrameProgramProvider(IShaderPipelineHost host, uint waveSize, bool taskLaunched = false) : IShaderPipelineProvider
     {
         public bool MeshShadersSupported => true;
 
@@ -137,7 +171,7 @@ public sealed unsafe partial class RenderHostDeviceTests
             var request = new ShaderCompileRequest(plan, resources, layout)
             {
                 WaveSize = waveSize, LocalSizeX = waveSize,
-                Mesh = new MeshShaderConfiguration(3, 1, 0, 1, 3, 0, false, 32),
+                Mesh = new MeshShaderConfiguration(3, 1, 0, 1, 3, 0, false, 32, TaskLaunched: taskLaunched),
             };
             Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var compiled, out var error), error);
             var meshProgram = new ShaderProgram(1, host.CreateShaderModule(
@@ -147,6 +181,7 @@ public sealed unsafe partial class RenderHostDeviceTests
             var meshInfo = new ShaderProgramInfo
             {
                 Stage = ShaderStageKind.Mesh, Hash = 1, Resources = resources, Bindings = layout,
+                MeshTask = taskLaunched ? new MeshTaskLaunchInfo(1, false) : null,
             };
             return new GraphicsPrograms
             {
@@ -161,6 +196,7 @@ public sealed unsafe partial class RenderHostDeviceTests
                     Geometry = new GuestGeometryConfiguration
                     {
                         WaveSize = waveSize, ThreadsPerGroup = waveSize, InputPrimitiveCountPerWorkgroup = 1,
+                        TaskLaunched = taskLaunched,
                     },
                     Execution = new MeshExecutionLimits { MaxGroupCountX = 65535, MaxGroupCountY = 65535, MaxGroupTotalCount = 65535 },
                 },

@@ -16,6 +16,223 @@ public sealed class Gen5MeshShaderTests
     public void IndirectMeshPreparationValidates()
         => ValidateWithInstalledSdk(SpirvMeshIndirect.Create());
 
+    [Fact]
+    public void TaskStageValidates()
+        => ValidateWithInstalledSdk(SpirvMeshTask.Create());
+
+    // The task stage's host interface: one TaskEXT invocation, eight push words after the shared push
+    // data, five specialization constants with their defaults, and one emit that passes the payload.
+    [Fact]
+    public void TaskStageDeclaresItsHostInterface()
+    {
+        var spirv = SpirvMeshTask.Create();
+        var module = ReadInstructions(spirv);
+        var inspector = new SpirvModuleInspector(spirv);
+        Assert.Equal(new[] { SpirvCapability.Shader, SpirvCapability.Int64, SpirvCapability.PhysicalStorageBufferAddresses,
+            SpirvCapability.MeshShadingExt }.Select(capability => (uint)capability).Order(), inspector.Capabilities.Order());
+        Assert.Equal(5348u, inspector.AddressingModel);
+        var entryPoint = Assert.Single(module, instruction => instruction.Op == SpirvOp.EntryPoint);
+        Assert.Equal((uint)SpirvExecutionModel.TaskExt, entryPoint.Operands[0]);
+        Assert.Equal(new uint[] { (uint)SpirvExecutionMode.LocalSize, 1, 1, 1 },
+            Assert.Single(module, instruction => instruction.Op == SpirvOp.ExecutionMode).Operands[1..]);
+
+        Assert.Equal(128u, SpirvMeshTask.PushOffsetBytes);
+        var push = Assert.Single(module, instruction => instruction.Op == SpirvOp.Variable &&
+            instruction.Operands[2] == (uint)SpirvStorageClass.PushConstant);
+        Assert.Contains(push.Operands[1], EntryPointInterface(entryPoint));
+        var block = PointeeType(module, push.Operands[0]);
+        Assert.Equal(new[] { block.Operands[0], 0u, (uint)SpirvDecoration.Offset, SpirvMeshTask.PushOffsetBytes },
+            Assert.Single(module, instruction => instruction.Op == MemberDecorate && instruction.Operands[0] == block.Operands[0]).Operands);
+        var constants = Constants(module);
+        var words = Assert.Single(module, instruction => instruction.Op == SpirvOp.TypeArray && instruction.Operands[0] == block.Operands[1]);
+        Assert.Equal(SpirvMeshTask.PushWordCount, constants[words.Operands[2]]);
+        Assert.Equal(Enumerable.Range(0, (int)SpirvMeshTask.PushWordCount).Select(word => (ulong)word),
+            module.Where(instruction => instruction.Op == SpirvOp.AccessChain && instruction.Operands[2] == push.Operands[1])
+                .Select(instruction => constants[instruction.Operands[^1]]).Order());
+
+        var specIds = module.Where(instruction => instruction.Op == SpirvOp.Decorate && instruction.Operands[1] == (uint)SpirvDecoration.SpecId)
+            .ToDictionary(instruction => instruction.Operands[0], instruction => instruction.Operands[2]);
+        Assert.Equal(new[]
+            {
+                (SpirvMeshTask.SpecPrimitivesPerGroup, 1u), (SpirvMeshTask.SpecPointList, 0u), (SpirvMeshTask.SpecMaxGroupCountX, 1u),
+                (SpirvMeshTask.SpecMaxGroupCountY, 1u), (SpirvMeshTask.SpecMaxGroupTotalCount, 1u),
+            },
+            module.Where(instruction => instruction.Op == SpirvOp.SpecConstant)
+                .Select(instruction => (specIds[instruction.Operands[1]], instruction.Operands[2])).Order());
+
+        var payload = Assert.Single(module, instruction => instruction.Op == SpirvOp.Variable &&
+            instruction.Operands[2] == (uint)SpirvStorageClass.TaskPayloadWorkgroupExt);
+        var emit = Assert.Single(module, instruction => instruction.Op == SpirvOp.EmitMeshTasksExt);
+        Assert.Equal(4, emit.Operands.Length);
+        Assert.Equal(payload.Operands[1], emit.Operands[3]);
+        Assert.Equal(Enumerable.Repeat((32u, 0u), (int)SpirvMeshTask.PayloadWordCount), TaskPayloadMembers(module));
+    }
+
+    // Each argument merges a device load, which only a nonzero address reaches, with push word 4 to 7,
+    // so the arguments of a draw without an address read no memory.
+    [Fact]
+    public void TaskStageReadsPushedArgumentsWithoutAnAddress()
+    {
+        var module = ReadInstructions(SpirvMeshTask.Create());
+        var constants = Constants(module);
+        var values = module.Where(instruction => instruction.Op is SpirvOp.Load or SpirvOp.AccessChain or SpirvOp.ConvertUToPtr or
+            SpirvOp.INotEqual or SpirvOp.IAdd).ToDictionary(instruction => instruction.Operands[1]);
+        var push = Assert.Single(module, instruction => instruction.Op == SpirvOp.Variable &&
+            instruction.Operands[2] == (uint)SpirvStorageClass.PushConstant).Operands[1];
+        bool IsDeviceLoad(SpirvInstruction instruction) => instruction.Op == SpirvOp.Load &&
+            values.TryGetValue(instruction.Operands[2], out var pointer) && pointer.Op == SpirvOp.ConvertUToPtr;
+
+        var entry = module.First(instruction => instruction.Op == SpirvOp.Label).Operands[0];
+        var branch = Assert.Single(module, instruction => instruction.Op == SpirvOp.BranchConditional && instruction.Block == entry);
+        var (condition, read, merge) = (values[branch.Operands[0]], branch.Operands[1], branch.Operands[2]);
+        Assert.Equal(SpirvOp.INotEqual, condition.Op);
+        Assert.Equal(0ul, constants[condition.Operands[3]]);
+        Assert.Equal(4, module.Count(IsDeviceLoad));
+        Assert.All(module.Where(IsDeviceLoad), load => Assert.Equal(read, load.Block));
+        var phis = module.Where(instruction => instruction.Op == SpirvOp.Phi).ToList();
+        Assert.Equal(4, phis.Count);
+        for (var index = 0; index < phis.Count; index++)
+        {
+            Assert.Equal(merge, phis[index].Block);
+            var incoming = phis[index].Operands[2..].Chunk(2).ToDictionary(pair => pair[1], pair => values[pair[0]]);
+            Assert.Equal(2, incoming.Count);
+            var loaded = incoming[read];
+            Assert.True(IsDeviceLoad(loaded));
+            Assert.Equal(new uint[] { 2, 4 }, loaded.Operands[3..]);
+            // The first argument is read at the address itself: its "+ 0" folds away.
+            var target = values[loaded.Operands[2]].Operands[2];
+            if (index == 0)
+            {
+                Assert.Equal(condition.Operands[2], target);
+            }
+            else
+            {
+                var address = values[target];
+                Assert.Equal(condition.Operands[2], address.Operands[2]);
+                Assert.Equal((ulong)index * 4, constants[address.Operands[3]]);
+            }
+            var pushed = values[incoming[entry].Operands[2]];
+            Assert.Equal(push, pushed.Operands[2]);
+            Assert.Equal((ulong)index + 4, constants[pushed.Operands[^1]]);
+        }
+    }
+
+    // A task-launched mesh shader takes its draw parameters from the payload the task stage declares and
+    // reads none of them from the shader data, in each wave arrangement. Left off, the module is unchanged.
+    [Theory]
+    [InlineData(32u, 32u, 0u)]
+    [InlineData(32u, 32u, 32u)]
+    [InlineData(64u, 192u, 32u)]
+    [InlineData(64u, 64u, 64u)]
+    public void TaskLaunchedMeshReadsItsDrawParametersFromThePayload(uint waveSize, uint localSize, uint hostSubgroupSize)
+    {
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(AllocatingMeshProgram(), ShaderStage.Mesh, userDataCount: 0);
+        var mesh = new MeshShaderConfiguration(localSize, 16, 0, 8, 24, 0, DeviceSubgroupLaneCount: hostSubgroupSize);
+        byte[] Compile(MeshShaderConfiguration configuration)
+        {
+            var request = new ShaderCompileRequest(plan, resources, layout)
+            {
+                WaveSize = waveSize, LocalSizeX = localSize, Mesh = configuration,
+            };
+            Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+            return shader.Spirv;
+        }
+        var shaderData = Compile(mesh);
+        Assert.Equal(shaderData, Compile(mesh with { TaskLaunched = false }));
+        var task = Compile(mesh with { TaskLaunched = true });
+
+        Assert.True(layout.UsesPushData);
+        var parameters = Enumerable.Range(0, 6)
+            .Select(index => (ulong)(layout.PushDataStartDword + layout.MeshDrawParametersDword) + (ulong)index).ToHashSet();
+        Assert.True(PushDataReads(shaderData, parameters) >= parameters.Count);
+        Assert.Equal(0, PushDataReads(task, parameters));
+        Assert.False(new SpirvModuleInspector(shaderData).HasVariableInStorageClass(SpirvStorageClass.TaskPayloadWorkgroupExt));
+        // The validator checks each stage alone, so the payload the two stages share is compared here.
+        Assert.Equal(TaskPayloadMembers(ReadInstructions(SpirvMeshTask.Create())), TaskPayloadMembers(ReadInstructions(task)));
+        ValidateWithInstalledSdk(task);
+    }
+
+    // An allocating mesh program with a position and a primitive export.
+    private static Gen5ShaderProgram AllocatingMeshProgram() => new(0,
+    [
+        new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Sop1, "SMovB32", [0],
+            [Gen5Operand.Source(131)], [Gen5Operand.Scalar(124)], null),
+        new Gen5ShaderInstruction(4, Gen5ShaderEncoding.Sopp, "SSendmsg", [0xBF900009], [], [], null),
+        new Gen5ShaderInstruction(8, Gen5ShaderEncoding.Exp, "Exp", [0, 0],
+            [Gen5Operand.Vector(0), Gen5Operand.Vector(1), Gen5Operand.Vector(2), Gen5Operand.Vector(3)], [],
+            new Gen5ExportControl(12, 15, false, false, false)),
+        new Gen5ShaderInstruction(16, Gen5ShaderEncoding.Exp, "Exp", [0, 0],
+            [Gen5Operand.Vector(4), Gen5Operand.Vector(4), Gen5Operand.Vector(4), Gen5Operand.Vector(4)], [],
+            new Gen5ExportControl(20, 1, false, true, false)),
+        new Gen5ShaderInstruction(24, Gen5ShaderEncoding.Sopp, "SEndpgm", [0xBF810000], [], [], null),
+    ]);
+
+    private const SpirvOp MemberDecorate = (SpirvOp)72;
+
+    // One instruction of a module: its opcode, its operand words and the label of the block it is in.
+    private readonly record struct SpirvInstruction(SpirvOp Op, uint[] Operands, uint Block);
+
+    private static List<SpirvInstruction> ReadInstructions(byte[] spirv)
+    {
+        var words = new uint[spirv.Length / sizeof(uint)];
+        Buffer.BlockCopy(spirv, 0, words, 0, spirv.Length);
+        var instructions = new List<SpirvInstruction>();
+        var block = 0u;
+        for (var offset = 5; offset < words.Length; offset += (int)(words[offset] >> 16))
+        {
+            var op = (SpirvOp)(words[offset] & 0xffff);
+            var operands = words[(offset + 1)..(offset + (int)(words[offset] >> 16))];
+            if (op == SpirvOp.Label) block = operands[0];
+            instructions.Add(new SpirvInstruction(op, operands, block));
+        }
+        return instructions;
+    }
+
+    // The integer constants of a module by id, 64-bit ones included.
+    private static Dictionary<uint, ulong> Constants(List<SpirvInstruction> module) =>
+        module.Where(instruction => instruction.Op == SpirvOp.Constant).ToDictionary(instruction => instruction.Operands[1],
+            instruction => instruction.Operands.Length > 3 ? instruction.Operands[2] | (ulong)instruction.Operands[3] << 32 : instruction.Operands[2]);
+
+    private static SpirvInstruction PointeeType(List<SpirvInstruction> module, uint pointerType)
+    {
+        var pointer = Assert.Single(module, instruction => instruction.Op == SpirvOp.TypePointer && instruction.Operands[0] == pointerType);
+        return Assert.Single(module, instruction => instruction.Op is >= SpirvOp.TypeVoid and <= SpirvOp.TypeFunction &&
+            instruction.Operands[0] == pointer.Operands[2]);
+    }
+
+    // The interface of an entry point: the ids after its nul-terminated name.
+    private static uint[] EntryPointInterface(SpirvInstruction entryPoint)
+    {
+        var name = 2;
+        while (entryPoint.Operands[name] >> 24 != 0) name++;
+        return entryPoint.Operands[(name + 1)..];
+    }
+
+    // The members of a module's task payload as (width, signedness). Its variable is in the entry point's
+    // interface, and the payload type has no decorations.
+    private static (uint Width, uint Signedness)[] TaskPayloadMembers(List<SpirvInstruction> module)
+    {
+        var payload = Assert.Single(module, instruction => instruction.Op == SpirvOp.Variable &&
+            instruction.Operands[2] == (uint)SpirvStorageClass.TaskPayloadWorkgroupExt);
+        Assert.Contains(payload.Operands[1], EntryPointInterface(Assert.Single(module, instruction => instruction.Op == SpirvOp.EntryPoint)));
+        var structure = PointeeType(module, payload.Operands[0]);
+        Assert.Equal(SpirvOp.TypeStruct, structure.Op);
+        Assert.DoesNotContain(module, instruction => instruction.Op is SpirvOp.Decorate or MemberDecorate &&
+            instruction.Operands[0] == structure.Operands[0]);
+        return [.. structure.Operands[1..].Select(member => Assert.Single(module, instruction => instruction.Op == SpirvOp.TypeInt &&
+            instruction.Operands[0] == member)).Select(type => (type.Operands[1], type.Operands[2]))];
+    }
+
+    // The number of reads of the given push data dwords.
+    private static int PushDataReads(byte[] spirv, IReadOnlySet<ulong> dwords)
+    {
+        var module = ReadInstructions(spirv);
+        var constants = Constants(module);
+        var pushData = new SpirvModuleInspector(spirv).Names.Single(name => name.Value == "pushData").Key;
+        return module.Count(instruction => instruction.Op == SpirvOp.AccessChain && instruction.Operands[2] == pushData &&
+            constants.TryGetValue(instruction.Operands[^1], out var dword) && dwords.Contains(dword));
+    }
+
     [Theory]
     [InlineData(null, 11, 41984ul)]
     [InlineData(1501u, 8, 32768ul)]
@@ -317,7 +534,8 @@ public sealed class Gen5MeshShaderTests
             Assert.Equal(expectedMask, laneMasks[words[offset + 5]]);
             shuffleCount++;
         }
-        Assert.True(shuffleCount >= 2);
+        // A wave32 DPP16 source reads the guest EXEC of its lane from a ballot, not from a second shuffle.
+        Assert.True(shuffleCount >= (operation == "dpp" && waveSize == 32 ? 1 : 2));
         ValidateWithInstalledSdk(shader.Spirv);
     }
 
@@ -551,6 +769,64 @@ public sealed class Gen5MeshShaderTests
         Assert.Contains((ushort)SpirvOp.SetMeshOutputsExt, module.Opcodes);
 
         ValidateWithInstalledSdk(shader.Spirv);
+    }
+
+    // A primitive export packs three 9-bit vertex indices at bits 0, 10 and 20; bit 9 of each field is the vertex's
+    // edge flag, so a set edge flag must not move the index past 511.
+    [Fact]
+    public void PrimitiveExportIndicesLeaveOutTheEdgeFlags()
+    {
+        var program = new Gen5ShaderProgram(0,
+        [
+            new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Sop1, "SMovB32", [0],
+                [Gen5Operand.Source(131)], [Gen5Operand.Scalar(124)], null),
+            new Gen5ShaderInstruction(4, Gen5ShaderEncoding.Sopp, "SSendmsg", [0xBF900009],
+                [], [], null),
+            new Gen5ShaderInstruction(8, Gen5ShaderEncoding.Exp, "Exp", [0, 0],
+                [Gen5Operand.Vector(0), Gen5Operand.Vector(1),
+                    Gen5Operand.Vector(2), Gen5Operand.Vector(3)], [],
+                new Gen5ExportControl(12, 15, false, false, false)),
+            new Gen5ShaderInstruction(16, Gen5ShaderEncoding.Exp, "Exp", [0, 0],
+                [Gen5Operand.Vector(4), Gen5Operand.Vector(4),
+                    Gen5Operand.Vector(4), Gen5Operand.Vector(4)], [],
+                new Gen5ExportControl(20, 1, false, true, false)),
+            new Gen5ShaderInstruction(24, Gen5ShaderEncoding.Sopp, "SEndpgm", [0xBF810000],
+                [], [], null),
+        ]);
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(
+            program, ShaderStage.Mesh, userDataCount: 0);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            WaveSize = 32,
+            LocalSizeX = 32,
+            Mesh = new MeshShaderConfiguration(32, 16, 0, 8, 24, 0),
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+
+        var words = new uint[shader.Spirv.Length / 4];
+        Buffer.BlockCopy(shader.Spirv, 0, words, 0, shader.Spirv.Length);
+        var constants = new Dictionary<uint, uint>();
+        var extracts = new List<(uint Offset, uint Count)>();
+        for (var index = 5; index < words.Length; index += (int)(words[index] >> 16))
+        {
+            var opcode = (SpirvOp)(words[index] & 0xFFFF);
+            if (opcode == SpirvOp.Constant && words[index] >> 16 == 4)
+                constants[words[index + 2]] = words[index + 3];
+            else if (opcode == SpirvOp.BitFieldUExtract)
+                extracts.Add((words[index + 4], words[index + 5]));
+        }
+
+        var fields = extracts.Select(extract =>
+            (Offset: constants.GetValueOrDefault(extract.Offset, uint.MaxValue),
+             Count: constants.GetValueOrDefault(extract.Count, uint.MaxValue))).ToList();
+        // (0, 10) also decodes the vertex count of the GS allocation request, so only fields 1 and 2 tell the old width.
+        foreach (var offset in new[] { 0u, 10u, 20u })
+        {
+            Assert.Contains((offset, 9u), fields);
+        }
+
+        Assert.DoesNotContain((10u, 10u), fields);
+        Assert.DoesNotContain((20u, 10u), fields);
     }
 
     private sealed class MeshFixtureTheoryAttribute : TheoryAttribute

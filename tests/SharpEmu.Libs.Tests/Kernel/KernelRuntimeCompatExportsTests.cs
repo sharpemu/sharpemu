@@ -562,6 +562,47 @@ public sealed class KernelRuntimeCompatExportsTests
         }
     }
 
+    // The loader maps a module's own segments; the protection query reports them, so a title that adds flags to the
+    // current protection of its data starts from the real value.
+    [Fact]
+    public void QueryMemoryProtection_ReportsALoadedModuleSegment()
+    {
+        const ulong ModuleBase = 0x7F12_3400_0000;
+        var context = new CpuContext(new FakeCpuMemory(MemoryBase, 0x100), Generation.Gen5);
+        KernelModuleRegistry.Reset();
+        try
+        {
+            var handle = KernelModuleRegistry.RegisterModule(
+                "/app0/main.elf", ModuleBase, 0x10_0000, ModuleBase, 0, 0, 0, 0, isMain: true);
+            KernelModuleRegistry.RegisterModuleSegments(handle,
+            [
+                new(ModuleBase, ModuleBase + 0x8_0000, 0x4),
+                new(ModuleBase + 0x8_0000, ModuleBase + 0x10_0000, 0x3),
+            ]);
+            context[CpuRegister.Rdi] = ModuleBase + 0x9_2345;
+            context[CpuRegister.Rsi] = MemoryBase;
+            context[CpuRegister.Rdx] = MemoryBase + 0x8;
+            context[CpuRegister.Rcx] = MemoryBase + 0x10;
+
+            Assert.Equal(0, KernelMemoryCompatExports.KernelQueryMemoryProtection(context));
+            Assert.True(context.TryReadUInt64(MemoryBase, out var start));
+            Assert.True(context.TryReadUInt64(MemoryBase + 0x8, out var end));
+            Assert.True(context.TryReadUInt32(MemoryBase + 0x10, out var protection));
+            Assert.Equal(ModuleBase + 0x8_0000, start);
+            Assert.Equal(ModuleBase + 0x10_0000 - 1, end);
+            Assert.Equal(3u, protection);
+
+            context[CpuRegister.Rdi] = ModuleBase + 0x10_0000;
+            Assert.Equal(
+                (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND,
+                KernelMemoryCompatExports.KernelQueryMemoryProtection(context));
+        }
+        finally
+        {
+            KernelModuleRegistry.Reset();
+        }
+    }
+
     private static int GetMinutesWest() =>
         unchecked((int)-TimeZoneInfo.Local.BaseUtcOffset.TotalMinutes);
 

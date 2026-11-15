@@ -28,6 +28,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
     private readonly KeptPipeline _pipeline = new();
     private readonly InPlaceDraw _inPlace = new();
     private long _sequence;
+    private static int _meshDrawsOverLimits;
     private static readonly ThreadCounter _inPlaceDraws = new();
     private static readonly ThreadCounter _inPlaceRefused = new();
 
@@ -378,10 +379,20 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         ref readonly var indexSource = ref record.Index;
         using var preparation = _host.BeginPreparation();
         using var indirectMesh = meshInput is not null && emission.IndirectArgumentsAddress != 0
-            ? _host.PrepareIndirectMeshDraw(new IndirectMeshDrawRequest(emission.IndirectArgumentsAddress,
-                indexSource.Address, draw.Count, indexSource.Type == IndexType.Uint16 ? 2u : 4u,
-                topology == PrimitiveTopology.PointList, meshInput.Geometry.InputPrimitiveCountPerWorkgroup, meshInput.Execution))
+            ? _host.PrepareIndirectMeshDraw(emission.Indexed
+                ? new IndirectMeshDrawRequest(emission.IndirectArgumentsAddress,
+                    indexSource.Address, draw.Count, indexSource.Type == IndexType.Uint16 ? 2u : 4u,
+                    topology == PrimitiveTopology.PointList, meshInput.Geometry.InputPrimitiveCountPerWorkgroup, meshInput.Execution)
+                : IndirectMeshDrawRequest.ForAutomaticDraw(emission.IndirectArgumentsAddress,
+                    topology == PrimitiveTopology.PointList, meshInput.Geometry.InputPrimitiveCountPerWorkgroup, meshInput.Execution)
+                    with { TaskLaunched = meshInput.Geometry.TaskLaunched })
             : null;
+        // Only an automatic indirect draw resolves a task-launched program; anything else is a broken join.
+        if (meshInput is { Geometry.TaskLaunched: true } && (emission.IndirectArgumentsAddress == 0 || emission.Indexed))
+        {
+            throw _host.Fatal("A task-launched mesh program reached a draw that is not automatic and indirect.");
+        }
+
         var meshVertexCount = draw.Count;
         if (MeshDrawTrace.Active)
             MeshDrawTrace.Write("programs", $"mesh={meshInput is not null} vertexHash=0x{vertexInput.Stage.Program?.Hash:X16} pixelHash=0x{pixelInput.Stage.Program?.Hash:X16} pixelActive={state.PixelActive}");
@@ -484,6 +495,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
             _host.PrepareDeviceAddresses();
         }
 
+        var owners = _host.BufferOwnerGeneration;
         _host.BindResources(vertexBindings);
         if (pixelBindings is not null)
         {
@@ -510,6 +522,35 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
 
             state.Rendering = AcquireAttachments(ref state);
         }
+
+        // An owner bound above can be merged by a later stage or acquisition; bind and acquire the buffers again
+        // until none changes, so the draw records no retired owner.
+        for (var attempt = 0; _host.BufferOwnerGeneration != owners; attempt++)
+        {
+            if (attempt == 8)
+            {
+                throw _host.Fatal("Buffer owners kept changing while a draw was prepared.");
+            }
+
+            owners = _host.BufferOwnerGeneration;
+            _host.RebindBuffers(vertexBindings);
+            if (pixelBindings is not null)
+            {
+                _host.RebindBuffers(pixelBindings);
+            }
+
+            if (meshInput is null)
+            {
+                vertexBuffers = AcquireVertexBuffers(vertexInput);
+                indexBuffer = AcquireIndexBuffer(in indexSource);
+                if (emission.IndirectArgumentsAddress != 0)
+                {
+                    indirectArguments = _host.ObtainBuffer(emission.IndirectArgumentsAddress,
+                        emission.Indexed ? RenderExecutor.IndexedIndirectArgumentsSize : RenderExecutor.AutoIndirectArgumentsSize, isWritten: false);
+                }
+            }
+        }
+
         var pipeline = ResolvePipeline(record, ref state, vertexInput, state.PixelActive ? pixelInput : null);
         if (record.SetBindDebug)
         {
@@ -627,9 +668,17 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         if (groupCount > mesh.Execution.MaxGroupCountX || draw.InstanceCount > mesh.Execution.MaxGroupCountY ||
             totalGroupCount > mesh.Execution.MaxGroupTotalCount)
         {
-            throw _host.Fatal($"The mesh draw exceeds device group limits: groups={groupCount}/{mesh.Execution.MaxGroupCountX} " +
-                $"instances={draw.InstanceCount}/{mesh.Execution.MaxGroupCountY} " +
-                $"total={totalGroupCount}/{mesh.Execution.MaxGroupTotalCount}.");
+            // Left out, as the GPU preparation leaves out an indirect draw over the limits.
+            var left = Interlocked.Increment(ref _meshDrawsOverLimits);
+            if ((left & (left - 1)) == 0)
+            {
+                Console.Error.WriteLine($"[GPU][WARN] A mesh draw over the device group limits was left out ({left} so far): " +
+                    $"groups={groupCount}/{mesh.Execution.MaxGroupCountX} instances={draw.InstanceCount}/{mesh.Execution.MaxGroupCountY} " +
+                    $"total={totalGroupCount}/{mesh.Execution.MaxGroupTotalCount} vertices={draw.Count} " +
+                    $"hash=0x{(record.State.Programs.VertexInput.Stage.Program?.Hash ?? 0ul):X16}.");
+            }
+
+            return;
         }
 
         if (RenderTrace.Enabled)

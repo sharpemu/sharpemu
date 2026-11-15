@@ -256,7 +256,7 @@ internal sealed class CompiledResourceTransaction
         }
     }
 
-    private static void SetTablePhase(ResourceRuntimeInputs inputs, bool table) => inputs.TablePhase?.Invoke(table);
+    internal static void SetTablePhase(ResourceRuntimeInputs inputs, bool table) => inputs.TablePhase?.Invoke(table);
 
     private static bool ReadGroup(ResourceRuntimeInputs inputs, bool clean, ulong low, ulong high, long relative, int count,
         out ReadGroupWords values, ShaderResourcePlan plan, ScalarValue[] nodes)
@@ -292,7 +292,7 @@ internal sealed class CompiledResourceTransaction
 
     private static uint ReadGroupWord(ref ReadGroupWords words, int index) => words[index];
 
-    private static bool ReadUserData(ResourceRuntimeInputs inputs, ulong index, out ulong value)
+    internal static bool ReadUserData(ResourceRuntimeInputs inputs, ulong index, out ulong value)
     {
         value = 0;
         if (index >= (ulong)inputs.UserData.Count) return false;
@@ -300,7 +300,7 @@ internal sealed class CompiledResourceTransaction
         return true;
     }
 
-    private static bool ReadWord(ResourceRuntimeInputs inputs, bool clean, ScalarValueKind kind, ulong low, ulong high,
+    internal static bool ReadWord(ResourceRuntimeInputs inputs, bool clean, ScalarValueKind kind, ulong low, ulong high,
         ulong offset, ulong records, long immediate, bool absolute, out ulong value, ShaderResourcePlan plan, ScalarValue node)
     {
         value = 0;

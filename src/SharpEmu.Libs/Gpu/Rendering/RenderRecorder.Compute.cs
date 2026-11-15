@@ -114,6 +114,11 @@ internal sealed partial class RenderRecorder
                 _keptComputePipeline = pipeline;
             }
 
+            // The indirect arguments are registered before the resources bind, so acquiring them merges no owner the
+            // dispatch already bound.
+            using var arguments = record.IndirectArgumentsAddress != 0
+                ? _host.PrepareIndirectDispatchArguments(record.IndirectArgumentsAddress)
+                : null;
             var bindings = PrepareBindings(input.Stage);
             if (program.UsesDeviceAddresses)
             {
@@ -121,6 +126,28 @@ internal sealed partial class RenderRecorder
             }
 
             _host.BindResources(bindings);
+            var owners = _host.BufferOwnerGeneration;
+            // Diagnostic readbacks may finish a submission. Complete them before final native bindings.
+            var imageSnapshot = _host.BeginComputeImageSnapshot(bindings);
+            arguments?.Rebind();
+            for (var attempt = 0; _host.BufferOwnerGeneration != owners; attempt++)
+            {
+                if (attempt == 8)
+                {
+                    throw _host.Fatal("Compute buffer owners did not stabilize.");
+                }
+
+                owners = _host.BufferOwnerGeneration;
+                _host.RebindBuffers(bindings);
+                arguments?.Rebind();
+            }
+
+            // The groups and thread limits come from the GPU-written counts; the pass binds its own pipeline, so it is
+            // recorded before this dispatch's bindings and outside its checked window.
+            using var threadDispatch = record.GpuThreadCounts
+                ? _host.PrepareThreadDispatch(arguments ?? throw _host.Fatal("GPU thread counts have no prepared arguments."),
+                    bindings, [input.ThreadsX, input.ThreadsY, input.ThreadsZ], GroupAxisOrder(input))
+                : null;
             Span<IPreparedBindings> stages = [bindings];
             _host.CommitBindings(PipelineBindPoint.Compute, in pipeline, stages);
             var chain = _dispatchChain ??= new DispatchChain();
@@ -130,10 +157,13 @@ internal sealed partial class RenderRecorder
                 _host.ShaderWriteHazardBarrier();
             }
 
-            var imageSnapshot = _host.BeginComputeImageSnapshot(bindings);
             _host.BeginCheckedDispatch();
             _host.BindPipeline(PipelineBindPoint.Compute, in pipeline);
-            if (record.IndirectArgumentsAddress == 0 || !_host.TryDispatchIndirect(record.IndirectArgumentsAddress, GroupAxisOrder(input)))
+            if (threadDispatch is not null)
+            {
+                threadDispatch.Dispatch();
+            }
+            else if (record.IndirectArgumentsAddress == 0 || !TryDispatchIndirect(record, arguments, input))
             {
                 var (groupsX, groupsY, groupsZ) = PhysicalGroups(input, record);
                 _host.Dispatch(groupsX, groupsY, groupsZ);
@@ -259,6 +289,11 @@ internal sealed partial class RenderRecorder
 
         return false;
     }
+
+    private bool TryDispatchIndirect(ResolvedDispatch record, IIndirectDispatchArguments? arguments, ComputeInputInfo input) =>
+        arguments is not null
+            ? _host.TryDispatchIndirect(arguments, GroupAxisOrder(input))
+            : _host.TryDispatchIndirect(record.IndirectArgumentsAddress, GroupAxisOrder(input));
 
     private static int[] GroupAxisOrder(ComputeInputInfo input) =>
         Gen5SpirvTranslator.ComputeGroupAxisOrder(input.ThreadsX, input.ThreadsY, input.ThreadsZ, input.GroupIdX, input.GroupIdY, input.GroupIdZ);

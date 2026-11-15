@@ -142,6 +142,42 @@ public sealed class PlayGoExportsTests : IDisposable
         Assert.Equal(new byte[] { LocusLocalFast }, ReadLoci(1));
     }
 
+    // A title that ships playgo-chunk.dat without playgo-chunkdefs.xml lists the chunks its header counts.
+    [Theory]
+    [InlineData(0x6F676C70u)]
+    [InlineData(0x78676C70u)]
+    public void GetChunkId_ChunkDatWithoutDefinitions_ListsTheHeaderChunks(uint magic)
+    {
+        var dat = new byte[0x40];
+        BinaryPrimitives.WriteUInt32LittleEndian(dat, magic);
+        BinaryPrimitives.WriteUInt16LittleEndian(dat.AsSpan(0x08), 1);
+        BinaryPrimitives.WriteUInt16LittleEndian(dat.AsSpan(0x0A), 3);
+        BinaryPrimitives.WriteUInt32LittleEndian(dat.AsSpan(0x10), (uint)dat.Length);
+        var sceSys = Directory.CreateDirectory(Path.Combine(_app0Root, "sce_sys"));
+        File.WriteAllBytes(Path.Combine(sceSys.FullName, "playgo-chunk.dat"), dat);
+        var handle = InitializeAndOpen();
+
+        _ctx[CpuRegister.Rdi] = handle;
+        _ctx[CpuRegister.Rsi] = ChunkIdsAddress;
+        _ctx[CpuRegister.Rdx] = 16;
+        _ctx[CpuRegister.Rcx] = HandleAddress;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, PlayGoExports.PlayGoGetChunkId(_ctx));
+        Span<byte> written = stackalloc byte[sizeof(uint) + 3 * sizeof(ushort)];
+        Assert.True(_memory.TryRead(HandleAddress, written[..sizeof(uint)]));
+        Assert.True(_memory.TryRead(ChunkIdsAddress, written[sizeof(uint)..]));
+        Assert.Equal(3u, BinaryPrimitives.ReadUInt32LittleEndian(written));
+        Assert.Equal(new ushort[] { 0, 1, 2 }, new[]
+        {
+            BinaryPrimitives.ReadUInt16LittleEndian(written[4..]),
+            BinaryPrimitives.ReadUInt16LittleEndian(written[6..]),
+            BinaryPrimitives.ReadUInt16LittleEndian(written[8..]),
+        });
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, GetLocus(handle, [0, 1, 2]));
+        Assert.Equal(new byte[] { LocusLocalFast, LocusLocalFast, LocusLocalFast }, ReadLoci(3));
+        Assert.Equal(BadChunkId, GetLocus(handle, [3]));
+    }
+
     [Fact]
     public void GetLocus_FaultingChunkAndOutputPointers_ReturnMemoryFault()
     {

@@ -140,8 +140,46 @@ public sealed class Gen5Float16ArithmeticTests
         Assert.Contains((ushort)SpirvOp.FAdd, opcodes);
         Assert.Contains((ushort)SpirvOp.FSub, opcodes);
         Assert.Contains((ushort)SpirvOp.FMul, opcodes);
-        Assert.True(opcodes.Count(opcode => opcode == (ushort)SpirvOp.ExtInst) >= 3);
+        // The reciprocal square root and the maximum are GLSL instructions.
+        Assert.True(opcodes.Count(opcode => opcode == (ushort)SpirvOp.ExtInst) >= 2);
         Assert.DoesNotContain((ushort)SpirvCapability.Float16, ReadCapabilities(shader.Spirv));
+    }
+
+    // With NativeFloat16Conversions v_rcp_f16 widens its operand and narrows its result with OpFConvert, and the module declares
+    // 16-bit floats with the float controls of the conversions (round-to-nearest-even, denormals and NaN kept, three execution
+    // modes beside LocalSize).
+    [Fact]
+    public void NativeFloat16ConversionsDeclareTheirFloatControls()
+    {
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(Decode([0x7E000000u | (0x54u << 9) | 257u, SEndpgm]), userDataCount: 0);
+        var request = new ShaderCompileRequest(plan, resources, layout) { NativeFloat16Conversions = true };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var opcodes = ReadOpcodes(shader.Spirv);
+        Assert.Equal(2, opcodes.Count(opcode => opcode == (ushort)SpirvOp.FConvert));
+        Assert.Equal(4, opcodes.Count(opcode => opcode == (ushort)SpirvOp.ExecutionMode));
+        Assert.Superset(
+            new HashSet<ushort>([(ushort)SpirvCapability.Float16, (ushort)SpirvCapability.DenormPreserve,
+                (ushort)SpirvCapability.RoundingModeRte, (ushort)SpirvCapability.SignedZeroInfNanPreserve]),
+            ReadCapabilities(shader.Spirv).ToHashSet());
+    }
+
+    // With NativeFloat16Conversions v_add_f16 adds its halves as an f16 OpFAdd, without a conversion, where the f32 forms keep
+    // signed zero and NaN; without SignedZeroInfNanPreserve for 32 bits it keeps the f32 add between conversions.
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void NativeFloat16AddStaysInHalves(bool preserveNan)
+    {
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(Decode([0x64000501, SEndpgm]), userDataCount: 0);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            NativeFloat16Conversions = true, ShaderSignedZeroInfNanPreserveFloat32Supported = preserveNan,
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var opcodes = ReadOpcodes(shader.Spirv);
+        Assert.Equal(preserveNan ? 0 : 3, opcodes.Count(opcode => opcode == (ushort)SpirvOp.FConvert));
+        Assert.Equal(1, opcodes.Count(opcode => opcode == (ushort)SpirvOp.FAdd));
+        Assert.Contains((ushort)SpirvCapability.Float16, ReadCapabilities(shader.Spirv));
     }
 
     [Theory]
@@ -233,7 +271,10 @@ public sealed class Gen5Float16ArithmeticTests
         Assert.True(
             Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error),
             error);
-        Assert.Contains((ushort)SpirvOp.ExtInst, ReadOpcodes(shader.Spirv));
+        // The product and the sum of the round-to-odd fma.
+        var opcodes = ReadOpcodes(shader.Spirv);
+        Assert.Contains((ushort)SpirvOp.FMul, opcodes);
+        Assert.Contains((ushort)SpirvOp.FAdd, opcodes);
         Assert.DoesNotContain((ushort)SpirvCapability.Float16, ReadCapabilities(shader.Spirv));
     }
 

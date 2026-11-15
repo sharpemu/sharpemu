@@ -9,9 +9,11 @@ public static partial class Gen5SpirvTranslator
 {
     private sealed partial class CompilationContext
     {
-        // Independent halves duplicate scalar work; a lane-local proof is not a performance proof.
-        private static readonly bool LaneLocalWave64Enabled = string.Equals(
-            Environment.GetEnvironmentVariable("SHARPEMU_WAVE64_LANE_LOCAL"), "1", StringComparison.Ordinal);
+        // A lane-local wave64 program runs as two independent halves, one guest lane per invocation: its module is about
+        // half the size of paired lanes and compiles in about half the time, while each half repeats the scalar work.
+        // SHARPEMU_WAVE64_LANE_LOCAL=0 keeps paired lanes.
+        private static readonly bool LaneLocalWave64Enabled = !string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_WAVE64_LANE_LOCAL"), "0", StringComparison.Ordinal);
 
         private static bool CanRunHalfWaves(ShaderCompileRequest request, int[] physicalAxisOfLogical)
         {

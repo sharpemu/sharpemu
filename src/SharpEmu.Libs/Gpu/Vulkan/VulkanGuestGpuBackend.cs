@@ -37,6 +37,9 @@ internal sealed class VulkanGuestGpuBackend : IGuestGpuBackend
         return true;
     }
 
+    public IGuestCompiledShader? CreateCachedShader(byte[] payload, uint? inputLocationMask) =>
+        new VulkanCompiledGuestShader(payload) { InputLocationMask = inputLocationMask };
+
     public IGuestCompiledShader GetDepthOnlyFragmentShader() =>
         DepthOnlyFragmentShader;
 

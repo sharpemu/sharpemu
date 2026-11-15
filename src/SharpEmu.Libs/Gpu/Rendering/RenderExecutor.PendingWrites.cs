@@ -163,6 +163,15 @@ public sealed partial class RenderExecutor
                 PendingWrites.Mark(range.Base, range.Size, sequence, PendingWriteKind.Range);
             }
         }
+
+        // The buffers the stage's call records name for their callees (ShaderStageResources.CallRecordRanges).
+        foreach (var range in stage.CallRecordRanges ?? [])
+        {
+            if (range.Written)
+            {
+                PendingWrites.Mark(range.Base, range.Size, sequence, PendingWriteKind.Range);
+            }
+        }
     }
 
     private static bool TryGetImageData(ShaderProgramInfo program, ImageResource image, uint[] words, int imageIndex, out GuestSpan data)

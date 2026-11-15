@@ -231,6 +231,47 @@ public sealed class Gen5ImageTests
         Assert.Equal([6, 5, 4, 7], GetStoredVgprRegisters(spirv));
     }
 
+    // With storage image selects as shader data, every select compiles to one module, whose store reads its channel map.
+    [Theory]
+    [InlineData("ImageStore", 0xFu, 71u)]
+    [InlineData("ImageStore", 0x5u, 71u)]
+    [InlineData("ImageStoreMip", 0xFu, 71u)]
+    [InlineData("ImageStore", 0xFu, 69u)] // FORMAT_16_16_16_16_UINT
+    public void RuntimeSwizzleStoresOfEverySelectShareOneModule(string opcode, uint dmask, uint unifiedFormat)
+    {
+        var selects = new[] { 0xFACu, 0x9F5u, 0xF2Eu, 0x3ACu, 0xFA4u, 0x204u, 0x924u, 0x000u };
+        var modules = selects.Select(select => CompileImageOperation(opcode, dimension: 1, dmask, select, unifiedFormat,
+            runtimeImageSwizzles: true)).ToArray();
+        foreach (var module in modules.Skip(1))
+        {
+            Assert.Equal(modules[0], module);
+        }
+
+        var request = ImageOperationRequest(opcode, dimension: 1, dmask, 0x9F5u, unifiedFormat, runtimeImageSwizzles: true);
+        Assert.Equal(1u, request.Bindings.StorageImageSwizzleCount);
+        Assert.Equal(DescriptorConstants.IdentityImageSwizzle, Assert.Single(request.Resources.Info.Images).ShaderSwizzle);
+        var instructions = ReadSpirvInstructions(modules[0]);
+        Assert.Equal(4, instructions.Count(item => item.Opcode == SpirvOp.VectorExtractDynamic));
+        Assert.Single(instructions, item => item.Opcode == SpirvOp.ImageWrite);
+    }
+
+    // A function decodes the map once, in its entry block; each further store adds a pick and a select per channel.
+    [Fact]
+    public void RuntimeSwizzleStoresShareTheMapDecode()
+    {
+        var one = ReadSpirvInstructions(CompileImageOperation("ImageStore", dimension: 1, 0xF, 0xF2E, runtimeImageSwizzles: true));
+        var two = ReadSpirvInstructions(CompileImageOperation("ImageStore", dimension: 1, 0xF, 0xF2E, runtimeImageSwizzles: true,
+            instructions: 2));
+        int Count(IReadOnlyList<ParsedSpirvInstruction> module, SpirvOp opcode) => module.Count(item => item.Opcode == opcode);
+        Assert.Equal(2, Count(two, SpirvOp.ImageWrite));
+        Assert.Equal(8, Count(two, SpirvOp.VectorExtractDynamic));
+        Assert.Equal(Count(one, SpirvOp.Select) + 4, Count(two, SpirvOp.Select));
+        foreach (var decode in new[] { SpirvOp.BitFieldUExtract, SpirvOp.BitwiseXor, SpirvOp.ULessThan })
+        {
+            Assert.Equal(Count(one, decode), Count(two, decode));
+        }
+    }
+
     private static byte[] CompileImageOperation(
         string opcode,
         uint dimension,
@@ -240,9 +281,12 @@ public sealed class Gen5ImageTests
         uint samplerWord0 = 0u,
         uint samplerWord2 = 0u,
         uint? descriptorType = null,
-        bool arrayed = false)
+        bool arrayed = false,
+        bool runtimeImageSwizzles = false,
+        int instructions = 1)
     {
-        var request = ImageOperationRequest(opcode, dimension, dmask, dstSelect, unifiedFormat, samplerWord0, samplerWord2, descriptorType, arrayed);
+        var request = ImageOperationRequest(opcode, dimension, dmask, dstSelect, unifiedFormat, samplerWord0, samplerWord2, descriptorType, arrayed,
+            runtimeImageSwizzles, instructions);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
         return shader.Spirv;
     }
@@ -256,7 +300,9 @@ public sealed class Gen5ImageTests
         uint samplerWord0 = 0u,
         uint samplerWord2 = 0u,
         uint? descriptorType = null,
-        bool arrayed = false)
+        bool arrayed = false,
+        bool runtimeImageSwizzles = false,
+        int instructions = 1)
     {
         var coordinateCount = dimension == 2 || arrayed ? 3 : 2;
         var addressCount = coordinateCount +
@@ -277,24 +323,26 @@ public sealed class Gen5ImageTests
             Slc: false,
             A16: false,
             D16: false);
-        var imageInstruction = new Gen5ShaderInstruction(
-            0,
+        // Each further instruction reads its data from the next four registers.
+        var imageInstructions = Enumerable.Range(0, instructions).Select(index => new Gen5ShaderInstruction(
+            (uint)index * 8,
             Gen5ShaderEncoding.Mimg,
             opcode,
             [],
             [],
             [],
-            control);
+            control with { VectorData = 4 + (uint)index * 4 }));
         var end = new Gen5ShaderInstruction(
-            8,
+            (uint)instructions * 8,
             Gen5ShaderEncoding.Sopp,
             "SEndpgm",
             [SEndpgm],
             [],
             [],
             null);
-        var program = new Gen5ShaderProgram(ShaderAddress, [imageInstruction, end]);
-        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, ResourceTestProgram.Hash, 0, 20);
+        var program = new Gen5ShaderProgram(ShaderAddress, [.. imageInstructions, end]);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, ResourceTestProgram.Hash, 0, 20,
+            runtimeImageSwizzles: runtimeImageSwizzles);
         var userData = new uint[20];
         userData[8] = 0x20;
         userData[9] = unifiedFormat << 20;
@@ -428,10 +476,11 @@ public sealed class Gen5ImageTests
             instructions,
             item => item.Opcode == operation);
         var coordinateId = imageOperation.Operands[coordinateOperand];
+        // A fetch from an array ends its coordinates with the clamped layer.
         var coordinate = Assert.Single(
             instructions,
             item =>
-                item.Opcode == SpirvOp.CompositeConstruct &&
+                item.Opcode is SpirvOp.CompositeConstruct or SpirvOp.CompositeInsert &&
                 item.Operands.Length >= 2 &&
                 item.Operands[1] == coordinateId);
         AssertVectorTypeWidth(

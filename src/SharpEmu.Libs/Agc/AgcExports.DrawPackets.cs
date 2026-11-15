@@ -172,14 +172,8 @@ public static partial class AgcExports
         }
 
         var modifierBits = (uint)drawModifier;
-        var shaderStage = modifierBits >> 29;
-        var scalarRegisterBase = shaderStage is 3 or 5 ? 0x10Cu : 0x8Cu;
-        var firstVertexRegister = (modifierBits & 1u) != 0
-            ? scalarRegisterBase + ((modifierBits >> 9) & 0x1Fu)
-            : 0x280u;
-        var firstInstanceRegister = (modifierBits & 4u) != 0
-            ? scalarRegisterBase + ((modifierBits >> 19) & 0x1Fu)
-            : 0x280u;
+        var firstVertexRegister = DrawModifierRegister(modifierBits, DrawModifierStartVertex, 9);
+        var firstInstanceRegister = DrawModifierRegister(modifierBits, DrawModifierStartInstance, 19);
         var drawInitiator = (drawModifier & (1UL << 32)) != 0
             ? 2u
             : ((modifierBits >> 3) & 0x20u) | 2u;
@@ -247,17 +241,9 @@ public static partial class AgcExports
         var dataOffset = (uint)ctx[CpuRegister.Rsi];
         var modifier = ctx[CpuRegister.Rdx];
         var modifierBits = (uint)modifier;
-        var shaderStage = modifierBits >> 29;
-        var scalarRegisterBase = shaderStage is 3 or 5 ? 0x10Cu : 0x8Cu;
-        ulong registerLocations = (modifierBits & 1u) != 0
-            ? scalarRegisterBase + ((modifierBits >> 9) & 0x1Fu) : 0x280u;
-        var firstInstanceRegister = (modifierBits & 4u) != 0
-            ? scalarRegisterBase + ((modifierBits >> 19) & 0x1Fu) : 0x280u;
-        registerLocations |= (ulong)firstInstanceRegister << 32;
-        if ((modifierBits & 2u) != 0)
-        {
-            registerLocations |= ((ulong)(scalarRegisterBase + ((modifierBits >> 14) & 0x1Fu)) << 16) | (1UL << 59);
-        }
+        // Only the multi draws have the CP write the draw index; a single draw's comes from the bound user data.
+        var registerLocations = DrawModifierRegister(modifierBits, DrawModifierStartVertex, 9) |
+            ((ulong)DrawModifierRegister(modifierBits, DrawModifierStartInstance, 19) << 32);
 
         // The API modifier selects register locations; it is not a packet initiator.
         var drawInitiator = (modifier & (1UL << 32)) != 0
@@ -283,7 +269,37 @@ public static partial class AgcExports
         ExportName = "sceAgcDcbDrawIndexIndirectMulti",
         Target = Generation.Gen5,
         LibraryName = "libSceAgc")]
-    public static int DcbDrawIndexIndirectMulti(CpuContext ctx)
+    public static int DcbDrawIndexIndirectMulti(CpuContext ctx) =>
+        EmitDrawIndirectMulti(ctx, ItDrawIndexIndirectMulti, "agc.dcb_draw_index_indirect_multi");
+
+    [SysAbiExport(
+        Nid = "kUlvghKs-mA",
+        ExportName = "sceAgcDcbDrawIndirectMulti",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbDrawIndirectMulti(CpuContext ctx) =>
+        EmitDrawIndirectMulti(ctx, ItDrawIndirectMulti, "agc.dcb_draw_indirect_multi");
+
+    private const uint DrawModifierStartVertex = 1u << 0;
+    private const uint DrawModifierStartInstance = 1u << 2;
+    private const uint DrawModifierDrawIndex = 1u << 3;
+    private const uint DrawModifierUserVgprs = 1u << 4;
+
+    // The shader register of a user-data slot the modifier enables, as sce::Agc::get{VertexOffset,InstanceOffset,
+    // DrawIndex}UserDataSlot read it: five bits at slotShift, no slot when the modifier passes the values in VGPRs.
+    // Bits 29-31 name the frontmost stage; the hull stages' user data starts at 0x10C, the others' at 0x8C.
+    private static uint DrawModifierRegister(uint modifierBits, uint enable, int slotShift)
+    {
+        if ((modifierBits & (enable | DrawModifierUserVgprs)) != enable)
+            return 0x280u;
+
+        var userData0 = (modifierBits >> 29) is 3 or 5 ? 0x10Cu : 0x8Cu;
+        return userData0 + ((modifierBits >> slotShift) & 0x1Fu);
+    }
+
+    // Both multi draws take the same arguments and write the same ten-dword packet; the register the modifier names
+    // holds the base vertex of an indexed draw and the start vertex of the other.
+    private static int EmitDrawIndirectMulti(CpuContext ctx, uint opcode, string trace)
     {
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         var dataOffset = (uint)ctx[CpuRegister.Rsi];
@@ -296,21 +312,17 @@ public static partial class AgcExports
             return ReturnPointer(ctx, 0);
 
         var modifierBits = (uint)modifier;
-        var shaderStage = modifierBits >> 29;
-        var scalarRegisterBase = shaderStage is 3 or 5 ? 0x10Cu : 0x8Cu;
-        ulong registerLocations = (modifierBits & 1u) != 0
-            ? scalarRegisterBase + ((modifierBits >> 9) & 0x1Fu) : 0x280u;
-        var firstInstanceRegister = (modifierBits & 4u) != 0
-            ? scalarRegisterBase + ((modifierBits >> 19) & 0x1Fu) : 0x280u;
-        registerLocations |= (ulong)firstInstanceRegister << 32;
-        if ((modifierBits & 2u) != 0)
-            registerLocations |= ((ulong)(scalarRegisterBase + ((modifierBits >> 14) & 0x1Fu)) << 16) | (1UL << 59);
+        var registerLocations = DrawModifierRegister(modifierBits, DrawModifierStartVertex, 9) |
+            ((ulong)DrawModifierRegister(modifierBits, DrawModifierStartInstance, 19) << 32);
+        var drawIndexRegister = DrawModifierRegister(modifierBits, DrawModifierDrawIndex, 24);
+        if (drawIndexRegister != 0x280u)
+            registerLocations |= ((ulong)drawIndexRegister << 16) | (1UL << 59);
         var drawInitiator = (modifier & (1UL << 32)) != 0
             ? 2u : ((modifierBits >> 3) & 0x20u) | 2u;
 
         if (commandBufferAddress == 0 ||
             !TryAllocateCommandDwords(ctx, commandBufferAddress, 10, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(10, ItDrawIndexIndirectMulti, 0)) ||
+            !TryWriteUInt32(ctx, commandAddress, Pm4(10, opcode, 0)) ||
             !TryWriteUInt32(ctx, commandAddress + 4, dataOffset) ||
             !ctx.TryWriteUInt64(commandAddress + 8, registerLocations) ||
             !TryWriteUInt32(ctx, commandAddress + 16, countFromMemory << 30) ||
@@ -323,7 +335,7 @@ public static partial class AgcExports
         }
 
         TraceAgc(
-            $"agc.dcb_draw_index_indirect_multi buf=0x{commandBufferAddress:X16} " +
+            $"{trace} buf=0x{commandBufferAddress:X16} " +
             $"cmd=0x{commandAddress:X16} offset=0x{dataOffset:X8} draws={drawCount} " +
             $"stride={stride} modifier=0x{modifier:X8}");
         return ReturnPointer(ctx, commandAddress);

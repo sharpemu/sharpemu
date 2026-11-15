@@ -184,6 +184,10 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
         }
 
         Console.Error.WriteLine($"[GPU][FATAL] {message}");
+        if (message.Contains("DeviceLost", StringComparison.Ordinal))
+        {
+            SharpEmu.Libs.Gpu.Vulkan.DeviceFaultReport.Write();
+        }
         OnFatal(message);
         return new InvalidOperationException(message);
     }
