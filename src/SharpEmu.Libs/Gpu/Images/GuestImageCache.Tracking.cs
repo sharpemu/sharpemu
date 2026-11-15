@@ -422,6 +422,26 @@ public sealed partial class GuestImageCache
         }
     }
 
+    private const ulong CpuReadbackFrames = 1;
+
+    private void ScheduleReadbackAfterCpuWrite(ResourceSlotIdentifier imageIdentifier, CachedImage image, bool cpuWritten)
+    {
+        if (!_readbackLinearImages || image.Description.IsTiled)
+        {
+            return;
+        }
+
+        if (cpuWritten || !image.HasReadbackWindow)
+        {
+            image.ReadbackUntilFrame = _collectionTick + CpuReadbackFrames;
+        }
+
+        if (_collectionTick <= image.ReadbackUntilFrame)
+        {
+            ScheduleReadback(imageIdentifier, image);
+        }
+    }
+
     private void ScheduleReadback(ResourceSlotIdentifier imageIdentifier, CachedImage image)
     {
         if (_readbackLinearImages && !image.Description.IsTiled && !ImageDescription.IsEmptyRange(image.Description.Data) &&
