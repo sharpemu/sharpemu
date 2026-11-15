@@ -98,15 +98,7 @@ public sealed unsafe partial class GuestImageCache
 
         using (_lock.Read())
         {
-            if (_slots.TryGet(imageIdentifier) is not { } image ||
-                !_surfaceMetadata.TryGetValue(metadata.Range.Address, out var registration) ||
-                registration.Invalidated || registration.Kind != metadataKind || !registration.NativeColorClear ||
-                !ReferenceEquals(image.MetadataRegistration, registration) || registration.DccSliceCount != layers ||
-                registration.ClearMask != 0 || registration.FillSize != 0 || registration.FillValue != uint.MaxValue ||
-                registration.RangeSize < metadata.Range.Size || registration.Size < metadata.Range.Size ||
-                _maximumMetadataSize < metadata.Range.Size || !_metadataWriteRanges.Contains(metadata.Range.Address, metadata.Range.Size) ||
-                !MemoryMarshal.AsBytes(new ReadOnlySpan<MetadataDescription>(in image.Description.Metadata))
-                    .SequenceEqual(MemoryMarshal.AsBytes(new ReadOnlySpan<MetadataDescription>(in metadata))))
+            if (!NativeColorClearRegistered(imageIdentifier, in metadata, metadataKind, layers))
                 return false;
         }
 
@@ -119,6 +111,18 @@ public sealed unsafe partial class GuestImageCache
 
         return true;
     }
+
+    private bool NativeColorClearRegistered(ResourceSlotIdentifier imageIdentifier, in MetadataDescription metadata,
+        SurfaceMetadataKind metadataKind, uint layers) =>
+        _slots.TryGet(imageIdentifier) is { } image &&
+        _surfaceMetadata.TryGetValue(metadata.Range.Address, out var registration) &&
+        !registration.Invalidated && registration.Kind == metadataKind && registration.NativeColorClear &&
+        ReferenceEquals(image.MetadataRegistration, registration) && registration.DccSliceCount == layers &&
+        registration.ClearMask == 0 && registration.FillSize == 0 && registration.FillValue == uint.MaxValue &&
+        registration.RangeSize >= metadata.Range.Size && registration.Size >= metadata.Range.Size &&
+        _maximumMetadataSize >= metadata.Range.Size && _metadataWriteRanges.Contains(metadata.Range.Address, metadata.Range.Size) &&
+        MemoryMarshal.AsBytes(new ReadOnlySpan<MetadataDescription>(in image.Description.Metadata))
+            .SequenceEqual(MemoryMarshal.AsBytes(new ReadOnlySpan<MetadataDescription>(in metadata)));
 
     private bool TryInspectColorClear(in ImageRequest request, uint layer, ulong address,
         ulong sliceSize, Span<byte> bytes, out ColorClearOperation operation)
