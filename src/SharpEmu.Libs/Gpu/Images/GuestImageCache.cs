@@ -525,7 +525,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         image.MarkGpuModified();
         image.Uses.RenderTarget = true;
         TraceVolumeState("color-acquire", image, request);
-        RefreshFromGuest(imageIdentifier, request);
+        var cpuWritten = RefreshFromGuest(imageIdentifier, request);
         TraceMetadataBinding(request);
         if (request.Description.Metadata.Kind == MetadataKind.Dcc && request.Description.Metadata.Range.Size == 0)
         {
@@ -557,7 +557,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         }
 
         TakeGpuOwnership(image);
-        ScheduleReadback(imageIdentifier, image);
+        ScheduleReadbackAfterCpuWrite(imageIdentifier, image, cpuWritten);
     }
 
     public ImageView AcquireDepthTargetView(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
