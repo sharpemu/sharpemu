@@ -2300,6 +2300,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     }
                 }
 
+                var replayPushStages = default(ShaderStageFlags);
                 if (hasPushData)
                 {
                     var pushStages = bindPoint != PipelineBindPoint.Graphics
@@ -2312,7 +2313,10 @@ internal static unsafe partial class VulkanVideoPresenter
                               (entry.Description?.Tessellation is null
                                   ? 0 : ShaderStageFlags.TessellationControlBit | ShaderStageFlags.TessellationEvaluationBit);
                     PushConstantsShadowed(command, entry.Layout, pushStages, pushData);
+                    replayPushStages = pushStages;
                 }
+
+                CaptureDrawReplay(bindPoint, entry, stages, pushData, hasPushData, replayPushStages);
 
                 // A pipeline linked from libraries binds set 0 (vertex), the heap (set 1), then set 2 (pixel): binding a set
                 // with another layout disturbs the sets above it.
