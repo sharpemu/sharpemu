@@ -25,6 +25,7 @@ public sealed class AgcSubmissionShutdownTests
             Assert.Equal(cancelled, AgcExports.DriverSubmitDcb(context));
             Assert.Equal(cancelled, AgcExports.DriverSubmitAcb(context));
             Assert.Equal(cancelled, AgcExports.DriverSubmitMultiDcbs(context));
+            Assert.Equal(cancelled, AgcExports.DriverSubmitMultiAcbs(context));
         }
         finally
         {
