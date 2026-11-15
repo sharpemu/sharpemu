@@ -42,6 +42,8 @@ internal static unsafe partial class VulkanVideoPresenter
             DestroyBindlessHeap();
             DestroyCallMarks();
             _descriptorHeap.Dispose();
+            _descriptorPoolStock?.Dispose();
+            _descriptorPoolStock = null;
             _contentUploads.Dispose();
             _imageCache.Dispose();
             _samplerStore.Dispose();
