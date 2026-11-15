@@ -102,7 +102,7 @@ result filters, mutex warning sampling, and diagnostic selection.
 | Group | Variables |
 | --- | --- |
 | Behavior switches | 17 |
-| GPU and Vulkan | 62 |
+| GPU and Vulkan | 63 |
 | GnmMode | 4 (plus 2 shared switches listed below; trophy key also exposed in GUI) |
 | Audio and video | 6 |
 | Input | 5 |
@@ -230,6 +230,7 @@ These variables change the GPU path or the Vulkan presenter.
 | `SHARPEMU_OCCLUSION_GPU_DUMPS` | `0` | `0` turns off GPU copies of pending occlusion results. By default, later GPU buffer reads receive these results without waiting for CPU publication. Guest memory publication remains ordered in both modes. | `VulkanVideoPresenter.Occlusion.cs`, `VulkanOcclusionQueries.GpuResults.cs` |
 | `SHARPEMU_MARK_PIXEL_PCS` | list of `pc:register` pairs | Makes the SPIR-V pixel shader write the float value 1.0 to a shader register when execution reaches the given instruction PC. Use decimal numbers, a register below 256, and a comma between pairs. It has an effect only for the shader address in `SHARPEMU_CAPTURE_PIXEL_VGPR_ADDRESS`. | `Gen5SpirvTranslator.cs` |
 | `SHARPEMU_MAX_GUEST_WORK_PER_RENDER` | number | Sets the maximum number of guest command stream slices that the Vulkan presenter runs in one render pass. The default is 1024. The value must be more than 0. | `VulkanVideoPresenter.cs`, `VulkanVideoPresenter.CommandStream.cs` |
+| `SHARPEMU_READBACK_LINEAR_IMAGES` | `0` | `0` turns off the readback of linear images. By default, a linear storage image or color target that the GPU writes is copied back to guest memory when its work completes, so a CPU thread that waits for a GPU-filled image, such as an occlusion buffer whose sentinel it wrote, continues. An image is read back in the frame the GPU first writes it, and in the frame the CPU stores into it and the next one; an image only the GPU writes is not read back again every frame. A GnmMode target that is tiled in guest memory but laid out linear on the host is never read back, because its host bytes do not follow the guest's layout. The log names the first 16 images read back (`linear image readback`). | `VulkanVideoPresenter.Scheduler.cs`, `GuestImageCache.Tracking.cs`, `HostLayoutTargets.cs` |
 | `SHARPEMU_RENDERDOC_CAPTURE_TIMEOUT_SECONDS` | number (seconds) | Set the maximum time for a RenderDoc frame capture. The emulator discards a capture that does not end in this time. The range is 1 to 120. The default is 15. | `RenderDocCapture.cs` |
 | `SHARPEMU_RENDERDOC_DLL` | path | Set the path of the RenderDoc library file. The emulator tries this path first. When unset or when the load fails, it searches the default library name and the known install paths. | `RenderDocCapture.cs` |
 | `SHARPEMU_RENDERDOC_WAIT` | number (seconds) or `enter` | Set to make the emulator wait before it starts Vulkan, so that you can attach RenderDoc. `enter` waits until you press Enter. A number waits that many seconds, from 1 to 300. Other text waits 15 seconds. | `VulkanVideoPresenter.Device.Setup.cs` |
