@@ -473,7 +473,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _arenaPool = new SliceArenaPool(_deviceInfo, _scheduler);
             _descriptorPoolStock ??= new DescriptorPoolStock(_deviceInfo);
             _workers = new RenderWorkerPool(this, RenderWorkerCount);
-            Console.Error.WriteLine($"[LOADER][INFO] Render workers: {RenderWorkerCount}");
+            Console.Error.WriteLine($"[LOADER][INFO] Render workers: {RenderWorkerCount} {CommandThread.DescribeQueue()}");
         }
 
         private void StopRenderWorkers()

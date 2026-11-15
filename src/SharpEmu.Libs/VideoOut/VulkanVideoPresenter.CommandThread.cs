@@ -27,6 +27,9 @@ internal static partial class VulkanVideoPresenter
 
         private static readonly int SlicesAheadPerWorker =
             int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_SLICES_AHEAD"), out var ahead) && ahead >= 1 ? ahead : 2;
+
+        internal static string DescribeQueue() =>
+            FormattableString.Invariant($"command queue depth={MaxOutstanding} slices ahead per worker={SlicesAheadPerWorker}");
         private const int ShadowSweepCount = 64;
         private const int StorePageShift = 12;
 
