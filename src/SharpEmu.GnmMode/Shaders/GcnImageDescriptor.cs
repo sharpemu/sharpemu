@@ -67,6 +67,7 @@ public static class GcnImageDescriptor
     internal static void ResetLayouts()
     {
         ColorTargets.Clear();
+        HostLayoutTargets.Reset();
         LinearPitches.Clear();
         DepthTargets.Clear();
         ReportedDepthCopies.Clear();
