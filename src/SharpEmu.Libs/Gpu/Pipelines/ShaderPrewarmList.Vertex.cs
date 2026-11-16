@@ -272,11 +272,15 @@ internal sealed partial class ShaderPrewarmList
 
         WriteSpecialization(writer, record.Specialization);
         writer.Write(record.DeviceRecordCounts);
-        // The user data register of the draw's start instance, last and only when the program reads one, so a record
-        // without one keeps its bytes and identity.
-        if (!record.Mesh && record.VertexInfo is { StartInstanceUserData: not -1 } startInstanceInfo)
+        // The user data registers of the draw's start instance and base vertex, last and only when the program reads
+        // one, so a record without them keeps its bytes and identity.
+        if (!record.Mesh && record.VertexInfo is { } drawInfo && (drawInfo.StartInstanceUserData != -1 || drawInfo.BaseVertexUserData != -1))
         {
-            writer.Write(startInstanceInfo.StartInstanceUserData);
+            writer.Write(drawInfo.StartInstanceUserData);
+            if (drawInfo.BaseVertexUserData != -1)
+            {
+                writer.Write(drawInfo.BaseVertexUserData);
+            }
         }
 
         writer.Flush();
@@ -375,9 +379,14 @@ internal sealed partial class ShaderPrewarmList
 
             var specialization = ReadSpecialization(reader, payload.Length);
             var deviceRecordCounts = reader.ReadBoolean();
-            if (vertexInfo is not null && reader.BaseStream.Length - reader.BaseStream.Position == sizeof(int))
+            var drawParameters = reader.BaseStream.Length - reader.BaseStream.Position;
+            if (vertexInfo is not null && drawParameters is sizeof(int) or 2 * sizeof(int))
             {
                 vertexInfo.StartInstanceUserData = reader.ReadInt32();
+                if (drawParameters == 2 * sizeof(int))
+                {
+                    vertexInfo.BaseVertexUserData = reader.ReadInt32();
+                }
             }
 
             if (reader.BaseStream.Position != reader.BaseStream.Length)

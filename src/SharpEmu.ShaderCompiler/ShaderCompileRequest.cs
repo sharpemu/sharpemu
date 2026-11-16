@@ -363,6 +363,9 @@ public sealed class ShaderCompileRequest
     public bool SupportsClipDistance { get; init; } = true;
     public bool SupportsDrawParameters { get; init; }
     public int StartInstanceUserData { get; init; } = -1;
+    // The user data index an indirect draw names for its base vertex, or -1: the program then stores gl_BaseVertex there and
+    // counts its vertex index from it, so the draw can leave its arguments on the GPU.
+    public int BaseVertexUserData { get; init; } = -1;
     public ShaderClipSpaceTransform ClipSpace { get; init; }
     public MeshShaderConfiguration? Mesh { get; init; }
 

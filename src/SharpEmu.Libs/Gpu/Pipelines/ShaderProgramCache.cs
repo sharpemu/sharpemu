@@ -2035,6 +2035,7 @@ internal sealed partial class ShaderProgramCache
             SupportsClipDistance = host.ClipDistanceEnabled,
             SupportsDrawParameters = host.ShaderDrawParametersSupported,
             StartInstanceUserData = info.StartInstanceUserData,
+            BaseVertexUserData = info.BaseVertexUserData,
             ClipSpace = new ShaderClipSpaceTransform(
                 info.ClipSpace.Enabled,
                 info.ClipSpace.ScaleX,

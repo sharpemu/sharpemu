@@ -52,6 +52,48 @@ public sealed class Gen5VertexInstanceIdSpirvTests
             loads.TryGetValue(instruction.Operands[3], out var right) && right == baseInstance);
     }
 
+    // A base vertex an indirect draw names in user data: the program stores gl_BaseVertex there and counts its vertex
+    // index from it, as the CP's base_vtx_loc write would leave them.
+    [Theory]
+    [InlineData(-1)]
+    [InlineData(2)]
+    public void TheVertexIdCountsFromTheDrawsBaseVertexWhenTheDrawNamesItsUserData(int baseVertexUserData)
+    {
+        var end = new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Sopp, "SEndpgm", [], [], [], null);
+        var program = new Gen5ShaderProgram(0, [end]);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Vertex, 1, 8, 4);
+        var resources = ResourceMaterializer.ApplyTo(plan, ResourceSpecialization.Default(plan.Info));
+        var layout = BindingLayout.Allocate(resources.Info, [], false, false, false, 0);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            SupportsDrawParameters = true,
+            BaseVertexUserData = baseVertexUserData,
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+
+        var module = ParseModule(shader.Spirv);
+        var builtIns = module
+            .Where(instruction => instruction.Opcode == SpirvOp.Decorate && instruction.Operands.Length == 3 &&
+                instruction.Operands[1] == (uint)SpirvDecoration.BuiltIn)
+            .ToDictionary(instruction => instruction.Operands[2], instruction => instruction.Operands[0]);
+        if (baseVertexUserData < 0)
+        {
+            Assert.False(builtIns.ContainsKey((uint)SpirvBuiltIn.BaseVertex));
+            return;
+        }
+
+        var loads = module.Where(instruction => instruction.Opcode == SpirvOp.Load).ToDictionary(instruction => instruction.Operands[1], instruction => instruction.Operands[2]);
+        var vertexIndex = builtIns[(uint)SpirvBuiltIn.VertexIndex];
+        var baseVertex = builtIns[(uint)SpirvBuiltIn.BaseVertex];
+        Assert.Equal(1, loads.Values.Count(pointer => pointer == baseVertex));
+        Assert.Contains(module, instruction => instruction.Opcode == SpirvOp.ISub &&
+            loads.TryGetValue(instruction.Operands[2], out var left) && left == vertexIndex &&
+            loads.TryGetValue(instruction.Operands[3], out var right) && right == baseVertex);
+        // The loaded base vertex is stored once more: into the user data register.
+        var baseVertexValue = loads.Single(load => load.Value == baseVertex).Key;
+        Assert.Contains(module, instruction => instruction.Opcode == SpirvOp.Store && instruction.Operands[1] == baseVertexValue);
+    }
+
     private static IReadOnlyList<ParsedInstruction> ParseModule(byte[] spirv)
     {
         var instructions = new List<ParsedInstruction>();

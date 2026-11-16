@@ -1139,10 +1139,11 @@ internal sealed partial class ShaderPrewarmList : IDisposable
             builder.Append(type.ToString()).Append('{');
             foreach (var property in type.GetProperties().OrderBy(static property => property.Name, StringComparer.Ordinal))
             {
-                // A vertex record holds neither: tessellated programs are not recorded, and the start instance register
-                // follows the record as an optional field (SerializeVertex), so the lists recorded before them still load.
+                // A vertex record holds none: tessellated programs are not recorded, and the start instance and base vertex
+                // registers follow the record as optional fields (SerializeVertex), so the lists recorded before them still load.
                 if (vertexRecord && type == typeof(VertexInputInfo) &&
-                    property.Name is nameof(VertexInputInfo.Tessellation) or nameof(VertexInputInfo.StartInstanceUserData))
+                    property.Name is nameof(VertexInputInfo.Tessellation) or nameof(VertexInputInfo.StartInstanceUserData)
+                        or nameof(VertexInputInfo.BaseVertexUserData))
                 {
                     continue;
                 }
@@ -1822,6 +1823,7 @@ internal sealed partial class ShaderPrewarmList : IDisposable
         writer.Write(clip.HalfExtentX);
         writer.Write(clip.HalfExtentY);
         writer.Write(info.StartInstanceUserData);
+        writer.Write(info.BaseVertexUserData);
     }
 
     private static VertexInputInfo ReadVertexInfo(BinaryReader reader, int limit)
@@ -1859,6 +1861,7 @@ internal sealed partial class ShaderPrewarmList : IDisposable
                 reader.ReadBoolean(), reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle(),
                 reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle()),
             StartInstanceUserData = reader.ReadInt32(),
+            BaseVertexUserData = reader.ReadInt32(),
         };
     }
 

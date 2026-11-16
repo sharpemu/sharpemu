@@ -219,6 +219,7 @@ public static partial class Gen5SpirvTranslator
         private uint _vertexIndexInput;
         private uint _instanceIndexInput;
         private uint _baseInstanceInput;
+        private uint _baseVertexInput;
         private uint _fragCoordInput;
         private uint _localInvocationIdInput;
         private uint _localInvocationIndexInput;
@@ -952,6 +953,17 @@ public static partial class Gen5SpirvTranslator
                         (uint)SpirvBuiltIn.BaseInstance);
                     _interfaces.Add(_baseInstanceInput);
                     _module.AddCapability(SpirvCapability.DrawParameters);
+                    if (_request.BaseVertexUserData >= 0)
+                    {
+                        _baseVertexInput = _module.AddGlobalVariable(
+                            _module.TypePointer(SpirvStorageClass.Input, _uintType),
+                            SpirvStorageClass.Input);
+                        _module.AddDecoration(
+                            _baseVertexInput,
+                            SpirvDecoration.BuiltIn,
+                            (uint)SpirvBuiltIn.BaseVertex);
+                        _interfaces.Add(_baseVertexInput);
+                    }
                 }
 
                 var outputPointer =
@@ -1317,7 +1329,17 @@ public static partial class Gen5SpirvTranslator
             {
                 if (_stage == Gen5SpirvStage.Vertex)
                 {
-                    StoreV(_request.Program.VertexIndexRegister, Load(_uintType, _vertexIndexInput), guardWithExec: false);
+                    // A base vertex the indirect draw names in user data reaches the program there, and the vertex
+                    // index counts from it, as the CP's base_vtx_loc write does.
+                    var vertexIndex = Load(_uintType, _vertexIndexInput);
+                    if (_baseVertexInput != 0)
+                    {
+                        var baseVertex = Load(_uintType, _baseVertexInput);
+                        vertexIndex = ISubU(vertexIndex, baseVertex);
+                        StoreS(_request.UserDataBase + (uint)_request.BaseVertexUserData, baseVertex);
+                    }
+
+                    StoreV(_request.Program.VertexIndexRegister, vertexIndex, guardWithExec: false);
                     var instanceIndex = Load(_uintType, _instanceIndexInput);
                     if (_baseInstanceInput != 0)
                         instanceIndex = ISubU(instanceIndex, Load(_uintType, _baseInstanceInput));
