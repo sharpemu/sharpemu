@@ -418,7 +418,8 @@ public sealed class GnmComputeExportsTests
         var interpreter = AgcExports.GetHeadlessCommandStreamForTests(context.Memory).Queue.GetInterpreter(1);
         Assert.Equal(arguments, interpreter.DrawIndirectArgumentsBase);
         Assert.Equal(dispatchArguments, interpreter.DispatchIndirectArgumentsBase);
-        Assert.Equal(3u, interpreter.InstanceCount);
+        // Indirect draws do not leave their instance count for later direct draws by default.
+        Assert.Equal(1u, interpreter.InstanceCount);
         Assert.True(context.TryReadUInt32(ReadPointer, out var read));
         Assert.Equal(24u, read);
     }

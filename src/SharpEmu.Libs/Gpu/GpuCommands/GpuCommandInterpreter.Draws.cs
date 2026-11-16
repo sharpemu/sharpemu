@@ -76,6 +76,14 @@ public sealed partial class GpuCommandInterpreter
             FirstVertexInRegister: firstVertexInRegister, FirstInstanceInRegister: firstInstanceInRegister));
     }
 
+    // An indirect draw takes its instance count from its own record and leaves NUM_INSTANCES alone, so a later
+    // direct draw keeps the explicit count (a direct draw after an indirect one otherwise drew the
+    // record's float data, ~1e9 instances, and lost the device). AMD PAL treats indirect draws as clobbering
+    // NUM_INSTANCES and re-emits it; Gen5 persistence is undocumented. SHARPEMU_INDIRECT_INSTANCE_INHERIT=1 restores
+    // inheritance.
+    internal bool IndirectInstanceInherit { get; set; } =
+        Environment.GetEnvironmentVariable("SHARPEMU_INDIRECT_INSTANCE_INHERIT") == "1";
+
     // Indirect arguments are read from guest memory now, as the packet executes.
     internal void DrawIndirect(ulong packetAddress, uint opcode, uint dataOffset, uint drawInitiator, bool indexed,
         DrawRegisterLocations locations = default)
@@ -146,7 +154,7 @@ public sealed partial class GpuCommandInterpreter
             {
                 WriteDrawRegister(locations.DrawIndex, drawIndex);
                 // The host reads the four arguments on the GPU, or itself when the draw needs the counts.
-                _deferredInstanceCountAddress = argumentsAddress + 4;
+                if (IndirectInstanceInherit) _deferredInstanceCountAddress = argumentsAddress + 4;
                 if (Rendering.ScissorTrace.Instance is { Active: true } gpuTrace)
                     gpuTrace.DrawIssued(TypedRegisters, SubmitId, QueueId, packetAddress);
                 _host.DrawAuto(SubmitId, new DrawAutoArguments(packetAddress, opcode, uint.MaxValue, 1, 0, 0,
@@ -158,8 +166,10 @@ public sealed partial class GpuCommandInterpreter
             var instanceCount = ReadDword(argumentsAddress + 4);
             var startVertex = ReadDword(argumentsAddress + 8);
             var startInstance = ReadDword(argumentsAddress + 12);
-            InstanceCount = instanceCount;
+            if (IndirectInstanceInherit) InstanceCount = instanceCount;
             WriteDrawRegisters(locations, startVertex, startInstance, drawIndex, instanceInRegister);
+            // A record with no instances draws nothing; a zero passed on would mean "use NUM_INSTANCES".
+            if (instanceCount == 0) return;
             DrawAuto(packetAddress, opcode, vertexCount, instanceCount, vertexInRegister ? 0 : startVertex,
                 instanceInRegister ? 0 : startInstance, DrawOffsetSource.IndirectArguments, vertexInRegister, instanceInRegister,
                 startInstanceUserData);
@@ -172,7 +182,7 @@ public sealed partial class GpuCommandInterpreter
             // The host reads the five arguments on the GPU. It draws from the whole index
             // range; the arguments pick the indices. The host falls back to reading them
             // itself when the draw needs the counts.
-            _deferredInstanceCountAddress = argumentsAddress + 4;
+            if (IndirectInstanceInherit) _deferredInstanceCountAddress = argumentsAddress + 4;
             if (Rendering.ScissorTrace.Instance is { Active: true } trace)
                 trace.DrawIssued(TypedRegisters, SubmitId, QueueId, packetAddress);
             _host.DrawIndexed(SubmitId, new DrawIndexedArguments(
@@ -189,13 +199,14 @@ public sealed partial class GpuCommandInterpreter
         var indexedStartInstance = ReadDword(argumentsAddress + 16);
         var indexAddress = IndexBaseAddress + (startIndex * IndexElementSize);
         var indexCount = IndexBufferSize != 0 ? Math.Min(indexCountPerInstance, IndexBufferSize) : indexCountPerInstance;
-        InstanceCount = indexedInstanceCount;
+        if (IndirectInstanceInherit) InstanceCount = indexedInstanceCount;
         if (IndexBufferSize == 0 && IndexTypeAndSize is 0 or 1)
         {
             LearnIndexExtent(startIndex, indexCountPerInstance);
         }
 
         WriteDrawRegisters(locations, baseVertex, indexedStartInstance, drawIndex, instanceInRegister);
+        if (indexedInstanceCount == 0) return;
         DrawIndexed(packetAddress, opcode, indexCount, indexAddress, indexedInstanceCount,
             vertexInRegister ? 0 : unchecked((int)baseVertex),
             instanceInRegister ? 0 : indexedStartInstance, DrawOffsetSource.IndirectArguments, vertexInRegister, instanceInRegister,
