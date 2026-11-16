@@ -115,6 +115,10 @@ internal static unsafe partial class VulkanVideoPresenter
             (13, 7, _) or (14, 7, _) => Format.R32G32B32A32Sfloat,
             (20, 0, _) => Format.R32Uint,
             (29, 0, _) or (4, 0, _) => Format.R32Sfloat,
+            // Narrow sRGB targets (number type 6, or 9 like RGBA8 sRGB above): the image path stands a same-width UNORM
+            // format in (GuestPixelFormats: Bits8Srgb, Bits8_8Srgb), and the pixel output is a float either way.
+            (1, 6 or 9, _) => Format.R8Unorm,
+            (3, 6 or 9, _) => Format.R8G8Unorm,
             (1, 0, _) or (36, 0, _) => Format.R8Unorm,
             (1, 1, _) => Format.R8SNorm,
             (1, 4, _) or (49, 0, _) => Format.R8Uint,
