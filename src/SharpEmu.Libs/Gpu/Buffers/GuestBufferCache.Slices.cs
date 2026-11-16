@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.Diagnostics;
+
 namespace SharpEmu.Libs.Gpu.Buffers;
 
 public readonly record struct BufferSliceUse(ulong Address, ulong Size, bool Written, bool Texel, bool InvalidateImages, GpuBuffer Buffer);
@@ -144,8 +146,43 @@ public sealed unsafe partial class GuestBufferCache
         return true;
     }
 
+    private static readonly bool HeldSliceUses = Environment.GetEnvironmentVariable("SHARPEMU_HELD_SLICE_USES") != "0";
+    private static readonly ThreadCounter _heldSliceUses = new();
+    private static readonly ThreadCounter _obtainedSliceUses = new();
+
+    public static string TakeHeldSliceUseReport() =>
+        FormattableString.Invariant($"held_uses={_heldSliceUses.Take()}/obtained:{_obtainedSliceUses.Take()}");
+
+    private bool TryHoldSliceUse(in BufferSliceUse use)
+    {
+        if (!HeldSliceUses || use.Written || use.Texel || use.InvalidateImages || ObtainMemoUse != ObtainMemoMode.On || use.Buffer is null)
+        {
+            return false;
+        }
+
+        CompleteGuestPublications?.Invoke(use.Address, use.Size, PublicationAccess.OverlaidRead);
+        var identifier = _registry.FindContainingBuffer(use.Address, use.Size);
+        var buffer = use.Buffer;
+        if (!ReferenceEquals(_registry.TryGetRegisteredBuffer(identifier), buffer) || !buffer.IsInBounds(use.Address, use.Size) ||
+            _tracker.MayHaveCpuDirtyPages(use.Address, use.Size))
+        {
+            return false;
+        }
+
+        TouchBuffer(identifier);
+        OverlayGuestPublications?.Invoke(buffer, buffer.Offset(use.Address), use.Address, use.Size);
+        _heldSliceUses.Increment();
+        return true;
+    }
+
     public void ApplySliceUse(in BufferSliceUse use)
     {
+        if (TryHoldSliceUse(in use))
+        {
+            return;
+        }
+
+        _obtainedSliceUses.Increment();
         _ = ObtainBuffer(use.Address, use.Size, use.Written, use.Texel, allowStream: false);
         if (use.InvalidateImages)
         {
