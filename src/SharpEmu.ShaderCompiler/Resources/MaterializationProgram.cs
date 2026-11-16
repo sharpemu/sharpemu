@@ -718,7 +718,7 @@ internal sealed class MaterializationProgram
         var targets = scratch.Targets;
         var bases = scratch.NullBases;
         var absolute = scratch.Absolute;
-        for (var index = 1; index < count; index++)
+        for (var index = StaticReadOrder ? count : 1; index < count; index++)
         {
             var address = addresses[index];
             var target = targets[index];
