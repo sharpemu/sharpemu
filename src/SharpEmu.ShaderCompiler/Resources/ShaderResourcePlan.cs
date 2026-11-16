@@ -333,8 +333,9 @@ public sealed partial class ShaderResourcePlan
         plan.ResourceBranches = ResourceBranchBlock.Build(plan, Rewrite);
         plan.ResourceBranchesWithWrites = plan.ResourceBranches.Count != 0 && ResourceBranchBlock.Writes(plan);
         plan.ResourceBranchWrites = plan.ResourceBranchesWithWrites ? ResourceBranchBlock.WrittenBuffers(plan) ?? [] : [];
-        plan.DeviceAddressRanges = DeviceAddressRangePlanner.Plan(plan);
+        plan.DeviceAddressRanges = DeviceAddressRangePlanner.Plan(plan, out var readsBounded);
         plan.CallRecordCallees = CallRecordPlanner.Plan(plan);
+        plan.DeviceAddressReadsBounded = readsBounded && plan.CallRecordCallees.Count == 0;
 
         // Each written handle owns three flattened slots after the table reads: base
         // low, base high and size, which the shader checks every store against.
@@ -357,6 +358,8 @@ public sealed partial class ShaderResourcePlan
 
     // Planned after tracking; optional, and never a reason for the plan to fail.
     public IReadOnlyList<DeviceAddressRangePlan> DeviceAddressRanges { get; private set; } = [];
+
+    public bool DeviceAddressReadsBounded { get; private set; }
 
     public IReadOnlyDictionary<uint, uint> WrittenRangeSlotByHandle { get; private set; } = new Dictionary<uint, uint>();
 
