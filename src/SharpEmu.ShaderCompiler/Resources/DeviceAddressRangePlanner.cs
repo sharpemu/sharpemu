@@ -61,21 +61,36 @@ public static class DeviceAddressRangePlanner
         return string.Join(" ", parts);
     }
 
-    public static IReadOnlyList<DeviceAddressRangePlan> Plan(ShaderResourcePlan plan)
+    public static IReadOnlyList<DeviceAddressRangePlan> Plan(ShaderResourcePlan plan) => Plan(plan, out _);
+
+    public static IReadOnlyList<DeviceAddressRangePlan> Plan(ShaderResourcePlan plan, out bool readsBounded)
     {
+        readsBounded = true;
         var ranges = new List<DeviceAddressRangePlan>();
         var handles = new List<ScalarValue>();
         var slotsByHash = new Dictionary<int, List<int>>();
         for (var index = 0; index < plan.Memory.Count; index++)
         {
             var memory = plan.Memory[index];
-            if (memory.Kind is not (MemoryResourceKind.Flat or MemoryResourceKind.Global or MemoryResourceKind.ScalarAddress) || memory.PlanningOnly)
+            if (memory.DeviceDescriptor || memory.Opcode is "ImageBvhIntersectRay" or "ImageBvh64IntersectRay")
             {
+                readsBounded = false;
+            }
+
+            if (memory.Kind is not (MemoryResourceKind.Flat or MemoryResourceKind.Global or MemoryResourceKind.ScalarAddress))
+            {
+                continue;
+            }
+
+            if (memory.PlanningOnly)
+            {
+                readsBounded &= memory.Kind == MemoryResourceKind.ScalarAddress;
                 continue;
             }
 
             if (plan.Accesses[index]?.Handle is not { Kind: ScalarValueKind.AddressHandle } handle || handle.Operands.Length != 2)
             {
+                readsBounded = false;
                 continue;
             }
 
@@ -119,9 +134,18 @@ public static class DeviceAddressRangePlanner
 
             // The immediate offset is signed; the span keeps the lowest and highest byte.
             var written = memory.Access is MemoryAccess.Write or MemoryAccess.Atomic;
+            readsBounded &= memory.Access == MemoryAccess.Read;
             var bytes = Math.Max((memory.DataBits + 7) / 8, 1u) * Math.Max(memory.DataDwords, 1u);
             var firstByte = (long)unchecked((int)memory.Offset);
             var reason = UnboundedReasonOf(plan, index);
+            var spread = 0L;
+            if (reason != DeviceAddressUnboundedReason.None && !written && BoundedOffsets && OffsetInterval(plan, index) is { } interval &&
+                interval.High - interval.Low + bytes <= (long)MaxRangeBytes)
+            {
+                reason = DeviceAddressUnboundedReason.None;
+                firstByte += interval.Low;
+                spread = interval.High - interval.Low;
+            }
             ranges[slot] = ranges[slot] with
             {
                 MemoryIndices = [.. ranges[slot].MemoryIndices, index],
@@ -130,7 +154,7 @@ public static class DeviceAddressRangePlanner
                 Bounded = ranges[slot].Bounded && reason == DeviceAddressUnboundedReason.None,
                 UnboundedReason = ranges[slot].UnboundedReason != DeviceAddressUnboundedReason.None ? ranges[slot].UnboundedReason : reason,
                 FirstByte = Math.Min(ranges[slot].FirstByte, firstByte),
-                EndByte = Math.Max(ranges[slot].EndByte, firstByte + bytes),
+                EndByte = Math.Max(ranges[slot].EndByte, firstByte + spread + bytes),
             };
         }
 
@@ -140,9 +164,197 @@ public static class DeviceAddressRangePlanner
             {
                 Plannable = plan.ValidateRuntimeValue(ranges[slot].BaseLow) && plan.ValidateRuntimeValue(ranges[slot].BaseHigh),
             };
+            var range = ranges[slot];
+            readsBounded &= range.Bounded && range.Plannable && !range.Written && range.Extent <= MaxRangeBytes;
         }
 
+        readsBounded &= ranges.Count != 0 && plan.DeviceRecordCounts is null && plan.Graph.Program.FunctionBufferAccesses.Count == 0;
         return ranges;
+    }
+
+    private static readonly bool BoundedOffsets = Environment.GetEnvironmentVariable("SHARPEMU_BOUNDED_BDA") != "0";
+
+    private static readonly (uint Low, uint High) FullRange = (0u, uint.MaxValue);
+
+    private static (long Low, long High)? OffsetInterval(ShaderResourcePlan plan, int memoryIndex)
+    {
+        var memory = plan.Memory[memoryIndex];
+        var access = plan.Accesses[memoryIndex];
+        ScalarValue? value;
+        ScalarValue? predicate;
+        if (memory.Kind == MemoryResourceKind.ScalarAddress)
+        {
+            value = access?.Read is { Operands.Length: >= 2 } read ? read.Operands[1] : null;
+            predicate = null;
+        }
+        else
+        {
+            value = access?.Offset;
+            predicate = access?.Active;
+        }
+
+        if (value is null || value.IsUndefined)
+        {
+            return null;
+        }
+
+        var budget = 4096;
+        var (low, high) = BoundValue(plan, value, predicate, ref budget, 0);
+        return low == FullRange.Low && high == FullRange.High ? null : (low, high);
+    }
+
+    private static bool SameValue(ShaderResourcePlan plan, ScalarValue left, ScalarValue right) =>
+        ReferenceEquals(left, right) || plan.Graph.Equivalent(left, right);
+
+    private static bool Implies(ShaderResourcePlan plan, ScalarValue predicate, ScalarValue condition, ref int budget, int depth)
+    {
+        if (budget <= 0)
+        {
+            return false;
+        }
+
+        budget--;
+        if (SameValue(plan, predicate, condition))
+        {
+            return true;
+        }
+
+        if (depth >= 12 || predicate.Kind != ScalarValueKind.Operation || predicate.Operation != ScalarOperation.LogicalAnd ||
+            predicate.Operands.Length != 2)
+        {
+            return false;
+        }
+
+        return Implies(plan, predicate.Operands[0], condition, ref budget, depth + 1) ||
+            Implies(plan, predicate.Operands[1], condition, ref budget, depth + 1);
+    }
+
+    private static uint PredicateUpper(ShaderResourcePlan plan, ScalarValue value, ScalarValue? predicate, ref int budget, int depth)
+    {
+        if (predicate is null || budget <= 0 || depth >= 12 || predicate.Kind != ScalarValueKind.Operation || predicate.Operands.Length != 2)
+        {
+            return uint.MaxValue;
+        }
+
+        budget--;
+        var left = predicate.Operands[0];
+        var right = predicate.Operands[1];
+        switch (predicate.Operation)
+        {
+            case ScalarOperation.LogicalAnd:
+                return Math.Min(PredicateUpper(plan, value, left, ref budget, depth + 1), PredicateUpper(plan, value, right, ref budget, depth + 1));
+            case ScalarOperation.ULessThan32 when right.IsConstant && right.ConstantU32 != 0 && SameValue(plan, left, value):
+                return right.ConstantU32 - 1;
+            case ScalarOperation.UGreaterThan32 when left.IsConstant && left.ConstantU32 != 0 && SameValue(plan, right, value):
+                return left.ConstantU32 - 1;
+            case ScalarOperation.ULessThanEqual32 when right.IsConstant && SameValue(plan, left, value):
+                return right.ConstantU32;
+            case ScalarOperation.UGreaterThanEqual32 when left.IsConstant && SameValue(plan, right, value):
+                return left.ConstantU32;
+            default:
+                return uint.MaxValue;
+        }
+    }
+
+    private static (uint Low, uint High) BoundValue(ShaderResourcePlan plan, ScalarValue value, ScalarValue? predicate, ref int budget, int depth)
+    {
+        if (budget <= 0)
+        {
+            return FullRange;
+        }
+
+        budget--;
+        value = plan.Graph.ResolveInvariantPhi(value) ?? value;
+        if (value.IsConstant && value.Type == ScalarValueType.U32)
+        {
+            return (value.ConstantU32, value.ConstantU32);
+        }
+
+        var result = FullRange;
+        if (depth < 24)
+        {
+            var operands = value.Operands;
+            switch (value.Kind)
+            {
+                case ScalarValueKind.Operation when operands.Length >= 2:
+                    switch (value.Operation)
+                    {
+                        case ScalarOperation.And32:
+                        {
+                            var left = BoundValue(plan, operands[0], predicate, ref budget, depth + 1);
+                            var right = BoundValue(plan, operands[1], predicate, ref budget, depth + 1);
+                            result = (0, Math.Min(left.High, right.High));
+                            break;
+                        }
+                        case ScalarOperation.UMin32:
+                        {
+                            var left = BoundValue(plan, operands[0], predicate, ref budget, depth + 1);
+                            var right = BoundValue(plan, operands[1], predicate, ref budget, depth + 1);
+                            result = (Math.Min(left.Low, right.Low), Math.Min(left.High, right.High));
+                            break;
+                        }
+                        case ScalarOperation.IAdd32:
+                        case ScalarOperation.IMul32:
+                        {
+                            var left = BoundValue(plan, operands[0], predicate, ref budget, depth + 1);
+                            var right = BoundValue(plan, operands[1], predicate, ref budget, depth + 1);
+                            var add = value.Operation == ScalarOperation.IAdd32;
+                            var high = add ? (ulong)left.High + right.High : (ulong)left.High * right.High;
+                            if (high <= uint.MaxValue)
+                            {
+                                result = (add ? left.Low + right.Low : left.Low * right.Low, (uint)high);
+                            }
+
+                            break;
+                        }
+                        case ScalarOperation.ShiftLeft32 when operands[1].IsConstant && operands[1].ConstantU32 < 32:
+                        {
+                            var shift = (int)operands[1].ConstantU32;
+                            var source = BoundValue(plan, operands[0], predicate, ref budget, depth + 1);
+                            if (((ulong)source.High << shift) <= uint.MaxValue)
+                            {
+                                result = (source.Low << shift, source.High << shift);
+                            }
+
+                            break;
+                        }
+                        case ScalarOperation.ShiftRightLogical32 when operands[1].IsConstant && operands[1].ConstantU32 < 32:
+                        {
+                            var shift = (int)operands[1].ConstantU32;
+                            var source = BoundValue(plan, operands[0], predicate, ref budget, depth + 1);
+                            result = (source.Low >> shift, source.High >> shift);
+                            break;
+                        }
+                        case ScalarOperation.BitFieldUExtract when operands.Length == 3 && operands[1].IsConstant && operands[2].IsConstant &&
+                            operands[2].ConstantU32 < 32 && operands[1].ConstantU32 <= 32 - operands[2].ConstantU32:
+                            result = (0, (1u << (int)operands[2].ConstantU32) - 1);
+                            break;
+                    }
+
+                    break;
+                case ScalarValueKind.Select when operands.Length == 3:
+                    if (predicate is not null && Implies(plan, predicate, operands[0], ref budget, 0))
+                    {
+                        result = BoundValue(plan, operands[1], predicate, ref budget, depth + 1);
+                    }
+                    else
+                    {
+                        var whenTrue = BoundValue(plan, operands[1], predicate, ref budget, depth + 1);
+                        var whenFalse = BoundValue(plan, operands[2], predicate, ref budget, depth + 1);
+                        result = (Math.Min(whenTrue.Low, whenFalse.Low), Math.Max(whenTrue.High, whenFalse.High));
+                    }
+
+                    break;
+            }
+        }
+
+        var upper = PredicateUpper(plan, value, predicate, ref budget, 0);
+        if (upper < result.High)
+        {
+            result.High = upper;
+        }
+
+        return result.Low > result.High ? FullRange : result;
     }
 
     private static FlatAddressSpace ClassifyFlatAddress(ShaderResourcePlan plan, ScalarValue high, ScalarValue? active)
