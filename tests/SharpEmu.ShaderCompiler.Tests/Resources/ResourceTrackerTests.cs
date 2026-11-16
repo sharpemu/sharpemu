@@ -362,6 +362,36 @@ public sealed class ResourceTrackerTests
         Assert.Empty(plan.NullBindlessDescriptorPcs);
     }
 
+    // A T# whose two halves a shader reads from one scalar buffer at a uniform record offset, but not next to each other
+    // (a terrain material pixel shader builds s88..s95 from record bytes 48..63 and 192..207): each
+    // word is a scalar buffer read the host evaluates when the draw is bound, so the image is a runtime descriptor.
+    [Fact]
+    public void AnImageAssembledFromTwoScalarBufferReadsIsEvaluatedPerWord()
+    {
+        var program = Program(
+            // The record table V# in s16..s19 and the record index in s4 come from user data.
+            MoveScalarRegister(0, 16, 0),
+            MoveScalarRegister(4, 17, 1),
+            MoveScalarRegister(8, 18, 2),
+            MoveScalarRegister(12, 19, 3),
+            Sop2(16, "SLshlB32", 106, Gen5Operand.Scalar(4), Operand(7)),
+            ScalarBufferLoad(20, 16, destination: 20, count: 4, immediateOffset: 16, dynamicOffsetRegister: 106),
+            ScalarBufferLoad(28, 16, destination: 24, count: 4, immediateOffset: 96, dynamicOffsetRegister: 106),
+            Image(36, "ImageLoad", 20),
+            EndProgram(44));
+        var memory = new TestWordMemory { Base = 0x1000, Words = new uint[128] };
+        for (var word = 0; word < memory.Words.Length; word++)
+            memory.Words[word] = 0xA000u + (uint)word;
+
+        var plan = Extract(program, stage: ShaderStage.Pixel);
+
+        var image = Assert.Single(plan.Info.Images);
+        Assert.True(RuntimeValueEvaluator.EvaluateDescriptorSource(plan, image.Source,
+            Inputs([0x1000, 0, 0x200, 0, 2], memory.Read), out var words));
+        // Record 2 starts at byte 256 (word 64): words 4..7 and 24..27 of it.
+        Assert.Equal([0xA044u, 0xA045u, 0xA046u, 0xA047u, 0xA058u, 0xA059u, 0xA05Au, 0xA05Bu], words.Dwords.ToArray());
+    }
+
     internal static Gen5ShaderProgram LaneIndexedSamplerProgram() => Program(
         MoveScalarRegister(0, 16, 0),
         MoveScalarRegister(4, 17, 1),
@@ -803,11 +833,17 @@ public sealed class ResourceTrackerTests
         Assert.Same(priorSpecialization, specialization);
     }
 
+    // A heap record whose last word is not next to the others is not an indirect heap image; its words are still scalar
+    // buffer reads at a uniform offset, so the host reads them one by one when the draw is bound.
     [Fact]
-    public void MalformedIndirectImage_IsRejected()
+    public void MalformedIndirectImage_IsReadWordByWord()
     {
-        var error = Assert.Throws<ResourcePlanException>(() => Extract(IndirectImageProgram(true)));
-        Assert.Contains("not a valid runtime value", error.Message);
+        var plan = Extract(IndirectImageProgram(true));
+
+        var image = Assert.Single(plan.Info.Images);
+        var source = plan.DescriptorSources[(int)image.Source];
+        Assert.Null(source.IndirectImage);
+        Assert.All(source.Dwords, dword => Assert.Equal(ScalarValueKind.ScalarBufferWord, dword.Kind));
     }
 
     [Fact]

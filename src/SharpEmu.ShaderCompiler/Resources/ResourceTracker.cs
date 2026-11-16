@@ -736,7 +736,7 @@ public sealed partial class ResourceTracker
         // single source of truth instead of a narrower, ImageHandle-specific blanket ban.
         var badDword = 0u;
         var controlDependent = false;
-        if (nonContiguousImage || !ValidateSource(source, out badDword, out controlDependent))
+        if (!ValidateSource(source, out badDword, out controlDependent))
         {
             // A bindless image/sampler descriptor whose dwords resolve through a
             // control-dependent phi (e.g. a hash-table/linear-probe material lookup, as seen
@@ -812,7 +812,8 @@ public sealed partial class ResourceTracker
         return $"{value.Kind}#{value.Id}";
     }
 
-    // An image descriptor read from a scalar buffer must be one contiguous record.
+    // Whether an image descriptor read from a scalar buffer is one contiguous record. Any layout is valid when each word is
+    // a runtime value (the host evaluates the words one by one); a non-contiguous one with an SAndB32 hole reads as null.
     private bool IsContiguousScalarBufferRecord(DescriptorSource source)
     {
         if (!source.Dwords.Any(dword => dword.Kind == ScalarValueKind.ScalarBufferWord))
