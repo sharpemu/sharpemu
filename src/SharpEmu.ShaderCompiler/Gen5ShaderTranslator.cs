@@ -1783,6 +1783,8 @@ public static partial class Gen5ShaderTranslator
             0x23 => "BufferLoadSbyteD16Hi",
             0x24 => "BufferLoadShortD16",
             0x25 => "BufferLoadShortD16Hi",
+            0x26 => "BufferLoadFormatD16HiX",
+            0x27 => "BufferStoreFormatD16HiX",
             0x30 => "BufferAtomicSwap",
             0x31 => "BufferAtomicCmpswap",
             0x32 => "BufferAtomicAdd",
@@ -2943,7 +2945,8 @@ public static partial class Gen5ShaderTranslator
                     "BufferStoreFormatXyzw" => 4u,
                     // The D16 forms hold two components in each register.
                     "BufferLoadFormatD16X" or "BufferLoadFormatD16Xy" or
-                    "BufferStoreFormatD16X" or "BufferStoreFormatD16Xy" => 1u,
+                    "BufferStoreFormatD16X" or "BufferStoreFormatD16Xy" or
+                    "BufferLoadFormatD16HiX" or "BufferStoreFormatD16HiX" => 1u,
                     "BufferLoadFormatD16Xyz" or "BufferLoadFormatD16Xyzw" or
                     "BufferStoreFormatD16Xyz" or "BufferStoreFormatD16Xyzw" => 2u,
                     "BufferLoadUbyte" or

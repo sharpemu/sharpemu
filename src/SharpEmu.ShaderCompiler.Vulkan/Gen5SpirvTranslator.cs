@@ -3966,7 +3966,8 @@ public static partial class Gen5SpirvTranslator
                 }
 
                 EmitExecConditional(() => TryEmitBufferFormatStore(bindingIndex, byteAddress, control, descriptorWord3, descriptorFormat,
-                    storedHalves, component => LoadBufferD16Component(control.VectorData, component, storedNumberFormat)));
+                    storedHalves, component => LoadBufferD16Component(control.VectorData,
+                        component + (IsFormatD16High(instruction.Opcode) ? 1u : 0u), storedNumberFormat)));
                 return true;
             }
 
@@ -4070,7 +4071,8 @@ public static partial class Gen5SpirvTranslator
                 var (_, loadedNumberFormat) = DecodeGfx10BufferFormat(
                     BitwiseAnd(ShiftRightLogical(descriptorWord3, UInt(12)), UInt(0x7F)));
                 StoreBufferD16Components(control.VectorData,
-                    BufferFormatLoadValues(bindingIndex, byteAddress, descriptorWord3, loadedHalves), loadedNumberFormat);
+                    BufferFormatLoadValues(bindingIndex, byteAddress, descriptorWord3, loadedHalves), loadedNumberFormat,
+                    IsFormatD16High(instruction.Opcode));
                 return true;
             }
 
@@ -4265,7 +4267,8 @@ public static partial class Gen5SpirvTranslator
                 var (_, deviceNumberFormat) = DecodeGfx10BufferFormat(
                     BitwiseAnd(ShiftRightLogical(descriptorWord3, UInt(12)), UInt(0x7F)));
                 StoreBufferD16Components(control.VectorData,
-                    DeviceBufferFormatLoadValues(baseAddress, size, byteAddress, descriptorWord3, deviceHalves), deviceNumberFormat);
+                    DeviceBufferFormatLoadValues(baseAddress, size, byteAddress, descriptorWord3, deviceHalves), deviceNumberFormat,
+                    IsFormatD16High(instruction.Opcode));
                 return true;
             }
 
@@ -4993,7 +4996,7 @@ public static partial class Gen5SpirvTranslator
         // The components a D16 format operation transfers (X to XYZW), or 0 for any other operation.
         private static uint FormatD16Components(string opcode) => opcode switch
         {
-            "BufferLoadFormatD16X" or "BufferStoreFormatD16X" => 1u,
+            "BufferLoadFormatD16X" or "BufferStoreFormatD16X" or "BufferLoadFormatD16HiX" or "BufferStoreFormatD16HiX" => 1u,
             "BufferLoadFormatD16Xy" or "BufferStoreFormatD16Xy" => 2u,
             "BufferLoadFormatD16Xyz" or "BufferStoreFormatD16Xyz" => 3u,
             "BufferLoadFormatD16Xyzw" or "BufferStoreFormatD16Xyzw" => 4u,
@@ -5002,8 +5005,9 @@ public static partial class Gen5SpirvTranslator
 
         // A D16 load returns its components as 16-bit values, two to a register with the first in the low half: halves for
         // the float and normalized formats, the low 16 bits for UINT and SINT (number formats 4 and 5). An odd last
-        // component leaves the high half zero.
-        private void StoreBufferD16Components(uint vectorData, uint[] values, uint numberFormat)
+        // component leaves the high half zero. The D16_HI form (highHalf) writes its one component to bits 16..31 and keeps
+        // bits 0..15 of the register.
+        private void StoreBufferD16Components(uint vectorData, uint[] values, uint numberFormat, bool highHalf = false)
         {
             var integer = _module.AddInstruction(SpirvOp.LogicalOr, _boolType,
                 _module.AddInstruction(SpirvOp.IEqual, _boolType, numberFormat, UInt(4)),
@@ -5015,9 +5019,19 @@ public static partial class Gen5SpirvTranslator
                 var halves = Ext(58, _uintType, _module.AddInstruction(SpirvOp.CompositeConstruct, _vec2Type,
                     Bitcast(_floatType, low), Bitcast(_floatType, high)));
                 var integers = BitwiseOr(BitwiseAnd(low, UInt(0xFFFF)), ShiftLeftLogical(BitwiseAnd(high, UInt(0xFFFF)), UInt(16)));
-                StoreV(vectorData + (uint)(index / 2), _module.AddInstruction(SpirvOp.Select, _uintType, integer, integers, halves));
+                var packed = _module.AddInstruction(SpirvOp.Select, _uintType, integer, integers, halves);
+                if (highHalf)
+                {
+                    packed = BitwiseOr(BitwiseAnd(LoadV(vectorData), UInt(0xFFFF)), ShiftLeftLogical(packed, UInt(16)));
+                }
+
+                StoreV(vectorData + (uint)(index / 2), packed);
             }
         }
+
+        // BUFFER_LOAD_FORMAT_D16_HI_X and BUFFER_STORE_FORMAT_D16_HI_X move their one component through bits 16..31.
+        private static bool IsFormatD16High(string opcode) =>
+            opcode is "BufferLoadFormatD16HiX" or "BufferStoreFormatD16HiX";
 
         // The 32-bit register value one component of a D16 store stands for: its half widened to a float for the float and
         // normalized formats, its 16 bits (sign-extended for SINT) for the integer ones.
