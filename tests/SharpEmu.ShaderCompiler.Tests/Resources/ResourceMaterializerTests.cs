@@ -231,16 +231,17 @@ public sealed class ResourceMaterializerTests
         Assert.Contains(snapshot.Images, image => image.SequenceEqual(reachable));
     }
 
+    // A table too large to enumerate reads as the null image instead of failing the draw.
     [Fact]
-    public void UnclampedSelectorOverTheProbeCapStillFails()
+    public void UnclampedSelectorOverTheProbeCapReadsTheNullImage()
     {
         var (plan, inputs, _) = ClampedTable(null);
         Assert.Null(plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage!.SelectorBound);
         var snapshot = new ResourceSnapshot();
         var specialization = new ResourceSpecialization();
 
-        Assert.False(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization, out var failureKind));
-        Assert.Equal(ResourceMaterializationFailure.ImageCapacityExceeded, failureKind);
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization, out var failureKind));
+        Assert.Equal(ResourceMaterializationFailure.None, failureKind);
     }
 
     [Fact]

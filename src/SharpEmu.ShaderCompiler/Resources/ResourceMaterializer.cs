@@ -1431,9 +1431,15 @@ public static partial class ResourceMaterializer
         }
         else
         {
-            // A table this large cannot be enumerated into bindings.
-            failure = ResourceMaterializationFailure.ImageCapacityExceeded;
-            return false;
+            // A table this large cannot be enumerated into bindings. The access reads the null image, as a heap record at
+            // an index the host cannot evaluate does (BindlessNullDescriptors), so the draw still runs instead of being
+            // rejected (fatal with strict shaders): a pixel shader reads its terrain
+            // material table through such a selector.
+            result.Descriptors.Add(DescriptorWords.Empty(8));
+            result.Candidates.Add(0);
+            result.Keys.Add(0);
+            failure = ResourceMaterializationFailure.None;
+            return true;
         }
 
         var keys = new List<uint> { 0 };
