@@ -579,7 +579,7 @@ internal sealed partial class ShaderPrewarmList : IDisposable
     // The global cache stamp cannot certify a separate caller cache or pipeline binary file.
     public bool HasLinkedComputes => _loadedComputes.Any(record => record.Linked is not null);
 
-    public static ulong Identity(ComputePrewarmRecord record) => XxHash3.HashToUInt64(SerializeCompute(record));
+    public static ulong Identity(ComputePrewarmRecord record) => XxHash3.HashToUInt64(SerializeCompute(record, address: 0));
 
     // A graphics program loaded at another address translates the same (the program cache keys omit the address), so
     // its record's identity leaves the address out and a session that meets the program elsewhere records nothing new.
@@ -677,7 +677,7 @@ internal sealed partial class ShaderPrewarmList : IDisposable
     public void RecordCompute(ShaderCodeCapture code, ComputePrewarmRecord record)
     {
         var payload = SerializeCompute(record);
-        var identity = XxHash3.HashToUInt64(payload);
+        var identity = Identity(record);
         var seconds = SessionSeconds();
         lock (_gate)
         {
@@ -1243,13 +1243,15 @@ internal sealed partial class ShaderPrewarmList : IDisposable
         };
     }
 
-    private static byte[] SerializeCompute(ComputePrewarmRecord record)
+    private static byte[] SerializeCompute(ComputePrewarmRecord record) => SerializeCompute(record, record.Address);
+
+    private static byte[] SerializeCompute(ComputePrewarmRecord record, ulong address)
     {
         using var stream = new MemoryStream();
         using var writer = new BinaryWriter(stream);
         writer.Write(record.Hash);
         writer.Write(record.CodeSize);
-        writer.Write(record.Address);
+        writer.Write(address);
         writer.Write(record.ContinuationAddressOffset);
         writer.Write(record.UserDataBase);
         writer.Write(record.UserDataCount);
