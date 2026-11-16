@@ -469,12 +469,21 @@ public sealed partial class GuestImageCache
         return _surfaceMetadata.TryGetValue(address, out var found) && !found.Invalidated && found.Kind != SurfaceMetadataKind.PendingDcc;
     }
 
+    // DCC tracks its own slice count. HTile tracks any slice (SurfaceMetadata keeps the slices past 31 apart): a depth
+    // array can have more layers than 32 (a game can bind one of 36). CMask and FMask keep 32.
+    private static uint SliceLimit(SurfaceMetadata metadata) => metadata.Kind switch
+    {
+        SurfaceMetadataKind.Dcc => metadata.DccSliceCount,
+        SurfaceMetadataKind.HTile => uint.MaxValue,
+        _ => 32,
+    };
+
     public bool IsMetadataCleared(ulong address, uint slice, out uint fillValue)
     {
         fillValue = 0;
         using var held = _lock.Read();
         if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Invalidated || found.Kind == SurfaceMetadataKind.PendingDcc ||
-            slice >= (found.Kind == SurfaceMetadataKind.Dcc ? found.DccSliceCount : 32))
+            slice >= SliceLimit(found))
         {
             return false;
         }
@@ -674,7 +683,7 @@ public sealed partial class GuestImageCache
 
         using var held = _lock.Hold();
         if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Invalidated || found.Kind == SurfaceMetadataKind.PendingDcc ||
-            slice >= (found.Kind == SurfaceMetadataKind.Dcc ? found.DccSliceCount : 32))
+            slice >= SliceLimit(found))
         {
             return false;
         }

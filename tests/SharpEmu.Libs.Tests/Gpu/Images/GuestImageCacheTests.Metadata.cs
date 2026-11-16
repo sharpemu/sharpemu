@@ -268,8 +268,12 @@ public sealed partial class GuestImageCacheTests
         Assert.True(harness.Images.IsMetadataCleared(entries[2], 0, out var fill));
         Assert.Equal(0xffffffffu, fill);
         Assert.False(harness.Images.IsMetadataCleared(entries[0], 0));
-        Assert.False(harness.Images.IsMetadataCleared(entries[2], 32));
-        Assert.False(harness.Images.SetMetadataSlice(entries[2], 32, true));
+        // HTile tracks slices past 31 too (a depth array of more than 32 layers).
+        Assert.True(harness.Images.IsMetadataCleared(entries[2], 35));
+        Assert.False(harness.Images.IsMetadataCleared(entries[0], 35));
+        Assert.True(harness.Images.SetMetadataSlice(entries[2], 35, false));
+        Assert.False(harness.Images.IsMetadataCleared(entries[2], 35));
+        Assert.True(harness.Images.IsMetadataCleared(entries[2], 34));
         Assert.False(harness.Images.IsMetadata(address + 0x3000));
         Assert.False(harness.Images.ClearMetadata(address + 0x3000));
         harness.Shutdown();
