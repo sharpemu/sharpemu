@@ -94,7 +94,8 @@ public sealed class ResourceTrackerTests
     }
 
     // Behind exec branches the same word is a web of phis, which the runtime-descriptor check walks for a memory read.
-    // A buffer base that differs per lane cannot be bound, so the plan is rejected, at once.
+    // The V# the branches choose has no single source to bind, so the load reads it from its registers when it runs;
+    // the walk still finishes at once.
     [Fact]
     public void ADescriptorWordMergedThroughManyExecBranchesIsPlannedQuickly()
     {
@@ -143,8 +144,8 @@ public sealed class ResourceTrackerTests
         planning.Start();
 
         Assert.True(planning.Join(TimeSpan.FromSeconds(30)), "planning did not finish");
-        var rejection = Assert.IsType<ResourcePlanException>(failure);
-        Assert.Contains("BufferHandle dword 0 is not a valid runtime value", rejection.Message);
+        Assert.Null(failure);
+        Assert.True(Extract(program).Memory.Entries.Single(memory => memory.Pc == pc).DeviceDescriptor);
     }
 
     [Fact]
@@ -997,8 +998,8 @@ public sealed class ResourceTrackerTests
         Assert.Empty(plan.Info.Buffers);
         Assert.True(plan.Info.UsesDeviceAddresses);
         Assert.True(plan.Memory.TryGetIndex(8, 0, out var index));
-        Assert.False(plan.Memory[index].DeviceDescriptor);
-        Assert.Equal(BufferDescriptorProvenance.Runtime, plan.Memory[index].BufferDescriptor?.Provenance);
+        // main reads a V# loaded from scalar-buffer data through its registers (IsDeviceLoadedBufferHandle).
+        Assert.True(plan.Memory[index].DeviceDescriptor);
     }
 
     [Fact]
