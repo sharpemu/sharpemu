@@ -1072,6 +1072,9 @@ internal static partial class VulkanVideoPresenter
                         break;
                     case Kind.Write:
                         _presenter._bufferCache.NoteObservation();
+                        // The store can be an end-of-pipe label that tells the guest earlier GPU writes are done. Their
+                        // pages must block CPU reads before it lands, not only at the next submission.
+                        _presenter._bufferCache.ApplyPendingGpuProtections();
                         ApplyWrite(item);
                         break;
                 }
