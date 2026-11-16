@@ -97,7 +97,8 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
 
     public static string TakeInPlaceReport() => FormattableString.Invariant(
         $"in_place={_inPlaceDraws.Take()} in_place_refused={_inPlaceRefused.Take()} draw_replays={_drawReplays.Take()} draw_replay_misses={_drawReplayMisses.Take()} ") +
-        "replay_seal_refused=" + TakeSealRefusals() + " replay_miss=" + TakeReplayMisses() + " unreplayable_programs=" + DescribeUnreplayablePrograms();
+        "replay_seal_refused=" + TakeSealRefusals() + " replay_miss=" + TakeReplayMisses() + " unreplayable_programs=" + DescribeUnreplayablePrograms() +
+        " " + TakeDispatchReplayReport();
 
     private sealed class InPlaceDraw
     {

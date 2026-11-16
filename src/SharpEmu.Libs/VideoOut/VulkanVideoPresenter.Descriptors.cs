@@ -1570,7 +1570,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private static readonly ThreadCounter _sliceUseStale = new();
 
         internal static string TakeTableReport() =>
-            "replay_host_miss=" + TakeReplayHostMisses() + " " +
+            "replay_host_miss=" + TakeReplayHostMisses() + " dispatch_host_miss=" + TakeDispatchHostMisses() + " " +
             FormattableString.Invariant($"table_blocks={Interlocked.Exchange(ref _tableBlocks, 0)} descriptors_shadowed={Interlocked.Exchange(ref _descriptorsShadowed, 0)} ") +
             FormattableString.Invariant($"vsharp_cache=hit:{_sliceUseHits.Take()},miss:{_sliceUseMisses.Take()},stale:{_sliceUseStale.Take()} found_sets_hit={_foundSetsHit.Take()} ");
 
