@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
+using SharpEmu.Libs.Np;
 using System.Buffers.Binary;
 using System.Text;
 using System.Text.Json;
@@ -17,9 +18,11 @@ public static class AppContentExports
     private const int EntitlementLabelSize = 17;
     private const ulong BootParamAttrOffset = 4;
     private const string Temp0MountPoint = "/temp0";
-    private const string AddcontMountPoint = "/addcont0";
     private const uint AppParamSkuFlag = 0;
     private const int AppParamSkuFlagFull = 3;
+
+    // Each add-on mount hands back its own guest mount point, as the SDK does.
+    private static int _addcontMountIndex;
 
     [SysAbiExport(
         Nid = "R9lA82OraNs",
@@ -123,17 +126,25 @@ public static class AppContentExports
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        TraceAppContent($"addcont_mount label='{ReadLabel(labelBytes)}'");
+        var label = AddcontEntitlements.NormalizeLabel(ReadLabel(labelBytes));
+        TraceAppContent($"addcont_mount label='{label}'");
 
-        // The dump's pak files already carry the add-on content: grant the mount and
-        // return a mount point. Refusing here (DRM_NO_ENTITLEMENT) makes titles like
-        // Street Fighter 6 retry the mount in a tight loop forever, because the PSN
-        // entitlement the real hardware checks cannot be reproduced offline. Reads
-        // under the mount point resolve to an empty host directory.
-        Span<byte> mountPoint = stackalloc byte[MountPointSize];
-        mountPoint.Clear();
-        Encoding.ASCII.GetBytes(AddcontMountPoint).CopyTo(mountPoint);
-        if (!ctx.Memory.TryWrite(mountPointAddress, mountPoint))
+        // Mount the add-on package onto a fresh guest mount point backed by its host
+        // folder (created empty when the dump has no separate package, in which case
+        // the title's pak files carry the content). Refusing the mount only makes
+        // titles retry it forever: the PSN entitlement the real hardware checks cannot
+        // be reproduced offline.
+        var mountPoint = $"/addcont{_addcontMountIndex}";
+        _addcontMountIndex++;
+        var hostRoot = AddcontEntitlements.TryResolvePackageRoot(label, out var packageRoot)
+            ? packageRoot
+            : Path.Combine(AddcontEntitlements.AddcontRoot(), label);
+        KernelMemoryCompatExports.RegisterGuestPathMount(mountPoint, hostRoot);
+
+        Span<byte> mountPointBytes = stackalloc byte[MountPointSize];
+        mountPointBytes.Clear();
+        Encoding.ASCII.GetBytes(mountPoint).CopyTo(mountPointBytes);
+        if (!ctx.Memory.TryWrite(mountPointAddress, mountPointBytes))
         {
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
