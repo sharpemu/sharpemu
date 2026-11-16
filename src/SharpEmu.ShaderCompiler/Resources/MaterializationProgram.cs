@@ -384,7 +384,13 @@ internal sealed class MaterializationProgram
             var levels = new Level[levelCount];
             for (var level = 0; level < levelCount; level++)
             {
-                levels[level] = new Level { Reads = [.. reads[level]], Steps = [.. steps[level]] };
+                ReadStep[] levelReads = [.. reads[level]];
+                if (StaticReadOrder)
+                {
+                    Array.Sort(levelReads, CompareReadOrder);
+                }
+
+                levels[level] = new Level { Reads = levelReads, Steps = [.. steps[level]] };
             }
 
             return new MaterializationProgram(_constants.Count, [.. _constants], [.. _constantValid], levels, sourceWords, tableWords, tableOffsets,
@@ -655,6 +661,20 @@ internal sealed class MaterializationProgram
                 return;
             }
         }
+    }
+
+    private static readonly bool StaticReadOrder = Environment.GetEnvironmentVariable("SHARPEMU_STATIC_READ_ORDER") != "0";
+
+    private static int CompareReadOrder(ReadStep left, ReadStep right)
+    {
+        var order = left.Low.CompareTo(right.Low);
+        if (order == 0) order = left.High.CompareTo(right.High);
+        if (order == 0) order = left.Offset.CompareTo(right.Offset);
+        if (order == 0) order = left.Records.CompareTo(right.Records);
+        if (order == 0) order = left.Word3.CompareTo(right.Word3);
+        if (order == 0) order = left.Kind.CompareTo(right.Kind);
+        if (order == 0) order = (left.Immediate + left.ConstantOffset).CompareTo(right.Immediate + right.ConstantOffset);
+        return order != 0 ? order : left.Target.CompareTo(right.Target);
     }
 
     private static void ReadLevel(ReadStep[] reads, ResourceRuntimeInputs inputs, Scratch scratch)
