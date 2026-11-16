@@ -221,6 +221,9 @@ internal static unsafe partial class VulkanVideoPresenter
             public long Sequence;
             public ResolveReadLog Reads = null!;
             public CleanReadPages? CleanReads;
+            public ulong DirectPage = ulong.MaxValue;
+            public nint DirectAlias;
+            public object? DirectSnapshot;
         }
 
         [ThreadStatic]
@@ -243,6 +246,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             worker.Sequence = sequence;
             worker.Reads = reads;
+            worker.DirectPage = ulong.MaxValue;
             reads.Version = _bufferCache.GpuModifiedVersion;
             reads.Publications = _guestPublications.Ordinal;
         }

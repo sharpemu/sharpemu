@@ -592,6 +592,20 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
+        private void RememberDirectPage(ResolveWorkerState worker, ulong address, ulong size)
+        {
+            if (!DirectPageReads || !TryGetCleanReadPage(address, size, out var page, out var slot) || Reads is not { } pages ||
+                pages.Tags[slot] != page + 1 || pages.Aliases[slot] == 0 || _guestBacking.BackingAliasSnapshot is not { } snapshot ||
+                !ReferenceEquals(pages.Snapshots[slot], snapshot))
+            {
+                return;
+            }
+
+            worker.DirectPage = page;
+            worker.DirectAlias = (nint)pages.Aliases[slot];
+            worker.DirectSnapshot = snapshot;
+        }
+
         private bool TryGetAliasPointer(ulong address, ulong size, out byte* pointer)
         {
             pointer = null;
