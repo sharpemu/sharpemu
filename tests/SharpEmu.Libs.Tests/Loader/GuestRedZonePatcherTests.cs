@@ -30,6 +30,7 @@ public sealed class GuestRedZonePatcherTests
     [InlineData("554889E574044883EC20488B45F8C3", false)]
     [InlineData("554889E54883EC0875FA488B45F8C3", false)]
     [InlineData("554889E5FFE0488B45F8C3", false)]
+    [InlineData("554889E55353535353488945D0FFE0C3", true)]
     [InlineData("554889E5488D45F8C3", false)]
     [InlineData("554889E5904883EC40488B45F8C3", false)]
     [InlineData("554889E55353535353488945D0C3", true)]
