@@ -147,21 +147,24 @@ public sealed class AgcCommandBufferChainTests
         Assert.Equal(FirstLinkAddress + 16, ReadUInt64(memory, CommandBufferAddress + 0x10));
     }
 
-    [Fact]
-    public void AcbJump_AlwaysEncodesChainMode()
+    [Theory]
+    [InlineData(0u, 0x0F30_0123u)]
+    [InlineData(2u, 0x2F30_0123u)]
+    public void AcbJump_EncodesCachePolicyAndSizeAndAlwaysChains(uint cachePolicy, uint control)
     {
         var memory = new FakeCpuMemory(BaseAddress, MemorySize);
         var ctx = new CpuContext(memory, Generation.Gen5);
 
         PointCommandBufferAt(memory, FirstLinkAddress);
         ctx[CpuRegister.Rdi] = CommandBufferAddress;
-        ctx[CpuRegister.Rsi] = SecondLinkAddress;
-        ctx[CpuRegister.Rdx] = 0x123;
+        ctx[CpuRegister.Rsi] = cachePolicy;
+        ctx[CpuRegister.Rdx] = SecondLinkAddress;
+        ctx[CpuRegister.Rcx] = 0x123;
 
         Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.AcbJump(ctx));
         Assert.Equal(FirstLinkAddress, ctx[CpuRegister.Rax]);
         Assert.Equal(unchecked((uint)SecondLinkAddress), ReadUInt32(memory, FirstLinkAddress + 4));
-        Assert.Equal(0x0F30_0123u, ReadUInt32(memory, FirstLinkAddress + 12));
+        Assert.Equal(control, ReadUInt32(memory, FirstLinkAddress + 12));
     }
 
     [Fact]
