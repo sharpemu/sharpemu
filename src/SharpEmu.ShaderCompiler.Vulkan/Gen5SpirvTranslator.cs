@@ -9981,6 +9981,102 @@ public static partial class Gen5SpirvTranslator
                         ? BitwiseAnd(lane, UInt(PairedHalfLaneCount - 1))
                         : lane);
 
+        // A graphics host subgroup (a fragment one above all) can be partly empty: the lanes past the quads
+        // the rasterizer packed into it were never launched. The PS5 wave behind it still has those lanes,
+        // dead but with registers, and whole-wave code (S_ORN2_SAVEEXEC/S_OR_SAVEEXEC of EXEC) turns them on
+        // after filling them with a reduction's identity. A shuffle from an invocation that does not exist is
+        // undefined, so DPP, DPP8, PERMLANE and V_READLANE reads of such a lane go through ReadGraphicsLane.
+        // Compute and mesh subgroups are full.
+        private bool HostSubgroupMayBePartial =>
+            _subgroupInvocationIdInput != 0 && !_pairedLanes && !_pairedMeshLanes &&
+            _stage is not (Gen5SpirvStage.Compute or Gen5SpirvStage.Mesh);
+
+        // The host invocation of a guest lane of a graphics wave. A graphics wave is one group of up to 32
+        // host lanes (GuestWaveLane), so the lane is at its position within the reading invocation's group;
+        // the upper half of an emulated wave64 has no host lanes and maps onto the same positions. A native
+        // wave64 is its subgroup.
+        private uint GraphicsHostLane(uint guestLane)
+        {
+            if (_guestLaneFromSubgroup)
+            {
+                return BitwiseAnd(guestLane, UInt(63));
+            }
+
+            var group = BitwiseAnd(Load(_uintType, _subgroupInvocationIdInput), UInt(~31u));
+            return BitwiseOr(group, BitwiseAnd(guestLane, UInt(31)));
+        }
+
+        // Whether the host invocation exists: its bit in a ballot of true.
+        private uint IsHostLanePresent(uint hostLane)
+        {
+            _module.AddCapability(SpirvCapability.GroupNonUniformBallot);
+            var ballot = _module.AddInstruction(
+                SpirvOp.GroupNonUniformBallot, _uvec4Type, UInt(3), _module.ConstantBool(true));
+            var word = _module.AddInstruction(
+                SpirvOp.VectorExtractDynamic, _uintType, ballot, ShiftRightLogical(hostLane, UInt(5)));
+            return IsNotZero(BitwiseAnd(ShiftRightLogical(word, BitwiseAnd(hostLane, UInt(31))), UInt(1)));
+        }
+
+        // A guest lane's bit in the guest EXEC mask, which keeps the bits of the lanes the host never launched.
+        private uint IsGuestLaneExecSet(uint guestLane)
+        {
+            uint word;
+            uint bit;
+            if (_waveLaneCount == 32)
+            {
+                word = LoadS(126);
+                bit = BitwiseAnd(guestLane, UInt(31));
+            }
+            else
+            {
+                var lane = BitwiseAnd(guestLane, UInt(63));
+                word = _module.AddInstruction(
+                    SpirvOp.Select,
+                    _uintType,
+                    _module.AddInstruction(SpirvOp.ULessThan, _boolType, lane, UInt(32)),
+                    LoadS(126),
+                    LoadS(127));
+                bit = BitwiseAnd(lane, UInt(31));
+            }
+
+            return IsNotZero(BitwiseAnd(ShiftRightLogical(word, bit), UInt(1)));
+        }
+
+        // Reads a guest lane's register in a graphics wave whatever its EXEC state. present reports whether
+        // the lane's host invocation exists. An absent lane has no register on the host and no value is
+        // right; it reads as the caller's own value, which keeps the min/max/and/or reductions that
+        // whole-wave code runs across dead lanes exact (a wave-minimum loop).
+        private uint ReadGraphicsLane(uint value, uint guestLane, out uint present)
+        {
+            var hostLane = GraphicsHostLane(guestLane);
+            present = IsHostLanePresent(hostLane);
+            var sourceLane = _module.AddInstruction(
+                SpirvOp.Select,
+                _uintType,
+                present,
+                hostLane,
+                Load(_uintType, _subgroupInvocationIdInput));
+            return ShuffleLane(value, sourceLane);
+        }
+
+        // The fetch-inactive-off read of a graphics lane: usable is the source lane's EXEC state, judged by
+        // the guest EXEC bit for a lane the host never launched (set means whole-wave code turned the dead
+        // lane on). The caller applies the ISA's invalid-source result where usable is false.
+        private uint ReadGraphicsLaneIfActive(uint value, uint guestLane, out uint usable)
+        {
+            usable = IsGraphicsLaneUsable(guestLane);
+            return ReadGraphicsLane(value, guestLane, out _);
+        }
+
+        private uint IsGraphicsLaneUsable(uint guestLane)
+        {
+            var activeWord = _module.AddInstruction(
+                SpirvOp.Select, _uintType, Load(_boolType, _exec), UInt(1), UInt(0));
+            var hostActive = IsNotZero(ReadGraphicsLane(activeWord, guestLane, out var present));
+            return _module.AddInstruction(
+                SpirvOp.Select, _boolType, present, hostActive, IsGuestLaneExecSet(guestLane));
+        }
+
         private uint CurrentLaneBit() =>
             _waveLowering.CurrentLaneBit();
 
