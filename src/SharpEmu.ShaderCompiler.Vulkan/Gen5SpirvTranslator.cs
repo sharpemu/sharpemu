@@ -10064,8 +10064,11 @@ public static partial class Gen5SpirvTranslator
              UsesSubgroupShuffle() ||
              UsesSubgroupBroadcast() ||
              UsesWaveControl() ||
+             // These need the invocation's lane in the guest wave. V_WRITELANE picks its lane by it: without the lane
+             // inputs every invocation is lane 0, and a write to any other lane was dropped.
              _request.Program.Instructions.Any(static instruction =>
-                 instruction.Opcode is "VMbcntLoU32B32" or "VMbcntHiU32B32" or "DsWriteAddtidB32" or "DsReadAddtidB32"));
+                 instruction.Opcode is "VMbcntLoU32B32" or "VMbcntHiU32B32" or "DsWriteAddtidB32" or "DsReadAddtidB32" or
+                     "VWritelaneB32"));
 
         private static bool IsWaveMaskOperand(Gen5Operand operand) =>
             operand.Kind == Gen5OperandKind.ScalarRegister &&
