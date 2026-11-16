@@ -44,8 +44,8 @@ internal static class GuestStackFrameAnalysis
                     if (indices.TryGetValue(instruction.NearBranchTarget, out var target)) Merge(target, next);
                     break;
                 case FlowControl.IndirectBranch:
-                    // Unknown targets can enter any instruction with unknown stack state.
-                    for (var targetIndex = 0; targetIndex < instructions.Count; targetIndex++) Merge(targetIndex, new(null, null));
+                    // Unknown targets get no state: an access only they reach proves nothing, and the jump cannot undo
+                    // a red-zone access that direct flow from the entry already proved.
                     break;
             }
         }

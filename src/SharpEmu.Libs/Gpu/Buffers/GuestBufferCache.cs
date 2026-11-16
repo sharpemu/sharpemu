@@ -142,7 +142,17 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         set => _tracker.DefersGpuWriteProtection = value;
     }
 
-    public void ApplyPendingGpuProtections() => _tracker.ApplyPendingGpuProtections();
+    public void ApplyPendingGpuProtections()
+    {
+        Volatile.Write(ref _copyWritesPending, 0);
+        _tracker.ApplyPendingGpuProtections();
+    }
+
+    private int _copyWritesPending;
+
+    public bool CopyWritesPending => Volatile.Read(ref _copyWritesPending) != 0;
+
+    public void NoteCopyWrite() => Volatile.Write(ref _copyWritesPending, 1);
 
     public GpuBuffer GdsBuffer => _gds;
 
@@ -452,6 +462,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             return null;
         }
 
+        NoteCopyWrite();
         return ObtainBuffer(guestAddress, size, isWritten: true).Buffer;
     }
 
@@ -598,7 +609,12 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
     private void FillBuffer(ulong guestAddress, ulong size, uint value, bool isGds, bool publishFill)
     {
-        if (!isGds) CompleteGuestPublications?.Invoke(guestAddress, size, PublicationAccess.Write);
+        if (!isGds)
+        {
+            CompleteGuestPublications?.Invoke(guestAddress, size, PublicationAccess.Write);
+            NoteCopyWrite();
+        }
+
         if ((guestAddress & 3) != 0 || size == 0 || (size & 3) != 0 || size > ulong.MaxValue - guestAddress)
         {
             throw SubmissionScheduler.Fatal("The fill range must be aligned to four bytes.");
@@ -849,7 +865,12 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
     public void CopyBuffer(ulong dstVaddr, ulong srcVaddr, ulong size, bool dstGds, bool srcGds)
     {
-        if (!dstGds) CompleteGuestPublications?.Invoke(dstVaddr, size, PublicationAccess.Write);
+        if (!dstGds)
+        {
+            CompleteGuestPublications?.Invoke(dstVaddr, size, PublicationAccess.Write);
+            NoteCopyWrite();
+        }
+
         if (!srcGds) CompleteGuestPublications?.Invoke(srcVaddr, size, PublicationAccess.Read);
         var dstMemory = !dstGds;
         var srcMemory = !srcGds;

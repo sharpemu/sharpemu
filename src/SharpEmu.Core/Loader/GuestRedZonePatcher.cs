@@ -20,6 +20,7 @@ internal static partial class GuestRedZonePatcher
     private const ulong MaximumRelativeJumpDistance = 0x7FFF_FFFF;
     private const int MaximumJumpTableEntries = 4096;
     private const int MaximumJumpTableSetupInstructions = 6;
+    private const int MaximumJumpTableSliceInstructions = 16;
     private const ulong LargeExecutableBytes = 32UL << 20;
     private static readonly TimeSpan ProgressInterval = TimeSpan.FromSeconds(2);
 
@@ -274,6 +275,7 @@ internal static partial class GuestRedZonePatcher
                 continue;
             }
 
+            segmentFunctions = AddDirectCallTargets(segmentBytes, segmentStart, segmentEnd, segmentFunctions);
             for (var functionIndex = 0; functionIndex < segmentFunctions.Length; functionIndex++)
             {
                 progress?.Report(scannedFunctions++);
@@ -396,6 +398,39 @@ internal static partial class GuestRedZonePatcher
         return sites;
     }
 
+    // .eh_frame_hdr lists only the functions that have unwind entries, so the span between two entries can hold many
+    // functions: one red-zone leaf among them sends every access of its neighbours to a trampoline, and one unresolved
+    // indirect jump among them leaves the leaf unprotected. Direct call targets are function entries too.
+    private static ulong[] AddDirectCallTargets(byte[] segmentBytes, ulong segmentStart, ulong segmentEnd, ulong[] functionStarts)
+    {
+        var starts = new HashSet<ulong>(functionStarts);
+        for (var index = 0; index < functionStarts.Length; index++)
+        {
+            var start = functionStarts[index];
+            var end = index + 1 < functionStarts.Length ? functionStarts[index + 1] : segmentEnd;
+            var reader = new ArraySliceCodeReader(segmentBytes, checked((int)(start - segmentStart)), checked((int)(end - start)));
+            var decoder = Decoder.Create(64, reader, DecoderOptions.None);
+            decoder.IP = start;
+            while (decoder.IP < end && reader.CanRead)
+            {
+                decoder.Decode(out var instruction);
+                if (instruction.Code == Code.INVALID)
+                {
+                    break;
+                }
+
+                if (instruction.FlowControl == FlowControl.Call &&
+                    instruction.Op0Kind == OpKind.NearBranch64 &&
+                    instruction.NearBranch64 >= segmentStart && instruction.NearBranch64 < segmentEnd)
+                {
+                    starts.Add(instruction.NearBranch64);
+                }
+            }
+        }
+
+        return starts.Count == functionStarts.Length ? functionStarts : starts.Order().ToArray();
+    }
+
     private static List<DecodedInstruction> DecodeFunction(
         byte[] segmentBytes,
         ulong segmentStart,
@@ -455,8 +490,9 @@ internal static partial class GuestRedZonePatcher
         ulong functionEnd,
         HashSet<ulong> branchTargets)
     {
-        List<ulong>? resolvedTargets = null;
         HashSet<ulong>? instructionBoundaries = null;
+        Dictionary<int, List<ulong>>? jumpTargets = null;
+        List<int>? unresolved = null;
         for (var instructionIndex = 0; instructionIndex < decoded.Count; instructionIndex++)
         {
             if (decoded[instructionIndex].Instruction.FlowControl != FlowControl.IndirectBranch)
@@ -467,8 +503,8 @@ internal static partial class GuestRedZonePatcher
             instructionBoundaries ??= decoded
                 .Select(static entry => entry.Instruction.IP)
                 .ToHashSet();
-            resolvedTargets ??= new List<ulong>();
-            if (!TryResolveJumpTable(
+            var targets = new List<ulong>();
+            if (TryResolveJumpTable(
                     memory,
                     programHeaders,
                     imageBase,
@@ -478,15 +514,62 @@ internal static partial class GuestRedZonePatcher
                     functionEnd,
                     instructionBoundaries,
                     branchTargets,
-                    resolvedTargets))
+                    targets) ||
+                TryResolveSlicedJumpTable(
+                    memory,
+                    programHeaders,
+                    imageBase,
+                    decoded,
+                    instructionIndex,
+                    functionStart,
+                    functionEnd,
+                    instructionBoundaries,
+                    branchTargets,
+                    null,
+                    targets))
             {
-                return false;
+                (jumpTargets ??= new())[instructionIndex] = targets;
+            }
+            else
+            {
+                (unresolved ??= new()).Add(instructionIndex);
             }
         }
 
-        if (resolvedTargets is not null)
+        // A switch inside a loop loads its table address before the loop; the jumps resolved above give the data flow
+        // their exact edges.
+        if (unresolved is not null)
         {
-            branchTargets.UnionWith(resolvedTargets);
+            jumpTargets ??= new();
+            foreach (var jumpIndex in unresolved)
+            {
+                var targets = new List<ulong>();
+                if (!TryResolveSlicedJumpTable(
+                        memory,
+                        programHeaders,
+                        imageBase,
+                        decoded,
+                        jumpIndex,
+                        functionStart,
+                        functionEnd,
+                        instructionBoundaries!,
+                        branchTargets,
+                        jumpTargets,
+                        targets))
+                {
+                    return false;
+                }
+
+                jumpTargets[jumpIndex] = targets;
+            }
+        }
+
+        if (jumpTargets is not null)
+        {
+            foreach (var targets in jumpTargets.Values)
+            {
+                branchTargets.UnionWith(targets);
+            }
         }
 
         return true;
@@ -655,6 +738,420 @@ internal static partial class GuestRedZonePatcher
         }
 
         return true;
+    }
+
+    // Compilers interleave independent instructions with the table load, bound the selector with AND or with CMP; JA far
+    // from the jump, and load the table address once before a loop that holds the switch. Follow the data flow instead of
+    // fixed positions: jmp T, where T = movsxd [B + S*4] + B and B = lea [rip + table]. B comes from straight-line code no
+    // branch enters, or, once 'resolvedJumps' gives the function's other tables, from the one LEA that reaches the load
+    // on every path; that needs a bounded selector and holds only if the table's own edges keep it the one definition.
+    // A bounded table must name instructions of this function throughout; any other is read until an entry stops naming
+    // one, which can only add targets.
+    private static bool TryResolveSlicedJumpTable(
+        IVirtualMemory memory,
+        IReadOnlyList<ProgramHeader> programHeaders,
+        ulong imageBase,
+        IReadOnlyList<DecodedInstruction> decoded,
+        int jumpIndex,
+        ulong functionStart,
+        ulong functionEnd,
+        IReadOnlySet<ulong> instructionBoundaries,
+        IReadOnlySet<ulong> knownBranchTargets,
+        IReadOnlyDictionary<int, List<ulong>>? resolvedJumps,
+        List<ulong> targets)
+    {
+        var jump = decoded[jumpIndex].Instruction;
+        if (jump.Mnemonic != Mnemonic.Jmp || jump.OpCount != 1 || jump.GetOpKind(0) != OpKind.Register ||
+            jump.GetOpRegister(0).GetSize() != sizeof(ulong) || knownBranchTargets.Contains(jump.IP))
+        {
+            return false;
+        }
+
+        var factory = new InstructionInfoFactory();
+        var targetRegister = jump.GetOpRegister(0);
+        var addIndex = FindDefinition(decoded, jumpIndex - 1, targetRegister, Register.None, knownBranchTargets, factory);
+        if (addIndex < 0)
+        {
+            return false;
+        }
+
+        var add = decoded[addIndex].Instruction;
+        if (add.Mnemonic != Mnemonic.Add || add.OpCount != 2 ||
+            add.GetOpKind(0) != OpKind.Register || add.GetOpRegister(0) != targetRegister ||
+            add.GetOpKind(1) != OpKind.Register || add.GetOpRegister(1).GetSize() != sizeof(ulong) ||
+            add.GetOpRegister(1) == targetRegister || knownBranchTargets.Contains(add.IP))
+        {
+            return false;
+        }
+
+        var tableRegister = add.GetOpRegister(1);
+        var loadIndex = FindDefinition(decoded, addIndex - 1, targetRegister, tableRegister, knownBranchTargets, factory);
+        if (loadIndex < 0)
+        {
+            return false;
+        }
+
+        var load = decoded[loadIndex].Instruction;
+        if (load.Mnemonic != Mnemonic.Movsxd || load.OpCount != 2 ||
+            load.GetOpKind(0) != OpKind.Register || load.GetOpRegister(0) != targetRegister ||
+            load.GetOpKind(1) != OpKind.Memory || load.MemorySize.GetSize() != sizeof(int) ||
+            load.MemoryBase != tableRegister || load.MemoryIndexScale != sizeof(int) ||
+            load.MemoryIndex.GetSize() != sizeof(ulong) || load.MemoryIndex.GetFullRegister() == tableRegister.GetFullRegister() ||
+            load.MemoryDisplacement64 != 0 || knownBranchTargets.Contains(load.IP))
+        {
+            return false;
+        }
+
+        var entryLimit = MaximumJumpTableEntries;
+        var bounded = TryFindSelectorBound(decoded, loadIndex, load.MemoryIndex, knownBranchTargets, factory, out var comparedEntries);
+        if (bounded)
+        {
+            entryLimit = comparedEntries;
+        }
+        else
+        {
+            var selectorIndex = FindDefinition(decoded, loadIndex - 1, load.MemoryIndex, Register.None, knownBranchTargets, factory);
+            if (selectorIndex >= 0)
+            {
+                var selector = decoded[selectorIndex].Instruction;
+                // A 32-bit AND clears the upper half too; a narrower one would leave it.
+                if (selector.Mnemonic == Mnemonic.And && selector.OpCount == 2 &&
+                    selector.GetOpKind(0) == OpKind.Register && selector.GetOpRegister(0).GetSize() >= sizeof(int) &&
+                    TryGetNonNegativeImmediate(selector, 1, out var mask) && mask < MaximumJumpTableEntries)
+                {
+                    entryLimit = (int)mask + 1;
+                    bounded = true;
+                }
+                else if (ComparesBeforeRedefinition(decoded, selectorIndex, load.MemoryIndex))
+                {
+                    // The bounds check applied to the value the redefinition replaced.
+                    return false;
+                }
+            }
+        }
+
+        Dictionary<ulong, int>? index = null;
+        var leaIndex = FindDefinition(decoded, loadIndex - 1, tableRegister, Register.None, knownBranchTargets, factory);
+        if (leaIndex < 0 && bounded && resolvedJumps is not null)
+        {
+            index = new Dictionary<ulong, int>(decoded.Count);
+            for (var position = 0; position < decoded.Count; position++)
+            {
+                index[decoded[position].Instruction.IP] = position;
+            }
+
+            leaIndex = FindReachingDefinition(decoded, index, loadIndex, tableRegister, jumpIndex, null, resolvedJumps, factory);
+        }
+
+        if (leaIndex < 0)
+        {
+            return false;
+        }
+
+        var lea = decoded[leaIndex].Instruction;
+        if (lea.Mnemonic != Mnemonic.Lea || lea.OpCount != 2 || !lea.IsIPRelativeMemoryOperand ||
+            lea.GetOpRegister(0) != tableRegister)
+        {
+            return false;
+        }
+
+        var tableAddress = lea.IPRelativeMemoryAddress;
+        var firstTarget = targets.Count;
+        Span<byte> entry = stackalloc byte[sizeof(int)];
+        for (var entryIndex = 0; entryIndex < entryLimit; entryIndex++)
+        {
+            var entryAddress = tableAddress + (ulong)entryIndex * sizeof(int);
+            if (!IsRangeInReadableLoad(programHeaders, imageBase, entryAddress, sizeof(int)) ||
+                !memory.TryRead(entryAddress, entry) ||
+                !TryAddSignedOffset(tableAddress, BinaryPrimitives.ReadInt32LittleEndian(entry), out var target) ||
+                target < functionStart || target >= functionEnd ||
+                !instructionBoundaries.Contains(target))
+            {
+                if (bounded || entryIndex == 0)
+                {
+                    targets.RemoveRange(firstTarget, targets.Count - firstTarget);
+                    return false;
+                }
+
+                break;
+            }
+
+            targets.Add(target);
+        }
+
+        if (index is not null &&
+            FindReachingDefinition(decoded, index, loadIndex, tableRegister, jumpIndex, targets.GetRange(firstTarget, targets.Count - firstTarget),
+                resolvedJumps!, factory) != leaIndex)
+        {
+            targets.RemoveRange(firstTarget, targets.Count - firstTarget);
+            return false;
+        }
+
+        return true;
+    }
+
+    // CMP S, N; JA default, then straight-line code that leaves S alone and that no known branch enters, up to the
+    // table load: S indexes N + 1 entries.
+    private static bool TryFindSelectorBound(
+        IReadOnlyList<DecodedInstruction> decoded,
+        int loadIndex,
+        Register selector,
+        IReadOnlySet<ulong> knownBranchTargets,
+        InstructionInfoFactory factory,
+        out int entryCount)
+    {
+        entryCount = 0;
+        var fullSelector = selector.GetFullRegister();
+        for (var index = loadIndex - 1; index > 0 && index > loadIndex - MaximumJumpTableSliceInstructions; index--)
+        {
+            var instruction = decoded[index].Instruction;
+            if (instruction.Mnemonic == Mnemonic.Ja)
+            {
+                var compare = decoded[index - 1].Instruction;
+                if (compare.Mnemonic != Mnemonic.Cmp || compare.OpCount != 2 || compare.GetOpKind(0) != OpKind.Register ||
+                    compare.GetOpRegister(0).GetFullRegister() != fullSelector ||
+                    compare.GetOpRegister(0).GetSize() < sizeof(int) ||
+                    !TryGetNonNegativeImmediate(compare, 1, out var maximum) || maximum >= MaximumJumpTableEntries)
+                {
+                    return false;
+                }
+
+                entryCount = (int)maximum + 1;
+                return true;
+            }
+
+            if (instruction.FlowControl != FlowControl.Next || knownBranchTargets.Contains(instruction.IP) ||
+                WritesRegister(instruction, fullSelector, factory))
+            {
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    // The one instruction whose write of 'register' reaches 'use' on every path, or -1. Paths follow fall-through and
+    // direct branches inside the function; a resolved jump table reaches its targets, and every other indirect jump
+    // (the one at 'jumpIndex' too when 'jumpTargets' is null) may reach any instruction. The function entry, and any
+    // other instruction that neither direct flow nor a known table reaches, brings in an unknown value; when
+    // 'jumpTargets' is null that is only the entry, which can name the definition but not confirm it. A call ends a
+    // caller-saved register's value.
+    private static int FindReachingDefinition(
+        IReadOnlyList<DecodedInstruction> decoded,
+        IReadOnlyDictionary<ulong, int> index,
+        int use,
+        Register register,
+        int jumpIndex,
+        IReadOnlyList<ulong>? jumpTargets,
+        IReadOnlyDictionary<int, List<ulong>> resolvedJumps,
+        InstructionInfoFactory factory)
+    {
+        const int MaximumDefinitions = 63;
+        const int MaximumPasses = 128;
+        var fullRegister = register.GetFullRegister();
+        var callerSaved = fullRegister is Register.RAX or Register.RCX or Register.RDX or Register.RSI or Register.RDI or
+            Register.R8 or Register.R9 or Register.R10 or Register.R11;
+        var count = decoded.Count;
+        var definition = new int[count];
+        var definitions = new List<int> { -1 };
+        var reached = new bool[count];
+        for (var position = 0; position < count; position++)
+        {
+            var instruction = decoded[position].Instruction;
+            definition[position] = -1;
+            if (instruction.FlowControl is FlowControl.Call or FlowControl.IndirectCall)
+            {
+                if (callerSaved) definition[position] = 0;
+            }
+            else if (WritesRegister(instruction, fullRegister, factory))
+            {
+                if (definitions.Count > MaximumDefinitions) return -1;
+                definition[position] = definitions.Count;
+                definitions.Add(position);
+            }
+
+            if (instruction.FlowControl is FlowControl.Next or FlowControl.ConditionalBranch or FlowControl.Call or
+                FlowControl.IndirectCall && position + 1 < count)
+            {
+                reached[position + 1] = true;
+            }
+
+            if (instruction.FlowControl is FlowControl.ConditionalBranch or FlowControl.UnconditionalBranch &&
+                TryGetNearBranchTarget(instruction, out var target) && index.TryGetValue(target, out var targetIndex))
+            {
+                reached[targetIndex] = true;
+            }
+        }
+
+        var input = new ulong[count];
+        input[0] = 1;
+        if (jumpTargets is not null)
+        {
+            foreach (var targets in resolvedJumps.Values)
+                foreach (var target in targets)
+                    if (index.TryGetValue(target, out var targetIndex)) reached[targetIndex] = true;
+            foreach (var target in jumpTargets)
+                if (index.TryGetValue(target, out var targetIndex)) reached[targetIndex] = true;
+            for (var position = 1; position < count; position++)
+            {
+                var instruction = decoded[position].Instruction;
+                if (!reached[position] && instruction.Mnemonic is not (Mnemonic.Nop or Mnemonic.Int3))
+                {
+                    input[position] = 1;
+                }
+            }
+        }
+
+        var anywhere = 0UL;
+        for (var pass = 0; ; pass++)
+        {
+            if (pass == MaximumPasses) return -1;
+            var changed = false;
+            for (var position = 0; position < count; position++)
+            {
+                var instruction = decoded[position].Instruction;
+                var output = definition[position] >= 0 ? 1UL << definition[position] : input[position] | anywhere;
+                switch (instruction.FlowControl)
+                {
+                    case FlowControl.Next:
+                    case FlowControl.Call:
+                    case FlowControl.IndirectCall:
+                        Flow(position + 1, output);
+                        break;
+                    case FlowControl.ConditionalBranch:
+                        Flow(position + 1, output);
+                        FlowTo(instruction, output);
+                        break;
+                    case FlowControl.UnconditionalBranch:
+                        FlowTo(instruction, output);
+                        break;
+                    case FlowControl.IndirectBranch:
+                        var targets = position == jumpIndex ? jumpTargets : resolvedJumps.GetValueOrDefault(position);
+                        if (targets is null)
+                        {
+                            if ((anywhere | output) != anywhere)
+                            {
+                                anywhere |= output;
+                                changed = true;
+                            }
+                        }
+                        else
+                        {
+                            foreach (var target in targets)
+                                if (index.TryGetValue(target, out var targetIndex)) Flow(targetIndex, output);
+                        }
+
+                        break;
+                }
+            }
+
+            if (!changed) break;
+
+            void Flow(int target, ulong mask)
+            {
+                if (target >= count || (input[target] | mask) == input[target]) return;
+                input[target] |= mask;
+                changed = true;
+            }
+
+            void FlowTo(in Instruction branch, ulong mask)
+            {
+                if (TryGetNearBranchTarget(branch, out var target) && index.TryGetValue(target, out var targetIndex))
+                    Flow(targetIndex, mask);
+            }
+        }
+
+        var reaching = input[use] | anywhere;
+        if (reaching == 0 || (reaching & 1) != 0 || (reaching & (reaching - 1)) != 0) return -1;
+        return definitions[System.Numerics.BitOperations.TrailingZeroCount(reaching)];
+    }
+
+    private static bool WritesRegister(in Instruction instruction, Register fullRegister, InstructionInfoFactory factory)
+    {
+        foreach (var used in factory.GetInfo(instruction).GetUsedRegisters())
+        {
+            if (used.Access is (OpAccess.Write or OpAccess.CondWrite or OpAccess.ReadWrite or OpAccess.ReadCondWrite) &&
+                used.Register.GetFullRegister() == fullRegister)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool ComparesBeforeRedefinition(IReadOnlyList<DecodedInstruction> decoded, int definitionIndex, Register register)
+    {
+        var fullRegister = register.GetFullRegister();
+        for (var index = definitionIndex - 1; index >= 0 && index > definitionIndex - MaximumJumpTableSliceInstructions; index--)
+        {
+            var instruction = decoded[index].Instruction;
+            if (instruction.Mnemonic == Mnemonic.Cmp && instruction.OpCount == 2 &&
+                instruction.GetOpKind(0) == OpKind.Register && instruction.GetOpRegister(0).GetFullRegister() == fullRegister)
+            {
+                return true;
+            }
+
+            if (instruction.FlowControl is not (FlowControl.Next or FlowControl.ConditionalBranch))
+            {
+                return false;
+            }
+        }
+
+        return false;
+    }
+
+    // The last instruction at or before 'from' that writes 'register', through straight-line code that leaves
+    // 'protectedRegister' alone and that no known branch enters past the definition; -1 when there is none nearby.
+    private static int FindDefinition(
+        IReadOnlyList<DecodedInstruction> decoded,
+        int from,
+        Register register,
+        Register protectedRegister,
+        IReadOnlySet<ulong> knownBranchTargets,
+        InstructionInfoFactory factory)
+    {
+        var fullRegister = register.GetFullRegister();
+        var fullProtected = protectedRegister == Register.None ? Register.None : protectedRegister.GetFullRegister();
+        for (var index = from; index >= 0 && index > from - MaximumJumpTableSliceInstructions; index--)
+        {
+            var instruction = decoded[index].Instruction;
+            if (instruction.FlowControl != FlowControl.Next)
+            {
+                return -1;
+            }
+
+            var writesRegister = false;
+            foreach (var used in factory.GetInfo(instruction).GetUsedRegisters())
+            {
+                if (used.Access is not (OpAccess.Write or OpAccess.CondWrite or OpAccess.ReadWrite or OpAccess.ReadCondWrite))
+                {
+                    continue;
+                }
+
+                var written = used.Register.GetFullRegister();
+                if (written == fullRegister)
+                {
+                    writesRegister = true;
+                }
+                else if (written == fullProtected)
+                {
+                    return -1;
+                }
+            }
+
+            if (writesRegister)
+            {
+                return index;
+            }
+
+            if (knownBranchTargets.Contains(instruction.IP))
+            {
+                return -1;
+            }
+        }
+
+        return -1;
     }
 
     private static bool IsStoreToMemory(in Instruction instruction) =>

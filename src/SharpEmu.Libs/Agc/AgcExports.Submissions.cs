@@ -355,6 +355,66 @@ public static partial class AgcExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    // ABI: EDI is the queue (the owner sceAgcDriverSubmitAcb takes), RSI points to addresses, RDX points to dword
+    // counts, and ECX contains the count.
+    [SysAbiExport(
+        Nid = "HF3YllT3mXU",
+        ExportName = "sceAgcDriverSubmitMultiAcbs",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgcDriver")]
+    public static int DriverSubmitMultiAcbs(CpuContext ctx)
+    {
+        if (HostSessionControl.IsShutdownRequested)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_CANCELED);
+        }
+
+        var ownerHandle = (uint)ctx[CpuRegister.Rdi];
+        var addressArray = ctx[CpuRegister.Rsi];
+        var sizeArray = ctx[CpuRegister.Rdx];
+        var bufferCount = (uint)ctx[CpuRegister.Rcx];
+        if (addressArray == 0 || sizeArray == 0 || bufferCount == 0 || bufferCount > 4096)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        (GuestGpu.Current as IGuestImageSnapshotBackend)?.AttachGuestMemory(ctx.Memory);
+        var gpuState = _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState());
+        lock (gpuState.CommandSubmissionGate)
+        lock (gpuState.Gate)
+        {
+            for (uint bufferIndex = 0; bufferIndex < bufferCount; bufferIndex++)
+            {
+                if (!ctx.TryReadUInt64(addressArray + bufferIndex * 8, out var commandAddress) ||
+                    commandAddress == 0 ||
+                    !ctx.TryReadUInt32(sizeArray + bufferIndex * 4, out var dwordCount) ||
+                    dwordCount == 0)
+                {
+                    continue;
+                }
+
+                TraceAgc(
+                    $"agc.driver_submit_multi_acbs owner={ownerHandle} index={bufferIndex}/{bufferCount} " +
+                    $"addr=0x{commandAddress:X16} dwords={dwordCount}");
+                SubmissionFlowProfile.RecordGuest(SubmissionFlowProfile.EventKind.SubmitEntered,
+                    ownerHandle, 0, commandAddress, dwordCount);
+                if (!TrySubmitCommandStream(
+                    ctx.Memory,
+                    ownerHandle,
+                    commandAddress,
+                    dwordCount,
+                    ++gpuState.SubmissionSequence,
+                    null))
+                {
+                    return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_CANCELED);
+                }
+            }
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     private static Dictionary<ulong, byte[]>? CaptureSubmittedTables(CpuContext ctx, ulong address, ReadOnlySpan<byte> commands)
     {
         var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(commands);

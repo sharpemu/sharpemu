@@ -115733,6 +115733,7 @@ _sceLibcFree
 _sceLibcGetMallocParam
 _sceLibcInitialize
 _sceLibcInternal
+_sceLibcInternalThreadAtexit
 _sceLibcLockFinalize
 _sceLibcLockInitialize
 _sceLibcMalloc

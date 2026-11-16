@@ -168,7 +168,8 @@ public sealed class AgcWaitRegMemTests
         Assert.Equal(0x5566_7788u, ReadUInt32(memory, PacketAddress + 16));
         Assert.Equal(0x0400_0053u, ReadUInt32(memory, PacketAddress + 20));
         Assert.Equal(0xFFFFu, ReadUInt32(memory, PacketAddress + 24));
-        Assert.Equal(PacketAddress + 28, ReadUInt64(memory, CommandBufferAddress + 0x10));
+        Assert.Equal(0xC005_1000u, ReadUInt32(memory, PacketAddress + 28));
+        Assert.Equal(PacketAddress + 56, ReadUInt64(memory, CommandBufferAddress + 0x10));
     }
 
     [Fact]
@@ -197,6 +198,55 @@ public sealed class AgcWaitRegMemTests
         Assert.Equal(0x1122_3344u, ReadUInt32(memory, PacketAddress + 24));
         Assert.Equal(0x0200_0096u, ReadUInt32(memory, PacketAddress + 28));
         Assert.Equal(0x32u, ReadUInt32(memory, PacketAddress + 32));
+        Assert.Equal(0xC005_1000u, ReadUInt32(memory, PacketAddress + 36));
+        Assert.Equal(PacketAddress + 64, ReadUInt64(memory, CommandBufferAddress + 0x10));
+    }
+
+    // Titles size a buffer with the size export and then fill it with waits (UE's submission prologue), so a wait
+    // must take exactly the size its export reports.
+    [Theory]
+    [InlineData(0u)]
+    [InlineData(1u)]
+    public void DcbWaitRegMem_TakesTheSizeItsSizeExportReports(uint labelSize)
+    {
+        var memory = CreateMemory(out var ctx);
+        ctx[CpuRegister.Rdi] = labelSize;
+        var reportedBytes = (ulong)AgcExports.GetWaitOnAddressSize(ctx);
+        ctx[CpuRegister.Rdi] = CommandBufferAddress;
+        ctx[CpuRegister.Rsi] = labelSize;
+        ctx[CpuRegister.Rdx] = 3;
+        ctx[CpuRegister.Rcx] = 0;
+        ctx[CpuRegister.R8] = 2;
+        ctx[CpuRegister.R9] = BaseAddress + 0xC00;
+        WriteUInt64(memory, StackAddress + 8, 1);
+        WriteUInt64(memory, StackAddress + 16, ulong.MaxValue);
+        WriteUInt32(memory, StackAddress + 24, 400);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.DcbWaitRegMem(ctx));
+        Assert.Equal(PacketAddress, ctx[CpuRegister.Rax]);
+        Assert.Equal(PacketAddress + reportedBytes, ReadUInt64(memory, CommandBufferAddress + 0x10));
+    }
+
+    [Theory]
+    [InlineData(0u)]
+    [InlineData(1u)]
+    public void AcbWaitRegMem_TakesTheSizeItsSizeExportReports(uint labelSize)
+    {
+        var memory = CreateMemory(out var ctx);
+        ctx[CpuRegister.Rdi] = labelSize;
+        var reportedBytes = (ulong)AgcExports.AcbWaitOnAddressGetSize(ctx);
+        ctx[CpuRegister.Rdi] = CommandBufferAddress;
+        ctx[CpuRegister.Rsi] = labelSize;
+        ctx[CpuRegister.Rdx] = 3;
+        ctx[CpuRegister.Rcx] = 2;
+        ctx[CpuRegister.R8] = BaseAddress + 0xC00;
+        ctx[CpuRegister.R9] = 1;
+        WriteUInt64(memory, StackAddress + 8, ulong.MaxValue);
+        WriteUInt32(memory, StackAddress + 16, 400);
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.AcbWaitRegMem(ctx));
+        Assert.Equal(PacketAddress, ctx[CpuRegister.Rax]);
+        Assert.Equal(PacketAddress + reportedBytes, ReadUInt64(memory, CommandBufferAddress + 0x10));
     }
 
     [Theory]
