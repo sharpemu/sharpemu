@@ -278,6 +278,7 @@ internal static unsafe partial class VulkanVideoPresenter
         public readonly List<(ulong Address, uint[] Words)> KnownWrites = new();
         public readonly List<SubmissionUploadResources> Resources = new();
         public bool NeedsBdaSweep;
+        public bool NeedsBdaTouch;
         public long BufferSerial;
         public long? ReadsVersion;
         public bool MixedReadsVersions;
@@ -829,6 +830,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 if (requests.NeedsBdaSweep && requests.BdaSpans is { } spans)
                 {
                     _bufferCache.PrepareBda(spans, requests.BdaMapping);
+                }
+                else if (requests.NeedsBdaTouch && requests.BdaSpans is { } touched)
+                {
+                    _bufferCache.PrepareBoundedBda(touched, requests.BdaMapping);
                 }
 
                 foreach (var (address, size) in requests.SyncRanges)

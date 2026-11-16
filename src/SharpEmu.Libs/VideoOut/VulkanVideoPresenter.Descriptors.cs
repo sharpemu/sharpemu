@@ -1322,9 +1322,18 @@ internal static unsafe partial class VulkanVideoPresenter
             if (traceAddress != 0 && !memory.Covers(traceAddress, 1))
                 GuestGpuMemoryHook.Trace(traceAddress, 1,
                     $"device-address-mapping-check readable={_guestMemory.CanRead(traceAddress, 1)} backed={_guestBacking.IsBackedView(traceAddress)}");
+            var bounded = BoundedDeviceAddressReads && ReadsOnlyBoundedRanges(preparation);
             if (_worker)
             {
-                Requests.NeedsBdaSweep = true;
+                if (bounded)
+                {
+                    Requests.NeedsBdaTouch = true;
+                }
+                else
+                {
+                    Requests.NeedsBdaSweep = true;
+                }
+
                 Requests.BdaSpans = spans;
                 Requests.BdaMapping = _bdaSpanMapping;
                 return;
@@ -1339,7 +1348,44 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
             }
 
+            if (bounded)
+            {
+                _bufferCache.PrepareBoundedBda(spans, _bdaSpanMapping);
+                return;
+            }
+
             _bufferCache.PrepareBda(spans, _bdaSpanMapping);
+        }
+
+        private static readonly bool BoundedDeviceAddressReads = Environment.GetEnvironmentVariable("SHARPEMU_BOUNDED_BDA") != "0";
+
+        private bool ReadsOnlyBoundedRanges(RenderPreparation preparation)
+        {
+            var any = false;
+            foreach (var stage in preparation.Stages)
+            {
+                if (!stage.Program.UsesDeviceAddresses)
+                {
+                    continue;
+                }
+
+                if (!stage.Program.DeviceAddressReadsBounded)
+                {
+                    return false;
+                }
+
+                foreach (var range in DeviceAddressRangesOf(stage))
+                {
+                    if (!range.Planned || range.Written || range.Size > ShaderCompiler.Resources.DeviceAddressRangePlanner.MaxRangeBytes)
+                    {
+                        return false;
+                    }
+
+                    any = true;
+                }
+            }
+
+            return any;
         }
 
         private List<GuestSpan>? _bdaSpans;

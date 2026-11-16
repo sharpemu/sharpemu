@@ -1128,6 +1128,25 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         _faultProcessPending = true;
     }
 
+    public void PrepareBoundedBda(IReadOnlyList<GuestSpan> spans, ulong mapping)
+    {
+        if (SubmissionScheduler.ReadOnlyThread)
+        {
+            throw SubmissionScheduler.ReadOnlyViolation("bda");
+        }
+
+        if (_retirementPolicy.CurrentTick != _bdaTouchTick || mapping != _bdaTouchMapping)
+        {
+            for (var index = 0; index < spans.Count; index++)
+                TouchBuffersInRange(spans[index].Address, spans[index].Size);
+            _bdaTouchTick = _retirementPolicy.CurrentTick;
+            _bdaTouchMapping = mapping;
+        }
+
+        _faultProcessPending = true;
+        Interlocked.Increment(ref BdaBoundedPreparations);
+    }
+
     private Action<ulong, ulong>? _uploadDirtyBuffersInRange;
     private bool _inDeviceAddressSweep;
     private int _uploadBatchDepth;
@@ -1267,6 +1286,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     private long _observation;
     public static long BdaSweeps;
     public static long BdaSweepsSkipped;
+    public static long BdaBoundedPreparations;
 
     // With the command stream on its own thread, guest CPU writes reach the GPU at the stream's
     // order points (a submission, a label, a write or copy the stream performs); a device-address
