@@ -450,6 +450,26 @@ public sealed class ResourceMaterializerTests
         Assert.Equal(ImageNumericClass.Float, image.NumericClass);
     }
 
+    // A 16_SINT storage image the program only writes (as a shipped compute shader does) is compiled as
+    // unsigned bits: the stored low bits are the same.
+    [Fact]
+    public void WriteOnlySignedStorageImage_IsCompiledAsUnsignedBits()
+    {
+        const uint format16Sint = 12;
+        var instructions = new List<Gen5ShaderInstruction>();
+        uint pc = 0;
+        instructions.AddRange(ImageWords(ref pc, 16, 0x1000, format16Sint));
+        instructions.Add(Image(pc, "ImageStore", 16));
+        instructions.Add(EndProgram(pc + 8));
+        var plan = Extract(Program([.. instructions]));
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([]), ref snapshot, ref specialization));
+        var image = Assert.Single(ResourceMaterializer.ApplyTo(plan, specialization).Info.Images);
+        Assert.Equal(ImageNumericClass.Uint, image.NumericClass);
+    }
+
     // Three images share one sampler; the packed and signed ones need point filtering,
     // so the sampler splits and their accesses sample through the duplicate.
     [Fact]

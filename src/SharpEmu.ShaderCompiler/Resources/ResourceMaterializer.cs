@@ -2006,8 +2006,11 @@ public static partial class ResourceMaterializer
                 image.IndirectRoot == DescriptorConstants.NoIndex;
             var shaderSwizzle = runtimeSwizzle ? DescriptorConstants.IdentityImageSwizzle
                 : storage || conversionFormat != GuestImageFormat.Invalid ? descriptor[3] & 0xFFF : image.ShaderSwizzle;
-            var rawSintStorage = storage && format == GuestImageFormat.Format32Sint && baseImage.Written && !baseImage.Read && !baseImage.Atomic;
             var numericClass = GuestImageFormat.SampledNumericClass(format);
+            // A signed-integer storage image the program only writes stores the low bits of each register, which are the
+            // same bits as unsigned: it is compiled and viewed as the unsigned format of its width (ImageRequestBuilders).
+            // A compute shader can write a 16_SINT image.
+            var rawSintStorage = storage && numericClass == ImageNumericClass.Sint && baseImage.Written && !baseImage.Read && !baseImage.Atomic;
             if (storage)
             {
                 if ((!rawSintStorage && numericClass == ImageNumericClass.Sint) || numericClass == ImageNumericClass.Unsupported)

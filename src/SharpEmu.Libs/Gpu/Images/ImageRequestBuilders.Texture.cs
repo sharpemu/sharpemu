@@ -55,6 +55,23 @@ public static partial class ImageRequestBuilders
         Atomic: image.Atomic,
         Atomic64: image.NumericClass == ImageNumericClass.Uint64);
 
+    // The unsigned format of a signed-integer one: the view of a write-only signed storage image the program writes as
+    // unsigned bits (ResourceMaterializer). Undefined for any other format.
+    private static Format UnsignedOfSigned(Format format) => format switch
+    {
+        Format.R8Sint => Format.R8Uint,
+        Format.R8G8Sint => Format.R8G8Uint,
+        Format.R8G8B8A8Sint => Format.R8G8B8A8Uint,
+        Format.R16Sint => Format.R16Uint,
+        Format.R16G16Sint => Format.R16G16Uint,
+        Format.R16G16B16A16Sint => Format.R16G16B16A16Uint,
+        Format.R32Sint => Format.R32Uint,
+        Format.R32G32Sint => Format.R32G32Uint,
+        Format.R32G32B32A32Sint => Format.R32G32B32A32Uint,
+        Format.A2B10G10R10SintPack32 => Format.A2B10G10R10UintPack32,
+        _ => Format.Undefined,
+    };
+
     private static TextureNumericClass NumericClassOf(ImageResource image) => image.NumericClass switch
     {
         ImageNumericClass.Uint or ImageNumericClass.Uint64 => TextureNumericClass.Uint,
@@ -353,7 +370,10 @@ public static partial class ImageRequestBuilders
         // 64-bit texel (32_32 UINT) is declared R64 and views the same texels as one 64-bit integer.
         var storageViewFormat = storage && shape.Atomic64
             ? Format.R64Uint
-            : storage && (shape.Atomic || format == GuestPixelFormat.Bits32SInt) ? Format.R32Uint : ViewFormatRules.SrgbStorageFormat(pixelFormat);
+            : storage && (shape.Atomic || format == GuestPixelFormat.Bits32SInt) ? Format.R32Uint
+            : storage && shape.NumericClass == TextureNumericClass.Uint && UnsignedOfSigned(pixelFormat) is var unsigned and not Format.Undefined
+                ? unsigned
+                : ViewFormatRules.SrgbStorageFormat(pixelFormat);
         var viewFormat = storage && storageViewFormat != Format.Undefined ? storageViewFormat : pixelFormat;
         var blockBytes = GuestPixelFormats.BlockCompressedBytes(format);
         var description = ImageDescription.Create();
