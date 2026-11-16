@@ -37,7 +37,7 @@ public sealed class ShortcutSplashTests : IDisposable
         Assert.Equal(ShortcutSplashCache.PathForGame(game, cache), path);
         Assert.Equal(File.ReadAllBytes(source), File.ReadAllBytes(path));
         File.Delete(source);
-        using var cached = SKBitmap.Decode(path);
+        using var cached = SKBitmap.Decode(File.ReadAllBytes(path));
         Assert.NotNull(cached);
         Assert.Equal(width, cached.Width);
         Assert.Equal(height, cached.Height);

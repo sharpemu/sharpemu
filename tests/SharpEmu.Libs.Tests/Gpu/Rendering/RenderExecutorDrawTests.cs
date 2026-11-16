@@ -87,14 +87,18 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.Contains("create_graphics_pipeline colors=1 depth=False topology=TriangleList restart=False", _pipelines.Calls);
     }
 
-    [Fact]
-    public void ADrawRepeatingThePreviousTargetsInItsScopeKeepsTheirAcquisitions()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ADrawRepeatingThePreviousTargetsInItsScopeKeepsTheirAcquisitions(bool markWritten)
     {
         _pipelines.Graphics = Programs(vertexBuffers: [new VertexInputBuffer(VertexBase, 16, 4)]);
         _host.Scope = new DrawScopeToken(1, 1, 1);
         var banks = Banks();
         _executor.DrawIndexed(7, banks, Indexed(6));
         _host.Calls.Clear();
+        if (markWritten)
+            banks.MarkWritten(1u << (int)RegisterStamp.ColorTargets);
         _executor.DrawIndexed(8, banks, Indexed(6));
 
         Assert.DoesNotContain(_host.Calls, call => call.StartsWith("find_image", StringComparison.Ordinal) || call.StartsWith("acquire_color", StringComparison.Ordinal));
@@ -102,7 +106,7 @@ public sealed class RenderExecutorDrawTests : IDisposable
     }
 
     [Fact]
-    public void ADrawAcquiresItsTargetsAgainOnceTheScopeOrTheRegistersChange()
+    public void ADrawAcquiresItsTargetsAgainOnceTheScopeOrTheTargetChanges()
     {
         _pipelines.Graphics = Programs(vertexBuffers: [new VertexInputBuffer(VertexBase, 16, 4)]);
         _host.Scope = new DrawScopeToken(1, 1, 1);
@@ -115,9 +119,10 @@ public sealed class RenderExecutorDrawTests : IDisposable
         Assert.Contains(_host.Calls, call => call.StartsWith("acquire_color", StringComparison.Ordinal));
 
         _host.Calls.Clear();
+        banks.Context.ColorTargets[0] = RegisterWords.Color(SecondColorBase, 64, 64);
         banks.MarkWritten(1u << (int)RegisterStamp.ColorTargets);
         _executor.DrawIndexed(9, banks, Indexed(6));
-        Assert.Contains(_host.Calls, call => call.StartsWith("acquire_color", StringComparison.Ordinal));
+        Assert.Contains("acquire_color 0 100100000 image=2", _host.Calls);
     }
 
     [Fact]
