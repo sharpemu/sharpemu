@@ -1553,6 +1553,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 _imageCache.InvalidateMemoryCopiesFromGpu(address, size);
             }
 
+            if (_holdingStorage && obtained.Buffer is not null)
+            {
+                _stageStorage.Add(new HeldStorage(address, size, resource, obtained.Buffer, obtained.Offset));
+            }
+
             return obtained;
         }
 
@@ -1688,6 +1693,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw SubmissionScheduler.Fatal($"The prepared bindings are stale: hash=0x{program.Hash:X16}.");
             }
 
+            _holdingStorage = DispatchReplayCapture && program.Stage == ShaderStageKind.Compute;
+            _stageStorage.Clear();
             if (layout.UsesTableBlock)
             {
                 WriteTableBlock(prepared, shaderData);
@@ -2364,6 +2371,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
 
                 CaptureDrawReplay(bindPoint, entry, stages, pushData, hasPushData, replayPushStages);
+                CaptureDispatchReplay(bindPoint, entry, stages, pushData, hasPushData);
 
                 // A pipeline linked from libraries binds set 0 (vertex), the heap (set 1), then set 2 (pixel): binding a set
                 // with another layout disturbs the sets above it.

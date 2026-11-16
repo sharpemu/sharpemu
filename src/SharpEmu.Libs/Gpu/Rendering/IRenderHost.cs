@@ -198,6 +198,12 @@ public interface IRenderHost
 
     bool TryReplayDraw(in PipelineHandle pipeline, ReadOnlySpan<uint> vertexUserData, ReadOnlySpan<uint> pixelUserData) => false;
 
+    void SealDispatchReplay()
+    {
+    }
+
+    bool TryReplayDispatch(in PipelineHandle pipeline, in ShaderStageResources stage) => false;
+
     void RebindBuffers(IPreparedBindings prepared)
     {
     }

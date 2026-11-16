@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.Diagnostics;
+using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Vulkan;
 
@@ -114,6 +116,20 @@ internal sealed partial class RenderRecorder
                 _keptComputePipeline = pipeline;
             }
 
+            if (!TryReplayDispatch(record, computeProgram, input, in pipeline))
+            {
+                RecordPreparedDispatch(record, computeProgram, input, program, in pipeline);
+            }
+        }
+
+        _host.ResetBindings();
+    }
+
+    private void RecordPreparedDispatch(ResolvedDispatch record, ComputeProgram computeProgram, ComputeInputInfo input, ShaderProgramInfo program,
+        in PipelineHandle pipeline)
+    {
+        _dispatchReplayValid = false;
+        {
             // The indirect arguments are registered before the resources bind, so acquiring them merges no owner the
             // dispatch already bound.
             using var arguments = record.IndirectArgumentsAddress != 0
@@ -177,9 +193,115 @@ internal sealed partial class RenderRecorder
                 _host.NoteKnownGpuContents(known.Address, known.Words);
                 known.Release();
             }
+
+            if (DispatchReplayEnabled && record.IndirectArgumentsAddress == 0 && !record.GpuThreadCounts && threadDispatch is null && imageSnapshot == 0 &&
+                IsReplayable(program) && _host.CurrentItemSequence is var sequence and not 0)
+            {
+                _dispatchReplayStage = stage;
+                _dispatchReplayPipeline = pipeline;
+                _dispatchReplaySequence = sequence;
+                _dispatchReplayValid = true;
+                _host.SealDispatchReplay();
+            }
+        }
+    }
+
+    private static readonly bool DispatchReplayEnabled = Environment.GetEnvironmentVariable("SHARPEMU_DISPATCH_REPLAY") != "0";
+    private bool _dispatchReplayValid;
+    private long _dispatchReplaySequence;
+    private ShaderStageResources _dispatchReplayStage;
+    private PipelineHandle _dispatchReplayPipeline;
+    private static readonly ThreadCounter _dispatchReplays = new();
+    private static readonly string[] DispatchMissNames =
+        ["sequence", "pipeline", "program", "images", "samplers", "buffers", "table", "extras", "ranges", "heaps", "mips", "host"];
+    private static readonly ThreadCounter[] _dispatchMisses = Array.ConvertAll(DispatchMissNames, _ => new ThreadCounter());
+
+    private static bool DispatchMiss(int reason)
+    {
+        _dispatchMisses[reason].Increment();
+        return false;
+    }
+
+    internal static string TakeDispatchReplayReport()
+    {
+        var parts = new List<string>();
+        for (var index = 0; index < DispatchMissNames.Length; index++)
+        {
+            var count = _dispatchMisses[index].Take();
+            if (count != 0)
+            {
+                parts.Add(FormattableString.Invariant($"{DispatchMissNames[index]}:{count}"));
+            }
         }
 
-        _host.ResetBindings();
+        return FormattableString.Invariant($"dispatch_replays={_dispatchReplays.Take()} dispatch_replay_miss=") +
+            (parts.Count == 0 ? "none" : string.Join(",", parts));
+    }
+
+    private bool TryReplayDispatch(ResolvedDispatch record, ComputeProgram computeProgram, ComputeInputInfo input, in PipelineHandle pipeline)
+    {
+        if (!_dispatchReplayValid)
+        {
+            return false;
+        }
+
+        _dispatchReplayValid = false;
+        if (!DispatchReplayEnabled || record.IndirectArgumentsAddress != 0 || record.GpuThreadCounts || MeshDrawTrace.Active)
+        {
+            return false;
+        }
+
+        var sequence = _host.CurrentItemSequence;
+        if (sequence == 0 || sequence != _dispatchReplaySequence + 1)
+        {
+            return DispatchMiss(0);
+        }
+
+        if (pipeline.Pipeline != _dispatchReplayPipeline.Pipeline || pipeline.Layout != _dispatchReplayPipeline.Layout)
+        {
+            return DispatchMiss(1);
+        }
+
+        var stage = input.Stage;
+        if (stage.GpuThreadLimits || _dispatchReplayStage.GpuThreadLimits)
+        {
+            return DispatchMiss(7);
+        }
+
+        if (StageInputMismatch(in stage, in _dispatchReplayStage, compareThreadLimits: false) is var mismatch and >= 0)
+        {
+            return DispatchMiss(2 + mismatch);
+        }
+
+        if (!_host.TryReplayDispatch(in pipeline, in stage))
+        {
+            return DispatchMiss(11);
+        }
+
+        var chain = _dispatchChain ??= new DispatchChain();
+        if (chain.NeedsHazardBarrier(record, in stage, _host.DeferredBarrierPromotions))
+        {
+            _host.ShaderWriteHazardBarrier();
+        }
+
+        _host.BeginCheckedDispatch();
+        _host.BindPipeline(PipelineBindPoint.Compute, in pipeline);
+        var (groupsX, groupsY, groupsZ) = PhysicalGroups(input, record);
+        _host.Dispatch(groupsX, groupsY, groupsZ);
+        _host.EndCheckedDispatch();
+        chain.Commit(_host.TryDeferShaderAccessBarrier(), _host.DeferredBarrierPromotions);
+        if (computeProgram.KnownWrite is { } known)
+        {
+            _host.NoteKnownGpuContents(known.Address, known.Words);
+            known.Release();
+        }
+
+        _dispatchReplayStage = stage;
+        _dispatchReplaySequence = sequence;
+        _dispatchReplayValid = true;
+        _host.SealDispatchReplay();
+        _dispatchReplays.Increment();
+        return true;
     }
 
     private bool TryConsume(ResolvedDispatch record, ShaderProgramInfo program)
