@@ -375,6 +375,18 @@ public static partial class AgcExports
     public static int DcbSetCxRegisterDirect(CpuContext ctx) =>
         DcbSetRegisterDirect(ctx, ItSetContextReg, "cx");
 
+    // Matches the 3-dword SET_CONTEXT_REG packet DcbSetCxRegisterDirect writes.
+    [SysAbiExport(
+        Nid = "1DeUNpRIDDA",
+        ExportName = "sceAgcDcbSetCxRegisterDirectGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbSetCxRegisterDirectGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 3u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
     private static int DcbSetRegisterRangeDirect(CpuContext ctx, uint op, string registerSpace)
     {
         var commandBufferAddress = ctx[CpuRegister.Rdi];

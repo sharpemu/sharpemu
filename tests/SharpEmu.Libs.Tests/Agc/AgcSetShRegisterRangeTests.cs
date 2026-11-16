@@ -72,6 +72,25 @@ public sealed class AgcSetShRegisterRangeTests
         Assert.Equal(0x5566_7788u, ReadUInt32(memory, PacketAddress + 20));
     }
 
+    [Fact]
+    public void CxRegisterDirectGetSize_EqualsBytesConsumedByEmitter()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, 0x1000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        WriteUInt64(memory, CommandBufferAddress + 0x10, PacketAddress);
+        WriteUInt64(memory, CommandBufferAddress + 0x18, PacketAddress + 0x100);
+
+        var size = AgcExports.DcbSetCxRegisterDirectGetSize(ctx);
+        ctx[CpuRegister.Rdi] = CommandBufferAddress;
+        ctx[CpuRegister.Rsi] = (0x1122_3344UL << 32) | 0x0201;
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.DcbSetCxRegisterDirect(ctx));
+        Assert.Equal(PacketAddress, ctx[CpuRegister.Rax]);
+        Assert.Equal(PacketAddress + (ulong)size, ReadUInt64(memory, CommandBufferAddress + 0x10));
+        Assert.Equal(0x0201u, ReadUInt32(memory, PacketAddress + 4));
+        Assert.Equal(0x1122_3344u, ReadUInt32(memory, PacketAddress + 8));
+    }
+
     [Theory]
     [InlineData(1u)]
     [InlineData(64u)]
