@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.Np;
 using Xunit;
 
@@ -79,6 +80,7 @@ public sealed class NpEntitlementAccessExportsTests
     [InlineData("GHOST2BASE000000")]
     public void GhostOfYoteiMainEntitlement_IsReportedAsInstalled(string label)
     {
+        KernelMemoryCompatExports.ConfigureApplicationInfo("PPSA26344");
         var memory = new FakeCpuMemory(MemoryBase, 0x1_000);
         var context = new CpuContext(memory, Generation.Gen5);
         var labelAddress = MemoryBase + 0x100;
@@ -99,11 +101,29 @@ public sealed class NpEntitlementAccessExportsTests
     [Fact]
     public void GhostOfYoteiOptionalEntitlement_RemainsUnowned()
     {
+        KernelMemoryCompatExports.ConfigureApplicationInfo("PPSA26344");
         var memory = new FakeCpuMemory(MemoryBase, 0x1_000);
         var context = new CpuContext(memory, Generation.Gen5);
         var labelAddress = MemoryBase + 0x100;
         var infoAddress = MemoryBase + 0x200;
         memory.WriteCString(labelAddress, "GHOST2DDE0000000");
+        context[CpuRegister.Rsi] = labelAddress;
+        context[CpuRegister.Rdx] = infoAddress;
+
+        Assert.Equal(
+            unchecked((int)0x817D0007),
+            NpEntitlementAccessExports.NpEntitlementAccessGetAddcontEntitlementInfo(context));
+    }
+
+    [Fact]
+    public void OtherTitlesOwnNoAddcontEntitlements()
+    {
+        KernelMemoryCompatExports.ConfigureApplicationInfo("PPSA02633");
+        var memory = new FakeCpuMemory(MemoryBase, 0x1_000);
+        var context = new CpuContext(memory, Generation.Gen5);
+        var labelAddress = MemoryBase + 0x100;
+        var infoAddress = MemoryBase + 0x200;
+        memory.WriteCString(labelAddress, "GHOST2APP0000000");
         context[CpuRegister.Rsi] = labelAddress;
         context[CpuRegister.Rdx] = infoAddress;
 

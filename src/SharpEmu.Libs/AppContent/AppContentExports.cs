@@ -13,10 +13,11 @@ public static class AppContentExports
 {
     private const ulong FallbackAvailableSpaceKb = 1024UL * 1024UL; // 1 GiB
     private const int AppContentErrorParameter = unchecked((int)0x80D90002);
-    private const int AppContentErrorDrmNoEntitlement = unchecked((int)0x80D90007);
     private const int MountPointSize = 16;
+    private const int EntitlementLabelSize = 17;
     private const ulong BootParamAttrOffset = 4;
     private const string Temp0MountPoint = "/temp0";
+    private const string AddcontMountPoint = "/addcont0";
     private const uint AppParamSkuFlag = 0;
     private const int AppParamSkuFlagFull = 3;
 
@@ -116,13 +117,28 @@ public static class AppContentExports
             return ctx.SetReturn(AppContentErrorParameter);
         }
 
-        Span<byte> emptyMountPoint = stackalloc byte[MountPointSize];
-        if (!ctx.Memory.TryWrite(mountPointAddress, emptyMountPoint))
+        Span<byte> labelBytes = stackalloc byte[EntitlementLabelSize];
+        if (!ctx.Memory.TryRead(entitlementLabelAddress, labelBytes))
         {
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        return ctx.SetReturn(AppContentErrorDrmNoEntitlement);
+        TraceAppContent($"addcont_mount label='{ReadLabel(labelBytes)}'");
+
+        // The dump's pak files already carry the add-on content: grant the mount and
+        // return a mount point. Refusing here (DRM_NO_ENTITLEMENT) makes titles like
+        // Street Fighter 6 retry the mount in a tight loop forever, because the PSN
+        // entitlement the real hardware checks cannot be reproduced offline. Reads
+        // under the mount point resolve to an empty host directory.
+        Span<byte> mountPoint = stackalloc byte[MountPointSize];
+        mountPoint.Clear();
+        Encoding.ASCII.GetBytes(AddcontMountPoint).CopyTo(mountPoint);
+        if (!ctx.Memory.TryWrite(mountPointAddress, mountPoint))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
     [SysAbiExport(
@@ -255,6 +271,19 @@ public static class AppContentExports
         {
             return true;
         }
+    }
+
+    private static string ReadLabel(ReadOnlySpan<byte> bytes)
+    {
+        var length = 0;
+        while (length < bytes.Length && bytes[length] != 0)
+        {
+            length++;
+        }
+
+        return length == 0
+            ? string.Empty
+            : Encoding.ASCII.GetString(bytes[..length]);
     }
 
     private static void TraceAppContent(string message)

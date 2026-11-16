@@ -4,6 +4,7 @@
 using System.Buffers.Binary;
 using System.Text;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Kernel;
 
 namespace SharpEmu.Libs.Np;
 
@@ -47,6 +48,18 @@ public static class NpEntitlementAccessExports
         new("GHOST2APP0000000", PackageTypePsal, DownloadStatusInstalled),
         new("GHOST2BASE000000", PackageTypePsal, DownloadStatusInstalled),
     ];
+
+    // The owned labels of the running title. They belong to specific titles only;
+    // every other title owns none. Reporting them globally made titles like
+    // Street Fighter 6 try to mount other games' add-on packages, which the mount
+    // refused, and the title retried forever without ever finishing its boot.
+    private static IReadOnlyList<AddcontEntitlement> OwnedEntitlements() =>
+        KernelMemoryCompatExports.ApplicationTitleId switch
+        {
+            "PPSA04264" => OwnedAddcontEntitlements[..3],
+            "PPSA26344" => OwnedAddcontEntitlements[3..],
+            _ => [],
+        };
 
     private readonly record struct AddcontEntitlement(
         string Label,
@@ -138,7 +151,8 @@ public static class NpEntitlementAccessExports
             return ctx.SetReturn(NpEntitlementAccessErrorParameter);
         }
 
-        var hitNum = (uint)OwnedAddcontEntitlements.Length;
+        var owned = OwnedEntitlements();
+        var hitNum = (uint)owned.Count;
         Span<byte> hitNumBytes = stackalloc byte[sizeof(uint)];
         BinaryPrimitives.WriteUInt32LittleEndian(hitNumBytes, hitNum);
         if (!ctx.Memory.TryWrite(hitNumAddress, hitNumBytes))
@@ -164,7 +178,7 @@ public static class NpEntitlementAccessExports
                 if (!TryWriteAddcontEntitlementInfo(
                         ctx,
                         listAddress + index * (ulong)AddcontEntitlementInfoSize,
-                        OwnedAddcontEntitlements[(int)index]))
+                        owned[(int)index]))
                 {
                     return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
                 }
@@ -205,7 +219,7 @@ public static class NpEntitlementAccessExports
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        foreach (var entitlement in OwnedAddcontEntitlements)
+        foreach (var entitlement in OwnedEntitlements())
         {
             if (!string.Equals(label, entitlement.Label, StringComparison.Ordinal))
             {
@@ -255,7 +269,7 @@ public static class NpEntitlementAccessExports
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        return ctx.SetReturn(OwnedAddcontEntitlements.Any(entitlement =>
+        return ctx.SetReturn(OwnedEntitlements().Any(entitlement =>
             string.Equals(label, entitlement.Label, StringComparison.Ordinal))
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
             : NpEntitlementAccessErrorNoEntitlement);
