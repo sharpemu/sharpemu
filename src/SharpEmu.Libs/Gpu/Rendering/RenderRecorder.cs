@@ -846,14 +846,14 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         return true;
     }
 
-    private static int StageInputMismatch(in ShaderStageResources current, in ShaderStageResources kept)
+    private static int StageInputMismatch(in ShaderStageResources current, in ShaderStageResources kept, bool compareThreadLimits = true)
     {
         if (!ReferenceEquals(current.Program, kept.Program) || current.ShaderBase != kept.ShaderBase)
         {
             return 0;
         }
 
-        if (current.ThreadLimits != kept.ThreadLimits || current.MeshDraw != kept.MeshDraw || current.TessellationData is { Length: > 0 } ||
+        if ((compareThreadLimits && current.ThreadLimits != kept.ThreadLimits) || current.MeshDraw != kept.MeshDraw || current.TessellationData is { Length: > 0 } ||
             kept.TessellationData is { Length: > 0 } ||
             !(current.CallArguments ?? []).AsSpan().SequenceEqual(kept.CallArguments ?? []))
         {
