@@ -717,6 +717,14 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
+        // A stencil storage binding whose depth image moved to another stencil plane after the binding was resolved, with
+        // no depth image holding the requested plane now: the binding is found again (the old plane is its own image then).
+        private bool HoldsMovedStencilPlane(TextureResource binding) =>
+            binding.IsStorage && ViewFormatRules.IsStencilViewFormat(binding.Request.View.Format) &&
+            _imageCache.TryGetImage(binding.ImageIdentifier, out var image) && image.Description.HasStencil &&
+            !FitsStencilPlane(binding.Request.Description, image) &&
+            !_imageCache.TryFindStencilOwner(binding.Request.Description.Data, out _);
+
         private static bool FitsStencilPlane(in ImageDescription request, CachedImage attachment) =>
             request.Data.Address == attachment.Description.Stencil.Address && request.Data.Size <= attachment.Description.Stencil.Size;
 

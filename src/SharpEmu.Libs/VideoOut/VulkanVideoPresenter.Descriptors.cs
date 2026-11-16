@@ -1886,7 +1886,8 @@ internal static unsafe partial class VulkanVideoPresenter
             var images = prepared.Descriptors.Images;
             var nulled = RefindStaleBindings(
                 images.Length,
-                index => !images[index].IsHostMovie && IsStaleImage(images[index].ImageIdentifier, out _),
+                index => !images[index].IsHostMovie &&
+                    (IsStaleImage(images[index].ImageIdentifier, out _) || HoldsMovedStencilPlane(images[index])),
                 (index, asNull) =>
                 {
                     if (_imageCache.TryGetImage(images[index].ImageIdentifier, out var stale))
