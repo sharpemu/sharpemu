@@ -2118,7 +2118,8 @@ public static partial class ResourceMaterializer
 
             var imageClass = images[(int)exemplar];
             var separateSampledDimensions = info.Images[rootIndex].ResourceClass == ImageResourceClass.Sampled;
-            var sharedSelector = plan.DescriptorSources[(int)info.Images[rootIndex].Source].IndirectImage is { SharedSelector: true };
+            var nullIncompatible = plan.NullIncompatibleImageCandidates ||
+                plan.DescriptorSources[(int)info.Images[rootIndex].Source].IndirectImage is { SharedSelector: true };
             for (var candidate = 0; candidate < images.Count; candidate++)
             {
                 var image = images[candidate];
@@ -2128,7 +2129,8 @@ public static partial class ResourceMaterializer
                 }
 
                 // A shared selector read such a table as null before it had one: a candidate of another class reads as null too.
-                if (sharedSelector && !NullImageDescriptor(snapshot.Images[candidate]) &&
+                // So does one of a table the program cache could not read from the heap (NullIncompatibleImageCandidates).
+                if (nullIncompatible && !NullImageDescriptor(snapshot.Images[candidate]) &&
                     !CompatibleCandidates(image, imageClass, separateSampledDimensions))
                 {
                     Array.Clear(snapshot.Images[candidate]);

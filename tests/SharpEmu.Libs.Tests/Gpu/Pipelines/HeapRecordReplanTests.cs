@@ -25,6 +25,7 @@ public sealed class HeapRecordReplanTests : IDisposable
     private const uint KeyOffset = 60;
     private const uint ImageType2D = 9;
     private const uint Format32Float = 22;
+    private const uint Format32Uint = 20;
 
     private readonly FatalScope _fatal = new();
     private readonly PipelineTestGuest _guest = new();
@@ -61,6 +62,10 @@ public sealed class HeapRecordReplanTests : IDisposable
             _guest.WriteWords(Heap + key * 32, 0x2000 + key, Format32Float << 20, 0, 0xFAC | (ImageType2D << 28), 0, 0, 0, 0);
         }
     }
+
+    // One record of the table holds an image of another kind than the others (an integer texture where they are float).
+    private void WriteImageOfAnotherKind(uint key) =>
+        _guest.WriteWords(Heap + key * 32, 0x2000 + key, Format32Uint << 20, 0, 0xFAC | (ImageType2D << 28), 0, 0, 0, 0);
 
     private static StageCompileOptions PixelOptions() => new()
     {
@@ -121,5 +126,39 @@ public sealed class HeapRecordReplanTests : IDisposable
         WriteScene(materialCount: 3);
         Assert.True(TryCompile(out _, out rejection), rejection);
         Assert.Single(_guest.Compiler.Requests);
+    }
+
+    // Demon's Souls (compute 0x9FB5CC274B5E4F82): "indirect image table ... has incompatible candidates", and the dispatch was
+    // skipped every frame. An image of another kind cannot share the table's binding.
+    [Fact]
+    public void ATableWithAnImageOfAnotherKindIsReadFromTheHeapWhenTheHostHasOne()
+    {
+        _guest.Host.SupportsBindlessHeap = true;
+        WriteScene(materialCount: 8);
+        WriteImageOfAnotherKind(key: 5);
+
+        Assert.True(TryCompile(out _, out var rejection), rejection);
+
+        var request = Assert.Single(_guest.Compiler.Requests);
+        Assert.True(request.Resources.Info.UsesBindlessHeap);
+        Assert.NotEmpty(request.HeapImageByMemoryIndex);
+    }
+
+    [Fact]
+    public void ATableWithAnImageOfAnotherKindReadsItAsNullWithoutTheHeap()
+    {
+        _guest.Host.SupportsBindlessHeap = false;
+        WriteScene(materialCount: 8);
+        WriteImageOfAnotherKind(key: 5);
+
+        Assert.True(TryCompile(out _, out var rejection), rejection);
+
+        var request = Assert.Single(_guest.Compiler.Requests);
+        Assert.False(request.Resources.Info.UsesBindlessHeap);
+        Assert.True(request.Resources.Info.Images.Count > 1);
+
+        // The program keeps reading such a candidate as null: a table of one kind again finds the permutation.
+        WriteScene(materialCount: 8);
+        Assert.True(TryCompile(out _, out rejection), rejection);
     }
 }

@@ -734,6 +734,21 @@ internal sealed partial class ShaderProgramCache
                         captureIndirectImageFailure);
                 }
 
+                if (!materialized && materializationFailure == ResourceMaterializationFailure.IncompatibleImageCandidates &&
+                    !entry.Plan.NullIncompatibleImageCandidates)
+                {
+                    // No heap record serves the table, and an image of another kind cannot share its binding. That image
+                    // reads as null, as main read a candidate it could not use, so the operation still runs instead of
+                    // being skipped every time the table selects it.
+                    Console.Error.WriteLine(
+                        $"[GPU][INFO] Shader reads the images of another kind in its image table as null: stage={source.Label} " +
+                        $"hash=0x{source.Hash:X16} shader=0x{source.Address:X16}.");
+                    entry.Plan.NullIncompatibleImageCandidates = true;
+                    outcome = MaterializationTally.Outcome.Full;
+                    materialized = ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure,
+                        captureIndirectImageFailure);
+                }
+
                 MaterializationTally.Note(materialized ? outcome : MaterializationTally.Outcome.Failed,
                     System.Diagnostics.Stopwatch.GetTimestamp() - started, materialized ? snapshot : null);
                 if (!materialized)

@@ -223,6 +223,11 @@ public sealed partial class ShaderResourcePlan
     // Planned with preferHeapRecords (see ResourceTracker.Track).
     public bool PreferredHeapRecords { get; private set; }
 
+    // An indirect image table candidate of another kind than the table's first image reads as null, as a shared
+    // selector's always does, instead of failing the materialization. Set once by the program cache when such a table
+    // cannot be read from the bindless heap; tables of one kind materialize the same either way.
+    public bool NullIncompatibleImageCandidates { get; set; }
+
     public static ShaderResourcePlan Extract(Gen5ShaderProgram program, ShaderStage stage, ulong hash, uint userDataBase, uint userDataCount,
         IReadOnlySet<uint>? fixedFunctionVertexLoads = null, Action<ShaderResourcePlan>? beforeResourceTracking = null, uint waveSize = 64,
         bool bindlessNullDescriptors = false, bool bindlessHeap = false, bool callRecords = false, bool callMarks = false,

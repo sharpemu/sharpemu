@@ -99,7 +99,7 @@ public sealed class GraphicsRejectionPolicyTests
     [InlineData(true, false)]
     [InlineData(false, true)]
     [InlineData(true, true)]
-    public void PixelCandidateValidationHonorsCapacityAndStrictMode(bool strict, bool distinctCandidates)
+    public void PixelCandidateTableCompilesStrictOrNot(bool strict, bool distinctCandidates)
     {
         using var fatal = new FatalScope();
         var guest = new PipelineTestGuest();
@@ -113,28 +113,11 @@ public sealed class GraphicsRejectionPolicyTests
         var source = guest.Source(PixelAddress, ShaderStage.Pixel, [(uint)(TableAddress & uint.MaxValue), (uint)(TableAddress >> 32)]);
         var options = new StageCompileOptions { PixelInfo = new PixelInputInfo() };
         var cursor = 7u;
-        if (distinctCandidates)
-        {
-            Assert.True(guest.Programs.TryGetProgram(source, options, strict, ref cursor, out var program, out _, out var rejection), rejection);
-            Assert.True(program.IsValid);
-            Assert.Single(guest.Compiler.Requests);
-            Assert.Single(guest.Host.Modules);
-            return;
-        }
-        if (strict)
-        {
-            var failure = Assert.Throws<SchedulerFatalException>(() => guest.Programs.TryGetProgram(
-                source, options, true, ref cursor, out _, out _, out _));
-            Assert.Contains("could not be materialized", failure.Message);
-        }
-        else
-        {
-            Assert.False(guest.Programs.TryGetProgram(source, options, false, ref cursor, out var program, out _, out var rejection));
-            Assert.False(program.IsValid);
-            Assert.Contains("could not be materialized", rejection);
-        }
-        Assert.Equal(7u, cursor);
-        Assert.Empty(guest.Compiler.Requests);
-        Assert.Empty(guest.Host.Modules);
+        // Distinct candidates fit one binding. A 3D candidate among 2D ones cannot share it: with no heap to read the table
+        // from, it reads as null and the draw still runs, strict or not.
+        Assert.True(guest.Programs.TryGetProgram(source, options, strict, ref cursor, out var program, out _, out var rejection), rejection);
+        Assert.True(program.IsValid);
+        Assert.Single(guest.Compiler.Requests);
+        Assert.Single(guest.Host.Modules);
     }
 }
