@@ -244,6 +244,13 @@ public sealed partial class GuestImageCache
         var destination = _slots[destinationImageIdentifier];
         var source = _slots[sourceImageIdentifier];
         WatchImage(destinationImageIdentifier);
+        // A description can match the source at a level its backing does not hold (CachedImage keeps no more levels
+        // than the backing's extent has): the destination keeps what it read from the guest.
+        if (mip >= destination.Backing.MipLevels)
+        {
+            return;
+        }
+
         if (source.IsBufferModified || source.Backing.Samples != destination.Backing.Samples)
         {
             throw SubmissionScheduler.Fatal($"The mip copy source ownership or sample count is invalid: bufferModified={source.IsBufferModified} sourceSamples={source.Backing.Samples} destinationSamples={destination.Backing.Samples}.");
