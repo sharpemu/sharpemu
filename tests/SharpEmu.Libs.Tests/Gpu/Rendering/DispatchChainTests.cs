@@ -18,14 +18,22 @@ public sealed class DispatchChainTests : IDisposable
     private readonly FakePipelineProvider _pipelines = new();
     private readonly RenderExecutor _executor;
     private readonly FatalScope _fatal = new();
+    private readonly bool _sameProgramWrites = DispatchChain.SameProgramWrites;
 
     public DispatchChainTests() => _executor = new RenderExecutor(_host, _pipelines);
 
-    public void Dispose() => _fatal.Dispose();
+    public void Dispose()
+    {
+        DispatchChain.SameProgramWrites = _sameProgramWrites;
+        _fatal.Dispose();
+    }
 
     private static BufferResourceInfo Written => new(false, true, false, false, false, 4);
 
     private static BufferResourceInfo Read => new(true, false, false, false, false, 4);
+
+    // As the shader tracker records an atomic binding: read, written and atomic.
+    private static BufferResourceInfo Atomic => new(true, true, true, false, false, 4);
 
     private void Dispatch(ulong submitId, BufferResourceInfo[] buffers, uint[][] descriptors)
     {
@@ -34,6 +42,107 @@ public sealed class DispatchChainTests : IDisposable
     }
 
     private int HazardBarriers => _host.Calls.Count(call => call == "write_hazard_barrier");
+
+    private void DispatchStage(ulong submitId, ShaderStageResources stage)
+    {
+        _pipelines.Compute = ComputeProgram(stage);
+        _executor.Dispatch(submitId, Banks(), 1, 1, 1, 0x41);
+    }
+
+    // SHARPEMU_CHAIN_SAME_PROGRAM_WRITES: dispatches of one program the guest left unordered may write the same span.
+    [Theory]
+    [InlineData(true, 1)]
+    [InlineData(false, 2)]
+    public void SameProgramWritesOverOneSpanShareTheChain(bool sameProgramWrites, int barriers)
+    {
+        DispatchChain.SameProgramWrites = sameProgramWrites;
+        Dispatch(1, [Written], [BufferDescriptor(BufferA, 4, 16)]);
+        Dispatch(2, [Written], [BufferDescriptor(BufferA, 4, 16)]);
+
+        Assert.Equal(barriers, HazardBarriers);
+    }
+
+    [Fact]
+    public void WritesOverOneSpanByTwoProgramsKeepTheBarrier()
+    {
+        DispatchChain.SameProgramWrites = true;
+        Dispatch(1, [Written], [BufferDescriptor(BufferA, 4, 16)]);
+        var other = new ShaderProgramInfo { Stage = ShaderStageKind.Compute, Hash = 0x0BAD_C0DE, Buffers = [Written] };
+        DispatchStage(2, Stage(other, [BufferDescriptor(BufferA, 4, 16)]));
+
+        Assert.Equal(2, HazardBarriers);
+    }
+
+    [Fact]
+    public void SameProgramAtomicsOverOneSpanShareTheChain()
+    {
+        DispatchChain.SameProgramWrites = true;
+        Dispatch(1, [Atomic], [BufferDescriptor(BufferA, 4, 16)]);
+        Dispatch(2, [Atomic], [BufferDescriptor(BufferA, 4, 16)]);
+
+        Assert.Equal(1, HazardBarriers);
+    }
+
+    [Fact]
+    public void AnAtomicOverAPlainWriteKeepsTheBarrier()
+    {
+        DispatchChain.SameProgramWrites = true;
+        Dispatch(1, [Written], [BufferDescriptor(BufferA, 4, 16)]);
+        Dispatch(2, [Atomic], [BufferDescriptor(BufferA, 4, 16)]);
+
+        Assert.Equal(2, HazardBarriers);
+    }
+
+    [Fact]
+    public void APlainReadOfAnAtomicSpanKeepsTheBarrier()
+    {
+        DispatchChain.SameProgramWrites = true;
+        Dispatch(1, [Atomic], [BufferDescriptor(BufferA, 4, 16)]);
+        Dispatch(2, [Read], [BufferDescriptor(BufferA + 0x20, 4, 4)]);
+
+        Assert.Equal(2, HazardBarriers);
+    }
+
+    [Fact]
+    public void SameProgramWritersShareTheChainUntilAReaderOfTheirBytes()
+    {
+        DispatchChain.SameProgramWrites = true;
+        Dispatch(1, [Written], [BufferDescriptor(BufferA, 4, 16)]);
+        Dispatch(2, [Written], [BufferDescriptor(BufferA, 4, 16)]);
+        Dispatch(3, [Written], [BufferDescriptor(BufferA, 4, 16)]);
+        Dispatch(4, [Read], [BufferDescriptor(BufferA + 0x20, 4, 4)]);
+
+        Assert.Equal(2, HazardBarriers);
+    }
+
+    [Fact]
+    public void APromotionBetweenSameProgramWritersStartsANewChain()
+    {
+        DispatchChain.SameProgramWrites = true;
+        Dispatch(1, [Written], [BufferDescriptor(BufferA, 4, 16)]);
+        _host.Promotions++;
+        Dispatch(2, [Written], [BufferDescriptor(BufferA, 4, 16)]);
+
+        Assert.Equal(2, HazardBarriers);
+    }
+
+    [Fact]
+    public void ALongSameProgramRunOverOneSpanKeepsOneBarrierAndShortLists()
+    {
+        DispatchChain.SameProgramWrites = true;
+        var chain = new DispatchChain();
+        var stage = Stage(Program(ShaderStageKind.Compute, buffers: [Written]), [BufferDescriptor(BufferA, 4, 16)]);
+        var record = new ResolvedDispatch { HasStorageWrites = true };
+        var barriers = 0;
+        for (var index = 0; index < 2000; index++)
+        {
+            barriers += chain.NeedsHazardBarrier(record, in stage, promotions: 0) ? 1 : 0;
+            chain.Commit(deferred: true, promotions: 0);
+        }
+
+        Assert.Equal(1, barriers);
+        Assert.True(chain.SpanCount <= 2, $"spans {chain.SpanCount}");
+    }
 
     [Theory]
     [InlineData(false)]
