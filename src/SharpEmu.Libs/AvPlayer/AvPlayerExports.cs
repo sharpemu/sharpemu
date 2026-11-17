@@ -1179,7 +1179,8 @@ public static class AvPlayerExports
                 return SetReturn(ctx, InvalidParameters);
             }
 
-            var milliseconds = player.AvSyncMode == AvSyncModeDefault && player.HasAudio
+            var milliseconds = player.AvSyncMode == AvSyncModeDefault &&
+                player.HasAudio && player.AudioStreamIndex >= 0
                 ? player.StartTimeMilliseconds + DefaultSyncElapsedMilliseconds(
                     player.NextAudioFrameIndex,
                     SecondsSinceAudioEnded(player.AudioEndedSeconds, player.PlaybackClock.Elapsed.TotalSeconds))
@@ -1811,8 +1812,15 @@ public static class AvPlayerExports
             var expectedFrame = player.NextFrameIndex;
             if (player.AvSyncMode == AvSyncModeDefault)
             {
+                // The default sync follows the delivered audio, but only when the game
+                // actually enabled the audio stream. Street Fighter 6 enables the video
+                // stream alone and plays the movie audio through its own audio system:
+                // following the never-consumed audio track stalled the video on its first
+                // frame forever (the title stayed on a black screen). Without an enabled
+                // audio stream the video runs on the playback clock.
+                var audioClockIsMaster = player.HasAudio && player.AudioStreamIndex >= 0;
                 expectedFrame = CalculateExpectedDefaultSyncVideoFrame(
-                    player.HasAudio,
+                    audioClockIsMaster,
                     player.NextAudioFrameIndex,
                     player.PlaybackClock.Elapsed.TotalSeconds,
                     fps,
