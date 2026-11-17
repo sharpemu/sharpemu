@@ -16,7 +16,8 @@ namespace SharpEmu.Libs.VideoOut;
 // holds a run of elements (BindlessHeapViewTable), which the draw's shader data names. The shader marks each element it
 // reads in a feedback bitset; once the marking work completes, the host reads the record's T# or S# from the guest heap
 // and writes its view or sampler. The records of a view are read again periodically while draws read the view, and a
-// heap image's contents and layout are made current before each command that reads set 1.
+// heap image's contents and layout are made current before each command that reads set 1. A record that holds an integer
+// texture gets an integer view, and the feedback buffer tells the shader the element's numeric class.
 internal static unsafe partial class VulkanVideoPresenter
 {
     // Revalidation reads the heap records it compares in runs, one guest read per run of nearby records, instead of one
@@ -135,6 +136,9 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private static ulong FeedbackBytes => (ulong)BindlessHeap.FeedbackWords * sizeof(uint);
 
+        // The mark bitsets, which are read back; the element classes after them are the host's own.
+        private static ulong MarkBytes => (ulong)BindlessHeap.MarkWords * sizeof(uint);
+
         // One record the shaders marked: the words it was resolved from and what set 1 holds for it.
         private sealed class HeapEntry
         {
@@ -147,6 +151,8 @@ internal static unsafe partial class VulkanVideoPresenter
             public ResourceSlotIdentifier ImageIdentifier;
             public ImageRequest Request;
             public bool Resolved;
+            // The numeric class of the view a resolved image entry holds.
+            public ImageNumericClass NumericClass;
         }
 
         private bool _bindlessHeapSupported;
@@ -159,6 +165,8 @@ internal static unsafe partial class VulkanVideoPresenter
         private int _heapFeedbackReady;
         private int _heapFeedbackCopyPending;
         private uint[] _heapMarked = [];
+        // The element classes the feedback buffer holds (BindlessHeap.ClassCode).
+        private uint[] _heapClasses = [];
         private readonly Dictionary<(int Slot, uint Index), HeapEntry> _heapEntries = new();
         private readonly Dictionary<CachedImage, List<HeapEntry>> _heapEntriesByImage = new(ReferenceEqualityComparer.Instance);
         private readonly HashSet<CachedImage> _heapChangedImages = new(ReferenceEqualityComparer.Instance);
@@ -303,7 +311,7 @@ internal static unsafe partial class VulkanVideoPresenter
             SetDebugName(ObjectType.DescriptorSet, set.Handle, "SharpEmu bindless heap");
 
             _heapFeedback = new GpuBuffer(_deviceInfo, _scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AllFlags, FeedbackBytes);
-            _heapFeedbackReadback = new GpuBuffer(_deviceInfo, _scheduler, GpuBufferUsage.Download, 0, GpuBuffer.AllFlags, FeedbackBytes);
+            _heapFeedbackReadback = new GpuBuffer(_deviceInfo, _scheduler, GpuBufferUsage.Download, 0, GpuBuffer.AllFlags, MarkBytes);
             var completedReadback = _heapFeedbackReadback;
             _heapFeedbackCopyCompleted = () =>
             {
@@ -313,7 +321,8 @@ internal static unsafe partial class VulkanVideoPresenter
             };
             _ = BeginBatchedGuestCommands();
             _heapFeedback.Fill(0, FeedbackBytes, 0);
-            _heapMarked = new uint[BindlessHeap.FeedbackWords];
+            _heapMarked = new uint[BindlessHeap.MarkWords];
+            _heapClasses = new uint[BindlessHeap.ClassWords];
             Span<uint> nullSampler = stackalloc uint[4];
             _heapNullSampler = _samplerStore.GetSampler(new SamplerDescriptorWords(nullSampler), integerView: false);
             _heapImageChanged = image =>
@@ -549,10 +558,10 @@ internal static unsafe partial class VulkanVideoPresenter
             if (Interlocked.Exchange(ref _heapFeedbackReady, 0) != 0)
             {
                 var completed = _heapFeedbackReadback!;
-                completed.Invalidate(0, FeedbackBytes);
+                completed.Invalidate(0, MarkBytes);
                 // Keep the slot pending through consumption, including any reentrant preparation. No later GPU copy
                 // may overwrite these mapped words until every marked record has been resolved.
-                ResolveMarkedRecords(MemoryMarshal.Cast<byte, uint>(completed.Mapped[..(int)FeedbackBytes]));
+                ResolveMarkedRecords(MemoryMarshal.Cast<byte, uint>(completed.Mapped[..(int)MarkBytes]));
                 Volatile.Write(ref _heapFeedbackCopyPending, 0);
             }
 
@@ -566,7 +575,7 @@ internal static unsafe partial class VulkanVideoPresenter
             Volatile.Write(ref _heapFeedbackCopyPending, 1);
             _ = BeginBatchedGuestCommands();
             readback.CopyFrom(
-                _scheduler.Current, feedback, 0, 0, FeedbackBytes,
+                _scheduler.Current, feedback, 0, 0, MarkBytes,
                 AccessFlags.ShaderWriteBit | AccessFlags.MemoryWriteBit, AccessFlags.None,
                 AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit | AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit,
                 AccessFlags.HostReadBit);
@@ -639,7 +648,8 @@ internal static unsafe partial class VulkanVideoPresenter
 
             // A T# that had no image when it was last looked at (its texture was not mapped) is looked at again.
             if (words.SequenceEqual(entry.Words) &&
-                (entry.Resolved || entry.Slot >= BindlessHeap.ImageKinds.Length || words.Length != 8 || !ResourceMaterializer.IsFloatHeapImage(words)))
+                (entry.Resolved || entry.Slot >= BindlessHeap.ImageKinds.Length ||
+                 HeapRecordClass(entry.Slot, words) == ImageNumericClass.Unsupported))
             {
                 return false;
             }
@@ -715,9 +725,10 @@ internal static unsafe partial class VulkanVideoPresenter
             else
             {
                 ImageView view = default;
-                if (entry.Words.Length == 8 && ResourceMaterializer.IsFloatHeapImage(entry.Words))
+                var numericClass = HeapRecordClass(entry.Slot, entry.Words);
+                if (numericClass != ImageNumericClass.Unsupported)
                 {
-                    view = AcquireHeapImage(entry);
+                    view = AcquireHeapImage(entry, numericClass);
                 }
 
                 WriteHeapImage(entry.Slot, entry.Index, view);
@@ -727,7 +738,15 @@ internal static unsafe partial class VulkanVideoPresenter
             released?.Invoke();
         }
 
-        private static ShaderImageShape HeapImageShape(int slot)
+        // The numeric class of the view an array of this slot holds for the record, or Unsupported when it holds none:
+        // every class holds float textures, and the ones with integer forms hold integer textures too.
+        private static ImageNumericClass HeapRecordClass(int slot, ReadOnlySpan<uint> words)
+        {
+            var numericClass = words.Length == 8 ? ResourceMaterializer.HeapImageNumericClass(words) : ImageNumericClass.Unsupported;
+            return numericClass == ImageNumericClass.Float || BindlessHeap.HoldsIntegers(slot) ? numericClass : ImageNumericClass.Unsupported;
+        }
+
+        private static ShaderImageShape HeapImageShape(int slot, ImageNumericClass numericClass)
         {
             var heapClass = BindlessHeap.ImageClasses[slot];
             var dimension = heapClass.Dimension;
@@ -737,7 +756,12 @@ internal static unsafe partial class VulkanVideoPresenter
                 Cube: heapClass.Cube,
                 Storage: false,
                 DynamicMip: false,
-                NumericClass: TextureNumericClass.Float,
+                NumericClass: numericClass switch
+                {
+                    ImageNumericClass.Uint => TextureNumericClass.Uint,
+                    ImageNumericClass.Sint => TextureNumericClass.Sint,
+                    _ => TextureNumericClass.Float,
+                },
                 OneDimensional: dimension is ImageDimension.Dim1D or ImageDimension.Dim1DArray,
                 DepthCompare: heapClass.Compare);
         }
@@ -746,14 +770,14 @@ internal static unsafe partial class VulkanVideoPresenter
             format is Format.D16Unorm or Format.D32Sfloat or Format.D24UnormS8Uint or Format.D32SfloatS8Uint or Format.D16UnormS8Uint;
 
         // Finds the record's image the way a draw finds a texture, and leaves it in the general layout the heap reads.
-        private ImageView AcquireHeapImage(HeapEntry entry)
+        private ImageView AcquireHeapImage(HeapEntry entry, ImageNumericClass numericClass)
         {
             TextureRequestResolution resolution;
             try
             {
                 using (ImageRequestBuilders.RejectInvalidDescriptors())
                 {
-                    resolution = ImageRequestBuilders.Texture(entry.Words, HeapImageShape(entry.Slot));
+                    resolution = ImageRequestBuilders.Texture(entry.Words, HeapImageShape(entry.Slot, numericClass));
                 }
             }
             catch (TextureDescriptorRejectedException)
@@ -780,8 +804,9 @@ internal static unsafe partial class VulkanVideoPresenter
             _imageCache.ApplyNativeColorClear(identifier, resolution.Request);
             var image = _imageCache.GetImage(identifier);
             var viewDescription = resolution.Request.View;
-            // Depth-reference sampling needs a depth view; an integer view cannot stand in for the float class.
-            if (!image.SupportsViewType(viewDescription) || ViewFormatRules.IsIntegerFormat(viewDescription.Format) ||
+            // Depth-reference sampling needs a depth view; the view has the numeric class the shader reads the element by.
+            if (!image.SupportsViewType(viewDescription) ||
+                ViewFormatRules.IsIntegerFormat(viewDescription.Format) != (numericClass != ImageNumericClass.Float) ||
                 (BindlessHeap.ImageClasses[entry.Slot].Compare && !IsDepthViewFormat(viewDescription.Format)))
             {
                 return default;
@@ -793,6 +818,7 @@ internal static unsafe partial class VulkanVideoPresenter
             entry.ImageIdentifier = identifier;
             entry.Request = resolution.Request;
             entry.Resolved = true;
+            entry.NumericClass = numericClass;
             if (!_heapEntriesByImage.TryGetValue(image, out var entries))
             {
                 entries = [];
@@ -840,6 +866,33 @@ internal static unsafe partial class VulkanVideoPresenter
                 PImageInfo = &info,
             };
             _vk.UpdateDescriptorSets(_device, 1, &write, 0, null);
+            WriteHeapElementClass(index);
+        }
+
+        // The numeric class of the element at index, for the shaders: that of the integer view an array holds there (the
+        // arrays hold views of one record at an index), or float.
+        private void WriteHeapElementClass(uint index)
+        {
+            var code = 0u;
+            for (var slot = 0; slot < BindlessHeap.ImageKinds.Length && code == 0; slot++)
+            {
+                if (_heapEntries.TryGetValue((slot, index), out var entry) && entry.Resolved)
+                {
+                    code = BindlessHeap.ClassCode(entry.NumericClass);
+                }
+            }
+
+            var word = (int)(index >> (int)BindlessHeap.ClassWordShift);
+            var shift = (int)((index & (BindlessHeap.ClassesPerWord - 1)) * BindlessHeap.ClassBits);
+            var classes = (_heapClasses[word] & ~(BindlessHeap.ClassMask << shift)) | (code << shift);
+            if (classes == _heapClasses[word])
+            {
+                return;
+            }
+
+            _heapClasses[word] = classes;
+            _ = BeginBatchedGuestCommands();
+            _heapFeedback!.Fill((BindlessHeap.MarkWords + (ulong)word) * sizeof(uint), sizeof(uint), classes);
         }
 
         private void WriteHeapSampler(HeapEntry entry)

@@ -1312,18 +1312,22 @@ public static partial class ResourceMaterializer
         return true;
     }
 
-    // A bindless heap record the host can give a float view without a conversion in the shader: a valid sampled T# of a
-    // float format. A freed record (0xFEFEFEFE words) fails the reserved-bit check.
-    public static bool IsFloatHeapImage(ReadOnlySpan<uint> words)
+    // The numeric class of a bindless heap record the host can give a view without a conversion in the shader: a valid
+    // sampled T# of a float, unsigned or signed format. Any other record is Unsupported; a freed record (0xFEFEFEFE
+    // words) fails the reserved-bit check.
+    public static ImageNumericClass HeapImageNumericClass(ReadOnlySpan<uint> words)
     {
         if (words.Length < 8 || !UsableImageCandidate(words, r128: false))
         {
-            return false;
+            return ImageNumericClass.Unsupported;
         }
 
         var format = GuestImageFormat.FormatOf(words);
-        return GuestImageFormat.SampledNumericClass(format) == ImageNumericClass.Float &&
-            ImageConversionFormat(format) == GuestImageFormat.Invalid;
+        var numericClass = GuestImageFormat.SampledNumericClass(format);
+        return numericClass is ImageNumericClass.Float or ImageNumericClass.Uint or ImageNumericClass.Sint &&
+            ImageConversionFormat(format) == GuestImageFormat.Invalid
+            ? numericClass
+            : ImageNumericClass.Unsupported;
     }
 
     private static ulong ScalarBufferSize(ReadOnlySpan<uint> descriptor)

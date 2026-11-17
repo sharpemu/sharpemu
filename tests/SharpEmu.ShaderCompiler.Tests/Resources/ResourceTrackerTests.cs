@@ -403,7 +403,7 @@ public sealed class ResourceTrackerTests
         Image(32, "ImageSample", 8, 24),
         EndProgram(40));
 
-    internal static Gen5ShaderProgram LaneIndexedImageProgram(uint dimension = 1) => Program(
+    internal static Gen5ShaderProgram LaneIndexedImageProgram(uint dimension = 1, string opcode = "ImageSample") => Program(
         // The table V# in s16..s19 and the sampler in s24..s27 come from user data.
         MoveScalarRegister(0, 16, 0),
         MoveScalarRegister(4, 17, 1),
@@ -417,7 +417,7 @@ public sealed class ResourceTrackerTests
         ReadFirstLane(32, 106, 7),
         Sop2(36, "SLshlB32", 106, Gen5Operand.Scalar(106), Operand(5)),
         ScalarBufferLoad(40, 16, destination: 0, count: 8, dynamicOffsetRegister: 106),
-        Image(48, "ImageSample", 0, 24, dimension: dimension),
+        Image(48, opcode, 0, 24, dimension: dimension),
         EndProgram(56));
     // A shader that selects among states with v_cmpx and s_cbranch_execz sets a constant sampler up in the first state's block and samples
     // with it in a later state's block. The skip edge of the first branch reaches the join with the sampler registers unwritten, so the host

@@ -6310,6 +6310,11 @@ public static partial class Gen5SpirvTranslator
                     return false;
                 }
 
+                if (IsHeapLoad(instruction, out var heapLoad))
+                {
+                    return TryEmitHeapLoad(instruction, image, heapLoad, out error);
+                }
+
                 if (IsHeapVolumeRead(instruction, out var heapVolume, out var volumeType))
                 {
                     return TryEmitHeapVolumeRead(instruction, image, heapVolume, volumeType, out error);
@@ -6327,6 +6332,57 @@ public static partial class Gen5SpirvTranslator
             }
 
             return EmitImageOperation(instruction, image, resource, imageObject, dstSelect, mipLevel, out error);
+        }
+
+        // A heap record can hold an integer texture, which shaders read with loads and size queries: the instruction is the
+        // same whatever the format, and its result is the texel's bits. A load of a class with integer forms reads the
+        // record through the declaration of the element's numeric class.
+        private bool IsHeapLoad(Gen5ShaderInstruction instruction, out HeapRecordUse heapImage)
+        {
+            heapImage = default;
+            if (instruction.Opcode is not ("ImageLoad" or "ImageLoadMip" or "ImageGetResinfo") ||
+                !_request.Memory.TryGetIndex(instruction.Pc, 0, out var memoryIndex) ||
+                !_request.HeapImageByMemoryIndex.TryGetValue(memoryIndex, out heapImage))
+            {
+                return false;
+            }
+
+            var entry = _request.Memory[memoryIndex];
+            var info = _request.Resources.Info;
+            return entry.Resource < (uint)info.Images.Count &&
+                ImageDescriptorBinding.ForImage(info.Images[(int)entry.Resource]) is { } kind &&
+                BindlessHeap.HoldsIntegers(BindlessHeap.ImageSlot(kind));
+        }
+
+        private bool TryEmitHeapLoad(Gen5ShaderInstruction instruction, Gen5ImageControl image, HeapRecordUse heapImage, out string error)
+        {
+            var elementClass = HeapElementClass(HeapRecordIndex(heapImage));
+            var emitted = true;
+            var branchError = string.Empty;
+            foreach (var numericClass in new[] { ImageNumericClass.Float, ImageNumericClass.Uint, ImageNumericClass.Sint })
+            {
+                if (!emitted)
+                {
+                    break;
+                }
+
+                EmitConditional(_module.AddInstruction(SpirvOp.IEqual, _boolType, elementClass, UInt(BindlessHeap.ClassCode(numericClass))), () =>
+                {
+                    if (numericClass == ImageNumericClass.Float && IsHeapVolumeRead(instruction, out var heapVolume, out var volumeType))
+                    {
+                        emitted = TryEmitHeapVolumeRead(instruction, image, heapVolume, volumeType, out branchError);
+                        return;
+                    }
+
+                    emitted = TryResolveLayoutImage(instruction, image, out var resource, out var imageObject, out var dstSelect, out branchError,
+                            heapNumericClass: numericClass) &&
+                        EmitImageOperation(instruction, image, resource, imageObject, dstSelect,
+                            HeapReadMipLevel(instruction, image, resource), out branchError);
+                });
+            }
+
+            error = branchError;
+            return emitted;
         }
 
         // A heap record a 3D read picks can hold a 2D texture, whose 3D element stays null; the hardware then takes the
@@ -6366,7 +6422,7 @@ public static partial class Gen5SpirvTranslator
             // A null descriptor reports no levels. Each branch builds its sampled image in the block that samples it, so the
             // query loads the 3D element on its own.
             _module.AddCapability(SpirvCapability.ImageQuery);
-            var (_, volumeImage) = LoadHeapElement(BindlessHeap.VolumeSlot, volumeType, HeapRecordIndex(heapImage));
+            var (_, volumeImage) = LoadHeapElement(BindlessHeap.VolumeSlot, volumeType, HeapImageIndex(heapImage, BindlessHeap.VolumeSlot));
             var levels = _module.AddInstruction(SpirvOp.ImageQueryLevels, _uintType, volumeImage);
             _module.AddDecoration(levels, SpirvDecoration.NonUniform);
             var isVolume = _module.AddInstruction(SpirvOp.INotEqual, _boolType, levels, UInt(0));

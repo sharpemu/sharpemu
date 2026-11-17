@@ -148,15 +148,22 @@ public sealed class BindlessHeapTests
         Gen5MipStatisticsTests.ValidateWhenAvailable(shader.Spirv);
         var module = new Expressions(shader.Spirv);
         var descriptorBytes = sampler ? BindlessHeap.SamplerRecordBytes : BindlessHeap.ImageRecordBytes;
-        var indexes = module.ElementIndexes(sampler ? (uint)BindlessHeap.SamplerSlot : 0u);
+        var indexes = module.ElementIndexes(Assert.Single(module.Arrays(sampler ? (uint)BindlessHeap.SamplerSlot : 0u)).Array);
         Assert.NotEmpty(indexes);
         var table = new HeapView(First: 1000, Stride: 440, FieldOffset: 64, Records: 49);
         var packed = new HeapView(First: 7, Stride: descriptorBytes, FieldOffset: 0, Records: 4096);
         foreach (var index in indexes)
         {
             var (offset, word0, word1) = module.HeapViewInputs(index);
+            var values = new Dictionary<uint, uint>();
+            if (!sampler)
+            {
+                // Every element holds a float view.
+                values[module.HeapClassInput(index)] = 0;
+            }
+
             uint Element(HeapView view, uint byteOffset) =>
-                module.Evaluate(index, new Dictionary<uint, uint> { [offset] = byteOffset, [word0] = view.Word0, [word1] = view.Word1 });
+                module.Evaluate(index, new Dictionary<uint, uint>(values) { [offset] = byteOffset, [word0] = view.Word0, [word1] = view.Word1 });
 
             Assert.Equal(1000u, Element(table, 64));
             Assert.Equal(1003u, Element(table, 3 * 440 + 64));
@@ -262,10 +269,104 @@ public sealed class BindlessHeapTests
         uint[] levelClear = [0x80689630, 0x00700000, 0x00800080, 0x9050024C, 0, 0, 0, 0];
         uint[] freed = [0xFEFEFEFE, 0xFEFEFEFE, 0xFEFEFEFE, 0xFEFEFEFE, 0xFEFEFEFE, 0xFEFEFEFE, 0xFEFEFEFE, 0xFEFEFEFE];
 
-        Assert.True(ResourceMaterializer.IsFloatHeapImage(height));
-        Assert.True(ResourceMaterializer.IsFloatHeapImage(levelClear));
-        Assert.False(ResourceMaterializer.IsFloatHeapImage(freed));
-        Assert.False(ResourceMaterializer.IsFloatHeapImage([0x80689630, 0x00700000, 0xC0800080, 0x9050024C, 0, 0, 0, 0]));
+        Assert.Equal(ImageNumericClass.Float, ResourceMaterializer.HeapImageNumericClass(height));
+        Assert.Equal(ImageNumericClass.Float, ResourceMaterializer.HeapImageNumericClass(levelClear));
+        Assert.Equal(ImageNumericClass.Unsupported, ResourceMaterializer.HeapImageNumericClass(freed));
+        Assert.Equal(ImageNumericClass.Unsupported,
+            ResourceMaterializer.HeapImageNumericClass([0x80689630, 0x00700000, 0xC0800080, 0x9050024C, 0, 0, 0, 0]));
+    }
+
+    // A record can hold an integer texture: terrain tile records can hold an 8-bit unsigned 513x513 mask
+    // 96 bytes in, next to the R16 height, and its foliage passes read an 8-bit signed 128x128 map. The heap gave such
+    // a record no view (its arrays were float), so those reads were null. The record's format names the numeric class
+    // of its view; a format the shader would have to convert has none.
+    [Fact]
+    public void AHeapRecordOfAnIntegerTextureHasItsNumericClass()
+    {
+        uint[] mask = [0x80813360, 0x00500000, 0x80800080, 0x90500924, 0, 0, 0, 0];
+        uint[] signed = [0x80813360, 0xC0600000, 0x001FC01F, 0x90500924, 0, 0, 0, 0];
+        uint[] scaled = [0x80813360, 0x00300000, 0x80800080, 0x90500924, 0, 0, 0, 0];
+
+        Assert.Equal(ImageNumericClass.Uint, ResourceMaterializer.HeapImageNumericClass(mask));
+        Assert.Equal(ImageNumericClass.Sint, ResourceMaterializer.HeapImageNumericClass(signed));
+        Assert.Equal(ImageNumericClass.Unsupported, ResourceMaterializer.HeapImageNumericClass(scaled));
+        Assert.Equal(1u, BindlessHeap.ClassCode(ImageNumericClass.Uint));
+        Assert.Equal(2u, BindlessHeap.ClassCode(ImageNumericClass.Sint));
+        Assert.Equal(0u, BindlessHeap.ClassCode(ImageNumericClass.Float));
+        // Loads read integer textures; the cube and depth-compare classes are sampled.
+        Assert.Equal([true, true, true, true, false, false, false, false],
+            Enumerable.Range(0, BindlessHeap.ImageClasses.Length).Select(BindlessHeap.HoldsIntegers).ToArray());
+        Assert.Equal(BindlessHeap.Capacity * BindlessHeap.ClassBits, BindlessHeap.ClassWords * 32);
+        Assert.Equal(BindlessHeap.ClassesPerWord, 1u << (int)BindlessHeap.ClassWordShift);
+    }
+
+    // A load of a heap record reads the texel's bits whatever the texture's format, so it has a float, an unsigned and a
+    // signed declaration of its array, all at the array's binding. Each reads the record's element only when the host
+    // says the element holds a view of its numeric class (the class words after the mark bitsets), and the null element
+    // otherwise: no declaration reads a view of another class.
+    [Theory]
+    [InlineData("ImageLoad")]
+    [InlineData("ImageLoadMip")]
+    [InlineData("ImageGetResinfo")]
+    public void AHeapLoadReadsAnIntegerRecordThroughTheIntegerDeclarationsOfItsArray(string opcode)
+    {
+        var program = ResourceTrackerTests.LaneIndexedImageProgram(opcode: opcode);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(Request(program, ShaderStage.Pixel, bindlessHeap: true), out var shader, out var error), error);
+        Gen5MipStatisticsTests.ValidateWhenAvailable(shader.Spirv);
+        var module = new Expressions(shader.Spirv);
+
+        var arrays = module.Arrays(0);
+        Assert.Equal(["float", "int", "uint"], arrays.Select(array => array.SampledType).Order().ToArray());
+        var view = new HeapView(First: 1000, Stride: 440, FieldOffset: 96, Records: 31);
+        foreach (var (array, sampledType) in arrays)
+        {
+            var code = sampledType switch { "uint" => 1u, "int" => 2u, _ => 0u };
+            var indexes = module.ElementIndexes(array);
+            Assert.NotEmpty(indexes);
+            foreach (var index in indexes)
+            {
+                var (offset, word0, word1) = module.HeapViewInputs(index);
+                var classes = module.HeapClassInput(index);
+                // Record 5 is element 1005: element 13 of its class word (1005 % 16), two bits each.
+                uint Element(uint elementClass) => module.Evaluate(index, new Dictionary<uint, uint>
+                {
+                    [offset] = 5 * 440 + 96, [word0] = view.Word0, [word1] = view.Word1, [classes] = 0xF3FFFFFF | (elementClass << 26),
+                });
+                for (var elementClass = 0u; elementClass < 4; elementClass++)
+                {
+                    Assert.Equal(elementClass == code ? 1005u : BindlessHeap.CallRecordNullIndex, Element(elementClass));
+                }
+            }
+        }
+
+        Assert.Equal(BindlessHeap.MarkWords + (1005u >> (int)BindlessHeap.ClassWordShift), module.HeapClassWord(module.ElementIndexes(arrays[0].Array)[0]));
+    }
+
+    // A sampled read has the float declaration alone, and takes the null element of a record that holds an integer view.
+    [Fact]
+    public void AHeapSampleDoesNotReadAnIntegerRecord()
+    {
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(
+            Request(ResourceTrackerTests.LaneIndexedImageProgram(), ShaderStage.Pixel, bindlessHeap: true), out var shader, out var error), error);
+        var module = new Expressions(shader.Spirv);
+
+        var (array, sampledType) = Assert.Single(module.Arrays(0));
+        Assert.Equal("float", sampledType);
+        var view = new HeapView(First: 7, Stride: BindlessHeap.ImageRecordBytes, FieldOffset: 0, Records: 4096);
+        foreach (var index in module.ElementIndexes(array))
+        {
+            var (offset, word0, word1) = module.HeapViewInputs(index);
+            var classes = module.HeapClassInput(index);
+            uint Element(uint classWord) => module.Evaluate(index, new Dictionary<uint, uint>
+            {
+                [offset] = 2 * BindlessHeap.ImageRecordBytes, [word0] = view.Word0, [word1] = view.Word1, [classes] = classWord,
+            });
+            // Record 2 is element 9: bits 18 and 19 of its class word.
+            Assert.Equal(9u, Element(0));
+            Assert.Equal(9u, Element(~(3u << 18)));
+            Assert.Equal(BindlessHeap.CallRecordNullIndex, Element(1u << 18));
+            Assert.Equal(BindlessHeap.CallRecordNullIndex, Element(2u << 18));
+        }
     }
 
     // Without the heap set nothing changes: compute still rejects the lane-chosen image.
@@ -333,6 +434,9 @@ public sealed class BindlessHeapTests
         private readonly Dictionary<uint, uint> _constants = [];
         private readonly Dictionary<uint, (uint? Set, uint? Binding)> _bindings = [];
         private readonly List<(uint Base, uint Index)> _elementPointers = [];
+        private readonly Dictionary<uint, (SpirvOp Opcode, uint[] Operands)> _types = [];
+        private readonly Dictionary<uint, uint> _variableTypes = [];
+        private readonly Dictionary<uint, uint> _loads = [];
 
         public Expressions(byte[] code)
         {
@@ -360,6 +464,16 @@ public sealed class BindlessHeapTests
                         break;
                     case SpirvOp.AccessChain when operands.Length >= 4:
                         _elementPointers.Add((operands[2], operands[3]));
+                        _definitions[operands[1]] = (opcode, operands[2..]);
+                        break;
+                    case SpirvOp.TypeFloat or SpirvOp.TypeInt or SpirvOp.TypeImage or SpirvOp.TypeRuntimeArray or SpirvOp.TypePointer:
+                        _types[operands[0]] = (opcode, operands[1..]);
+                        break;
+                    case SpirvOp.Variable:
+                        _variableTypes[operands[1]] = operands[0];
+                        break;
+                    case SpirvOp.Load:
+                        _loads[operands[1]] = operands[2];
                         break;
                     case SpirvOp.IAdd or SpirvOp.ISub or SpirvOp.IMul or SpirvOp.UDiv or SpirvOp.BitwiseAnd or SpirvOp.BitwiseOr or
                         SpirvOp.ShiftLeftLogical or SpirvOp.ShiftRightLogical or SpirvOp.ULessThan or SpirvOp.IEqual or SpirvOp.LogicalAnd or
@@ -372,11 +486,45 @@ public sealed class BindlessHeapTests
             }
         }
 
-        // The indexes of the element pointers into the set-1 array at binding slot.
-        public List<uint> ElementIndexes(uint slot)
+        // The declarations of the set-1 array at binding slot, each with the sampled type of its images ("sampler" for
+        // a sampler array).
+        public List<(uint Array, string SampledType)> Arrays(uint slot) =>
+            _bindings.Where(entry => entry.Value.Set == BindlessHeap.DescriptorSet && entry.Value.Binding == slot)
+                .Select(entry => (entry.Key, SampledType(entry.Key))).ToList();
+
+        private string SampledType(uint array)
         {
-            var array = Assert.Single(_bindings, entry => entry.Value.Set == BindlessHeap.DescriptorSet && entry.Value.Binding == slot).Key;
-            return _elementPointers.Where(pointer => pointer.Base == array).Select(pointer => pointer.Index).ToList();
+            if (!_types.TryGetValue(_types[_types[_variableTypes[array]].Operands[1]].Operands[0], out var element) ||
+                element.Opcode != SpirvOp.TypeImage)
+            {
+                return "sampler";
+            }
+
+            var sampled = _types[element.Operands[0]];
+            return sampled.Opcode == SpirvOp.TypeFloat ? "float" : sampled.Operands[1] != 0 ? "int" : "uint";
+        }
+
+        // The indexes of the element pointers into a set-1 array.
+        public List<uint> ElementIndexes(uint array) =>
+            _elementPointers.Where(pointer => pointer.Base == array).Select(pointer => pointer.Index).ToList();
+
+        // The load of the class word an image element index is chosen by: the one value its computation shifts that is
+        // read from the feedback buffer.
+        public uint HeapClassInput(uint index) =>
+            Assert.Single(Reachable(index).Select(id => _definitions[id]).Where(definition =>
+                definition.Opcode == SpirvOp.ShiftRightLogical && _loads.TryGetValue(definition.Operands[0], out var pointer) &&
+                _definitions.TryGetValue(pointer, out var chain) && chain.Opcode == SpirvOp.AccessChain &&
+                _bindings.GetValueOrDefault(chain.Operands[0]) == (BindlessHeap.DescriptorSet, BindlessHeap.FeedbackBinding))
+                .Select(definition => definition.Operands[0]).Distinct());
+
+        // The feedback word that load reads, for the element the view inputs of the tests above give (1005).
+        public uint HeapClassWord(uint index)
+        {
+            var pointer = _definitions[_loads[HeapClassInput(index)]];
+            Assert.Equal(SpirvOp.AccessChain, pointer.Opcode);
+            var (offset, word0, word1) = HeapViewInputs(index);
+            var view = new HeapView(First: 1000, Stride: 440, FieldOffset: 96, Records: 31);
+            return Evaluate(pointer.Operands[^1], new Dictionary<uint, uint> { [offset] = 5 * 440 + 96, [word0] = view.Word0, [word1] = view.Word1 });
         }
 
         // What a heap element index is computed from: the read's byte offset (the dividend of the division by the view's

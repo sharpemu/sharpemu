@@ -20,6 +20,14 @@ public static class BindlessHeap
     public const uint FeedbackBinding = 63;
     public const uint FeedbackWordsPerArray = Capacity / 32;
 
+    // After the mark bitsets the feedback buffer holds the numeric class of every image element (ClassCode, ClassBits
+    // each), which the host writes with the element's view: the format of a record is unknown until the shader picks it.
+    public const uint ClassBits = 2;
+    public const uint ClassMask = (1u << (int)ClassBits) - 1;
+    public const uint ClassesPerWord = 32 / ClassBits;
+    public const uint ClassWordShift = 4;
+    public const uint ClassWords = Capacity >> (int)ClassWordShift;
+
     // Set-1 elements from CallRecordFirstIndex on hold the views and samplers of call records (CallRecordSelector), which the
     // host assigns by their descriptor words; guest heap records use the elements below. CallRecordNullIndex stays null.
     public const uint CallRecordFirstIndex = Capacity - 16384;
@@ -36,8 +44,9 @@ public static class BindlessHeap
     // The buffer holds at least this many words, so the lookup of an empty table reads inside it.
     public const uint CallRecordMinimumWords = 8;
 
-    // The image classes set 1 declares, in binding order; the sampler arrays follow them. A heap image is sampled as
-    // float, since its format is unknown until the shader picks its record.
+    // The image classes set 1 declares, in binding order; the sampler arrays follow them. An array holds float views and,
+    // when its class has integer forms (HoldsIntegers), the views of integer textures, which a shader reads through an
+    // unsigned or a signed declaration of the same binding: an element's numeric class says which declaration reads it.
     public static readonly HeapImageClass[] ImageClasses = BuildImageClasses();
 
     public static readonly DescriptorBindingKind[] ImageKinds = ImageClasses.Select(static heapClass => heapClass.Kind).ToArray();
@@ -55,7 +64,20 @@ public static class BindlessHeap
 
     public static int ArrayCount => ImageKinds.Length + 2;
 
-    public static uint FeedbackWords => (uint)ArrayCount * FeedbackWordsPerArray;
+    public static uint MarkWords => (uint)ArrayCount * FeedbackWordsPerArray;
+
+    public static uint FeedbackWords => MarkWords + ClassWords;
+
+    // An integer texture is read by loads, which no cube or depth-compare class serves.
+    public static bool HoldsIntegers(int slot) =>
+        (uint)slot < (uint)ImageClasses.Length && ImageClasses[slot] is { Cube: false, Compare: false };
+
+    public static uint ClassCode(ImageNumericClass numericClass) => numericClass switch
+    {
+        ImageNumericClass.Uint => 1,
+        ImageNumericClass.Sint => 2,
+        _ => 0,
+    };
 
     // The binding of an image class in set 1, or -1 when set 1 has no array for it.
     public static int ImageSlot(DescriptorBindingKind kind) => Array.IndexOf(ImageKinds, kind);
