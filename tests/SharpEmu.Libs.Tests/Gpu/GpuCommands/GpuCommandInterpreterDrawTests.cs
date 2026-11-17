@@ -99,10 +99,16 @@ public sealed class GpuCommandInterpreterDrawTests
         Assert.Contains("auto draw flags", runner.RunExpectingFatal(StreamRunner.Packet(PacketOpcode.DrawIndexAuto, 1, 0x1)).Message);
     }
 
-    [Fact]
-    public void IndirectDraws_ReadArgumentsFromMemoryAndLeaveTheInstanceCount()
+    [Theory]
+    // By default a record read on the CPU passes its instance count on, as hardware CP indirect draws do.
+    [InlineData(null, 2u)]
+    [InlineData("1", 2u)]
+    // SHARPEMU_INDIRECT_INSTANCE_INHERIT=0: the direct draw after them keeps the explicit NUM_INSTANCES.
+    [InlineData("0", 4u)]
+    public void IndirectDraws_ReadArgumentsFromMemoryAndPassTheInstanceCountOn(string? mode, uint laterInstances)
     {
         var runner = new StreamRunner();
+        runner.Interpreter.IndirectInstanceInherit = GpuCommandInterpreter.ParseIndirectInstanceInheritance(mode);
         runner.Host.WriteWords(Arguments, new uint[] { 9, 3, 1, 2 });
         runner.Host.WriteWords(Arguments + 16, new uint[] { 50, 2, 4, 7, 1 });
 
@@ -123,8 +129,7 @@ public sealed class GpuCommandInterpreterDrawTests
         Assert.Equal(Indices + 8, indexed.IndexAddress);
         Assert.Equal(7, indexed.BaseVertex);
         Assert.Equal(2u, indexed.InstanceCount);
-        // The direct draw after them keeps the explicit NUM_INSTANCES.
-        Assert.Equal(4u, runner.Host.AutoDraws[1].InstanceCount);
+        Assert.Equal(laterInstances, runner.Host.AutoDraws[1].InstanceCount);
 
         Assert.Contains("initiator is not supported", runner.RunExpectingFatal(StreamRunner.Packet(PacketOpcode.DrawIndirect, 0, 0, 0, 3)).Message);
         Assert.Contains("arguments base is zero", new StreamRunner().RunExpectingFatal(StreamRunner.Packet(PacketOpcode.DrawIndirect, 0, 0, 0, 2)).Message);
@@ -248,7 +253,7 @@ public sealed class GpuCommandInterpreterDrawTests
             (indexed.IndexCount, indexed.IndexAddress, indexed.IndirectArgumentsAddress, indexed.OffsetSource));
         Assert.DoesNotContain(runner.Host.GuestReads, address => address >= Arguments + 16 && address < Arguments + 36);
 
-        // A later direct draw keeps the explicit instance count and never reads the record.
+        // By default a later direct draw does not read a record resolved on the GPU and keeps its instance count.
         runner.Run(StreamRunner.Packet(PacketOpcode.DrawIndexAuto, 5, 0));
         Assert.Equal(1u, runner.Host.AutoDraws[0].InstanceCount);
         Assert.DoesNotContain(runner.Host.GuestReads, address => address >= Arguments + 16 && address < Arguments + 36);
@@ -277,17 +282,18 @@ public sealed class GpuCommandInterpreterDrawTests
         Assert.Equal((Arguments, DrawOffsetSource.IndirectArguments), (auto.IndirectArgumentsAddress, auto.OffsetSource));
         Assert.DoesNotContain(runner.Host.GuestReads, address => address >= Arguments && address < Arguments + 16);
 
-        // A later direct draw keeps the explicit instance count.
+        // By default a later direct draw does not read the record and keeps its instance count.
         runner.Run(StreamRunner.Packet(PacketOpcode.DrawIndexAuto, 5, 0));
         Assert.Equal(1u, runner.Host.AutoDraws[1].InstanceCount);
     }
 
-    // SHARPEMU_INDIRECT_INSTANCE_INHERIT=1: a later draw inherits the count, read from the record only then.
+    // SHARPEMU_INDIRECT_INSTANCE_INHERIT=1: a later draw inherits the count of a record resolved on the GPU, read from
+    // the record only then.
     [Fact]
-    public void IndirectInstanceInherit_PassesTheRecordCountToLaterDraws()
+    public void IndirectInstanceInherit_PassesTheGpuRecordCountToLaterDraws()
     {
         var runner = new StreamRunner();
-        runner.Interpreter.IndirectInstanceInherit = true;
+        runner.Interpreter.IndirectInstanceInherit = GpuCommandInterpreter.IndirectInstanceInheritance.All;
         runner.Host.ResolvesIndirectDrawOnGpu = true;
         runner.Host.WriteWords(Arguments, new uint[] { 9, 3, 1, 2 });
 

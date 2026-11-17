@@ -77,13 +77,22 @@ public sealed partial class GpuCommandInterpreter
             FirstVertexInRegister: firstVertexInRegister, FirstInstanceInRegister: firstInstanceInRegister, BaseVertexUserData: baseVertexUserData));
     }
 
-    // An indirect draw takes its instance count from its own record and leaves NUM_INSTANCES alone, so a later
-    // direct draw keeps the explicit count (a direct draw after an indirect one otherwise drew the
-    // record's float data, ~1e9 instances, and lost the device). AMD PAL treats indirect draws as clobbering
-    // NUM_INSTANCES and re-emits it; Gen5 persistence is undocumented. SHARPEMU_INDIRECT_INSTANCE_INHERIT=1 restores
-    // inheritance.
-    internal bool IndirectInstanceInherit { get; set; } =
-        Environment.GetEnvironmentVariable("SHARPEMU_INDIRECT_INSTANCE_INHERIT") == "1";
+    // Which indirect draws leave their instance count in NUM_INSTANCES for later direct draws. Hardware CP indirect
+    // draws write it (AMD PAL re-emits it after them), and a record read on the CPU passes it on by default. A record
+    // resolved on the GPU is not read back later by default: read on the CPU at a later direct draw it can hold data
+    // the GPU has not written yet (Ghost of Yotei: float data such as 0x3F800000, ~1e9 instances, a lost device).
+    // SHARPEMU_INDIRECT_INSTANCE_INHERIT=1 reads that record too, =0 leaves NUM_INSTANCES alone for every indirect draw.
+    internal IndirectInstanceInheritance IndirectInstanceInherit { get; set; } =
+        ParseIndirectInstanceInheritance(Environment.GetEnvironmentVariable("SHARPEMU_INDIRECT_INSTANCE_INHERIT"));
+
+    internal static IndirectInstanceInheritance ParseIndirectInstanceInheritance(string? mode) => mode switch
+    {
+        "0" => IndirectInstanceInheritance.None,
+        "1" => IndirectInstanceInheritance.All,
+        _ => IndirectInstanceInheritance.CpuReadRecords,
+    };
+
+    internal enum IndirectInstanceInheritance { None, CpuReadRecords, All }
 
     // Indirect arguments are read from guest memory now, as the packet executes.
     internal void DrawIndirect(ulong packetAddress, uint opcode, uint dataOffset, uint drawInitiator, bool indexed,
@@ -160,7 +169,7 @@ public sealed partial class GpuCommandInterpreter
             {
                 WriteDrawRegister(locations.DrawIndex, drawIndex);
                 // The host reads the four arguments on the GPU, or itself when the draw needs the counts.
-                if (IndirectInstanceInherit) _deferredInstanceCountAddress = argumentsAddress + 4;
+                if (IndirectInstanceInherit == IndirectInstanceInheritance.All) _deferredInstanceCountAddress = argumentsAddress + 4;
                 if (Rendering.ScissorTrace.Instance is { Active: true } gpuTrace)
                     gpuTrace.DrawIssued(TypedRegisters, SubmitId, QueueId, packetAddress);
                 _host.DrawAuto(SubmitId, new DrawAutoArguments(packetAddress, opcode, uint.MaxValue, 1, 0, 0,
@@ -172,7 +181,7 @@ public sealed partial class GpuCommandInterpreter
             var instanceCount = ReadDword(argumentsAddress + 4);
             var startVertex = ReadDword(argumentsAddress + 8);
             var startInstance = ReadDword(argumentsAddress + 12);
-            if (IndirectInstanceInherit) InstanceCount = instanceCount;
+            if (IndirectInstanceInherit != IndirectInstanceInheritance.None) InstanceCount = instanceCount;
             WriteDrawRegisters(locations, startVertex, startInstance, drawIndex, vertexInRegister, instanceInRegister);
             // A record with no instances draws nothing; a zero passed on would mean "use NUM_INSTANCES".
             if (instanceCount == 0) return;
@@ -188,7 +197,7 @@ public sealed partial class GpuCommandInterpreter
             // The host reads the five arguments on the GPU. It draws from the whole index
             // range; the arguments pick the indices. The host falls back to reading them
             // itself when the draw needs the counts.
-            if (IndirectInstanceInherit) _deferredInstanceCountAddress = argumentsAddress + 4;
+            if (IndirectInstanceInherit == IndirectInstanceInheritance.All) _deferredInstanceCountAddress = argumentsAddress + 4;
             if (Rendering.ScissorTrace.Instance is { Active: true } trace)
                 trace.DrawIssued(TypedRegisters, SubmitId, QueueId, packetAddress);
             _host.DrawIndexed(SubmitId, new DrawIndexedArguments(
@@ -205,7 +214,7 @@ public sealed partial class GpuCommandInterpreter
         var indexedStartInstance = ReadDword(argumentsAddress + 16);
         var indexAddress = IndexBaseAddress + (startIndex * IndexElementSize);
         var indexCount = IndexBufferSize != 0 ? Math.Min(indexCountPerInstance, IndexBufferSize) : indexCountPerInstance;
-        if (IndirectInstanceInherit) InstanceCount = indexedInstanceCount;
+        if (IndirectInstanceInherit != IndirectInstanceInheritance.None) InstanceCount = indexedInstanceCount;
         if (IndexBufferSize == 0 && IndexTypeAndSize is 0 or 1)
         {
             LearnIndexExtent(startIndex, indexCountPerInstance);
