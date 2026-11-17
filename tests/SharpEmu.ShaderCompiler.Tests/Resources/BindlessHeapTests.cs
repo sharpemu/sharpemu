@@ -252,6 +252,22 @@ public sealed class BindlessHeapTests
             (last.Word0 & HeapView.ElementMask, last.Word0 >> HeapView.ElementBits, last.Word1 & HeapView.ElementMask, last.Word1 >> HeapView.ElementBits));
     }
 
+    // A T# with RESOURCE_LEVEL set (word 2 bit 31, a GFX10 field) is a texture like any other: terrain
+    // tile records hold their R16 height textures that way, and the heap gave them no view, so the terrain cull sampled no
+    // height. A freed record (0xFEFEFEFE words) still has reserved bits set.
+    [Fact]
+    public void AHeapRecordWithItsResourceLevelSetIsAnImage()
+    {
+        uint[] height = [0x80689630, 0x00700000, 0x80800080, 0x9050024C, 0, 0, 0, 0];
+        uint[] levelClear = [0x80689630, 0x00700000, 0x00800080, 0x9050024C, 0, 0, 0, 0];
+        uint[] freed = [0xFEFEFEFE, 0xFEFEFEFE, 0xFEFEFEFE, 0xFEFEFEFE, 0xFEFEFEFE, 0xFEFEFEFE, 0xFEFEFEFE, 0xFEFEFEFE];
+
+        Assert.True(ResourceMaterializer.IsFloatHeapImage(height));
+        Assert.True(ResourceMaterializer.IsFloatHeapImage(levelClear));
+        Assert.False(ResourceMaterializer.IsFloatHeapImage(freed));
+        Assert.False(ResourceMaterializer.IsFloatHeapImage([0x80689630, 0x00700000, 0xC0800080, 0x9050024C, 0, 0, 0, 0]));
+    }
+
     // Without the heap set nothing changes: compute still rejects the lane-chosen image.
     [Fact]
     public void WithoutTheOptInTheImageIsStillRejected()

@@ -1220,7 +1220,8 @@ public static partial class ResourceMaterializer
     {
         ReadOnlySpan<uint> reserved =
         [
-            0x00000000u, 0x20000000u, 0xf0003000u, 0x00000000u,
+            // GFX10/10.3 word 2 bit 31 is RESOURCE_LEVEL, not reserved.
+            0x00000000u, 0x20000000u, 0x70003000u, 0x00000000u,
             0xe000e000u, 0xf9000000u, 0x00007b00u, 0x00000000u,
         ];
         for (var dword = 0; dword < reserved.Length; dword++)
