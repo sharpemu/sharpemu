@@ -64,7 +64,7 @@ internal static unsafe partial class VulkanVideoPresenter
         };
 
     internal static string TakeStagePreparationReport() =>
-        FormattableString.Invariant($"[PERF][STAGE_MEMO] hits={Interlocked.Exchange(ref _stageMemoHits, 0)} misses={Interlocked.Exchange(ref _stageMemoMisses, 0)} captures={Interlocked.Exchange(ref _stageMemoCaptures, 0)} ") +
+        FormattableString.Invariant($"[PERF][STAGE_MEMO] proven={Interlocked.Exchange(ref RecordingHost._stageMemoProven, 0)} hits={Interlocked.Exchange(ref _stageMemoHits, 0)} misses={Interlocked.Exchange(ref _stageMemoMisses, 0)} captures={Interlocked.Exchange(ref _stageMemoCaptures, 0)} ") +
         FormattableString.Invariant($"stale={Interlocked.Exchange(ref _stageMemoStale, 0)} invalidations={Interlocked.Exchange(ref _stageMemoInvalidations, 0)} acquire_reuses={Interlocked.Exchange(ref _stageMemoAcquireReuses, 0)} ") +
         FormattableString.Invariant($"content_hits={Interlocked.Exchange(ref _stageMemoContentHits, 0)} evictions={Interlocked.Exchange(ref _stageMemoEvictions, 0)} ") +
         FormattableString.Invariant($"null_images=hits:{_nullImageHits.Take()},verified:{_nullImageVerified.Take()},mismatches:{_nullImageMismatches.Take()}");
@@ -87,12 +87,16 @@ internal static unsafe partial class VulkanVideoPresenter
         public TextureResource[] Textures = [];
         public GuestSpan[] TextureRanges = [];
         public ulong LookupGeneration;
+        public ulong ProvenGeneration = ulong.MaxValue;
+        public ulong ProvenCollection;
+        public ulong ProvenTick;
         public Sampler[] SamplerHandles = [];
         public (BufferDescriptorWords Descriptor, ResourceSlotIdentifier Buffer, ulong MappedSize)[] Sources = [];
         public bool Valid;
 
         public void Invalidate()
         {
+            ProvenGeneration = ulong.MaxValue;
             if (Valid)
             {
                 Valid = false;
@@ -395,11 +399,24 @@ internal static unsafe partial class VulkanVideoPresenter
             return false;
         }
 
+        private const ulong ProvenMemoTicks = 8;
+        internal static long _stageMemoProven;
+
         private bool IsFreshStagePreparation(StagePreparationMemo memo)
         {
             if (!memo.Valid)
             {
                 return false;
+            }
+
+            var proofGeneration = _imageCache.LookupGeneration;
+            var proofCollection = _imageCache.CollectionTick;
+            var proofTick = _scheduler.CurrentTick;
+            if (!_worker && memo.ProvenGeneration == proofGeneration && memo.ProvenCollection == proofCollection &&
+                proofTick - memo.ProvenTick < ProvenMemoTicks)
+            {
+                Interlocked.Increment(ref _stageMemoProven);
+                return true;
             }
 
             var generation = memo.LookupGeneration;
@@ -428,6 +445,13 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             memo.LookupGeneration = generation;
+            if (!_worker)
+            {
+                memo.ProvenGeneration = proofGeneration;
+                memo.ProvenCollection = proofCollection;
+                memo.ProvenTick = proofTick;
+            }
+
             return true;
         }
 
@@ -565,6 +589,8 @@ internal static unsafe partial class VulkanVideoPresenter
             for (var index = 0; index < images.Length; index++)
             {
                 memo.Textures[index].CopyBindingFrom(images[index]);
+                // Recycling an invalid memo clears the binding's owner before this recapture.
+                memo.Textures[index].Preparation = memo;
                 memo.TextureRanges[index] = _imageCache.RememberedRange(images[index].ImageIdentifier, images[index].Request);
             }
 
@@ -589,6 +615,7 @@ internal static unsafe partial class VulkanVideoPresenter
             memo.Buffers = snapshot.Buffers;
             memo.Ranges = snapshot.DeviceAddressRanges;
             memo.ShaderBase = shaderBase;
+            memo.ProvenGeneration = ulong.MaxValue;
             memo.RegistrationSerial = _bufferCache.RegistrationSerial;
             memo.Spans = GuestGpuMemoryHook.Current?.SpanVersion ?? 0;
             memo.Valid = true;

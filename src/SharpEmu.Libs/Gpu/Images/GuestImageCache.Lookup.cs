@@ -65,6 +65,8 @@ public sealed partial class GuestImageCache
     // that remembers a lookup's result can tell when it may have changed.
     public ulong LookupGeneration => _lookupGeneration;
 
+    internal ulong CollectionTick => Volatile.Read(ref _collectionTick);
+
     // What a remembered lookup still does on reuse: the image counts as used now. False when the
     // image is gone.
     public bool TryReuseAcquired(ResourceSlotIdentifier imageIdentifier, ulong backing)
