@@ -19,11 +19,13 @@ internal static class ResidentImageBacking
     private static readonly bool AllowHoles =
         Environment.GetEnvironmentVariable("SHARPEMU_IMAGE_BACKING_HOLES") == "1";
 
-    // Reads image bytes from CPU-visible backing, PRT backing, or a resident prefix.
+    // Reads image bytes from CPU-visible backing or PRT backing. A streamed texture's image holds only its
+    // resident levels and its upload reads only their bytes, so an unmapped byte inside them is an error,
+    // not a level to zero; SHARPEMU_IMAGE_BACKING_HOLES=1 still zero-fills the unmapped pages instead.
     internal static bool TryRead(IGuestBackedSpace backing, ulong address, Span<byte> destination) =>
         backing.TryReadBacking(address, destination) ||
         KernelMemoryCompatExports.TryReadPrtBacking(backing, address, destination) ||
-        TryReadResidentPrefix(backing, address, destination);
+        AllowHoles && TryReadResidentPrefix(backing, address, destination, allowHoles: true);
 
     // Copies the backed prefix page by page and zero-fills the unmapped tail. A backed page
     // after a hole is not a mip chain, so it is rejected unless allowHoles.
