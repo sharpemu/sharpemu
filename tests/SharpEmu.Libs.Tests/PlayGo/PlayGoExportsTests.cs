@@ -27,6 +27,7 @@ public sealed class PlayGoExportsTests : IDisposable
     private const ulong HandleAddress = MemoryBase + 0x200;
     private const ulong ChunkIdsAddress = MemoryBase + 0x300;
     private const ulong LociAddress = MemoryBase + 0x400;
+    private const ulong ProgressAddress = MemoryBase + 0x500;
 
     private readonly string? _originalApp0Root;
     private readonly string? _originalDisableMetadataFallback;
@@ -226,18 +227,46 @@ public sealed class PlayGoExportsTests : IDisposable
     }
 
     [Fact]
-    public void GetLocus_PgmTakesPrecedenceOverChunkDefinitionsAndPaks()
+    public void GetLocus_ChunkDefinitionsTakePrecedenceOverPgm()
     {
         WritePgm(2);
         File.WriteAllText(
             Path.Combine(_app0Root, "playgo-chunkdefs.xml"),
             "<playgo default_chunk=\"5\"><chunk id=\"5\"/></playgo>");
+        var handle = InitializeAndOpen();
+
+        // The title's own chunk list stays exact: the pgm count does not add chunk 1.
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, GetLocus(handle, [5]));
+        Assert.Equal(BadChunkId, GetLocus(handle, [1]));
+        Assert.Equal((0ul, 0ul), GetProgress(handle, [5]));
+    }
+
+    [Fact]
+    public void GetLocus_PakChunksTakePrecedenceOverPgm()
+    {
+        WritePgm(2);
         File.WriteAllBytes(Path.Combine(_app0Root, "pakchunk7-PS5.pak"), []);
         var handle = InitializeAndOpen();
 
-        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, GetLocus(handle, [0, 1], 0xCC));
-        Assert.Equal(new byte[] { LocusLocalFast, LocusLocalFast }, ReadLoci(2));
-        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, GetLocus(handle, [7]));
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, GetLocus(handle, [0, 7]));
+        Assert.Equal(BadChunkId, GetLocus(handle, [1]));
+    }
+
+    [Fact]
+    public void GetProgress_PgmChunks_ReportsAFullyInstalledTitle()
+    {
+        WritePgm(3);
+        var handle = InitializeAndOpen();
+
+        Assert.Equal((1ul, 1ul), GetProgress(handle, [0, 1, 2]));
+    }
+
+    [Fact]
+    public void GetProgress_WithoutPgm_ReportsZeroOfZero()
+    {
+        var handle = InitializeAndOpen();
+
+        Assert.Equal((0ul, 0ul), GetProgress(handle, [0]));
     }
 
     [Theory]
@@ -328,6 +357,16 @@ public sealed class PlayGoExportsTests : IDisposable
 
         SetGetLocusArguments(handle, ChunkIdsAddress, (uint)chunkIds.Length, LociAddress);
         return PlayGoExports.PlayGoGetLocus(_ctx);
+    }
+
+    private (ulong Installed, ulong Total) GetProgress(uint handle, ushort[] chunkIds)
+    {
+        WriteChunkIds(chunkIds);
+        SetGetLocusArguments(handle, ChunkIdsAddress, (uint)chunkIds.Length, ProgressAddress);
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, PlayGoExports.PlayGoGetProgress(_ctx));
+        var progress = new byte[sizeof(ulong) * 2];
+        Assert.True(_memory.TryRead(ProgressAddress, progress));
+        return (BinaryPrimitives.ReadUInt64LittleEndian(progress), BinaryPrimitives.ReadUInt64LittleEndian(progress.AsSpan(sizeof(ulong))));
     }
 
     private void WriteChunkIds(ushort[] chunkIds)

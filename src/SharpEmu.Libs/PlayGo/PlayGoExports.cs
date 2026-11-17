@@ -568,10 +568,18 @@ public static class PlayGoExports
 
         TracePlayGo($"get_progress entries={numberOfEntries}");
         Span<byte> progress = stackalloc byte[sizeof(ulong) * 2];
-        // Every chunk is installed, so installed size equals total size. Report a
-        // non-zero pair so a title computing progress / total sees 100%, not 0/0.
-        BinaryPrimitives.WriteUInt64LittleEndian(progress, 1);
-        BinaryPrimitives.WriteUInt64LittleEndian(progress[sizeof(ulong)..], 1);
+        bool pgmChunks;
+        lock (_stateGate)
+        {
+            pgmChunks = _metadata.ChunkIdKnowledge == PlayGoChunkIdKnowledge.Assumed;
+        }
+
+        // Every chunk is installed, so installed size equals total size. A title whose chunks come
+        // from playgo.pgm gets a non-zero pair, so progress / total reads 100%, not 0/0; every other
+        // title keeps the 0/0 it always read.
+        var size = pgmChunks ? 1ul : 0ul;
+        BinaryPrimitives.WriteUInt64LittleEndian(progress, size);
+        BinaryPrimitives.WriteUInt64LittleEndian(progress[sizeof(ulong)..], size);
         return ctx.Memory.TryWrite(outProgress, progress)
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
             : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
@@ -797,18 +805,6 @@ public static class PlayGoExports
         var scenarioJson = GameFileOverlay.ResolveFile(Path.Combine(app0Root, "sce_sys", "playgo-scenario.json"));
         var chunkDefsXml = GameFileOverlay.ResolveFile(Path.Combine(app0Root, "playgo-chunkdefs.xml"));
         App0Archive.Extract(chunkDefsXml);
-        App0Archive.Extract(playGoPgm);
-
-        // PS5 titles ship cache_ps5/playgo.pgm. It carries the chunk count, which
-        // beats guessing from pak files: Ghost of Yotei has no sidecar and no
-        // pakchunk files, so the fallback reported chunk 0 only and the title
-        // exited on the resulting PlayGo errors.
-        var pgmChunkIds = LoadPlayGoPgmChunkIds(playGoPgm);
-        if (pgmChunkIds.Length > 0)
-        {
-            TracePlayGo($"metadata_pgm chunks={pgmChunkIds.Length}");
-            return new PlayGoMetadata(true, pgmChunkIds, PlayGoChunkIdKnowledge.Assumed);
-        }
 
         var hasMetadata = File.Exists(playGoDat) || File.Exists(scenarioJson) || File.Exists(chunkDefsXml);
         if (!hasMetadata)
@@ -831,6 +827,20 @@ public static class PlayGoExports
             // Ids outside the discovered set still return BAD_CHUNK_ID, so
             // title-side chunk enumeration still terminates.
             var installedChunkIds = DiscoverInstalledChunkIds(app0Root);
+            if (installedChunkIds.Length == 1)
+            {
+                // No pakchunk files either. PS5 titles ship cache_ps5/playgo.pgm, which carries the
+                // chunk count: Ghost of Yotei has nothing else, and with chunk 0 only its PlayGo
+                // queries failed and it exited at boot.
+                App0Archive.Extract(playGoPgm);
+                var pgmChunkIds = LoadPlayGoPgmChunkIds(playGoPgm);
+                if (pgmChunkIds.Length > 0)
+                {
+                    TracePlayGo($"metadata_pgm chunks={pgmChunkIds.Length}");
+                    return new PlayGoMetadata(true, pgmChunkIds, PlayGoChunkIdKnowledge.Assumed);
+                }
+            }
+
             TracePlayGo($"metadata_missing; fully-installed chunks=[{string.Join(',', installedChunkIds)}]");
             return new PlayGoMetadata(
                 true,
