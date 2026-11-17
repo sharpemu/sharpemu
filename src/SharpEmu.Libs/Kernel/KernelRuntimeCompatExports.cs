@@ -106,7 +106,9 @@ public static partial class KernelRuntimeCompatExports
 
         if (micros > UsleepSpinLimitMicroseconds)
         {
-            micros = Audio.AudioOut2Exports.ProducerSleepMicroseconds(micros);
+            // The audio producer pacing may shorten the sleep; a sleep that was above the spin limit stays above it, so a nap
+            // just over the limit remains a timer wait instead of becoming a spin.
+            micros = Math.Max(Audio.AudioOut2Exports.ProducerSleepMicroseconds(micros), UsleepSpinLimitMicroseconds + 1);
         }
 
         while (micros > 0)
