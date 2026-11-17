@@ -931,6 +931,29 @@ public static class AvPlayerExports
     }
 
     [SysAbiExport(
+        Nid = "BOVKAzRmuTQ",
+        ExportName = "sceAvPlayerDisableStream",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAvPlayer")]
+    public static int AvPlayerDisableStream(CpuContext ctx)
+    {
+        TraceOnce(
+            $"disable_stream_{ctx[CpuRegister.Rsi]}",
+            $"disable_stream index={ctx[CpuRegister.Rsi]}");
+        lock (StateGate)
+        {
+            if (Players.TryGetValue(ctx[CpuRegister.Rdi], out var player) &&
+                player.AudioDecoderOutput is null &&
+                ctx[CpuRegister.Rsi] < (ulong)player.Streams.Length &&
+                player.Streams[(int)ctx[CpuRegister.Rsi]].Index == player.AudioStreamIndex)
+            {
+                player.AudioStreamIndex = -1;
+            }
+        }
+        return ValidatePlayer(ctx);
+    }
+
+    [SysAbiExport(
         Nid = "k-q+xOxdc3E",
         ExportName = "sceAvPlayerSetAvSyncMode",
         Target = Generation.Gen4 | Generation.Gen5,
