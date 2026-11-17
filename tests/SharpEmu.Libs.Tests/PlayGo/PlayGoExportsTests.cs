@@ -71,6 +71,18 @@ public sealed class PlayGoExportsTests : IDisposable
         Assert.Equal(new byte[] { LocusLocalFast, LocusNotDownloaded }, ReadLoci(2));
     }
 
+    [Fact]
+    public void GetLocus_WithoutMetadata_ReportsReEngineChunkPaksAsInstalled()
+    {
+        File.WriteAllBytes(Path.Combine(_app0Root, "re_chunk_000.pak"), []);
+        File.WriteAllBytes(Path.Combine(_app0Root, "re_chunk_001.pak"), []);
+        var handle = InitializeAndOpen();
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, GetLocus(handle, [0, 1]));
+        Assert.Equal(new byte[] { LocusLocalFast, LocusLocalFast }, ReadLoci(2));
+        Assert.Equal(BadChunkId, GetLocus(handle, [2]));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

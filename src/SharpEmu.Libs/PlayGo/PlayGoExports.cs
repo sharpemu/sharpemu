@@ -938,28 +938,26 @@ public static class PlayGoExports
             [(ushort)0],
             knowledge);
 
-    // Chunk ids for a title that ships no PlayGo sidecar, taken from the
-    // pakchunk<N>-<platform>.pak files on disk. Chunk 0 is always included: it
-    // is the base chunk and must resolve even for a title with no pak files at
-    // all (which keeps the single-chunk behaviour for such titles).
+    // Chunk ids for a title that ships no PlayGo sidecar, taken from the pak files on
+    // disk: Unreal names them pakchunk<N>-<platform>.pak and RE Engine re_chunk_<NNN>.pak
+    // (Street Fighter 6 ships re_chunk_000 and re_chunk_001, its bulk content; reporting
+    // only chunk 0 left the title in its "installation in progress" mode with most
+    // textures and models unavailable). Chunk 0 is always included: it is the base chunk
+    // and must resolve even for a title with no pak files at all (which keeps the
+    // single-chunk behaviour for such titles).
     private static ushort[] DiscoverInstalledChunkIds(string app0Root)
     {
         var ids = new SortedSet<ushort> { 0 };
         try
         {
-            foreach (var pakFile in App0Archive.EnumerateFilesRecursive(app0Root, "pakchunk*.pak"))
+            foreach (var (pattern, prefix) in PakChunkPatterns)
             {
-                var name = Path.GetFileNameWithoutExtension(pakFile);
-                var digits = name.AsSpan("pakchunk".Length);
-                var length = 0;
-                while (length < digits.Length && char.IsAsciiDigit(digits[length]))
+                foreach (var pakFile in App0Archive.EnumerateFilesRecursive(app0Root, pattern))
                 {
-                    length++;
-                }
-
-                if (length > 0 && ushort.TryParse(digits[..length], out var chunkId))
-                {
-                    ids.Add(chunkId);
+                    if (TryParseLeadingChunkId(Path.GetFileName(pakFile).AsSpan(prefix.Length), out var chunkId))
+                    {
+                        ids.Add(chunkId);
+                    }
                 }
             }
         }
@@ -971,6 +969,24 @@ public static class PlayGoExports
         }
 
         return ids.ToArray();
+    }
+
+    private static readonly (string Pattern, string Prefix)[] PakChunkPatterns =
+    [
+        ("pakchunk*.pak", "pakchunk"),
+        ("re_chunk_*.pak", "re_chunk_"),
+    ];
+
+    private static bool TryParseLeadingChunkId(ReadOnlySpan<char> digits, out ushort chunkId)
+    {
+        var length = 0;
+        while (length < digits.Length && char.IsAsciiDigit(digits[length]))
+        {
+            length++;
+        }
+
+        chunkId = 0;
+        return length > 0 && ushort.TryParse(digits[..length], out chunkId);
     }
 
     private static ushort[] LoadChunkIds(string chunkDefsXml)
