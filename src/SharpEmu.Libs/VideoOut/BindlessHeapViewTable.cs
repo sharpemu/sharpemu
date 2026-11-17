@@ -6,7 +6,7 @@ using SharpEmu.ShaderCompiler.Resources;
 namespace SharpEmu.Libs.VideoOut;
 
 // The runs of set-1 elements the heap views of the draws hold (see BindlessHeap, HeapView): one run per heap V# and
-// descriptor offset, as long as its records. A view that is read again keeps its run, so the elements the shaders marked
+// descriptor offset (BindlessHeapDescriptor.ViewKey), as long as its records. A view that is read again keeps its run, so the elements the shaders marked
 // stay resolved. A new view takes over the run of a view of its shape that no pending command reads any more: a table the
 // guest allocates for each frame is the same records at another address, and most of its elements stay as they are.
 // Otherwise it takes free elements, then the elements of the views no pending command reads, least recently used first,
@@ -40,9 +40,10 @@ internal sealed class BindlessHeapViewTable(uint capacity)
     // or free elements, or those of the least recently used views no pending command reads (released sees each one before
     // its elements are taken), or shares the run of a view of its shape that is still read (moved). Null when the view has
     // no records or the table has no room for it.
-    public Region? Acquire(in BindlessHeapDescriptor heap, ulong tick, ulong completedTick, Action<Region> released, out bool moved)
+    public Region? Acquire(in BindlessHeapDescriptor descriptor, ulong tick, ulong completedTick, Action<Region> released, out bool moved)
     {
         moved = false;
+        var heap = descriptor.ViewKey;
         if (_byHeap.TryGetValue(heap, out var region))
         {
             region.LastUsedTick = tick;

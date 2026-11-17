@@ -40,6 +40,28 @@ public sealed class BindlessHeapViewTableTests
     }
 
     // The same view of a later draw reads the same elements: the records the shaders marked stay resolved.
+    // A packed heap is one view whatever immediate a shader reads it at: the whole offset picks the descriptor. A raw
+    // V# (stride 0) counts bytes, so its view has a record per descriptor. A record view at the same field one record
+    // further on is the same view.
+    [Fact]
+    public void ReadsOfOneHeapAtSeveralImmediatesShareOneView()
+    {
+        var table = new BindlessHeapViewTable(1000);
+
+        var packed = table.Acquire(Table(0x1000, 100, stride: 32), tick: 1, completedTick: 0, Unreleased, out _)!;
+        Assert.Same(packed, table.Acquire(Table(0x1000, 100, stride: 32, immediate: 32), tick: 1, completedTick: 0, Unreleased, out _));
+        Assert.Same(packed, table.Acquire(Table(0x1000, 100, stride: 32, immediate: 64), tick: 1, completedTick: 0, Unreleased, out _));
+        Assert.Equal(new HeapView(0, 32, 0, 100), packed.View);
+
+        var raw = table.Acquire(Table(0x8000, 3200, stride: 0, immediate: 96), tick: 1, completedTick: 0, Unreleased, out _)!;
+        Assert.Same(raw, table.Acquire(Table(0x8000, 3200, stride: 0), tick: 1, completedTick: 0, Unreleased, out _));
+        Assert.Equal(new HeapView(100, 32, 0, 100), raw.View);
+
+        var records = table.Acquire(Table(0x9000, 49, immediate: 64), tick: 1, completedTick: 0, Unreleased, out _)!;
+        Assert.Same(records, table.Acquire(Table(0x9000, 49, immediate: 440 + 64), tick: 1, completedTick: 0, Unreleased, out _));
+        Assert.Equal(new HeapView(200, 440, 64, 49), records.View);
+    }
+
     [Fact]
     public void AViewReadAgainKeepsItsElements()
     {
