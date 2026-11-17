@@ -851,4 +851,79 @@ public sealed partial class GuestImageCacheTests
         Assert.True(harness.Images.IsMetadata(address + 0x3000));
         harness.Shutdown();
     }
+
+    private static ImageViewDescription LayerView(uint baseLayer, uint layerCount, ImageViewType type = ImageViewType.Type2D) =>
+        ImageViewDescription.Default with { Type = type, BaseLayer = baseLayer, LayerCount = layerCount };
+
+    [Fact]
+    public void ConsumedClears_PassOnlyTheLayersTheyLeft()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var metadata = address + 0x1000;
+        harness.Images.RegisterHtileMetadataForTest(metadata);
+        var generation = harness.Images.MetadataGeneration;
+
+        Assert.True(harness.Images.ClearMetadata(metadata));
+        Assert.False(harness.Images.ConsumedClearsOnlyForTest(generation, metadata, LayerView(0, 1)));
+
+        Assert.True(harness.Images.SetMetadataSlice(metadata, 0, false));
+        Assert.True(harness.Images.ConsumedClearsOnlyForTest(generation, metadata, LayerView(0, 1)));
+        // Layer 1 still waits on its clear: a view that covers it, or a 3D view, does not pass.
+        Assert.False(harness.Images.ConsumedClearsOnlyForTest(generation, metadata, LayerView(0, 2)));
+        Assert.False(harness.Images.ConsumedClearsOnlyForTest(generation, metadata, LayerView(0, 1, ImageViewType.Type3D)));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void ConsumedClears_IncludeATrackedDccFill()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var metadata = address + 0x4000;
+        harness.Images.RegisterDccMetadataForTest(metadata, 0x1000);
+        var generation = harness.Images.MetadataGeneration;
+        Assert.True(harness.Images.TryAbsorbDccFill(metadata, 0x1000, 0x00000000u));
+        Assert.False(harness.Images.ConsumedClearsOnlyForTest(generation, metadata, LayerView(0, 1)));
+
+        Assert.True(harness.Images.SetMetadataSlice(metadata, 0, false));
+        Assert.True(harness.Images.ConsumedClearsOnlyForTest(generation, metadata, LayerView(0, 1)));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void ConsumedClears_ExcludeRegistrationsInvalidationsAndAnOverflowedRing()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+
+        // A fill seen before its target registers a pending entry.
+        var pending = address + 0x1000;
+        var generation = harness.Images.MetadataGeneration;
+        Assert.False(harness.Images.TryAbsorbDccFill(pending, 0x100, 0xc0c0c0c0u));
+        Assert.False(harness.Images.ConsumedClearsOnlyForTest(generation, pending, LayerView(0, 1)));
+
+        // A CPU write over registered DCC metadata invalidates it.
+        var dcc = address + 0x4000;
+        harness.Images.RegisterDccMetadataForTest(dcc, 0x1000);
+        generation = harness.Images.MetadataGeneration;
+        harness.ImageStore.MarkCpuWrite(dcc + 0x10, 8);
+        Assert.False(harness.Images.IsMetadata(dcc));
+        Assert.False(harness.Images.ConsumedClearsOnlyForTest(generation, dcc, LayerView(0, 1)));
+
+        // More events than the ring holds since the segment began.
+        var htile = address + 0x8000;
+        harness.Images.RegisterHtileMetadataForTest(htile);
+        generation = harness.Images.MetadataGeneration;
+        for (var index = 0; index < 1100; index++)
+        {
+            Assert.True(harness.Images.SetMetadataSlice(htile, 0, index % 2 == 0));
+        }
+
+        Assert.False(harness.Images.ConsumedClearsOnlyForTest(generation, htile, LayerView(1, 1)));
+        harness.Shutdown();
+    }
 }

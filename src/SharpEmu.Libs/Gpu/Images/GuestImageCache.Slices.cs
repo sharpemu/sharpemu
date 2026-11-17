@@ -738,8 +738,11 @@ public sealed partial class GuestImageCache
                 return SliceLookupFailed(SliceLookupFailure.ChangedAtJoin, use.Request.Role);
             }
 
-            if ((use.Request.Description.HasMetadata && !MetadataUnchangedSince(metadataGeneration, use.Request.Description.Metadata.Range.Address)) ||
-                (image.Description.HasMetadata && !MetadataUnchangedSince(metadataGeneration, image.Description.Metadata.Range.Address)))
+            var requestChanged = use.Request.Description.HasMetadata &&
+                                 !MetadataUnchangedSince(metadataGeneration, use.Request.Description.Metadata.Range.Address);
+            var imageChanged = image.Description.HasMetadata &&
+                               !MetadataUnchangedSince(metadataGeneration, image.Description.Metadata.Range.Address);
+            if ((requestChanged || imageChanged) && !ConsumedClearsOnly(in use, image, metadataGeneration, requestChanged, imageChanged))
             {
                 return SliceLookupFailed(SliceLookupFailure.MetadataChangedAtJoin, use.Request.Role);
             }
