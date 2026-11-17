@@ -87,6 +87,7 @@ public sealed unsafe partial class RenderHostDeviceTests
             WaveSize = waveSize,
             PixelOutputs = [new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float)],
             EnableGraphicsSubgroupOperations = true,
+            GraphicsPartialSubgroupLanes = true,
         };
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
         var provider = new FixedProgramProvider((IShaderPipelineHost)presenter.Instance, vertices,
@@ -156,6 +157,7 @@ public sealed unsafe partial class RenderHostDeviceTests
             PixelInputEnable = 1u << 8,
             PixelOutputs = [new Gen5PixelOutputBinding(0, 0, Gen5PixelOutputKind.Float)],
             EnableGraphicsSubgroupOperations = true,
+            GraphicsPartialSubgroupLanes = true,
         };
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
         var provider = new FixedProgramProvider((IShaderPipelineHost)presenter.Instance, vertices,

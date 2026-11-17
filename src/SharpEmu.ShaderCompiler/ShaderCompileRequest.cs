@@ -311,6 +311,14 @@ public sealed class ShaderCompileRequest
     public uint ScratchDwords { get; init; }
     public bool EnableGraphicsSubgroupOperations { get; init; } = true;
 
+    // Graphics lane reads (DPP, DPP8, PERMLANE, V_READLANE) follow the ISA for lanes a partial host subgroup never
+    // launched, through a ballot and the guest EXEC mask. Off (main's lowering) unless SHARPEMU_GRAPHICS_PARTIAL_LANES=1:
+    // it changes every vertex and pixel shader with cross-lane operations, and was proven on Ghost of Yotei only.
+    public bool GraphicsPartialSubgroupLanes { get; init; } = DefaultGraphicsPartialSubgroupLanes;
+
+    private static readonly bool DefaultGraphicsPartialSubgroupLanes =
+        Environment.GetEnvironmentVariable("SHARPEMU_GRAPHICS_PARTIAL_LANES") == "1";
+
     public bool MipStatisticsSubgroupReduction { get; init; }
 
     // The host subgroup of this stage is one guest wave32 and has arithmetic operations: wave32 MIN/MAX scans then

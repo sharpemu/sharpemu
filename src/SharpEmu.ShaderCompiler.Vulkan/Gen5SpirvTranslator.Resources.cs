@@ -246,6 +246,7 @@ public static partial class Gen5SpirvTranslator
                 _stage == Gen5SpirvStage.Pixel && PixelLiveExec &&
                 request.Program.Instructions.Any(static instruction => instruction.Opcode is "DsAppend" or "DsConsume");
             _enableGraphicsSubgroupOperations = _stage is Gen5SpirvStage.Compute or Gen5SpirvStage.Mesh || request.EnableGraphicsSubgroupOperations;
+            _graphicsPartialSubgroupLanes = request.GraphicsPartialSubgroupLanes;
             _waveLaneCount = request.WaveSize == 64 ? 64u : 32u;
             _pairedMeshLanes = _stage == Gen5SpirvStage.Mesh && _waveLaneCount == 64 &&
                 request.Mesh?.DeviceSubgroupLaneCount == 32;

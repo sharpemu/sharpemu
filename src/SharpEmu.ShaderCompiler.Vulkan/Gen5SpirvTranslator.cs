@@ -80,6 +80,7 @@ public static partial class Gen5SpirvTranslator
         private static readonly bool PixelLiveExec = !string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_PS_LIVE_EXEC"), "0", StringComparison.Ordinal);
         private readonly bool _enableGraphicsSubgroupOperations;
+        private readonly bool _graphicsPartialSubgroupLanes;
         private readonly uint _waveLaneCount;
         private readonly IWaveLowering _waveLowering;
         private bool _guestLaneFromSubgroup;
@@ -10064,9 +10065,9 @@ public static partial class Gen5SpirvTranslator
         // dead but with registers, and whole-wave code (S_ORN2_SAVEEXEC/S_OR_SAVEEXEC of EXEC) turns them on
         // after filling them with a reduction's identity. A shuffle from an invocation that does not exist is
         // undefined, so DPP, DPP8, PERMLANE and V_READLANE reads of such a lane go through ReadGraphicsLane.
-        // Compute and mesh subgroups are full.
+        // Compute and mesh subgroups are full. Opt-in (ShaderCompileRequest.GraphicsPartialSubgroupLanes).
         private bool HostSubgroupMayBePartial =>
-            _subgroupInvocationIdInput != 0 && !_pairedLanes && !_pairedMeshLanes &&
+            _graphicsPartialSubgroupLanes && _subgroupInvocationIdInput != 0 && !_pairedLanes && !_pairedMeshLanes &&
             _stage is not (Gen5SpirvStage.Compute or Gen5SpirvStage.Mesh);
 
         // The host invocation of a guest lane of a graphics wave. A graphics wave is one group of up to 32

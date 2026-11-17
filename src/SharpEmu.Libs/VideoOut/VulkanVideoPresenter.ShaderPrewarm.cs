@@ -438,6 +438,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 Environment.GetEnvironmentVariable("SHARPEMU_WAVE64_HALF_MASKS"),
                 Environment.GetEnvironmentVariable("SHARPEMU_WAVE64_LANE_LOCAL"),
                 Environment.GetEnvironmentVariable("SHARPEMU_WAVE64_PAIRED"),
+                Environment.GetEnvironmentVariable("SHARPEMU_GRAPHICS_PARTIAL_LANES"),
                 Environment.GetEnvironmentVariable("SHARPEMU_SHADER_MAX_STEPS"),
                 Environment.GetEnvironmentVariable("SHARPEMU_STRUCTURED_CF"),
                 Environment.GetEnvironmentVariable("SHARPEMU_STRUCTURED_FORWARD_BLOCKS"),
