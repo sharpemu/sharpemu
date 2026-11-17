@@ -139,6 +139,13 @@ public interface ICommandStreamHost
     // At the stream position of the draw: whether the bytes a worker read are what it would read now.
     bool ValidateWorkerReads(ResolveReadLog reads) => true;
 
+    // SHARPEMU_COMPUTE_TICKETS: the worker rebinds direct dispatches take ahead of the stream, or null.
+    SharpEmu.Libs.Gpu.Pipelines.ComputeTickets? ComputeTickets => null;
+
+    // At a compute ticket's take: whether the bytes its worker read are what the stream would read now. The ticket was
+    // requested ahead of earlier dispatches, so writes they posted since must refuse it.
+    bool ValidateTicketReads(ResolveReadLog reads) => ValidateWorkerReads(reads);
+
     // Runs commands other threads posted to this worker. Called before every packet.
     void RunPendingCommands();
 

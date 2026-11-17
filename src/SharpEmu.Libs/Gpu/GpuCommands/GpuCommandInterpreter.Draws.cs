@@ -475,6 +475,26 @@ public sealed partial class GpuCommandInterpreter
             throw _host.Fatal($"The dispatch header is not supported: header=0x{packet.Header:X8} address=0x{packet.PacketAddress:X16}.");
         }
 
+        if (_host.ComputeTickets is { } tickets)
+        {
+            if (tickets.NeedsScan(this, packet.PacketAddress, out var requestedThrough))
+            {
+                ScanComputeTickets(tickets, in packet, requestedThrough);
+            }
+
+            tickets.BeginDispatch(this, packet.PacketAddress);
+            try
+            {
+                DispatchDirect(payload[0], payload[1], payload[2], payload[3]);
+            }
+            finally
+            {
+                tickets.EndDispatch();
+            }
+
+            return 4;
+        }
+
         DispatchDirect(payload[0], payload[1], payload[2], payload[3]);
         return 4;
     }

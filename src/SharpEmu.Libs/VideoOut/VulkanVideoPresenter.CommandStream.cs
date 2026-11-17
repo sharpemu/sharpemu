@@ -304,6 +304,42 @@ internal static unsafe partial class VulkanVideoPresenter
             return true;
         }
 
+        SharpEmu.Libs.Gpu.Pipelines.ComputeTickets? ICommandStreamHost.ComputeTickets => _translation.ComputeTicketPool;
+
+        // A ticket was requested before the dispatches between its request and its take posted their writes, so a pending GPU
+        // write, publication, store or GPU-dirty byte over any range it read refuses it, and every range must read the same now.
+        bool ICommandStreamHost.ValidateTicketReads(ResolveReadLog reads)
+        {
+            Span<byte> current = stackalloc byte[256];
+            for (var index = 0; index < reads.Count; index++)
+            {
+                var bytes = reads.Bytes(index, out var address);
+                var size = (ulong)bytes.Length;
+                if (HasPendingMemoryPublication(address, size) || _bufferCache.HasGpuDirtyBytes(address, size) ||
+                    (_translation.PendingWrites is { } pending && pending.HasPendingBetween(address, size, pending.Released, long.MaxValue)) ||
+                    (_commandThread is { } thread && thread.HasShadowBefore(address, size, long.MaxValue)))
+                {
+                    return false;
+                }
+
+                var rented = bytes.Length > current.Length ? ArrayPool<byte>.Shared.Rent(bytes.Length) : null;
+                try
+                {
+                    var now = rented is null ? current[..bytes.Length] : rented.AsSpan(0, bytes.Length);
+                    if (!_guestMemory.TryRead(address, now) || !now.SequenceEqual(bytes))
+                    {
+                        return false;
+                    }
+                }
+                finally
+                {
+                    if (rented is not null) ArrayPool<byte>.Shared.Return(rented);
+                }
+            }
+
+            return true;
+        }
+
         // A read for a draw resolving ahead of the stream: a range earlier GPU work may still write
         // sends the draw to the stream thread; everything else reads with the stores before it applied.
         private bool ReadOnResolveWorker(ulong address, Span<byte> destination)
