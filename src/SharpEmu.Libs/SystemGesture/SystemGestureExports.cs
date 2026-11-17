@@ -74,6 +74,30 @@ public static class SystemGestureExports
     }
 
     [SysAbiExport(
+        Nid = "fLTseA7XiWY",
+        ExportName = "sceSystemGestureGetTouchEvents",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSystemGesture")]
+    public static int SystemGestureGetTouchEvents(CpuContext ctx)
+    {
+        // No touch input is reported: the recognizer holds no events.
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
+        Nid = "L8YmemOeSNY",
+        ExportName = "sceSystemGestureGetPrimitiveTouchEvents",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceSystemGesture")]
+    public static int SystemGestureGetPrimitiveTouchEvents(CpuContext ctx)
+    {
+        // No touch input is reported: the recognizer holds no events.
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
         Nid = "1MMK0W-kMgA",
         ExportName = "sceSystemGestureAppendTouchRecognizer",
         Target = Generation.Gen4 | Generation.Gen5,
