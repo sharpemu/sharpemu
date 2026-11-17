@@ -2589,16 +2589,27 @@ public static partial class Gen5SpirvTranslator
                 ImageComponentKind.Float, IsStorage: false, Arrayed: true, Cube: false, Multisampled: false, SpirvImageDim.Dim2D, []);
         }
 
-        // The record a heap read picks: the dynamic offset its key read kept plus the read's immediate, in records.
+        // The element of set 1 a heap read picks: the dynamic offset its key read kept plus the read's immediate is a
+        // byte offset in the heap, whose record the draw's heap view (HeapView, two dwords of shader data) has an element
+        // for. A read the view has no element for (past its records, or not at its descriptor's offset in a record)
+        // reads the null element.
         private uint HeapRecordIndex(HeapRecordUse use)
         {
             var key = _indirectKeyScratch.TryGetValue(use.KeyMemoryIndex, out var scratch) ? Load(_uintType, scratch) : UInt(0);
-            var shift = use.RecordBytes == BindlessHeap.SamplerRecordBytes ? 4u : 5u;
-            var record = ShiftRightLogical(IAdd(key, UInt(use.Immediate)), UInt(shift));
-            // Set 1 holds the heap's records below CallRecordFirstIndex (call records own the elements above); any other record
-            // reads the null element.
-            var inHeap = _module.AddInstruction(SpirvOp.ULessThan, _boolType, record, UInt(BindlessHeap.CallRecordFirstIndex));
-            return _module.AddInstruction(SpirvOp.Select, _uintType, inHeap, record, UInt(BindlessHeap.CallRecordNullIndex));
+            var offset = IAdd(key, UInt(use.Immediate));
+            var viewDword = _request.Bindings.HeapViewsDword + (uint)use.View * HeapView.DwordCount;
+            var word0 = LoadShaderDataDword(UInt(viewDword));
+            var word1 = LoadShaderDataDword(UInt(viewDword + 1));
+            var first = BitwiseAnd(word0, UInt(HeapView.ElementMask));
+            var stride = ShiftRightLogical(word0, UInt(HeapView.ElementBits));
+            var records = BitwiseAnd(word1, UInt(HeapView.ElementMask));
+            var fieldOffset = ShiftRightLogical(word1, UInt(HeapView.ElementBits));
+            // The host never gives a view a stride of zero.
+            var record = _module.AddInstruction(SpirvOp.UDiv, _uintType, offset, stride);
+            var atField = _module.AddInstruction(SpirvOp.IEqual, _boolType,
+                _module.AddInstruction(SpirvOp.ISub, _uintType, offset, _module.AddInstruction(SpirvOp.IMul, _uintType, record, stride)), fieldOffset);
+            var inView = LogicalAnd(atField, _module.AddInstruction(SpirvOp.ULessThan, _boolType, record, records));
+            return _module.AddInstruction(SpirvOp.Select, _uintType, inView, IAdd(first, record), UInt(BindlessHeap.CallRecordNullIndex));
         }
 
         // One runtime array of set 1, declared at its first use.

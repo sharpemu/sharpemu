@@ -184,6 +184,28 @@ public sealed partial class ShaderResourcePlan
     public IReadOnlyList<HeapRecordAccess> HeapRecords { get; private set; } = [];
     public IReadOnlyList<HeapRecordSource> HeapRecordSources { get; private set; } = [];
 
+    // The heap view a heap record access reads: its heap V#, descriptor kind and immediate offset.
+    public HeapRecordSource HeapRecordSourceOf(HeapRecordAccess record)
+    {
+        var heap = DescriptorSources[(int)record.Source].Heap!;
+        return new HeapRecordSource(heap.HeapSource, record.Sampler, heap.Immediate);
+    }
+
+    // That view's number among HeapRecordSources.
+    public int HeapViewOf(HeapRecordAccess record)
+    {
+        var source = HeapRecordSourceOf(record);
+        for (var view = 0; view < HeapRecordSources.Count; view++)
+        {
+            if (HeapRecordSources[view] == source)
+            {
+                return view;
+            }
+        }
+
+        throw new InvalidOperationException("A heap record access has no heap view.");
+    }
+
     // The image accesses whose image or sampler a linked callee's call record holds, and what each callee reads through its
     // records' arguments besides them (by its slot among the program's call targets; empty unless linked with run-time
     // arguments).
@@ -260,9 +282,10 @@ public sealed partial class ShaderResourcePlan
         plan.HeapRecords = tracked.HeapRecords;
         plan.CallRecords = tracked.CallRecords;
         plan.HeapRecordSources = tracked.HeapRecords
-            .Select(record => new HeapRecordSource(plan.DescriptorSources[(int)record.Source].Heap!.HeapSource, record.Sampler))
+            .Select(record => plan.HeapRecordSourceOf(record))
             .Distinct()
             .ToList();
+        plan.Info.HeapViewCount = (uint)plan.HeapRecordSources.Count;
         if (program.Instructions.Any(instruction => instruction.Control is ShaderCallFaultControl))
             plan.Info.UsesDeviceAddresses = true;
         // A program with shader calls, or a compute program with many device-address dwords (CompactMemoryAccessPolicy),

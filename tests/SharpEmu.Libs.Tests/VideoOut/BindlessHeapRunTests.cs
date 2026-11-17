@@ -85,8 +85,11 @@ public sealed class BindlessHeapRunTests
         // Runs on each visit; true means the visit resolved.
         public Func<int, bool> OnVisit = _ => false;
         public readonly uint RecordBytes = sampler ? BindlessHeap.SamplerRecordBytes : BindlessHeap.ImageRecordBytes;
+        // The records of a table are larger than the descriptor each one starts with.
+        private uint? _stride;
+        public uint Stride { get => _stride ?? RecordBytes; set => _stride = value; }
 
-        public BindlessHeapDescriptor Heap(bool samplerHeap) => new(samplerHeap, Base, Records, RecordBytes);
+        public BindlessHeapDescriptor Heap(bool samplerHeap) => new(samplerHeap, Base, Records, Stride);
 
         public bool TryRead(ulong address, Span<byte> destination)
         {
@@ -100,7 +103,7 @@ public sealed class BindlessHeapRunTests
             var index = indexes[position];
             var count = (int)(RecordBytes / sizeof(uint));
             return Base != 0 && index < Records &&
-                Read(Base + (ulong)index * RecordBytes, System.Runtime.InteropServices.MemoryMarshal.AsBytes(words[..count])) ? count : 0;
+                Read(Base + (ulong)index * Stride, System.Runtime.InteropServices.MemoryMarshal.AsBytes(words[..count])) ? count : 0;
         }
 
         public bool Visit(int position, ReadOnlySpan<uint> words)
@@ -114,7 +117,7 @@ public sealed class BindlessHeapRunTests
         {
             var words = new uint[RecordBytes / sizeof(uint)];
             return Base != 0 && index < Records &&
-                Read(Base + (ulong)index * RecordBytes, System.Runtime.InteropServices.MemoryMarshal.AsBytes(words.AsSpan())) ? words : [];
+                Read(Base + (ulong)index * Stride, System.Runtime.InteropServices.MemoryMarshal.AsBytes(words.AsSpan())) ? words : [];
         }
 
         private bool Read(ulong address, Span<byte> destination)
@@ -156,6 +159,28 @@ public sealed class BindlessHeapRunTests
         }
 
         Assert.True(heap.RunReads < indexes.Length / 4);
+        Assert.Equal(0, heap.RecordReads);
+    }
+
+    // The descriptors of a heap view are a record stride apart (a table of 440-byte records, each starting with its T#):
+    // a run reads from the first record's descriptor to the last one's, and each entry takes its own record's words.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void RunsOverATablesRecordsReadEachRecordsDescriptor(bool sampler)
+    {
+        var memory = Pattern(0x40000, 17);
+        uint[] indexes = [0, 1, 2, 3, 5, 5, 8, 40, 47, 48];
+        var heap = new FakeHeap(memory, MemoryBase + 0x40, 49, indexes, sampler) { Stride = 440 };
+        Visit(heap, indexes, sampler, new byte[VulkanVideoPresenter.HeapRunMaxBytes]);
+        Assert.Equal(Enumerable.Range(0, indexes.Length), heap.Visits.Select(visit => visit.Position));
+        for (var at = 0; at < indexes.Length; at++)
+        {
+            Assert.Equal(heap.RecordWords(indexes[at]), heap.Visits[at].Words);
+        }
+
+        // Records 0..8 are one run; 40 and 47 are each more than the gap from the record before.
+        Assert.Equal(3, heap.RunReads);
         Assert.Equal(0, heap.RecordReads);
     }
 

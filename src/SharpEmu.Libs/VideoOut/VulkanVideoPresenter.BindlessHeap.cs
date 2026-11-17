@@ -12,10 +12,11 @@ using Silk.NET.Vulkan;
 namespace SharpEmu.Libs.VideoOut;
 
 // Descriptor set 1: the bindless heaps a program reads at a record only its shader knows (see BindlessHeap). Every
-// element starts as a null descriptor. The shader marks each record it reads in a feedback bitset; once the marking
-// work completes, the host reads the record's T# or S# from the guest heap and writes its view or sampler. Records are
-// read again periodically, and a heap image's contents and layout are made current before each command that reads
-// set 1.
+// element starts as a null descriptor. Each heap view of a draw (a heap V# and the offset of a descriptor in its records)
+// holds a run of elements (BindlessHeapViewTable), which the draw's shader data names. The shader marks each element it
+// reads in a feedback bitset; once the marking work completes, the host reads the record's T# or S# from the guest heap
+// and writes its view or sampler. The records of a view are read again periodically while draws read the view, and a
+// heap image's contents and layout are made current before each command that reads set 1.
 internal static unsafe partial class VulkanVideoPresenter
 {
     // Revalidation reads the heap records it compares in runs, one guest read per run of nearby records, instead of one
@@ -91,10 +92,12 @@ internal static unsafe partial class VulkanVideoPresenter
                 continue;
             }
 
-            var end = HeapRecordRunEnd(indexes, start, bytes, heap.Records);
+            // The records of a heap are its stride apart; each holds the descriptor in its first bytes.
+            var stride = Math.Max(heap.Stride, bytes);
+            var end = HeapRecordRunEnd(indexes, start, stride, heap.Records);
             var first = indexes[start];
-            var run = buffer[..checked((int)(((ulong)indexes[end - 1] - first + 1) * bytes))];
-            if (!visitor.TryRead(heap.Base + (ulong)first * bytes, run))
+            var run = buffer[..checked((int)(((ulong)indexes[end - 1] - first) * stride + bytes))];
+            if (!visitor.TryRead(heap.Base + (ulong)first * stride, run))
             {
                 for (; start < end; start++)
                 {
@@ -106,7 +109,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             while (start < end)
             {
-                var offset = checked((int)((indexes[start] - first) * bytes));
+                var offset = checked((int)((indexes[start] - first) * stride));
                 var resolved = visitor.Visit(start, System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(run.Slice(offset, (int)bytes)));
                 start++;
                 if (resolved)
@@ -137,6 +140,8 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             public int Slot;
             public uint Index;
+            // The heap view whose run holds the element; null for a call record's element.
+            public BindlessHeapViewTable.Region? Region;
             public uint[] Words = [];
             public CachedImage? Image;
             public ResourceSlotIdentifier ImageIdentifier;
@@ -157,17 +162,22 @@ internal static unsafe partial class VulkanVideoPresenter
         private readonly Dictionary<(int Slot, uint Index), HeapEntry> _heapEntries = new();
         private readonly Dictionary<CachedImage, List<HeapEntry>> _heapEntriesByImage = new(ReferenceEqualityComparer.Instance);
         private readonly HashSet<CachedImage> _heapChangedImages = new(ReferenceEqualityComparer.Instance);
-        private BindlessHeapDescriptor _textureHeap;
-        private BindlessHeapDescriptor _samplerHeap;
+        // The image arrays share their elements (a record has one element in each), and so do the two sampler arrays.
+        private readonly BindlessHeapViewTable _heapImageViews = new(BindlessHeap.CallRecordFirstIndex);
+        private readonly BindlessHeapViewTable _heapSamplerViews = new(BindlessHeap.CallRecordFirstIndex);
+        private Action<BindlessHeapViewTable.Region>? _heapRegionReleased;
+        // The entries of each view in record order, and when their records were last compared with the guest's.
+        private sealed class HeapRegionEntries
+        {
+            public readonly List<HeapEntry> Order = [];
+            public HeapEntry[]? Snapshot;
+            public uint[]? Records;
+            public ulong ValidatedTick;
+        }
+
+        private readonly Dictionary<BindlessHeapViewTable.Region, HeapRegionEntries> _heapRegionEntries = new(ReferenceEqualityComparer.Instance);
         private ulong _heapRevalidatedTick;
         private object? _heapPreparedFor;
-        // Changes whenever _heapEntries does; the entries in record order (image heap, then sampler heap, each by
-        // index), their indexes and where the sampler heap's begin, as of _heapRunVersion; and the run buffer.
-        private long _heapEntriesVersion;
-        private long _heapRunVersion;
-        private HeapEntry[]? _heapRunOrder;
-        private uint[]? _heapRunIndexes;
-        private int _heapRunSamplerStart;
         private byte[]? _heapRunBytes;
         private Sampler _heapNullSampler;
         private Action<CachedImage>? _heapImageChanged;
@@ -313,6 +323,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     _heapChangedImages.Add(image);
                 }
             };
+            _heapRegionReleased = ReleaseHeapRegion;
 
             // Every element is a null view or the null sampler until its record is read.
             var nullImages = new DescriptorImageInfo[BindlessHeap.Capacity];
@@ -363,7 +374,9 @@ internal static unsafe partial class VulkanVideoPresenter
 
             _heapEntriesByImage.Clear();
             _heapEntries.Clear();
-            _heapEntriesVersion++;
+            _heapRegionEntries.Clear();
+            _heapImageViews.ReleaseIdle(ulong.MaxValue, ulong.MaxValue, static _ => { });
+            _heapSamplerViews.ReleaseIdle(ulong.MaxValue, ulong.MaxValue, static _ => { });
             _callRecordEntries.Clear();
             Array.Clear(_callRecordNext);
             _heapFeedback?.Dispose();
@@ -398,9 +411,13 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        // Before the images of a draw or dispatch that reads set 1 are found: the heap V#s, the records marked since the
-        // last look, records rewritten since they were read, and heap images whose contents or layout changed.
-        internal void PrepareBindlessHeap(object preparation, BindlessHeapDescriptor[] heaps)
+        // A view no draw has read for this many submission ticks gives its elements up: a table the guest allocates
+        // for each frame is a new view whenever it moves, and the memory of the old one holds other data by then.
+        private const ulong HeapIdleTicks = 256;
+
+        // Before the images of a draw or dispatch that reads set 1 are found: the records marked since the last look,
+        // records rewritten since they were read, and heap images whose contents or layout changed.
+        internal void PrepareBindlessHeap(object preparation)
         {
             if (ReferenceEquals(_heapPreparedFor, preparation))
             {
@@ -409,32 +426,110 @@ internal static unsafe partial class VulkanVideoPresenter
 
             _heapPreparedFor = preparation;
             EnsureBindlessHeap();
-            var revalidate = _scheduler.CurrentTick - _heapRevalidatedTick >= HeapRevalidationTicks;
-            foreach (var heap in heaps)
-            {
-                ref var current = ref heap.Sampler ? ref _samplerHeap : ref _textureHeap;
-                if (current == heap)
-                {
-                    continue;
-                }
-
-                if (current.Base != 0 && current.Base != heap.Base && _heapReports++ < 16)
-                {
-                    Console.Error.WriteLine(
-                        $"[GPU][WARN] Bindless {(heap.Sampler ? "sampler" : "texture")} heap moved: from=0x{current.Base:X16} to=0x{heap.Base:X16} records={heap.Records}");
-                }
-
-                current = heap;
-                revalidate = true;
-            }
-
             PollHeapFeedback();
-            if (revalidate)
+            if (_scheduler.CurrentTick - _heapRevalidatedTick >= HeapRevalidationTicks)
             {
                 RevalidateHeapEntries();
             }
 
             RefreshChangedHeapImages();
+        }
+
+        // The runs of set-1 elements of a stage's heap views, as the stage's shader data (HeapView, two dwords each).
+        internal void WriteHeapViews(ReadOnlySpan<BindlessHeapDescriptor> heaps, Span<uint> words)
+        {
+            EnsureBindlessHeap();
+            var tick = _scheduler.CurrentTick;
+            var completed = _scheduler.CompletedTick;
+            for (var index = 0; index < heaps.Length; index++)
+            {
+                ref readonly var heap = ref heaps[index];
+                var region = (heap.Sampler ? _heapSamplerViews : _heapImageViews).Acquire(heap, tick, completed, _heapRegionReleased!, out var moved);
+                var view = region?.View ?? HeapView.None;
+                words[index * (int)HeapView.DwordCount] = view.Word0;
+                words[index * (int)HeapView.DwordCount + 1] = view.Word1;
+                if (region is null)
+                {
+                    if (heap.Base != 0 && heap.Records != 0 && _heapReports++ < 16)
+                    {
+                        Console.Error.WriteLine(
+                            $"[GPU][WARN] Bindless heap view has no elements left: heap=0x{heap.Base:X16} records={heap.Records} stride={heap.Stride}; its records read as null.");
+                    }
+
+                    continue;
+                }
+
+                // Only a view some draw reads is compared with the guest's records: an idle view's memory may hold
+                // anything, and is read again when a draw comes back to it. A run that moved to this heap is compared
+                // now: the records that are the same textures at the new address keep their elements.
+                if (_heapRegionEntries.TryGetValue(region, out var entries) && (moved || tick - entries.ValidatedTick >= HeapRevalidationTicks))
+                {
+                    RevalidateHeapRegion(region, entries);
+                }
+
+            }
+        }
+
+        private void AddHeapEntry(int slot, uint index, BindlessHeapViewTable.Region region)
+        {
+            var entry = new HeapEntry { Slot = slot, Index = index, Region = region };
+            _heapEntries[(slot, index)] = entry;
+            if (!_heapRegionEntries.TryGetValue(region, out var entries))
+            {
+                entries = new HeapRegionEntries { ValidatedTick = _scheduler.CurrentTick };
+                _heapRegionEntries.Add(region, entries);
+            }
+
+            var position = entries.Order.Count;
+            while (position > 0 && (entries.Order[position - 1].Index > index ||
+                       (entries.Order[position - 1].Index == index && entries.Order[position - 1].Slot > slot)))
+            {
+                position--;
+            }
+
+            entries.Order.Insert(position, entry);
+            entries.Snapshot = null;
+            entries.Records = null;
+            entry.Words = ReadHeapRecord(entry);
+            ResolveHeapEntry(entry);
+        }
+
+        // A view gives its elements up: they read null again, and a later view that takes them starts unmarked.
+        private void ReleaseHeapRegion(BindlessHeapViewTable.Region region)
+        {
+            var sampler = region.Heap.Sampler;
+            if (_heapRegionEntries.Remove(region, out var entries))
+            {
+                foreach (var entry in entries.Order)
+                {
+                    _heapEntries.Remove((entry.Slot, entry.Index));
+                    _heapMarked[entry.Slot * (int)BindlessHeap.FeedbackWordsPerArray + (int)(entry.Index >> 5)] &= ~(1u << (int)(entry.Index & 31));
+                    var released = DetachHeapEntry(entry);
+                    if (sampler)
+                    {
+                        entry.Words = [];
+                        WriteHeapSampler(entry);
+                    }
+                    else
+                    {
+                        WriteHeapImage(entry.Slot, entry.Index, default);
+                    }
+
+                    released?.Invoke();
+                }
+            }
+
+            // The marks of the words the run touches: a neighbor's shader marks its element again when it reads it.
+            var firstSlot = sampler ? BindlessHeap.SamplerSlot : 0;
+            var endSlot = sampler ? BindlessHeap.ArrayCount : BindlessHeap.ImageKinds.Length;
+            var firstWord = region.View.First >> 5;
+            var endWord = (region.View.First + region.View.Records + 31) >> 5;
+            _ = BeginBatchedGuestCommands();
+            for (var slot = firstSlot; slot < endSlot; slot++)
+            {
+                _heapFeedback!.Fill(
+                    ((ulong)slot * BindlessHeap.FeedbackWordsPerArray + firstWord) * sizeof(uint), (ulong)(endWord - firstWord) * sizeof(uint), 0);
+            }
         }
 
         public void BindBindlessHeap(CommandBuffer command, PipelineBindPoint bindPoint, PipelineLayout layout)
@@ -501,11 +596,15 @@ internal static unsafe partial class VulkanVideoPresenter
                         continue;
                     }
 
-                    var entry = new HeapEntry { Slot = slot, Index = index };
-                    _heapEntries[(slot, index)] = entry;
-                    _heapEntriesVersion++;
-                    entry.Words = ReadHeapRecord(slot, index);
-                    ResolveHeapEntry(entry);
+                    // An element no view holds was marked before its view gave it up.
+                    var sampler = slot >= BindlessHeap.ImageKinds.Length;
+                    if ((sampler ? _heapSamplerViews : _heapImageViews).Find(index) is not { } region)
+                    {
+                        _heapMarked[word] &= ~(1u << (int)(index & 31));
+                        continue;
+                    }
+
+                    AddHeapEntry(slot, index, region);
                 }
             }
         }
@@ -513,17 +612,10 @@ internal static unsafe partial class VulkanVideoPresenter
         private void RevalidateHeapEntries()
         {
             _heapRevalidatedTick = _scheduler.CurrentTick;
-            Span<uint> scratch = stackalloc uint[8];
-            if (HeapBulkReadsActive)
+            if (_heapRevalidatedTick > HeapIdleTicks)
             {
-                RevalidateHeapEntriesInRuns(scratch);
-            }
-            else
-            {
-                foreach (var entry in _heapEntries.Values)
-                {
-                    RevalidateHeapEntry(entry, scratch[..ReadHeapRecord(entry.Slot, entry.Index, scratch)]);
-                }
+                _heapImageViews.ReleaseIdle(_heapRevalidatedTick - HeapIdleTicks, _scheduler.CompletedTick, _heapRegionReleased!);
+                _heapSamplerViews.ReleaseIdle(_heapRevalidatedTick - HeapIdleTicks, _scheduler.CompletedTick, _heapRegionReleased!);
             }
 
             // A call record entry is named by its words, which never change; its image stays in use.
@@ -545,7 +637,9 @@ internal static unsafe partial class VulkanVideoPresenter
                 _ = _imageCache.GetImage(entry.ImageIdentifier);
             }
 
-            if (words.SequenceEqual(entry.Words))
+            // A T# that had no image when it was last looked at (its texture was not mapped) is looked at again.
+            if (words.SequenceEqual(entry.Words) &&
+                (entry.Resolved || entry.Slot >= BindlessHeap.ImageKinds.Length || words.Length != 8 || !ResourceMaterializer.IsFloatHeapImage(words)))
             {
                 return false;
             }
@@ -555,67 +649,60 @@ internal static unsafe partial class VulkanVideoPresenter
             return true;
         }
 
-        // The presenter's side of VisitHeapRuns, over the entries in record order.
-        private readonly struct HeapRunVisitor(Presenter owner, HeapEntry[] order) : IHeapRunVisitor
+        // The presenter's side of VisitHeapRuns, over the entries of one heap view in record order: the view's
+        // descriptors are its heap's records, a stride apart.
+        private readonly struct HeapRunVisitor(Presenter owner, HeapEntry[] order, BindlessHeapViewTable.Region region) : IHeapRunVisitor
         {
-            public BindlessHeapDescriptor Heap(bool sampler) => sampler ? owner._samplerHeap : owner._textureHeap;
+            public BindlessHeapDescriptor Heap(bool sampler) =>
+                new(sampler, region.View.DescriptorAddress(region.Heap, 0), region.View.Records, region.View.Stride);
 
             public bool TryRead(ulong address, Span<byte> destination) => owner._guestMemory.TryRead(address, destination);
 
-            public int ReadRecord(int position, Span<uint> words) =>
-                owner.ReadHeapRecord(order[position].Slot, order[position].Index, words);
+            public int ReadRecord(int position, Span<uint> words) => owner.ReadHeapRecord(order[position], words);
 
             public bool Visit(int position, ReadOnlySpan<uint> words) => owner.RevalidateHeapEntry(order[position], words);
         }
 
-        // Every entry, in record order, compared with words read in runs (HeapRecordRunEnd).
-        private void RevalidateHeapEntriesInRuns(Span<uint> scratch)
+        // The entries of one view, in record order, compared with words read in runs (HeapRecordRunEnd).
+        private void RevalidateHeapRegion(BindlessHeapViewTable.Region region, HeapRegionEntries entries)
         {
-            if (_heapRunOrder is null || _heapRunIndexes is null || _heapRunVersion != _heapEntriesVersion)
+            entries.ValidatedTick = _scheduler.CurrentTick;
+            // The arrays are replaced, never changed, when the entries change: a nested preparation leaves these intact.
+            var order = entries.Snapshot ??= [.. entries.Order];
+            var records = entries.Records ??= Array.ConvertAll(order, entry => entry.Index - region.View.First);
+            Span<uint> scratch = stackalloc uint[8];
+            if (HeapBulkReadsActive)
             {
-                var order = _heapEntries.Values.ToArray();
-                Array.Sort(order, static (left, right) =>
-                {
-                    var heap = (left.Slot >= BindlessHeap.ImageKinds.Length).CompareTo(right.Slot >= BindlessHeap.ImageKinds.Length);
-                    return heap != 0 ? heap : left.Index != right.Index ? left.Index.CompareTo(right.Index) : left.Slot.CompareTo(right.Slot);
-                });
-                _heapRunOrder = order;
-                _heapRunIndexes = Array.ConvertAll(order, static entry => entry.Index);
-                _heapRunSamplerStart = Array.FindIndex(order, static entry => entry.Slot >= BindlessHeap.ImageKinds.Length);
-                if (_heapRunSamplerStart < 0) _heapRunSamplerStart = order.Length;
-                _heapRunVersion = _heapEntriesVersion;
+                var visitor = new HeapRunVisitor(this, order, region);
+                VisitHeapRuns(ref visitor, records, 0, order.Length, region.Heap.Sampler, (_heapRunBytes ??= new byte[HeapRunMaxBytes]).AsSpan(), scratch);
+                return;
             }
 
-            // The arrays are replaced, never changed, when the entries change: a nested revalidation leaves these intact.
-            var runOrder = _heapRunOrder!;
-            var runIndexes = _heapRunIndexes!;
-            var samplerStart = _heapRunSamplerStart;
-            var visitor = new HeapRunVisitor(this, runOrder);
-            var buffer = (_heapRunBytes ??= new byte[HeapRunMaxBytes]).AsSpan();
-            VisitHeapRuns(ref visitor, runIndexes, 0, samplerStart, sampler: false, buffer, scratch);
-            VisitHeapRuns(ref visitor, runIndexes, samplerStart, runOrder.Length, sampler: true, buffer, scratch);
+            foreach (var entry in order)
+            {
+                RevalidateHeapEntry(entry, scratch[..ReadHeapRecord(entry, scratch)]);
+            }
         }
 
-        // The record's words, or none when the heap has no such record or it cannot be read.
-        private uint[] ReadHeapRecord(int slot, uint index)
+        // The words of the entry's record, or none when its heap has no such record or it cannot be read.
+        private uint[] ReadHeapRecord(HeapEntry entry)
         {
             Span<uint> words = stackalloc uint[8];
-            return words[..ReadHeapRecord(slot, index, words)].ToArray();
+            return words[..ReadHeapRecord(entry, words)].ToArray();
         }
 
         // Revalidation compares current words in scratch; only a changed entry needs a new retained array.
-        private int ReadHeapRecord(int slot, uint index, Span<uint> words)
+        private int ReadHeapRecord(HeapEntry entry, Span<uint> words)
         {
-            var sampler = slot >= BindlessHeap.ImageKinds.Length;
-            var heap = sampler ? _samplerHeap : _textureHeap;
-            var bytes = sampler ? BindlessHeap.SamplerRecordBytes : BindlessHeap.ImageRecordBytes;
-            if (heap.Base == 0 || index >= heap.Records)
+            if (entry.Region is not { } region || !region.Holds(entry.Index))
             {
                 return 0;
             }
 
+            var bytes = region.Heap.Sampler ? BindlessHeap.SamplerRecordBytes : BindlessHeap.ImageRecordBytes;
             var count = checked((int)(bytes / sizeof(uint)));
-            return _guestMemory.TryRead(heap.Base + (ulong)index * bytes, MemoryMarshal.AsBytes(words[..count])) ? count : 0;
+            var address = region.View.DescriptorAddress(region.Heap, entry.Index - region.View.First);
+            return _guestMemory.TryRead(address, MemoryMarshal.AsBytes(words[..count])) ? count : 0;
         }
 
         private void ResolveHeapEntry(HeapEntry entry)
@@ -675,7 +762,10 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var request = resolution.Request;
-            if (ImageDescription.IsEmptyRange(request.Description.Data))
+            // The record of a table may hold no T# the guest uses (a record it has not filled, one whose memory it uses
+            // for other data by now, or the T# of a texture it has unloaded): words that name no mapped guest memory are
+            // no image for now.
+            if (ImageDescription.IsEmptyRange(request.Description.Data) || !_imageCache.IsBackedImageRange(request.Description.Data))
             {
                 return default;
             }

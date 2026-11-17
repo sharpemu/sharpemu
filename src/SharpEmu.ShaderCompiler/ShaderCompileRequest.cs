@@ -131,8 +131,9 @@ public sealed class ShaderCompileRequest
         foreach (var record in plan.HeapRecords)
         {
             var heap = plan.DescriptorSources[(int)record.Source].Heap!;
+            var view = plan.HeapViewOf(record);
             (record.Sampler ? heapSamplers : heapImages)[record.MemoryIndex] =
-                new HeapRecordUse(heap.KeyMemoryIndex, heap.Immediate, heap.RecordBytes);
+                new HeapRecordUse(heap.KeyMemoryIndex, heap.Immediate, heap.RecordBytes, view);
         }
 
         HeapImageByMemoryIndex = heapImages;

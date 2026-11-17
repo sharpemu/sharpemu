@@ -1,0 +1,180 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+using SharpEmu.Libs.VideoOut;
+using SharpEmu.ShaderCompiler.Resources;
+using Xunit;
+
+namespace SharpEmu.Libs.Tests.VideoOut;
+
+// The runs of set-1 elements the heap views of the draws hold. A game can read several tables in one frame (terrain
+// tile records, material records), each through its own program: every view needs elements no other view holds.
+public sealed class BindlessHeapViewTableTests
+{
+    private static readonly Action<BindlessHeapViewTable.Region> Unreleased = region =>
+        Assert.Fail($"A view gave its elements up: first={region.View.First}.");
+
+    private static BindlessHeapDescriptor Table(ulong address, uint records, uint stride = 440, uint immediate = 0) =>
+        new(false, address, records, stride, immediate);
+
+    [Fact]
+    public void ViewsOfDifferentHeapsAndDescriptorsHoldDifferentElements()
+    {
+        var table = new BindlessHeapViewTable(1000);
+
+        var terrain = table.Acquire(Table(0x1000, 49), tick: 1, completedTick: 0, Unreleased, out _)!;
+        var masks = table.Acquire(Table(0x1000, 49, immediate: 64), tick: 1, completedTick: 0, Unreleased, out _)!;
+        var materials = table.Acquire(Table(0x9000, 200, stride: 136, immediate: 48), tick: 1, completedTick: 0, Unreleased, out _)!;
+
+        Assert.Equal(new HeapView(0, 440, 0, 49), terrain.View);
+        Assert.Equal(new HeapView(49, 440, 64, 49), masks.View);
+        Assert.Equal(new HeapView(98, 136, 48, 200), materials.View);
+        Assert.Same(terrain, table.Find(0));
+        Assert.Same(terrain, table.Find(48));
+        Assert.Same(masks, table.Find(49));
+        Assert.Same(materials, table.Find(297));
+        Assert.Null(table.Find(298));
+        Assert.True(masks.Holds(97));
+        Assert.False(masks.Holds(98));
+        Assert.False(masks.Holds(48));
+    }
+
+    // The same view of a later draw reads the same elements: the records the shaders marked stay resolved.
+    [Fact]
+    public void AViewReadAgainKeepsItsElements()
+    {
+        var table = new BindlessHeapViewTable(1000);
+        var first = table.Acquire(Table(0x1000, 49), tick: 1, completedTick: 0, Unreleased, out _)!;
+
+        var again = table.Acquire(Table(0x1000, 49), tick: 7, completedTick: 5, Unreleased, out _);
+
+        Assert.Same(first, again);
+        Assert.Equal(7ul, again!.LastUsedTick);
+        Assert.Single(table.Regions);
+    }
+
+    // A table the guest allocates for each frame is the same records at another address: the moved table takes over the run
+    // of the old one once no pending command reads it, so its elements stay resolved (the caller compares them with the
+    // records at the new address). While a command still reads the old one, the moved table gets free elements.
+    [Fact]
+    public void AMovedTableTakesOverTheRunOfTheOldOne()
+    {
+        var table = new BindlessHeapViewTable(1000);
+        var old = table.Acquire(Table(0x1000, 23), tick: 1, completedTick: 0, Unreleased, out var moved)!;
+        Assert.False(moved);
+
+        var pending = table.Acquire(Table(0x5000, 23), tick: 2, completedTick: 0, Unreleased, out moved)!;
+        Assert.False(moved);
+        Assert.NotSame(old, pending);
+        Assert.Equal(23u, pending.View.First);
+
+        var next = table.Acquire(Table(0x9000, 23), tick: 3, completedTick: 1, Unreleased, out moved)!;
+        Assert.True(moved);
+        Assert.Same(old, next);
+        Assert.Equal((0x9000ul, 0u, 3ul), (next.Heap.Base, next.View.First, next.LastUsedTick));
+        Assert.Equal(2, table.Regions.Count);
+        // The old address is a new view when a draw comes back to it.
+        var back = table.Acquire(Table(0x1000, 23), tick: 3, completedTick: 1, Unreleased, out moved)!;
+        Assert.False(moved);
+        Assert.Equal(46u, back.View.First);
+    }
+
+    // With no free elements left, a view takes those of the view used longest ago, but only one whose commands have all
+    // completed: a pending command still reads its elements.
+    [Fact]
+    public void AFullTableGivesANewViewTheElementsOfTheOldestCompletedOne()
+    {
+        var table = new BindlessHeapViewTable(100);
+        var oldest = table.Acquire(Table(0x1000, 40), tick: 1, completedTick: 0, Unreleased, out _)!;
+        var newer = table.Acquire(Table(0x2000, 40, immediate: 64), tick: 2, completedTick: 0, Unreleased, out _)!;
+        var released = new List<BindlessHeapViewTable.Region>();
+
+        // Nothing has completed: the view has no elements, and nothing is taken.
+        Assert.Null(table.Acquire(Table(0x3000, 40, immediate: 128), tick: 3, completedTick: 0, released.Add, out _));
+        Assert.Empty(released);
+
+        var moved = table.Acquire(Table(0x3000, 40, immediate: 128), tick: 3, completedTick: 1, released.Add, out _)!;
+
+        Assert.Equal([oldest], released);
+        Assert.Equal(new HeapView(0, 440, 128, 40), moved.View);
+        Assert.Same(moved, table.Find(0));
+        Assert.Same(newer, table.Find(40));
+        Assert.Equal(2, table.Regions.Count);
+        // The view that gave its elements up is a new view when it is read again.
+        var back = table.Acquire(Table(0x1000, 20), tick: 4, completedTick: 1, Unreleased, out _)!;
+        Assert.Equal(80u, back.View.First);
+    }
+
+    // A view larger than the gap between two others takes the elements of as many completed views as it needs.
+    [Fact]
+    public void ALargeViewTakesSeveralCompletedViews()
+    {
+        var table = new BindlessHeapViewTable(100);
+        var a = table.Acquire(Table(0x1000, 30), tick: 1, completedTick: 0, Unreleased, out _)!;
+        var b = table.Acquire(Table(0x2000, 30), tick: 2, completedTick: 0, Unreleased, out _)!;
+        var c = table.Acquire(Table(0x3000, 30), tick: 3, completedTick: 0, Unreleased, out _)!;
+        var released = new List<BindlessHeapViewTable.Region>();
+
+        var large = table.Acquire(Table(0x4000, 60), tick: 4, completedTick: 3, released.Add, out _)!;
+
+        Assert.Equal([a, b], released);
+        Assert.Equal(0u, large.View.First);
+        Assert.Same(c, table.Find(60));
+        Assert.Null(table.Find(95));
+    }
+
+    // A title's texture heap of packed descriptors can be larger than half of set 1, and the guest keeps two copies of it
+    // (46158 records each in a real title). The second copy finds no free run and shares the first one's, as a heap that
+    // moved: the caller compares the run's elements with the new copy's records. Tables keep their own runs.
+    [Fact]
+    public void AViewWithoutFreeElementsSharesTheRunOfAViewOfItsShape()
+    {
+        var table = new BindlessHeapViewTable(100);
+        var terrain = table.Acquire(Table(0x1000, 10), tick: 1, completedTick: 0, Unreleased, out _)!;
+        var heap = table.Acquire(new BindlessHeapDescriptor(false, 0x10000, 80, 32), tick: 1, completedTick: 0, Unreleased, out var moved)!;
+        Assert.False(moved);
+
+        var copy = table.Acquire(new BindlessHeapDescriptor(false, 0x20000, 80, 32), tick: 1, completedTick: 0, Unreleased, out moved);
+
+        Assert.Same(heap, copy);
+        Assert.True(moved);
+        Assert.Equal(0x20000ul, heap.Heap.Base);
+        Assert.Equal(new HeapView(10, 32, 0, 80), heap.View);
+        // Back to the first copy: the run moves again.
+        Assert.Same(heap, table.Acquire(new BindlessHeapDescriptor(false, 0x10000, 80, 32), tick: 2, completedTick: 0, Unreleased, out moved));
+        Assert.True(moved);
+        // The copy it holds now is found as it is.
+        Assert.Same(heap, table.Acquire(new BindlessHeapDescriptor(false, 0x10000, 80, 32), tick: 3, completedTick: 0, Unreleased, out moved));
+        Assert.False(moved);
+        // Another shape does not share: with nothing completed it has no elements.
+        Assert.Null(table.Acquire(new BindlessHeapDescriptor(false, 0x30000, 80, 32, 0) with { Records = 81 }, tick: 3, completedTick: 0, Unreleased, out _));
+        Assert.Same(terrain, table.Find(0));
+    }
+
+    [Fact]
+    public void AViewHasNoMoreElementsThanTheTable()
+    {
+        var table = new BindlessHeapViewTable(100);
+
+        Assert.Null(table.Acquire(Table(0x1000, 0), tick: 1, completedTick: 0, Unreleased, out _));
+        Assert.Null(table.Acquire(Table(0, 16), tick: 1, completedTick: 0, Unreleased, out _));
+        var cut = table.Acquire(Table(0x1000, 5000), tick: 1, completedTick: 0, Unreleased, out _)!;
+
+        Assert.Equal(new HeapView(0, 440, 0, 100), cut.View);
+    }
+
+    [Fact]
+    public void IdleViewsGiveTheirElementsUpOnceTheirCommandsCompleted()
+    {
+        var table = new BindlessHeapViewTable(100);
+        var idle = table.Acquire(Table(0x1000, 10), tick: 1, completedTick: 0, Unreleased, out _)!;
+        var pending = table.Acquire(Table(0x2000, 10), tick: 5, completedTick: 0, Unreleased, out _)!;
+        var used = table.Acquire(Table(0x3000, 10), tick: 9, completedTick: 0, Unreleased, out _)!;
+        var released = new List<BindlessHeapViewTable.Region>();
+
+        table.ReleaseIdle(idleBefore: 8, completedTick: 4, released.Add);
+
+        Assert.Equal([idle], released);
+        Assert.Equal([pending, used], table.Regions);
+    }
+}

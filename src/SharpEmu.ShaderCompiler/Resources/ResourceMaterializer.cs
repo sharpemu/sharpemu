@@ -982,7 +982,8 @@ public static partial class ResourceMaterializer
                     return false;
                 }
 
-                snapshot.Heaps[index] = BindlessHeapDescriptor.FromWords(plan.HeapRecordSources[index].Sampler, heaps[index].Dwords);
+                var view = plan.HeapRecordSources[index];
+                snapshot.Heaps[index] = BindlessHeapDescriptor.FromWords(view.Sampler, heaps[index].Dwords, view.Immediate);
             }
         }
 

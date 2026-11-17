@@ -3,14 +3,18 @@
 
 namespace SharpEmu.ShaderCompiler.Resources;
 
-// The descriptor heaps a bindless shader indexes at run time: a texture heap of 32-byte T# records and a sampler heap of
-// 16-byte S# records, each read at a record only the shader knows. Descriptor set 1 holds one array per supported image
-// class and two sampler arrays (plain and depth compare), indexed by the record number, and a bitset per array in which
-// the shader marks every record it reads, so that the host can give that record a view.
+// The descriptor heaps a bindless shader indexes at run time: buffers of records that hold 32-byte T#s or 16-byte S#s,
+// each read at a record only the shader knows. Descriptor set 1 holds one array per supported image class and two sampler
+// arrays (plain and depth compare), and a bitset per array in which the shader marks every element it reads, so that the
+// host can give that element a view. A program may read several heaps, and a record may hold more than a descriptor
+// (a material or terrain record with its textures among other fields), so the elements a read takes are those of its
+// heap view (HeapView): the host gives each view its own run of elements for every draw.
 public static class BindlessHeap
 {
     public const uint DescriptorSet = 1;
-    public const uint Capacity = 65536;
+    // Every view of a draw has its own elements: a title that keeps two copies of a 46158-record texture heap beside its
+    // tables needs more than twice that.
+    public const uint Capacity = 131072;
     public const uint ImageRecordBytes = 32;
     public const uint SamplerRecordBytes = 16;
     public const uint FeedbackBinding = 63;
@@ -18,7 +22,7 @@ public static class BindlessHeap
 
     // Set-1 elements from CallRecordFirstIndex on hold the views and samplers of call records (CallRecordSelector), which the
     // host assigns by their descriptor words; guest heap records use the elements below. CallRecordNullIndex stays null.
-    public const uint CallRecordFirstIndex = 49152;
+    public const uint CallRecordFirstIndex = Capacity - 16384;
     public const uint CallRecordNullIndex = Capacity - 1;
 
     // The call records buffer of a dispatch (DescriptorBindingKind.CallRecords): word 0 holds the row count N, then N rows of
@@ -131,15 +135,54 @@ public sealed record CallRecordBufferWords(ScalarValue[] Words, bool Written);
 // reads itself.
 public sealed record CallRecordCallee(CallRecordField[] Fields, CallRecordBuffer[] Buffers, uint ArgumentBytes);
 
-// A heap V# the plan evaluates for every draw, and whether it holds samplers.
-public sealed record HeapRecordSource(uint Source, bool Sampler);
+// A heap view of a program: the heap V# the plan evaluates for every draw, whether its records hold samplers, and the
+// immediate offset the program reads them at.
+public sealed record HeapRecordSource(uint Source, bool Sampler, uint Immediate = 0);
 
-// One heap V# a draw's bindless accesses read: its base address, record count and stride.
-public readonly record struct BindlessHeapDescriptor(bool Sampler, ulong Base, uint Records, uint Stride)
+// One heap view of a draw: the heap V#'s base address, record count and stride, and the immediate offset of the view's reads.
+public readonly record struct BindlessHeapDescriptor(bool Sampler, ulong Base, uint Records, uint Stride, uint Immediate = 0)
 {
-    public static BindlessHeapDescriptor FromWords(bool sampler, ReadOnlySpan<uint> words) =>
-        new(sampler, words[0] | ((ulong)(words[1] & 0xFFFF) << 32), words[2], (words[1] >> 16) & 0x3FFF);
+    public static BindlessHeapDescriptor FromWords(bool sampler, ReadOnlySpan<uint> words, uint immediate = 0) =>
+        new(sampler, words[0] | ((ulong)(words[1] & 0xFFFF) << 32), words[2], (words[1] >> 16) & 0x3FFF, immediate);
 }
 
-// How the shader reads one heap record: the key read whose dynamic offset it kept, the immediate offset and the record size.
-public readonly record struct HeapRecordUse(int KeyMemoryIndex, uint Immediate, uint RecordBytes);
+// How the shader reads one heap record: the key read whose dynamic offset it kept, the immediate offset, the descriptor
+// size and the program's heap view (its number among ShaderResourcePlan.HeapRecordSources).
+public readonly record struct HeapRecordUse(int KeyMemoryIndex, uint Immediate, uint RecordBytes, int View = 0);
+
+// Where the elements of one heap view are for one draw, as the shader reads it from two dwords of shader data
+// (BindingLayout.HeapViewsDword): the view's first element of set 1, the heap's record stride, the offset of the view's
+// descriptor in a record, and how many records the view has elements for. The read at byte offset (key + immediate) of
+// the heap takes element First + offset / Stride when offset % Stride is FieldOffset and that record is below Records;
+// any other read takes the null element.
+public readonly record struct HeapView(uint First, uint Stride, uint FieldOffset, uint Records)
+{
+    public const uint DwordCount = 2;
+
+    // The stride and field offset are V# strides (14 bits); the first element and the count are below BindlessHeap.Capacity
+    // (18 bits).
+    public const uint StrideMask = 0x3FFF;
+    public const int ElementBits = 18;
+    public const uint ElementMask = (1u << ElementBits) - 1;
+
+    // No element: every read of the view takes the null element.
+    public static HeapView None => new(0, 1, 0, 0);
+
+    // The records of a heap V# are its elements when they can hold more than the descriptor: the shader's key picks the
+    // record and its immediate the field. A V# whose stride is the descriptor's size or less (a byte buffer, say) is
+    // read as packed descriptors, whichever part of the offset the shader keeps in its key.
+    public static HeapView Of(in BindlessHeapDescriptor heap, uint first, uint records)
+    {
+        var descriptorBytes = heap.Sampler ? BindlessHeap.SamplerRecordBytes : BindlessHeap.ImageRecordBytes;
+        return heap.Stride <= descriptorBytes
+            ? new HeapView(first, descriptorBytes, 0, records)
+            : new HeapView(first, heap.Stride, heap.Immediate % heap.Stride, records);
+    }
+
+    // The guest address of the descriptor a record of the heap holds for this view.
+    public ulong DescriptorAddress(in BindlessHeapDescriptor heap, uint record) => heap.Base + (ulong)record * Stride + FieldOffset;
+
+    public uint Word0 => (First & ElementMask) | ((Stride & StrideMask) << ElementBits);
+
+    public uint Word1 => (Records & ElementMask) | ((FieldOffset & StrideMask) << ElementBits);
+}

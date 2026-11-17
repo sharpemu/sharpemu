@@ -427,6 +427,11 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         return found != null;
     }
 
+    // Whether the texels of an image over this range could be read from the guest: the range is valid and its first page
+    // is mapped (ResidentImageBacking reads a mapped prefix). A descriptor read from a table the guest no longer uses may
+    // name memory it has unmapped since.
+    public bool IsBackedImageRange(GuestSpan data) => ImageDescription.IsValidRange(data) && _backing.IsBackedRange(data.Address, 1);
+
     // The registered depth image that owns the stencil plane starting at this span, with the
     // newest GPU write when several do (a copied depth buffer shares its source's plane).
     public bool TryFindStencilOwner(GuestSpan plane, out ResourceSlotIdentifier owner)
