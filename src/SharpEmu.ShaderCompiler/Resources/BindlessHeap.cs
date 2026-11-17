@@ -16,6 +16,8 @@ public static class BindlessHeap
     // tables needs more than twice that.
     public const uint Capacity = 131072;
     public const uint ImageRecordBytes = 32;
+    // A T# an R128 image instruction reads is its first four words.
+    public const uint R128RecordBytes = 16;
     public const uint SamplerRecordBytes = 16;
     public const uint FeedbackBinding = 63;
     public const uint FeedbackWordsPerArray = Capacity / 32;
@@ -113,10 +115,13 @@ public readonly record struct HeapImageClass(DescriptorBindingKind Kind, ImageDi
 
 // A descriptor the shader reads from a bindless heap at a record it picks at run time: the heap V# source, the scalar
 // read of the record's first dword (whose dynamic offset the shader keeps), that read's immediate offset and the record
-// size. A cube image is sampled through a cube view.
+// size. A cube image is sampled through a cube view. An R128 image instruction reads a 16-byte T#: the words after it in
+// the heap are not the descriptor's.
 public sealed record HeapRecordSelector(uint HeapSource, int KeyMemoryIndex, uint Immediate, uint RecordBytes)
 {
     public bool Cube { get; init; }
+
+    public bool R128 { get; init; }
 }
 
 // One image access whose image or sampler is a heap record.
@@ -157,15 +162,20 @@ public sealed record CallRecordBufferWords(ScalarValue[] Words, bool Written);
 // reads itself.
 public sealed record CallRecordCallee(CallRecordField[] Fields, CallRecordBuffer[] Buffers, uint ArgumentBytes);
 
-// A heap view of a program: the heap V# the plan evaluates for every draw, whether its records hold samplers, and the
-// immediate offset the program reads them at.
-public sealed record HeapRecordSource(uint Source, bool Sampler, uint Immediate = 0);
+// A heap view of a program: the heap V# the plan evaluates for every draw, whether its records hold samplers, the
+// immediate offset the program reads them at, and whether it reads them as 16-byte T#s (R128).
+public sealed record HeapRecordSource(uint Source, bool Sampler, uint Immediate = 0, bool R128 = false);
 
-// One heap view of a draw: the heap V#'s base address, record count and stride, and the immediate offset of the view's reads.
-public readonly record struct BindlessHeapDescriptor(bool Sampler, ulong Base, uint Records, uint Stride, uint Immediate = 0)
+// One heap view of a draw: the heap V#'s base address, record count and stride, the immediate offset of the view's reads,
+// and whether its descriptors are 16-byte T#s.
+public readonly record struct BindlessHeapDescriptor(bool Sampler, ulong Base, uint Records, uint Stride, uint Immediate = 0, bool R128 = false)
 {
-    public static BindlessHeapDescriptor FromWords(bool sampler, ReadOnlySpan<uint> words, uint immediate = 0) =>
-        new(sampler, words[0] | ((ulong)(words[1] & 0xFFFF) << 32), words[2], (words[1] >> 16) & 0x3FFF, immediate);
+    // The size of the view's descriptor in a record.
+    public uint DescriptorBytes =>
+        Sampler ? BindlessHeap.SamplerRecordBytes : R128 ? BindlessHeap.R128RecordBytes : BindlessHeap.ImageRecordBytes;
+
+    public static BindlessHeapDescriptor FromWords(bool sampler, ReadOnlySpan<uint> words, uint immediate = 0, bool r128 = false) =>
+        new(sampler, words[0] | ((ulong)(words[1] & 0xFFFF) << 32), words[2], (words[1] >> 16) & 0x3FFF, immediate, r128);
 }
 
 // How the shader reads one heap record: the key read whose dynamic offset it kept, the immediate offset, the descriptor
@@ -195,7 +205,7 @@ public readonly record struct HeapView(uint First, uint Stride, uint FieldOffset
     // read as packed descriptors, whichever part of the offset the shader keeps in its key.
     public static HeapView Of(in BindlessHeapDescriptor heap, uint first, uint records)
     {
-        var descriptorBytes = heap.Sampler ? BindlessHeap.SamplerRecordBytes : BindlessHeap.ImageRecordBytes;
+        var descriptorBytes = heap.DescriptorBytes;
         return heap.Stride <= descriptorBytes
             ? new HeapView(first, descriptorBytes, 0, records)
             : new HeapView(first, heap.Stride, heap.Immediate % heap.Stride, records);

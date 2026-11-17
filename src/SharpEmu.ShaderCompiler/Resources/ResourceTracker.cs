@@ -1652,6 +1652,7 @@ public sealed partial class ResourceTracker
             Heap = new HeapRecordSelector(heapSource, memoryIndices[0], first.Offset, (uint)width * sizeof(uint))
             {
                 Cube = !sampler && instruction?.Control is Gen5ImageControl { Dimension: 3 },
+                R128 = !sampler && instruction is { Control: Gen5ImageControl, Words.Count: > 0 } && ((instruction.Words[0] >> 15) & 1) != 0,
             },
         });
         _heapRecords.Add(new HeapRecordPlan

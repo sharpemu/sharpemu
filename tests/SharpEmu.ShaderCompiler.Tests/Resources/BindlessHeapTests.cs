@@ -300,6 +300,44 @@ public sealed class BindlessHeapTests
         Assert.Equal(BindlessHeap.ClassesPerWord, 1u << (int)BindlessHeap.ClassWordShift);
     }
 
+    // An R128 image instruction reads a 16-byte T#: the words after it in the heap are another field of the record.
+    // Large material records can hold their textures as 16-byte T#s one after another (at offsets such as 468, 484 and
+    // 500 bytes in), so the 32 bytes at each were a T# followed by the next one, whose words set reserved bits of the
+    // first: every such record was refused. The view of an R128 read says so, and its descriptors are 16 bytes.
+    [Fact]
+    public void AnR128ImageReadFromAHeapIsASixteenByteDescriptor()
+    {
+        var plan = Extract(ResourceTrackerTests.LaneIndexedImageProgram(r128: true), stage: ShaderStage.Compute, bindlessHeap: true);
+
+        var record = Assert.Single(plan.HeapRecords);
+        Assert.True(plan.DescriptorSources[(int)record.Source].Heap!.R128);
+        Assert.True(Assert.Single(plan.HeapRecordSources).R128);
+        Assert.False(Assert.Single(Extract(ResourceTrackerTests.LaneIndexedImageProgram(), stage: ShaderStage.Compute, bindlessHeap: true)
+            .HeapRecordSources).R128);
+
+        var userData = new uint[64];
+        userData[0] = 0x0001_0000;
+        userData[1] = 1016u << 16;
+        userData[2] = 257;
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs(userData), ref snapshot, ref specialization));
+        var heap = Assert.Single(snapshot.Heaps);
+        Assert.Equal(new BindlessHeapDescriptor(false, 0x0001_0000, 257, 1016, 0, R128: true), heap);
+        Assert.Equal(BindlessHeap.R128RecordBytes, heap.DescriptorBytes);
+        Assert.Equal(BindlessHeap.ImageRecordBytes, (heap with { R128 = false }).DescriptorBytes);
+        Assert.Equal(BindlessHeap.SamplerRecordBytes, (heap with { Sampler = true, R128 = false }).DescriptorBytes);
+        // A heap of packed 16-byte T#s has one element for each.
+        Assert.Equal(new HeapView(5, 16, 0, 100), HeapView.Of(new BindlessHeapDescriptor(false, 0x1000, 100, 16, 0, R128: true), 5, 100));
+        Assert.Equal(new HeapView(5, 32, 0, 100), HeapView.Of(new BindlessHeapDescriptor(false, 0x1000, 100, 16), 5, 100));
+
+        // Two of the material record's T#s, as the host reads them: 32 bytes at the first, and the first one's four words.
+        uint[] overlapped = [0xB3396E00, 0xCB500000, 0x003FC03F, 0x90580FAC, 0x900006E0, 0x0A900000, 0x00000000, 0x90500FAC];
+        uint[] extended = [0xB3396E00, 0xCB500000, 0x003FC03F, 0x90580FAC, 0, 0, 0, 0];
+        Assert.Equal(ImageNumericClass.Unsupported, ResourceMaterializer.HeapImageNumericClass(overlapped));
+        Assert.Equal(ImageNumericClass.Float, ResourceMaterializer.HeapImageNumericClass(extended, r128: true));
+    }
+
     // A load of a heap record reads the texel's bits whatever the texture's format, so it has a float, an unsigned and a
     // signed declaration of its array, all at the array's binding. Each reads the record's element only when the host
     // says the element holds a view of its numeric class (the class words after the mark bitsets), and the null element

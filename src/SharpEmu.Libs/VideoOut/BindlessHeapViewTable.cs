@@ -22,6 +22,11 @@ internal sealed class BindlessHeapViewTable(uint capacity)
         public ulong LastUsedTick;
 
         public bool Holds(uint element) => element >= View.First && element - View.First < View.Records;
+
+        // The run's descriptors as a heap of their own, for reading them in guest memory: the first one's address, a
+        // stride apart, each of the size its heap reads (an R128 view's are 16 bytes).
+        public BindlessHeapDescriptor Descriptors =>
+            Heap with { Base = View.DescriptorAddress(Heap, 0), Records = View.Records, Stride = View.Stride, Immediate = 0 };
     }
 
     // Sorted by first element; runs never overlap.
@@ -51,7 +56,7 @@ internal sealed class BindlessHeapViewTable(uint capacity)
         }
 
         var shape = HeapView.Of(heap, 0, records);
-        if (FindShape(heap.Sampler, shape, tick, completedTick) is { } idle)
+        if (FindShape(heap, shape, tick, completedTick) is { } idle)
         {
             moved = true;
             return Move(idle, heap, tick);
@@ -73,7 +78,7 @@ internal sealed class BindlessHeapViewTable(uint capacity)
 
             if (oldest is null)
             {
-                if (FindShape(heap.Sampler, shape, ulong.MaxValue, ulong.MaxValue) is not { } shared)
+                if (FindShape(heap, shape, ulong.MaxValue, ulong.MaxValue) is not { } shared)
                 {
                     return null;
                 }
@@ -92,12 +97,12 @@ internal sealed class BindlessHeapViewTable(uint capacity)
     }
 
     // The least recently used run of a view of this shape last used before tick and at or before completedTick.
-    private Region? FindShape(bool sampler, HeapView shape, ulong tick, ulong completedTick)
+    private Region? FindShape(in BindlessHeapDescriptor heap, HeapView shape, ulong tick, ulong completedTick)
     {
         Region? found = null;
         foreach (var candidate in _regions)
         {
-            if (candidate.Heap.Sampler == sampler && candidate.View with { First = 0 } == shape &&
+            if (candidate.Heap.Sampler == heap.Sampler && candidate.Heap.R128 == heap.R128 && candidate.View with { First = 0 } == shape &&
                 candidate.LastUsedTick <= completedTick && candidate.LastUsedTick < tick &&
                 (found is null || candidate.LastUsedTick < found.LastUsedTick))
             {

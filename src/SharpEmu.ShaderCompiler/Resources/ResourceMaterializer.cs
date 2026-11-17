@@ -1306,7 +1306,7 @@ public static partial class ResourceMaterializer
             }
 
             var view = plan.HeapRecordSources[index];
-            heaps[index] = BindlessHeapDescriptor.FromWords(view.Sampler, words[index].Dwords, view.Immediate);
+            heaps[index] = BindlessHeapDescriptor.FromWords(view.Sampler, words[index].Dwords, view.Immediate, view.R128);
         }
 
         return true;
@@ -1314,10 +1314,10 @@ public static partial class ResourceMaterializer
 
     // The numeric class of a bindless heap record the host can give a view without a conversion in the shader: a valid
     // sampled T# of a float, unsigned or signed format. Any other record is Unsupported; a freed record (0xFEFEFEFE
-    // words) fails the reserved-bit check.
-    public static ImageNumericClass HeapImageNumericClass(ReadOnlySpan<uint> words)
+    // words) fails the reserved-bit check. The words of an R128 T# are its first four, the rest zero.
+    public static ImageNumericClass HeapImageNumericClass(ReadOnlySpan<uint> words, bool r128 = false)
     {
-        if (words.Length < 8 || !UsableImageCandidate(words, r128: false))
+        if (words.Length < 8 || !UsableImageCandidate(words, r128))
         {
             return ImageNumericClass.Unsupported;
         }

@@ -79,6 +79,40 @@ public sealed class BindlessHeapViewTableTests
         Assert.Equal(46u, back.View.First);
     }
 
+    // A view of 16-byte T#s (R128) and a view of 32-byte T#s over records of one shape resolve different descriptors:
+    // neither takes over the other's run.
+    [Fact]
+    public void AnR128ViewDoesNotTakeOverTheRunOfAViewOfWholeDescriptors()
+    {
+        var table = new BindlessHeapViewTable(1000);
+        var whole = table.Acquire(Table(0x1000, 23), tick: 1, completedTick: 0, Unreleased, out _)!;
+
+        var r128 = table.Acquire(Table(0x5000, 23) with { R128 = true }, tick: 3, completedTick: 1, Unreleased, out var moved)!;
+        Assert.False(moved);
+        Assert.NotSame(whole, r128);
+        Assert.Equal(23u, r128.View.First);
+
+        var next = table.Acquire(Table(0x9000, 23) with { R128 = true }, tick: 5, completedTick: 3, Unreleased, out moved)!;
+        Assert.True(moved);
+        Assert.Same(r128, next);
+    }
+
+    // The records of a run are read again in guest memory where its heap holds their descriptors, each of the size the
+    // heap's reads take. Material records can hold 16-byte T#s several hundred bytes in: read as 32 bytes,
+    // the next T# followed each one, and the record lost its view the first time it was read again.
+    [Fact]
+    public void ARunsDescriptorsAreTheSizeItsHeapReads()
+    {
+        var table = new BindlessHeapViewTable(1000);
+        var r128 = table.Acquire(Table(0x1000, 257, 1016, 468) with { R128 = true }, tick: 1, completedTick: 0, Unreleased, out _)!;
+        var whole = table.Acquire(Table(0x1000, 257, 1016, 468), tick: 1, completedTick: 0, Unreleased, out _)!;
+
+        Assert.Equal(new BindlessHeapDescriptor(false, 0x1000 + 468, 257, 1016, 0, R128: true), r128.Descriptors);
+        Assert.Equal(BindlessHeap.R128RecordBytes, r128.Descriptors.DescriptorBytes);
+        Assert.Equal(new BindlessHeapDescriptor(false, 0x1000 + 468, 257, 1016), whole.Descriptors);
+        Assert.Equal(BindlessHeap.ImageRecordBytes, whole.Descriptors.DescriptorBytes);
+    }
+
     // With no free elements left, a view takes those of the view used longest ago, but only one whose commands have all
     // completed: a pending command still reads its elements.
     [Fact]

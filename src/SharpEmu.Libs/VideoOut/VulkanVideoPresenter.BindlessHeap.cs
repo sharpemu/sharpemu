@@ -80,12 +80,12 @@ internal static unsafe partial class VulkanVideoPresenter
     internal static void VisitHeapRuns<T>(ref T visitor, ReadOnlySpan<uint> indexes, int from, int to, bool sampler,
         Span<byte> buffer, Span<uint> scratch) where T : IHeapRunVisitor
     {
-        var bytes = sampler ? BindlessHeap.SamplerRecordBytes : BindlessHeap.ImageRecordBytes;
         indexes = indexes[..to];
         var start = from;
         while (start < to)
         {
             var heap = visitor.Heap(sampler);
+            var bytes = heap.DescriptorBytes;
             if (heap.Base == 0 || indexes[start] >= heap.Records)
             {
                 _ = visitor.Visit(start, ReadOnlySpan<uint>.Empty);
@@ -646,10 +646,19 @@ internal static unsafe partial class VulkanVideoPresenter
                 _ = _imageCache.GetImage(entry.ImageIdentifier);
             }
 
+            // An R128 T# is its four words; the rest of the T# is zero.
+            Span<uint> extended = stackalloc uint[8];
+            if (words.Length == 4 && entry.Region is { Heap: { Sampler: false, R128: true } })
+            {
+                extended.Clear();
+                words.CopyTo(extended);
+                words = extended;
+            }
+
             // A T# that had no image when it was last looked at (its texture was not mapped) is looked at again.
             if (words.SequenceEqual(entry.Words) &&
                 (entry.Resolved || entry.Slot >= BindlessHeap.ImageKinds.Length ||
-                 HeapRecordClass(entry.Slot, words) == ImageNumericClass.Unsupported))
+                 HeapRecordClass(entry, words) == ImageNumericClass.Unsupported))
             {
                 return false;
             }
@@ -663,8 +672,7 @@ internal static unsafe partial class VulkanVideoPresenter
         // descriptors are its heap's records, a stride apart.
         private readonly struct HeapRunVisitor(Presenter owner, HeapEntry[] order, BindlessHeapViewTable.Region region) : IHeapRunVisitor
         {
-            public BindlessHeapDescriptor Heap(bool sampler) =>
-                new(sampler, region.View.DescriptorAddress(region.Heap, 0), region.View.Records, region.View.Stride);
+            public BindlessHeapDescriptor Heap(bool sampler) => region.Descriptors with { Sampler = sampler };
 
             public bool TryRead(ulong address, Span<byte> destination) => owner._guestMemory.TryRead(address, destination);
 
@@ -709,10 +717,21 @@ internal static unsafe partial class VulkanVideoPresenter
                 return 0;
             }
 
-            var bytes = region.Heap.Sampler ? BindlessHeap.SamplerRecordBytes : BindlessHeap.ImageRecordBytes;
-            var count = checked((int)(bytes / sizeof(uint)));
+            var count = checked((int)(region.Heap.DescriptorBytes / sizeof(uint)));
             var address = region.View.DescriptorAddress(region.Heap, entry.Index - region.View.First);
-            return _guestMemory.TryRead(address, MemoryMarshal.AsBytes(words[..count])) ? count : 0;
+            if (!_guestMemory.TryRead(address, MemoryMarshal.AsBytes(words[..count])))
+            {
+                return 0;
+            }
+
+            if (region.Heap is { Sampler: false, R128: true })
+            {
+                // An R128 T# is its four words; the rest of the T# is zero.
+                words[count..8].Clear();
+                count = 8;
+            }
+
+            return count;
         }
 
         private void ResolveHeapEntry(HeapEntry entry)
@@ -725,7 +744,7 @@ internal static unsafe partial class VulkanVideoPresenter
             else
             {
                 ImageView view = default;
-                var numericClass = HeapRecordClass(entry.Slot, entry.Words);
+                var numericClass = HeapRecordClass(entry, entry.Words);
                 if (numericClass != ImageNumericClass.Unsupported)
                 {
                     view = AcquireHeapImage(entry, numericClass);
@@ -740,13 +759,15 @@ internal static unsafe partial class VulkanVideoPresenter
 
         // The numeric class of the view an array of this slot holds for the record, or Unsupported when it holds none:
         // every class holds float textures, and the ones with integer forms hold integer textures too.
-        private static ImageNumericClass HeapRecordClass(int slot, ReadOnlySpan<uint> words)
+        private static ImageNumericClass HeapRecordClass(HeapEntry entry, ReadOnlySpan<uint> words)
         {
-            var numericClass = words.Length == 8 ? ResourceMaterializer.HeapImageNumericClass(words) : ImageNumericClass.Unsupported;
-            return numericClass == ImageNumericClass.Float || BindlessHeap.HoldsIntegers(slot) ? numericClass : ImageNumericClass.Unsupported;
+            var numericClass = words.Length == 8
+                ? ResourceMaterializer.HeapImageNumericClass(words, entry.Region is { Heap.R128: true })
+                : ImageNumericClass.Unsupported;
+            return numericClass == ImageNumericClass.Float || BindlessHeap.HoldsIntegers(entry.Slot) ? numericClass : ImageNumericClass.Unsupported;
         }
 
-        private static ShaderImageShape HeapImageShape(int slot, ImageNumericClass numericClass)
+        private static ShaderImageShape HeapImageShape(int slot, ImageNumericClass numericClass, bool r128)
         {
             var heapClass = BindlessHeap.ImageClasses[slot];
             var dimension = heapClass.Dimension;
@@ -763,6 +784,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     _ => TextureNumericClass.Float,
                 },
                 OneDimensional: dimension is ImageDimension.Dim1D or ImageDimension.Dim1DArray,
+                R128: r128,
                 DepthCompare: heapClass.Compare);
         }
 
@@ -777,7 +799,8 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 using (ImageRequestBuilders.RejectInvalidDescriptors())
                 {
-                    resolution = ImageRequestBuilders.Texture(entry.Words, HeapImageShape(entry.Slot, numericClass));
+                    resolution = ImageRequestBuilders.Texture(entry.Words,
+                        HeapImageShape(entry.Slot, numericClass, entry.Region is { Heap.R128: true }));
                 }
             }
             catch (TextureDescriptorRejectedException)
