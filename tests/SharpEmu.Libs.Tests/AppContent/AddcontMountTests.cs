@@ -69,7 +69,7 @@ public sealed class AddcontMountTests : IDisposable
     {
         var (context, memory) = CreateContext("../evil");
         Assert.Equal(ErrorParameter, AppContentExports.AppContentAddcontMount(context));
-        Assert.Equal(0, ReadMountPoint(memory)[0]);
+        Assert.Equal(string.Empty, ReadMountPoint(memory));
         Assert.False(Directory.Exists(Path.Combine(_root, "evil")));
     }
 
