@@ -5,6 +5,7 @@ using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
 using SharpEmu.Libs.Np;
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 
@@ -21,8 +22,27 @@ public static class AppContentExports
     private const uint AppParamSkuFlag = 0;
     private const int AppParamSkuFlagFull = 3;
 
-    // Each add-on mount hands back its own guest mount point, as the SDK does.
-    private static int _addcontMountIndex;
+    // Each add-on package gets its own guest mount point, as the SDK does; mounting the
+    // same label again returns the mount point it already has.
+    private static readonly ConcurrentDictionary<string, string> AddcontMounts = new(StringComparer.Ordinal);
+    private static readonly object AddcontMountGate = new();
+    private static int _addcontMountIndex = -1;
+
+    public static void ResetRuntimeState()
+    {
+        lock (AddcontMountGate)
+        {
+            foreach (var mountPoint in AddcontMounts.Values)
+            {
+                KernelMemoryCompatExports.UnregisterGuestPathMount(mountPoint);
+            }
+
+            AddcontMounts.Clear();
+            Volatile.Write(ref _addcontMountIndex, -1);
+        }
+
+        AddcontEntitlements.ResetRuntimeState();
+    }
 
     [SysAbiExport(
         Nid = "R9lA82OraNs",
@@ -126,7 +146,13 @@ public static class AppContentExports
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        var label = AddcontEntitlements.NormalizeLabel(ReadLabel(labelBytes));
+        var label = ReadLabel(labelBytes);
+        if (!AddcontEntitlements.IsValidLabel(label))
+        {
+            TraceAppContent("addcont_mount rejected an invalid label");
+            return ctx.SetReturn(AppContentErrorParameter);
+        }
+
         TraceAppContent($"addcont_mount label='{label}'");
 
         // Mount the add-on package onto a fresh guest mount point backed by its host
@@ -134,12 +160,21 @@ public static class AppContentExports
         // the title's pak files carry the content). Refusing the mount only makes
         // titles retry it forever: the PSN entitlement the real hardware checks cannot
         // be reproduced offline.
-        var mountPoint = $"/addcont{_addcontMountIndex}";
-        _addcontMountIndex++;
-        var hostRoot = AddcontEntitlements.TryResolvePackageRoot(label, out var packageRoot)
-            ? packageRoot
-            : Path.Combine(AddcontEntitlements.AddcontRoot(), label);
-        KernelMemoryCompatExports.RegisterGuestPathMount(mountPoint, hostRoot);
+        if (!AddcontMounts.TryGetValue(label, out var mountPoint))
+        {
+            lock (AddcontMountGate)
+            {
+                if (!AddcontMounts.TryGetValue(label, out mountPoint))
+                {
+                    mountPoint = $"/addcont{Interlocked.Increment(ref _addcontMountIndex)}";
+                    var hostRoot = AddcontEntitlements.TryResolvePackageRoot(label, out var packageRoot)
+                        ? packageRoot
+                        : Path.Combine(AddcontEntitlements.AddcontRoot(), label);
+                    KernelMemoryCompatExports.RegisterGuestPathMount(mountPoint, hostRoot);
+                    AddcontMounts[label] = mountPoint;
+                }
+            }
+        }
 
         Span<byte> mountPointBytes = stackalloc byte[MountPointSize];
         mountPointBytes.Clear();

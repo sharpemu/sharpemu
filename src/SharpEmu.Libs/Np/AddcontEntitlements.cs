@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Collections.Frozen;
 using System.Text.Json;
 using SharpEmu.Libs.Kernel;
 
@@ -36,17 +37,60 @@ public static class AddcontEntitlements
         ["PPSA26344"] = ["GHOST2APP0000000", "GHOST2BASE000000"],
     };
 
-    private static string? _cachedTitle;
-    private static Entitlement[] _cachedOwned = [];
+    // One immutable snapshot per title, swapped as a whole so a racing reader never
+    // pairs a title with another title's labels.
+    private sealed class Snapshot(string title, Entitlement[] owned)
+    {
+        public string Title { get; } = title;
+        public Entitlement[] Owned { get; } = owned;
+        public FrozenDictionary<string, Entitlement> ByLabel { get; } =
+            owned.ToFrozenDictionary(entitlement => entitlement.Label, StringComparer.Ordinal);
+    }
+
+    private static Snapshot? _snapshot;
+
+    // Test seams: the folders the configuration file and the packages are read from.
+    internal static string? DataRootOverride { get; set; }
+    internal static string? AddcontRootOverride { get; set; }
+
+    internal static void ResetRuntimeState() => Volatile.Write(ref _snapshot, null);
+
+    // Entitlement labels are at most 16 characters of letters, digits, '-' and '_'. The
+    // guest chooses the label passed to the mount call, so nothing else may reach a path.
+    public static bool IsValidLabel(string? label)
+    {
+        if (string.IsNullOrEmpty(label) || label.Length > EntitlementLabelLength)
+        {
+            return false;
+        }
+
+        foreach (var character in label)
+        {
+            if (!(char.IsAsciiLetterOrDigit(character) || character is '-' or '_'))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     // The labels the running title owns, merged from the configuration file, the
     // built-in defaults and the installed addcont packages. Cached per title.
-    public static IReadOnlyList<Entitlement> Owned()
+    public static IReadOnlyList<Entitlement> Owned() => GetSnapshot().Owned;
+
+    public static bool Owns(string label) => GetSnapshot().ByLabel.ContainsKey(label);
+
+    public static bool TryGet(string label, out Entitlement entitlement) =>
+        GetSnapshot().ByLabel.TryGetValue(label, out entitlement);
+
+    private static Snapshot GetSnapshot()
     {
         var title = KernelMemoryCompatExports.ApplicationTitleId;
-        if (string.Equals(Volatile.Read(ref _cachedTitle), title, StringComparison.Ordinal))
+        var current = Volatile.Read(ref _snapshot);
+        if (current is not null && string.Equals(current.Title, title, StringComparison.Ordinal))
         {
-            return _cachedOwned;
+            return current;
         }
 
         var labels = new List<string>();
@@ -63,20 +107,25 @@ public static class AddcontEntitlements
 
         var owned = labels
             .Select(NormalizeLabel)
-            .Where(label => label.Length != 0)
+            .Where(IsValidLabel)
             .Distinct(StringComparer.Ordinal)
             .Select(label => new Entitlement(label, PackageTypePsal, DownloadStatusInstalled))
             .ToArray();
 
-        Volatile.Write(ref _cachedTitle, title);
-        _cachedOwned = owned;
-        return owned;
+        var snapshot = new Snapshot(title, owned);
+        Volatile.Write(ref _snapshot, snapshot);
+        return snapshot;
     }
 
     // The host folder add-on packages are read from: an explicit variable, else the
     // addcont folder next to the game image (the PS5 dump layout).
     public static string AddcontRoot()
     {
+        if (AddcontRootOverride is not null)
+        {
+            return AddcontRootOverride;
+        }
+
         var configured = Environment.GetEnvironmentVariable("SHARPEMU_ADDCONT_DIR");
         if (!string.IsNullOrWhiteSpace(configured))
         {
@@ -92,7 +141,13 @@ public static class AddcontEntitlements
     // The host folder of one installed add-on package, when it exists.
     public static bool TryResolvePackageRoot(string label, out string hostRoot)
     {
-        hostRoot = Path.Combine(AddcontRoot(), NormalizeLabel(label));
+        hostRoot = string.Empty;
+        if (!IsValidLabel(label))
+        {
+            return false;
+        }
+
+        hostRoot = Path.Combine(AddcontRoot(), label);
         return Directory.Exists(hostRoot);
     }
 
@@ -108,7 +163,7 @@ public static class AddcontEntitlements
         {
             return Directory.GetDirectories(root)
                 .Select(Path.GetFileName)
-                .Where(name => !string.IsNullOrEmpty(name))
+                .Where(IsValidLabel)
                 .Select(name => name!)
                 .ToArray();
         }
@@ -121,7 +176,7 @@ public static class AddcontEntitlements
     private static bool TryLoadConfiguredLabels(string title, out string[] labels)
     {
         labels = [];
-        var path = Path.Combine(SharpEmuPaths.DataRoot, "user", EntitlementsFileName);
+        var path = Path.Combine(DataRootOverride ?? SharpEmuPaths.DataRoot, "user", EntitlementsFileName);
         if (!File.Exists(path))
         {
             return false;

@@ -188,13 +188,8 @@ public static class NpEntitlementAccessExports
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        foreach (var entitlement in AddcontEntitlements.Owned())
+        if (AddcontEntitlements.TryGet(label, out var entitlement))
         {
-            if (!string.Equals(label, entitlement.Label, StringComparison.Ordinal))
-            {
-                continue;
-            }
-
             if (!TryWriteAddcontEntitlementInfo(ctx, infoAddress, entitlement))
             {
                 return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
@@ -238,8 +233,7 @@ public static class NpEntitlementAccessExports
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        return ctx.SetReturn(AddcontEntitlements.Owned().Any(entitlement =>
-            string.Equals(label, entitlement.Label, StringComparison.Ordinal))
+        return ctx.SetReturn(AddcontEntitlements.Owns(label)
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
             : NpEntitlementAccessErrorNoEntitlement);
     }
