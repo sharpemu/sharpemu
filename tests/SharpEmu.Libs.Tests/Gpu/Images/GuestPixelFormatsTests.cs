@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.ShaderCompiler.Resources;
 using Silk.NET.Vulkan;
 using Xunit;
 
@@ -47,6 +48,18 @@ public sealed class GuestPixelFormatsTests
         Assert.Equal(Format.BC1RgbaUnormBlock, GuestPixelFormats.HostFormat(GuestPixelFormat.Bc1UNorm));
         Assert.Equal(Format.Undefined, GuestPixelFormats.HostFormat(GuestPixelFormat.Invalid));
         Assert.Equal(Format.Undefined, GuestPixelFormats.HostFormat((GuestPixelFormat)0xFFFF_FFFF));
+    }
+
+    // An 8-bit signed integer texture is sampled like the 16-bit and 32-bit ones: foliage passes load
+    // a 128x128 map of this format, which had no host format and read as null.
+    [Fact]
+    public void AnEightBitSignedIntegerTextureIsSampledAsSigned()
+    {
+        Assert.Equal(TextureNumericClass.Sint, GuestPixelFormats.SampledNumericClass(GuestPixelFormat.Bits8SInt));
+        Assert.Equal(Format.R8Sint, GuestPixelFormats.HostFormat(GuestPixelFormat.Bits8SInt));
+        Assert.Equal(1u, GuestPixelFormats.BytesPerElement(GuestPixelFormat.Bits8SInt));
+        Assert.Equal(1u, GuestPixelFormats.RenderTargetBytesPerElement(GuestPixelFormat.Bits8SInt));
+        Assert.Equal(ImageNumericClass.Sint, GuestImageFormat.SampledNumericClass((uint)GuestPixelFormat.Bits8SInt));
     }
 
     [Fact]
