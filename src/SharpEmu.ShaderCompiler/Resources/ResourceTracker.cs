@@ -25,6 +25,7 @@ public sealed partial class ResourceTracker
     private readonly bool _bindlessNullDescriptors;
     private readonly SortedSet<uint> _nullBindlessPcs = new();
     private readonly bool _bindlessHeap;
+    private readonly bool _preferHeapRecords;
     private readonly bool _callRecordsEnabled;
     private readonly List<HeapRecordPlan> _heapRecords = [];
     private readonly List<HeapRecordPlan> _callRecords = [];
@@ -63,11 +64,13 @@ public sealed partial class ResourceTracker
         IReadOnlyList<HeapRecordAccess> HeapRecords,
         IReadOnlyList<CallRecordAccess> CallRecords);
 
-    private ResourceTracker(ShaderResourcePlan plan, bool bindlessNullDescriptors, bool bindlessHeap, bool callRecords)
+    private ResourceTracker(ShaderResourcePlan plan, bool bindlessNullDescriptors, bool bindlessHeap, bool callRecords,
+        bool preferHeapRecords)
     {
         _plan = plan;
         _bindlessNullDescriptors = bindlessNullDescriptors;
         _bindlessHeap = bindlessHeap;
+        _preferHeapRecords = preferHeapRecords && bindlessHeap;
         _callRecordsEnabled = callRecords;
         _graph = plan.Graph;
         var roots = new List<ScalarValue>();
@@ -115,12 +118,20 @@ public sealed partial class ResourceTracker
     // record that the shader reads through descriptor set 1 (see BindlessHeap).
     // With callRecords, the images and samplers a callee linked with run-time arguments reads through its record are call
     // records (see CallRecordSelector), which descriptor set 1 holds.
+    // With preferHeapRecords (and the heap), a sampled image the heap can serve is planned as a heap record before the
+    // indirect-image planner may claim it as a table: a table binds every image it can select, so one that selects more than
+    // a draw may bind could not be materialized, while a heap record reads its descriptor at run time.
     public static Result Track(ShaderResourcePlan plan, bool bindlessNullDescriptors = false, bool bindlessHeap = false,
-        bool callRecords = false) =>
-        new ResourceTracker(plan, bindlessNullDescriptors, bindlessHeap, callRecords).Run();
+        bool callRecords = false, bool preferHeapRecords = false) =>
+        new ResourceTracker(plan, bindlessNullDescriptors, bindlessHeap, callRecords, preferHeapRecords).Run();
 
     private Result Run()
     {
+        if (_preferHeapRecords)
+        {
+            PlanHeapRecords();
+        }
+
         PlanIndirectImages();
         PlanHeapRecords();
         PlanCallRecords();
@@ -1707,7 +1718,8 @@ public sealed partial class ResourceTracker
         {
             var memory = _plan.Memory[index];
             if (memory.Kind != MemoryResourceKind.Image || _plan.Accesses[index]?.Handle is not { } handle ||
-                _indirectImages.Any(plan => ReferenceEquals(plan.Handle, handle)))
+                _indirectImages.Any(plan => ReferenceEquals(plan.Handle, handle)) ||
+                _preferHeapRecords && HeapRecordFor(handle, sampler: false) is not null)
             {
                 continue;
             }

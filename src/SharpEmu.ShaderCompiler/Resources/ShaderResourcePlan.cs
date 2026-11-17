@@ -220,13 +220,16 @@ public sealed partial class ShaderResourcePlan
     // The accesses whose bindless image or sampler descriptor reads as null.
     public IReadOnlyList<uint> NullBindlessDescriptorPcs { get; private set; } = [];
 
+    // Planned with preferHeapRecords (see ResourceTracker.Track).
+    public bool PreferredHeapRecords { get; private set; }
+
     public static ShaderResourcePlan Extract(Gen5ShaderProgram program, ShaderStage stage, ulong hash, uint userDataBase, uint userDataCount,
         IReadOnlySet<uint>? fixedFunctionVertexLoads = null, Action<ShaderResourcePlan>? beforeResourceTracking = null, uint waveSize = 64,
         bool bindlessNullDescriptors = false, bool bindlessHeap = false, bool callRecords = false, bool callMarks = false,
         int dynamicUserData = -1, BufferDescriptorNormalizer? normalizeBufferDescriptor = null,
         ImageDescriptorNormalizer? normalizeImageDescriptor = null, Func<long>? imageNormalizationVersion = null,
         StableImageDescriptorLimits stableImageLimits = default, bool? scalarDataOnDevice = null,
-        bool? deviceRecordCounts = null, bool? runtimeImageSwizzles = null)
+        bool? deviceRecordCounts = null, bool? runtimeImageSwizzles = null, bool preferHeapRecords = false)
     {
         // Mesh system inputs are not uniform user data, even when a GS pointer occupies s0:s1.
         var graph = ScalarGraphDiskCache.Build(program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize,
@@ -275,10 +278,11 @@ public sealed partial class ShaderResourcePlan
 
         // Diagnostics observe rewritten values before descriptor validation.
         beforeResourceTracking?.Invoke(plan);
-        var tracked = ResourceTracker.Track(plan, bindlessNullDescriptors, bindlessHeap, callRecords);
+        var tracked = ResourceTracker.Track(plan, bindlessNullDescriptors, bindlessHeap, callRecords, preferHeapRecords);
         plan.DescriptorSources = tracked.Sources;
         plan.Info = tracked.Info;
         plan.NullBindlessDescriptorPcs = tracked.NullBindlessDescriptorPcs;
+        plan.PreferredHeapRecords = preferHeapRecords && bindlessHeap;
         plan.HeapRecords = tracked.HeapRecords;
         plan.CallRecords = tracked.CallRecords;
         plan.HeapRecordSources = tracked.HeapRecords

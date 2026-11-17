@@ -141,7 +141,8 @@ internal sealed class ProgramPermutation
 // One decoded program with its resource plan and every permutation compiled from it.
 internal sealed class ProgramSourceEntry
 {
-    public required ShaderResourcePlan Plan { get; init; }
+    // Replaced once when an indirect image table proves too large to bind (see PreferHeapRecords).
+    public required ShaderResourcePlan Plan { get; set; }
     public required Gen5ShaderProgram Program { get; init; }
     public required bool HasBitwiseExclusiveOr { get; init; }
     public required bool HasShaderCalls { get; init; }
@@ -175,6 +176,9 @@ internal sealed class ProgramSourceEntry
     public IReadOnlyList<ProgramPermutation> Permutations => Volatile.Read(ref _permutations);
 
     public ProgramPermutation? LastPermutation;
+
+    // The permutations compiled from a replaced plan belong to a layout no draw can use again.
+    public void ClearPermutations() => Volatile.Write(ref _permutations, []);
 
     public void AddPermutation(ProgramPermutation permutation)
     {
@@ -718,6 +722,16 @@ internal sealed partial class ShaderProgramCache
                     materialized = ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure,
                         captureIndirectImageFailure);
                     outcome = MaterializationTally.Outcome.Full;
+                }
+
+                if (!materialized && materializationFailure is ResourceMaterializationFailure.IncompatibleImageCandidates or ResourceMaterializationFailure.ImageCapacityExceeded &&
+                    preparation is null && PreferHeapRecords(source, options, entry))
+                {
+                    // The table binds every image it can select, and this one selects more than a draw may bind. The
+                    // heap records of the new plan read their descriptors at run time instead.
+                    outcome = MaterializationTally.Outcome.Full;
+                    materialized = ResourceMaterializer.Materialize(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure,
+                        captureIndirectImageFailure);
                 }
 
                 MaterializationTally.Note(materialized ? outcome : MaterializationTally.Outcome.Failed,
@@ -1478,6 +1492,69 @@ internal sealed partial class ShaderProgramCache
         }
     }
 
+    private ShaderResourcePlan ExtractPlan(ShaderSource source, StageCompileOptions options, Gen5ShaderProgram program,
+        EmbeddedVertexFetchPlan? fetch, bool preferHeapRecords, bool dumpPlanning) =>
+        ShaderResourcePlan.Extract(program, source.Stage, source.Hash, source.UserDataBase, (uint)source.UserData.Length,
+            fetch?.Loads.Select(load => load.Pc).ToHashSet(),
+            beforeResourceTracking: dumpPlanning ? resourcePlan => ShaderPlanningDump.WriteGraph(source, resourcePlan) : null,
+            // Resource planning must use the guest wave size of shader compilation.
+            waveSize: source.Stage switch
+            {
+                ShaderStage.Mesh => options.MeshInfo!.Geometry.WaveSize,
+                ShaderStage.Compute => options.ComputeInfo?.WaveSize ?? 64u,
+                _ => 32u,
+            }, dynamicUserData: options.VertexInfo?.StartInstanceUserData ?? -1,
+            bindlessNullDescriptors: BindlessNullDescriptors, bindlessHeap: _host.SupportsBindlessHeap,
+            stableImageLimits: StableImageLimits(_host, source.Stage),
+            deviceRecordCounts: DeviceRecordCountPlan.Enabled && options.DeviceRecordCounts,
+            normalizeBufferDescriptor: source.Registered.Frontend?.NormalizeBufferDescriptor,
+            normalizeImageDescriptor: ImageNormalizer(source.Registered.Frontend),
+            imageNormalizationVersion: source.Registered.Frontend?.ImageNormalizationVersion,
+            preferHeapRecords: preferHeapRecords);
+
+    // An indirect image table binds every image it can select, and this program's selects more than a draw may bind. Plans
+    // it again so the sampled images the bindless heap can serve are heap records, read at run time through descriptor set 1,
+    // instead of table candidates. Only a program that gains a heap record changes; the permutations compiled from the old
+    // plan belong to a layout no draw can use again. Returns whether the plan was replaced, by this thread or another.
+    private bool PreferHeapRecords(ShaderSource source, StageCompileOptions options, ProgramSourceEntry entry)
+    {
+        if (!_host.SupportsBindlessHeap)
+        {
+            return false;
+        }
+
+        lock (_gate)
+        {
+            if (entry.Plan.PreferredHeapRecords)
+            {
+                // Another thread replanned this program meanwhile; the caller materializes with its plan.
+                return true;
+            }
+
+            ShaderResourcePlan plan;
+            try
+            {
+                plan = ExtractPlan(source, options, entry.Program, entry.EmbeddedFetch, preferHeapRecords: true, dumpPlanning: false);
+            }
+            catch (ResourcePlanException)
+            {
+                return false;
+            }
+
+            if (!plan.Info.UsesBindlessHeap || plan.HeapRecords.Count <= entry.Plan.HeapRecords.Count)
+            {
+                return false;
+            }
+
+            Console.Error.WriteLine(
+                $"[GPU][INFO] Shader reads its image descriptors from the bindless heap at run time: stage={source.Label} hash=0x{source.Hash:X16} " +
+                $"shader=0x{source.Address:X16} (its image table selects more images than a draw can bind).");
+            entry.Plan = plan;
+            entry.ClearPermutations();
+            return true;
+        }
+    }
+
     private ProgramSourceEntry CreateEntry(ShaderSource source, StageCompileOptions options)
     {
         using var planningScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPlanning);
@@ -1503,22 +1580,7 @@ internal sealed partial class ShaderProgramCache
         ShaderResourcePlan plan;
         try
         {
-            plan = ShaderResourcePlan.Extract(program, source.Stage, source.Hash, source.UserDataBase, (uint)source.UserData.Length,
-                fetch?.Loads.Select(load => load.Pc).ToHashSet(),
-                beforeResourceTracking: dumpPlanning ? resourcePlan => ShaderPlanningDump.WriteGraph(source, resourcePlan) : null,
-                // Resource planning must use the guest wave size of shader compilation.
-                waveSize: source.Stage switch
-                {
-                    ShaderStage.Mesh => options.MeshInfo!.Geometry.WaveSize,
-                    ShaderStage.Compute => options.ComputeInfo?.WaveSize ?? 64u,
-                    _ => 32u,
-                }, dynamicUserData: options.VertexInfo?.StartInstanceUserData ?? -1,
-                bindlessNullDescriptors: BindlessNullDescriptors, bindlessHeap: _host.SupportsBindlessHeap,
-                stableImageLimits: StableImageLimits(_host, source.Stage),
-                deviceRecordCounts: DeviceRecordCountPlan.Enabled && options.DeviceRecordCounts,
-                normalizeBufferDescriptor: source.Registered.Frontend?.NormalizeBufferDescriptor,
-                normalizeImageDescriptor: ImageNormalizer(source.Registered.Frontend),
-                imageNormalizationVersion: source.Registered.Frontend?.ImageNormalizationVersion);
+            plan = ExtractPlan(source, options, program, fetch, preferHeapRecords: false, dumpPlanning);
         }
         catch (ResourcePlanException exception)
         {
@@ -1906,7 +1968,7 @@ internal sealed partial class ShaderProgramCache
         if (source.Stage == ShaderStage.Pixel)
         {
             _host.PixelProgramCreated(info, module);
-            if (_host.ShaderPrewarm is { } pixelPrewarm && options.PixelInfo is { } pixelInfo && !entry.HasShaderCalls &&
+            if (_host.ShaderPrewarm is { } pixelPrewarm && options.PixelInfo is { } pixelInfo && !entry.HasShaderCalls && !plan.PreferredHeapRecords &&
                 _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var pixelCapture))
             {
                 var pixelRecord = new PixelPrewarmRecord
@@ -1932,7 +1994,7 @@ internal sealed partial class ShaderProgramCache
         // Vertex and mesh programs, for the graphics prewarm; the host records their parts' states under the identity. The
         // part of a task-launched mesh program also takes the generic task stage, which its record determines (TaskLaunch).
         if (source.Stage is ShaderStage.Vertex or ShaderStage.Mesh && _host.ShaderPrewarm is { } vertexPrewarm &&
-            !entry.HasShaderCalls &&
+            !entry.HasShaderCalls && !plan.PreferredHeapRecords &&
             _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var vertexCapture))
         {
             var identity = vertexPrewarm.RecordVertex(vertexCapture, new VertexPrewarmRecord
@@ -1956,7 +2018,7 @@ internal sealed partial class ShaderProgramCache
         }
 
         if (source.Stage == ShaderStage.Compute && options.TessellationHull is null &&
-            _host.ShaderPrewarm is { } prewarm &&
+            _host.ShaderPrewarm is { } prewarm && !plan.PreferredHeapRecords &&
             (!Gen5ShaderCallLinker.IsLinked(program) || entry.LinkedPrewarm is not null) &&
             _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var capture))
         {
@@ -1977,7 +2039,7 @@ internal sealed partial class ShaderProgramCache
             });
         }
 
-        if (source.Stage is ShaderStage.Vertex or ShaderStage.Pixel && options.Tessellation is null && !entry.HasShaderCalls &&
+        if (source.Stage is ShaderStage.Vertex or ShaderStage.Pixel && options.Tessellation is null && !entry.HasShaderCalls && !plan.PreferredHeapRecords &&
             _host.ShaderPrewarm is { } stagePrewarm &&
             _programs.TryGetValue(key, out var canonical) && ReferenceEquals(canonical, entry) &&
             _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var stageCapture))
