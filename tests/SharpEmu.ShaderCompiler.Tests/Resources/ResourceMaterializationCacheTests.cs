@@ -302,6 +302,59 @@ public sealed class ResourceMaterializationCacheTests
         Assert.Equal((1, 1, 1), (cache.Hits, cache.Misses, cache.TableRefreshes));
     }
 
+    // A program that reads descriptors from a table of records (a bindless heap) takes the table's V# from its resource
+    // table. The guest allocates both per frame, so the resource table and the V# in it name other addresses from draw to
+    // draw while everything else stays the same, and the cache serves the draw from an entry it rebases or refreshes. The
+    // heap the draw reports is the table where it is now, not where the entry saw it: a terrain cull lost
+    // its tile heights this way after a few minutes (the host kept resolving the records of a table
+    // address 100 s old).
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ACachedDrawReportsTheHeapWhereItIsNow(bool resourceTableMoves)
+    {
+        var program = Program(
+            // The heap V# in s16..s19 comes from the resource table s0 points at; the sampler in s24..s27 from user data.
+            ScalarLoad(0, 0, 16, 4),
+            MoveScalarRegister(8, 24, 4),
+            MoveScalarRegister(12, 25, 5),
+            MoveScalarRegister(16, 26, 6),
+            MoveScalarRegister(20, 27, 7),
+            // A buffer the program writes through a V# of the same resource table.
+            ScalarLoad(24, 0, 32, 4, immediateOffset: 16),
+            BufferLoad(32, 32),
+            // The table of records is also a buffer the program reads other fields of.
+            BufferLoad(36, 16, offset: 320),
+            // s106 = readfirstlane(v7) * 440: the byte offset of the record the first lane asks for.
+            ReadFirstLane(44, 106, 7),
+            Sop2(48, "SMulI32", 106, Gen5Operand.Scalar(106), new Gen5Operand(Gen5OperandKind.LiteralConstant, 440)),
+            ScalarBufferLoad(56, 16, destination: 0, count: 8, dynamicOffsetRegister: 106),
+            Image(64, "ImageSample", 0, 24),
+            EndProgram(72));
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, Hash, 0, 9, bindlessHeap: true, scalarDataOnDevice: true);
+        Assert.Single(plan.HeapRecordSources);
+        var memory = new TestWordMemory { Base = 0x10000, Words = new uint[0x4000] };
+        var cache = new ResourceMaterializationCache();
+
+        for (var draw = 0; draw < 24; draw++)
+        {
+            var resourceTable = 0x10000u + (resourceTableMoves ? (uint)draw * 0x100u : 0u);
+            var heap = 0x0020_0000u + (uint)draw * 0x1000u;
+            var words = memory.Words.AsSpan((int)(resourceTable - 0x10000) / 4);
+            words[0] = heap;
+            words[1] = 440u << 16;
+            words[2] = 49;
+            words[4] = 0x0030_0000u + (uint)draw * 0x1000u;
+            words[6] = 256;
+            words[7] = 0x2_0000;
+            uint[] userData = [resourceTable, 0, 0, 0, 0, 0, 0, 0, 0];
+            Assert.True(RunWords(cache, plan, memory, userData, out var snapshot));
+            Assert.Equal([new BindlessHeapDescriptor(false, heap, 49, 440)], snapshot.Heaps);
+        }
+
+        Assert.True(cache.Hits + cache.TableRefreshes > 0, $"hits={cache.Hits} misses={cache.Misses} refreshes={cache.TableRefreshes}");
+    }
+
     [Fact]
     public void AnUnreadableTableWordFallsBackToAFullWalk()
     {

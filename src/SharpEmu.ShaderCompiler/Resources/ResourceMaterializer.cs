@@ -962,29 +962,9 @@ public static partial class ResourceMaterializer
             snapshot.BufferCandidateTables.Add(candidateTable);
         }
 
-        // The heap V#s the bindless heap records are read from, for the host's descriptor set 1.
-        if (plan.HeapRecordSources.Count != 0)
+        if (!TryEvaluateHeaps(plan, inputs, out snapshot.Heaps))
         {
-            var heapSources = new uint[plan.HeapRecordSources.Count];
-            for (var index = 0; index < heapSources.Length; index++)
-                heapSources[index] = plan.HeapRecordSources[index].Source;
-            if (!RuntimeValueEvaluator.EvaluateSources(plan, heapSources, inputs, [], evaluateTable: false, out var heaps, out _) ||
-                heaps.Count != heapSources.Length)
-            {
-                return false;
-            }
-
-            snapshot.Heaps = new BindlessHeapDescriptor[heaps.Count];
-            for (var index = 0; index < heaps.Count; index++)
-            {
-                if (heaps[index].DwordCount != 4)
-                {
-                    return false;
-                }
-
-                var view = plan.HeapRecordSources[index];
-                snapshot.Heaps[index] = BindlessHeapDescriptor.FromWords(view.Sampler, heaps[index].Dwords, view.Immediate);
-            }
+            return false;
         }
 
         snapshot.UserData = inputs.UserData.ToArray();
@@ -1296,6 +1276,41 @@ public static partial class ResourceMaterializer
     private static bool UsableImageCandidate(ReadOnlySpan<uint> candidate, bool r128) =>
         !NullImageDescriptor(candidate) && ValidImageDescriptor(candidate, r128) && ReservedImageBitsClear(candidate) &&
         GuestImageFormat.SampledNumericClass(GuestImageFormat.FormatOf(candidate)) != ImageNumericClass.Unsupported;
+
+    // The heap V#s the bindless heap records of a draw are read from, for the host's descriptor set 1. They are read for
+    // every draw, also one whose other descriptors a cache entry still holds: a table the guest allocates per frame names
+    // its heaps at another address each time.
+    internal static bool TryEvaluateHeaps(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, out BindlessHeapDescriptor[] heaps)
+    {
+        heaps = [];
+        if (plan.HeapRecordSources.Count == 0)
+        {
+            return true;
+        }
+
+        var heapSources = new uint[plan.HeapRecordSources.Count];
+        for (var index = 0; index < heapSources.Length; index++)
+            heapSources[index] = plan.HeapRecordSources[index].Source;
+        if (!RuntimeValueEvaluator.EvaluateSources(plan, heapSources, inputs, [], evaluateTable: false, out var words, out _) ||
+            words.Count != heapSources.Length)
+        {
+            return false;
+        }
+
+        heaps = new BindlessHeapDescriptor[words.Count];
+        for (var index = 0; index < words.Count; index++)
+        {
+            if (words[index].DwordCount != 4)
+            {
+                return false;
+            }
+
+            var view = plan.HeapRecordSources[index];
+            heaps[index] = BindlessHeapDescriptor.FromWords(view.Sampler, words[index].Dwords, view.Immediate);
+        }
+
+        return true;
+    }
 
     // A bindless heap record the host can give a float view without a conversion in the shader: a valid sampled T# of a
     // float format. A freed record (0xFEFEFEFE words) fails the reserved-bit check.
