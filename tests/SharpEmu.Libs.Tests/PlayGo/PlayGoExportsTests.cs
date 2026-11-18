@@ -301,6 +301,38 @@ public sealed class PlayGoExportsTests : IDisposable
         Assert.Equal(BadChunkId, GetLocus(handle, [1]));
     }
 
+    [Fact]
+    public void GetLocus_ScenarioWithoutChunkList_UsesPgmChunks()
+    {
+        WritePgm(3);
+        WriteScenarioJson();
+        var handle = InitializeAndOpen();
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, GetLocus(handle, [0, 1, 2]));
+        Assert.Equal(new byte[] { LocusLocalFast, LocusLocalFast, LocusLocalFast }, ReadLoci(3));
+        Assert.Equal((1ul, 1ul), GetProgress(handle, [0, 1, 2]));
+    }
+
+    [Fact]
+    public void GetLocus_ScenarioWithoutChunkList_PakChunksTakePrecedenceOverPgm()
+    {
+        WritePgm(2);
+        WriteScenarioJson();
+        File.WriteAllBytes(Path.Combine(_app0Root, "pakchunk7-PS5.pak"), []);
+        var handle = InitializeAndOpen();
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, GetLocus(handle, [0, 7]));
+        Assert.Equal(BadChunkId, GetLocus(handle, [1]));
+    }
+
+    private void WriteScenarioJson()
+    {
+        var sceSys = Directory.CreateDirectory(Path.Combine(_app0Root, "sce_sys"));
+        File.WriteAllText(
+            Path.Combine(sceSys.FullName, "playgo-scenario.json"),
+            "{\"languages\":[\"en\"],\"scenarios\":[]}");
+    }
+
     private void WritePgm(uint chunkCount, string magic = "DMGP")
     {
         var header = new byte[0x14];
