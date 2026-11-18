@@ -56,9 +56,13 @@ internal static partial class VulkanVideoPresenter
             public Action? Action;
             public ulong Address;
             public byte[]? Data;
+            // The store's length; a pooled Data can be longer.
+            public int Length;
             public bool Kernel;
             // A store over more than PendingStorePages.LargePages pages, kept as one range in the page index.
             public bool Large;
+            // Data came from StoreBufferPool.Shared and returns there once the store lands.
+            public bool Pooled;
             // The guest range a queued fill or copy writes; zero for other items.
             public ulong RangeSize;
             public RangeKind Range;
@@ -198,7 +202,7 @@ internal static partial class VulkanVideoPresenter
         private void NotePendingStorePages(Item item, int delta)
         {
             var address = item.Address;
-            var length = (ulong)item.Data!.Length;
+            var length = (ulong)item.Length;
             if (delta > 0)
             {
                 _storePages.Add(address, length, item.Large);
@@ -298,9 +302,18 @@ internal static partial class VulkanVideoPresenter
 
         public void PostWrite(ulong address, ReadOnlySpan<byte> data, bool kernel = false) => PostOwnedWrite(address, data.ToArray(), kernel);
 
-        public void PostOwnedWrite(ulong address, byte[] data, bool kernel)
+        public void PostOwnedWrite(ulong address, byte[] data, bool kernel) => PostStore(address, data, data.Length, kernel, pooled: false);
+
+        // The first length bytes of a buffer rented from StoreBufferPool.Shared, which takes it back once the store lands.
+        public void PostPooledWrite(ulong address, byte[] data, int length, bool kernel) => PostStore(address, data, length, kernel, pooled: true);
+
+        private void PostStore(ulong address, byte[] data, int length, bool kernel, bool pooled)
         {
-            var item = new Item { Kind = Kind.Write, Address = address, Data = data, Kernel = kernel, Large = PendingStorePages.IsLarge(address, (ulong)data.Length) };
+            var item = new Item
+            {
+                Kind = Kind.Write, Address = address, Data = data, Length = length, Kernel = kernel, Pooled = pooled,
+                Large = PendingStorePages.IsLarge(address, (ulong)length),
+            };
             lock (_writeLock)
             {
                 _pendingWrites.Enqueue(item);
@@ -596,7 +609,7 @@ internal static partial class VulkanVideoPresenter
 
         private static void ApplyPendingStore(Item write, ulong address, ulong end, Span<byte> destination, long afterSequence, long beforeSequence)
         {
-            var writeEnd = write.Address + (ulong)write.Data!.Length;
+            var writeEnd = write.Address + (ulong)write.Length;
             if (write.Sequence <= afterSequence || write.Address >= end || writeEnd <= address ||
                 (beforeSequence != long.MaxValue && (write.Sequence == 0 || write.Sequence >= beforeSequence)))
             {
@@ -1150,7 +1163,8 @@ internal static partial class VulkanVideoPresenter
         {
             lock (_writeLock)
             {
-                var written = (item.Kernel && _presenter.TryApplyKernelWriteOverGpuBytes(item.Address, item.Data!)) || _memory.TryWrite(item.Address, item.Data);
+                var data = item.Data.AsSpan(0, item.Length);
+                var written = (item.Kernel && _presenter.TryApplyKernelWriteOverGpuBytes(item.Address, data)) || _memory.TryWrite(item.Address, data);
                 if (!ReferenceEquals(_pendingWrites.Peek(), item))
                 {
                     throw SubmissionScheduler.Fatal("The command stream stores ran out of order.");
@@ -1162,7 +1176,14 @@ internal static partial class VulkanVideoPresenter
                 if (!written)
                 {
                     throw SubmissionScheduler.Fatal(
-                        $"The command stream cannot write guest memory: address=0x{item.Address:X16} size={item.Data!.Length}.");
+                        $"The command stream cannot write guest memory: address=0x{item.Address:X16} size={item.Length}.");
+                }
+
+                // No reader reaches the store once it left the queue and the index under this lock.
+                if (item.Pooled)
+                {
+                    StoreBufferPool.Shared.Return(item.Data!);
+                    item.Data = null;
                 }
             }
         }
