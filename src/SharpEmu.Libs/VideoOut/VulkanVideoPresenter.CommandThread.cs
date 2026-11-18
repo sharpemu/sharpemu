@@ -57,6 +57,8 @@ internal static partial class VulkanVideoPresenter
             public ulong Address;
             public byte[]? Data;
             public bool Kernel;
+            // A store over more than PendingStorePages.LargePages pages, kept as one range in the page index.
+            public bool Large;
             // The guest range a queued fill or copy writes; zero for other items.
             public ulong RangeSize;
             public RangeKind Range;
@@ -122,7 +124,7 @@ internal static partial class VulkanVideoPresenter
         // this thread see them over guest memory.
         private readonly object _writeLock = new();
         private readonly Queue<Item> _pendingWrites = new();
-        private readonly ConcurrentDictionary<ulong, int> _pendingStorePages = new();
+        private readonly PendingStorePages _storePages = new();
         private readonly Dictionary<ulong, Queue<Item>> _storesByPage = new();
         private readonly Stack<Queue<Item>> _spareStoreQueues = new();
         private volatile int _pendingWriteCount;
@@ -190,29 +192,28 @@ internal static partial class VulkanVideoPresenter
         public long ShadowGeneration => Volatile.Read(ref _shadowGeneration);
 
         // Whether a queued store of the stream lands on a page of the range.
-        public bool HasPendingStores(ulong address, ulong size)
-        {
-            if (_pendingWriteCount == 0)
-            {
-                return false;
-            }
+        public bool HasPendingStores(ulong address, ulong size) => _pendingWriteCount != 0 && _storePages.Overlaps(address, size);
 
-            var last = (address + size - 1) >> StorePageShift;
-            for (var page = address >> StorePageShift; page <= last; page++)
-            {
-                if (_pendingStorePages.ContainsKey(page))
-                {
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
+        // A large store has no page queues: a single-page overlay read it overlaps scans the ordered store queue instead.
         private void NotePendingStorePages(Item item, int delta)
         {
             var address = item.Address;
-            var last = (address + (ulong)item.Data!.Length - 1) >> StorePageShift;
+            var length = (ulong)item.Data!.Length;
+            if (delta > 0)
+            {
+                _storePages.Add(address, length, item.Large);
+            }
+            else
+            {
+                _storePages.Remove(address, length, item.Large);
+            }
+
+            if (item.Large)
+            {
+                return;
+            }
+
+            var last = (address + length - 1) >> StorePageShift;
             for (var page = address >> StorePageShift; page <= last; page++)
             {
                 if (delta > 0)
@@ -240,11 +241,6 @@ internal static partial class VulkanVideoPresenter
                             _spareStoreQueues.Push(queued);
                         }
                     }
-                }
-
-                if (_pendingStorePages.AddOrUpdate(page, delta, (_, count) => count + delta) == 0)
-                {
-                    _pendingStorePages.TryRemove(new KeyValuePair<ulong, int>(page, 0));
                 }
             }
         }
@@ -304,7 +300,7 @@ internal static partial class VulkanVideoPresenter
 
         public void PostOwnedWrite(ulong address, byte[] data, bool kernel)
         {
-            var item = new Item { Kind = Kind.Write, Address = address, Data = data, Kernel = kernel };
+            var item = new Item { Kind = Kind.Write, Address = address, Data = data, Kernel = kernel, Large = PendingStorePages.IsLarge(address, (ulong)data.Length) };
             lock (_writeLock)
             {
                 _pendingWrites.Enqueue(item);
@@ -524,6 +520,13 @@ internal static partial class VulkanVideoPresenter
             }
         }
 
+        // Tests: ReadOverlay into a new array.
+        internal byte[] ReadOverlayForTest(ulong address, int length)
+        {
+            var bytes = new byte[length];
+            return ReadOverlay(address, bytes) ? bytes : throw new InvalidOperationException("The overlay read failed.");
+        }
+
         // Guest memory as a draw at this stream position sees it: the queued stores before it applied,
         // none of the later ones. A queued fill or copy before it into the range cannot be read ahead.
         public bool ReadOverlayBefore(ulong address, Span<byte> destination, long sequence)
@@ -572,7 +575,7 @@ internal static partial class VulkanVideoPresenter
         {
             var end = address + (ulong)destination.Length;
             var page = address >> StorePageShift;
-            if (page == (end - 1) >> StorePageShift)
+            if (page == (end - 1) >> StorePageShift && (!_storePages.HasLarge || !_storePages.OverlapsLarge(address, end)))
             {
                 if (_storesByPage.TryGetValue(page, out var queued))
                 {
