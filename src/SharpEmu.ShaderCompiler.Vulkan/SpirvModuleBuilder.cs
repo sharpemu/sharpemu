@@ -280,6 +280,7 @@ public enum SpirvExecutionMode : uint
     Quads = 24,
     Isolines = 25,
     OriginUpperLeft = 7,
+    EarlyFragmentTests = 9,
     DepthReplacing = 12,
     LocalSize = 17,
     DenormPreserve = 4459,

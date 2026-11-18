@@ -145,6 +145,25 @@ public sealed class ShaderProgramCacheTests : IDisposable
     private readonly PipelineTestGuest _guest = new();
 
     [Fact]
+    public void PixelEarlyDepthHasSeparateProgramKeysAndReachesTheCompiler()
+    {
+        _guest.RegisterProgram(CodeA, HeaderA, PipelineTestGuest.EndProgram);
+        var source = _guest.Source(CodeA, ShaderStage.Pixel, []);
+        var cursor = 0u;
+        ShaderProgram Compile(bool earlyDepth) => _guest.Programs.GetOrCompile(source, new StageCompileOptions
+        {
+            PixelInfo = new PixelInputInfo { EarlyDepth = earlyDepth }, PixelOutputs = [],
+        }, ref cursor, out _);
+
+        var late = Compile(false);
+        var early = Compile(true);
+        Assert.NotEqual(late, early);
+        Assert.Equal(late, Compile(false));
+        Assert.Equal(early, Compile(true));
+        Assert.Equal(new[] { false, true }, _guest.Compiler.Requests.Select(request => request.PixelEarlyDepth));
+    }
+
+    [Fact]
     public void PixelOutputModesHaveSeparateProgramKeys()
     {
         _guest.RegisterProgram(CodeA, HeaderA, PipelineTestGuest.EndProgram);

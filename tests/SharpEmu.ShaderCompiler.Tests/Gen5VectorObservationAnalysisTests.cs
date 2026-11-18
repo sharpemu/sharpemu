@@ -62,6 +62,28 @@ public sealed class Gen5VectorObservationAnalysisTests
         Assert.False(Analyze().UnobservedWrites(write).Contains(3));
     }
 
+    [Theory]
+    [InlineData("ImageStore", false)]
+    [InlineData("ImageLoad", false)]
+    [InlineData("ImageSample", false)]
+    [InlineData("ImageStore", true)]
+    public void ImageArrayLayerPreservesInactiveValuesWhenExecIsRestored(string opcode, bool nonSequential)
+    {
+        var layer = nonSequential ? 90u : 42u;
+        SaveExec();
+        Narrow();
+        var write = Add(MoveVector(0, layer, 0));
+        RestoreExec();
+        var image = Image(0, opcode, 0, dimension: 5, vectorAddress: 40, dmask: 1);
+        image = image with { Control = ((Gen5ImageControl)image.Control!) with
+        {
+            AddressRegisters = nonSequential ? [40, 41, layer] : [40],
+        } };
+        Add(image);
+
+        Assert.False(Analyze().UnobservedWrites(write).Contains(layer));
+    }
+
     [Fact]
     public void AFullWriteUnderAFullExecEndsTheObservation()
     {

@@ -348,6 +348,7 @@ public sealed class ShaderCompileRequest
 
     public IReadOnlyList<Gen5PixelOutputBinding> PixelOutputs { get; init; } = [];
     public bool PixelDepthExportEnable { get; init; }
+    public bool PixelEarlyDepth { get; init; }
     public uint PixelInputEnable { get; init; }
     public uint PixelCustomInterpolationMask { get; init; }
 

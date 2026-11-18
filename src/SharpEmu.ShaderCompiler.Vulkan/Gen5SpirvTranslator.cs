@@ -537,6 +537,11 @@ public static partial class Gen5SpirvTranslator
                 if (_stage == Gen5SpirvStage.Pixel)
                 {
                     _module.AddExecutionMode(main, SpirvExecutionMode.OriginUpperLeft);
+                    // Rejected fragments must not write guest buffers or storage images.
+                    if (_request.PixelEarlyDepth)
+                    {
+                        _module.AddExecutionMode(main, SpirvExecutionMode.EarlyFragmentTests);
+                    }
                     if (_pixelDepthOutput != 0)
                     {
                         _module.AddExecutionMode(main, SpirvExecutionMode.DepthReplacing);

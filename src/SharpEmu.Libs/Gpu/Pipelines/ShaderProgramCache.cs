@@ -2103,6 +2103,7 @@ internal sealed partial class ShaderProgramCache
             NativeFloat16Conversions = host.NativeFloat16Conversions,
             PixelOutputs = options.PixelOutputs,
             PixelDepthExportEnable = info.DepthExportEnable,
+            PixelEarlyDepth = info.EarlyDepth,
             PixelInputEnable = options.PixelInputEnable,
             PixelCustomInterpolationMask = info.CustomInterpolationMask,
             SupportsPerVertexPixelInputs = host.PerVertexPixelInputsSupported,

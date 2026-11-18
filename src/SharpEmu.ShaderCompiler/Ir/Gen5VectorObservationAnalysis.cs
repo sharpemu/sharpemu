@@ -226,7 +226,7 @@ public static class Gen5VectorObservationAnalysis
                 break;
             case Gen5ShaderEncoding.Mimg:
                 cross = cross.Union(reads);
-                DescribeImage(instruction, ref reads, ref writes);
+                DescribeImage(instruction, ref reads, ref cross, ref writes);
                 break;
             case Gen5ShaderEncoding.Ds:
                 if (opcode is "DsSwizzleB32" or "DsBpermuteB32" or "DsPermuteB32")
@@ -326,8 +326,20 @@ public static class Gen5VectorObservationAnalysis
         }
     }
 
-    private static void DescribeImage(Gen5ShaderInstruction instruction, ref VectorRegisterSet reads, ref VectorRegisterSet writes)
+    private static void DescribeImage(Gen5ShaderInstruction instruction, ref VectorRegisterSet reads,
+        ref VectorRegisterSet cross, ref VectorRegisterSet writes)
     {
+        if (instruction.Control is Gen5ImageControl address)
+        {
+            // Sources may name only the base; keep the whole possible address tuple, including layer, LOD and gradients.
+            for (var component = 0; component < 16; component++)
+            {
+                var register = address.GetAddressRegister(component);
+                reads = reads.With(register);
+                cross = cross.With(register);
+            }
+        }
+
         var (data, count) = instruction.Control switch
         {
             Gen5ImageControl image => (image.VectorData, 5u),

@@ -15,6 +15,18 @@ namespace SharpEmu.ShaderCompiler.Tests;
 public sealed class Gen5PixelOutputMappingTests
 {
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void PixelEarlyDepthControlsFragmentTestOrdering(bool earlyDepth)
+    {
+        var code = CompilePixelProgram(Gen5ColorComponentMapping.Identity, earlyDepth: earlyDepth);
+        Assert.Equal(earlyDepth, ReadInstructions(code).Any(instruction =>
+            instruction.Opcode == SpirvOp.ExecutionMode &&
+            instruction.Operands[1] == (uint)SpirvExecutionMode.EarlyFragmentTests));
+        ValidateDepthModule(code);
+    }
+
+    [Theory]
     [InlineData(true, 1u, 8u, true)]
     [InlineData(true, 3u, 8u, true)]
     [InlineData(false, 1u, 8u, false)]
@@ -371,7 +383,8 @@ public sealed class Gen5PixelOutputMappingTests
         IReadOnlyList<Gen5ShaderInstruction>? prefix = null,
         bool enableGraphicsSubgroupOperations = true,
         bool depthExportEnable = false,
-        IReadOnlyList<Gen5ShaderInstruction>? suffix = null)
+        IReadOnlyList<Gen5ShaderInstruction>? suffix = null,
+        bool earlyDepth = false)
     {
         var prefixInstructions = prefix ?? [];
         var suffixInstructions = suffix ?? [];
@@ -407,6 +420,7 @@ public sealed class Gen5PixelOutputMappingTests
                     componentMapping)],
             EnableGraphicsSubgroupOperations = enableGraphicsSubgroupOperations,
             PixelDepthExportEnable = depthExportEnable,
+            PixelEarlyDepth = earlyDepth,
         };
 
         Assert.True(
