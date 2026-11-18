@@ -143,6 +143,9 @@ internal sealed class ProgramSourceEntry
 {
     // Replaced once when an indirect image table proves too large to bind (see PreferHeapRecords).
     public required ShaderResourcePlan Plan { get; set; }
+
+    // Plans this program again with heap records by the policy that produced Plan: CreateEntry's, or a link's with its call records.
+    public Func<ShaderSource, StageCompileOptions, ShaderResourcePlan>? ReplanWithHeapRecords { get; init; }
     public required Gen5ShaderProgram Program { get; init; }
     public required bool HasBitwiseExclusiveOr { get; init; }
     public required bool HasShaderCalls { get; init; }
@@ -864,7 +867,7 @@ internal sealed partial class ShaderProgramCache
                         {
                             linked = LinkProgram(caller, library, source.Stage, source.Hash, source.UserDataBase, (uint)source.UserData.Length,
                                 waveSize, captureLinkedImages ? plan => failedLinkedPlan = plan : null, runtimeRecords, runtimeRecords && CalleeTiering,
-                                _host.SupportsBindlessHeap, _host.ShaderPrewarm is not null, source.Registered.Frontend) ??
+                                _host.SupportsBindlessHeap, _host.ShaderPrewarm is not null, source.Registered.Frontend, PrefersHeapRecords(source)) ??
                                 RefuseRuntimeCallRecords(source.Hash);
                             failedLinkedPlan = null;
                         }
@@ -1106,21 +1109,36 @@ internal sealed partial class ShaderProgramCache
     // links a copy per record from then on (RefuseRuntimeCallRecords).
     private ProgramSourceEntry? LinkProgram(Gen5ShaderProgram caller, ShaderCallLibrary library, ShaderStage stage, ulong hash,
         uint userDataBase, uint userDataCount, uint waveSize, Action<ShaderResourcePlan>? beforeResourceTracking, bool runtimeRecords = false,
-        bool callMarks = false, bool bindlessHeap = false, bool capturePrewarm = false, IShaderFrontend? frontend = null)
+        bool callMarks = false, bool bindlessHeap = false, bool capturePrewarm = false, IShaderFrontend? frontend = null,
+        bool preferHeapRecords = false)
     {
         Gen5ShaderProgram program;
         ShaderResourcePlan plan;
+        Func<ShaderSource, StageCompileOptions, ShaderResourcePlan> replan;
         try
         {
             program = runtimeRecords
                 ? ShaderCallLibrary.LinkLeavingOutUnlinkable(caller, ref library, failure => ReportLeftOutCallee(hash, failure))
                 : Gen5ShaderCallLinker.Link(caller, library.Calls, runtimeRecords);
-            plan = ShaderResourcePlan.Extract(program, stage, hash, userDataBase, userDataCount,
-                beforeResourceTracking: beforeResourceTracking, waveSize: waveSize, bindlessNullDescriptors: BindlessNullDescriptors,
-                bindlessHeap: bindlessHeap, callRecords: runtimeRecords, callMarks: callMarks,
-                normalizeBufferDescriptor: frontend?.NormalizeBufferDescriptor,
-                normalizeImageDescriptor: ImageNormalizer(frontend),
-                imageNormalizationVersion: frontend?.ImageNormalizationVersion);
+            var linkedProgram = program;
+            ShaderResourcePlan Extract(bool heapRecords, Action<ShaderResourcePlan>? beforeTracking) =>
+                ShaderResourcePlan.Extract(linkedProgram, stage, hash, userDataBase, userDataCount,
+                    beforeResourceTracking: beforeTracking, waveSize: waveSize, bindlessNullDescriptors: BindlessNullDescriptors,
+                    bindlessHeap: bindlessHeap, callRecords: runtimeRecords, callMarks: callMarks,
+                    normalizeBufferDescriptor: frontend?.NormalizeBufferDescriptor,
+                    normalizeImageDescriptor: ImageNormalizer(frontend),
+                    imageNormalizationVersion: frontend?.ImageNormalizationVersion,
+                    preferHeapRecords: heapRecords);
+            replan = (_, _) => Extract(heapRecords: true, beforeTracking: null);
+            try
+            {
+                plan = Extract(preferHeapRecords, beforeResourceTracking);
+            }
+            catch (ResourcePlanException) when (preferHeapRecords)
+            {
+                // Only the heap attempt falls back, as CreateEntry's does; the plan without it refuses call records as before.
+                plan = Extract(heapRecords: false, beforeResourceTracking);
+            }
         }
         catch (Exception exception) when (runtimeRecords && exception is InvalidOperationException or ResourcePlanException)
         {
@@ -1130,7 +1148,7 @@ internal sealed partial class ShaderProgramCache
         }
 
         ulong[] callTargets = runtimeRecords ? Gen5ShaderCallLinker.CallTargets(program) : [];
-        return new ProgramSourceEntry { Program = program, Plan = plan, RuntimeCallRecords = runtimeRecords,
+        return new ProgramSourceEntry { Program = program, Plan = plan, ReplanWithHeapRecords = replan, RuntimeCallRecords = runtimeRecords,
             CallTargets = callTargets,
             CallTargetCodes = [.. callTargets.Select(address => library.CodeHashes[address])],
             RuntimeCallees = runtimeRecords ? library.SiteCallees() : null,
@@ -1431,9 +1449,10 @@ internal sealed partial class ShaderProgramCache
         var bindlessHeap = _host.SupportsBindlessHeap;
         var capturePrewarm = _host.ShaderPrewarm is not null;
         var frontend = source.Registered.Frontend;
+        var preferHeapRecords = PrefersHeapRecords(source);
         _pendingLinks.Add(source.Hash, (linkedKey, Task.Run(() =>
             LinkProgram(caller, library, stage, hash, userDataBase, userDataCount, waveSize, null, runtimeRecords, callMarks, bindlessHeap,
-                capturePrewarm, frontend))));
+                capturePrewarm, frontend, preferHeapRecords))));
         throw new ShaderProgramPendingException();
     }
 
@@ -1527,6 +1546,11 @@ internal sealed partial class ShaderProgramCache
             imageNormalizationVersion: source.Registered.Frontend?.ImageNormalizationVersion,
             preferHeapRecords: preferHeapRecords);
 
+    // A program an earlier session had to replan (PreferHeapRecords) is planned so from the start, as its prewarm record is.
+    private bool PrefersHeapRecords(ShaderSource source) =>
+        _host.SupportsBindlessHeap &&
+        _host.ShaderPrewarm?.PrefersHeapRecords(source.Hash, source.CodeSize, source.ContinuationAddressOffset) == true;
+
     // An indirect image table binds every image it can select, and this program's selects more than a draw may bind. Plans
     // it again so the sampled images the bindless heap can serve are heap records, read at run time through descriptor set 1,
     // instead of table candidates. Only a program that gains a heap record changes; the permutations compiled from the old
@@ -1549,7 +1573,12 @@ internal sealed partial class ShaderProgramCache
             ShaderResourcePlan plan;
             try
             {
-                plan = ExtractPlan(source, options, entry.Program, entry.EmbeddedFetch, preferHeapRecords: true, dumpPlanning: false);
+                if (entry.ReplanWithHeapRecords is not { } replan)
+                {
+                    return false;
+                }
+
+                plan = replan(source, options);
             }
             catch (ResourcePlanException)
             {
@@ -1592,9 +1621,7 @@ internal sealed partial class ShaderProgramCache
                 (uint)source.UserData.Length, source.Hash, source.Address);
         }
 
-        // A program an earlier session had to replan (PreferHeapRecords) is planned so from the start, as its prewarm record is.
-        var preferHeapRecords = _host.SupportsBindlessHeap &&
-            _host.ShaderPrewarm?.PrefersHeapRecords(source.Hash, source.CodeSize, source.ContinuationAddressOffset) == true;
+        var preferHeapRecords = PrefersHeapRecords(source);
         ShaderResourcePlan plan;
         try
         {
@@ -1629,6 +1656,8 @@ internal sealed partial class ShaderProgramCache
         return new ProgramSourceEntry
         {
             Plan = plan,
+            ReplanWithHeapRecords = (replanSource, replanOptions) =>
+                ExtractPlan(replanSource, replanOptions, program, fetch, preferHeapRecords: true, dumpPlanning: false),
             Program = program,
             HasBitwiseExclusiveOr = exclusiveOr,
             HasShaderCalls = program.Instructions.Any(instruction => instruction.Opcode == "SSwappcB64"),
@@ -2046,8 +2075,6 @@ internal sealed partial class ShaderProgramCache
 
         if (source.Stage == ShaderStage.Compute && options.TessellationHull is null &&
             _host.ShaderPrewarm is { } prewarm &&
-            // A linked program's heap plan comes from the linker, which the replan does not repeat.
-            (!plan.PreferredHeapRecords || entry.LinkedPrewarm is null) &&
             (!Gen5ShaderCallLinker.IsLinked(program) || entry.LinkedPrewarm is not null) &&
             _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var capture))
         {
