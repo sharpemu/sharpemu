@@ -28,6 +28,9 @@ internal sealed class VertexPrewarmRecord
     public uint? MeshOutputLocationMask { get; init; }
     public required ResourceSpecialization Specialization { get; init; }
     public bool DeviceRecordCounts { get; init; }
+    // The program's image table selects more images than a draw can bind, so its plan reads them from the bindless heap
+    // (ShaderProgramCache.PreferHeapRecords). The prewarm plans it the same way, or its compile would never be reused.
+    public bool PreferHeapRecords { get; init; }
 
     public (ulong Hash, uint CodeSize, ulong Address, ulong ContinuationAddressOffset) CodeKey =>
         (Hash, CodeSize, Address, ContinuationAddressOffset);
@@ -139,6 +142,7 @@ internal sealed partial class ShaderPrewarmList
     // Returns the record's identity, under which RecordPreRasterization records the program's states.
     public ulong RecordVertex(ShaderCodeCapture code, VertexPrewarmRecord record)
     {
+        NoteHeapRecords(record.PreferHeapRecords, record.Hash, record.CodeSize, record.ContinuationAddressOffset);
         var payload = SerializeVertex(record, record.Address);
         var identity = Identity(record);
         lock (_gate)
@@ -180,6 +184,7 @@ internal sealed partial class ShaderPrewarmList
             case VertexKind:
                 if (TryDeserializeVertex(payload) is { } vertex && _vertices.Add(Identity(vertex)))
                 {
+                    NoteHeapRecords(vertex.PreferHeapRecords, vertex.Hash, vertex.CodeSize, vertex.ContinuationAddressOffset);
                     _loadedVertices[Identity(vertex)] = vertex;
                 }
 
@@ -283,6 +288,8 @@ internal sealed partial class ShaderPrewarmList
             }
         }
 
+        // Last of all, one byte: the length tells it from the draw registers, which are whole dwords.
+        if (record.PreferHeapRecords) writer.Write((byte)1);
         writer.Flush();
         return stream.ToArray();
     }
@@ -379,7 +386,9 @@ internal sealed partial class ShaderPrewarmList
 
             var specialization = ReadSpecialization(reader, payload.Length);
             var deviceRecordCounts = reader.ReadBoolean();
-            var drawParameters = reader.BaseStream.Length - reader.BaseStream.Position;
+            var trailing = reader.BaseStream.Length - reader.BaseStream.Position;
+            var preferHeapRecords = trailing % sizeof(int) == 1;
+            var drawParameters = trailing - (preferHeapRecords ? 1 : 0);
             if (vertexInfo is not null && drawParameters is sizeof(int) or 2 * sizeof(int))
             {
                 vertexInfo.StartInstanceUserData = reader.ReadInt32();
@@ -387,6 +396,18 @@ internal sealed partial class ShaderPrewarmList
                 {
                     vertexInfo.BaseVertexUserData = reader.ReadInt32();
                 }
+            }
+
+            if (preferHeapRecords && reader.BaseStream.Position + 1 == reader.BaseStream.Length)
+            {
+                if (reader.ReadByte() != 1)
+                {
+                    return null;
+                }
+            }
+            else
+            {
+                preferHeapRecords = false;
             }
 
             if (reader.BaseStream.Position != reader.BaseStream.Length)
@@ -410,6 +431,7 @@ internal sealed partial class ShaderPrewarmList
                 MeshOutputLocationMask = hasOutputMask ? outputMask : null,
                 Specialization = specialization,
                 DeviceRecordCounts = deviceRecordCounts,
+                PreferHeapRecords = preferHeapRecords,
             };
         }
         catch (Exception exception) when (exception is EndOfStreamException or ArgumentException or IOException)

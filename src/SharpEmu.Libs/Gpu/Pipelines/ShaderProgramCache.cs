@@ -1592,10 +1592,20 @@ internal sealed partial class ShaderProgramCache
                 (uint)source.UserData.Length, source.Hash, source.Address);
         }
 
+        // A program an earlier session had to replan (PreferHeapRecords) is planned so from the start, as its prewarm record is.
+        var preferHeapRecords = _host.SupportsBindlessHeap &&
+            _host.ShaderPrewarm?.PrefersHeapRecords(source.Hash, source.CodeSize, source.ContinuationAddressOffset) == true;
         ShaderResourcePlan plan;
         try
         {
-            plan = ExtractPlan(source, options, program, fetch, preferHeapRecords: false, dumpPlanning);
+            try
+            {
+                plan = ExtractPlan(source, options, program, fetch, preferHeapRecords, dumpPlanning);
+            }
+            catch (ResourcePlanException) when (preferHeapRecords)
+            {
+                plan = ExtractPlan(source, options, program, fetch, preferHeapRecords: false, dumpPlanning);
+            }
         }
         catch (ResourcePlanException exception)
         {
@@ -1983,7 +1993,7 @@ internal sealed partial class ShaderProgramCache
         if (source.Stage == ShaderStage.Pixel)
         {
             _host.PixelProgramCreated(info, module);
-            if (_host.ShaderPrewarm is { } pixelPrewarm && options.PixelInfo is { } pixelInfo && !entry.HasShaderCalls && !plan.PreferredHeapRecords &&
+            if (_host.ShaderPrewarm is { } pixelPrewarm && options.PixelInfo is { } pixelInfo && !entry.HasShaderCalls &&
                 _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var pixelCapture))
             {
                 var pixelRecord = new PixelPrewarmRecord
@@ -2001,6 +2011,7 @@ internal sealed partial class ShaderProgramCache
                     InputAddress = options.PixelInputAddress,
                     Specialization = specialization.Clone(),
                     DeviceRecordCounts = plan.DeviceRecordCounts is not null,
+                    PreferHeapRecords = plan.PreferredHeapRecords,
                 };
                 pixelPrewarm.RecordPixel(pixelCapture, pixelRecord);
             }
@@ -2009,7 +2020,7 @@ internal sealed partial class ShaderProgramCache
         // Vertex and mesh programs, for the graphics prewarm; the host records their parts' states under the identity. The
         // part of a task-launched mesh program also takes the generic task stage, which its record determines (TaskLaunch).
         if (source.Stage is ShaderStage.Vertex or ShaderStage.Mesh && _host.ShaderPrewarm is { } vertexPrewarm &&
-            !entry.HasShaderCalls && !plan.PreferredHeapRecords &&
+            !entry.HasShaderCalls &&
             _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var vertexCapture))
         {
             var identity = vertexPrewarm.RecordVertex(vertexCapture, new VertexPrewarmRecord
@@ -2028,12 +2039,15 @@ internal sealed partial class ShaderProgramCache
                 MeshOutputLocationMask = options.MeshOutputLocationMask,
                 Specialization = specialization.Clone(),
                 DeviceRecordCounts = plan.DeviceRecordCounts is not null,
+                PreferHeapRecords = plan.PreferredHeapRecords,
             });
             _host.VertexProgramRecorded(module, identity);
         }
 
         if (source.Stage == ShaderStage.Compute && options.TessellationHull is null &&
-            _host.ShaderPrewarm is { } prewarm && !plan.PreferredHeapRecords &&
+            _host.ShaderPrewarm is { } prewarm &&
+            // A linked program's heap plan comes from the linker, which the replan does not repeat.
+            (!plan.PreferredHeapRecords || entry.LinkedPrewarm is null) &&
             (!Gen5ShaderCallLinker.IsLinked(program) || entry.LinkedPrewarm is not null) &&
             _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var capture))
         {
@@ -2051,10 +2065,11 @@ internal sealed partial class ShaderProgramCache
                 Specialization = specialization.Clone(),
                 Linked = entry.LinkedPrewarm,
                 DeviceRecordCounts = plan.DeviceRecordCounts is not null,
+                PreferHeapRecords = plan.PreferredHeapRecords,
             });
         }
 
-        if (source.Stage is ShaderStage.Vertex or ShaderStage.Pixel && options.Tessellation is null && !entry.HasShaderCalls && !plan.PreferredHeapRecords &&
+        if (source.Stage is ShaderStage.Vertex or ShaderStage.Pixel && options.Tessellation is null && !entry.HasShaderCalls &&
             _host.ShaderPrewarm is { } stagePrewarm &&
             _programs.TryGetValue(key, out var canonical) && ReferenceEquals(canonical, entry) &&
             _codeCaptures.TryGetValue((source.Hash, source.CodeSize, source.ContinuationAddressOffset), out var stageCapture))
@@ -2074,6 +2089,7 @@ internal sealed partial class ShaderProgramCache
                 PushDataCursor = pushDataCursor,
                 Options = options,
                 Specialization = specialization,
+                PreferHeapRecords = plan.PreferredHeapRecords,
             });
         }
 
@@ -2332,7 +2348,8 @@ internal sealed partial class ShaderProgramCache
                 deviceRecordCounts: record.DeviceRecordCounts,
                 normalizeBufferDescriptor: frontend?.NormalizeBufferDescriptor,
                 normalizeImageDescriptor: frontend?.NormalizeImageDescriptor,
-                imageNormalizationVersion: frontend?.ImageNormalizationVersion);
+                imageNormalizationVersion: frontend?.ImageNormalizationVersion,
+                preferHeapRecords: record.PreferHeapRecords);
             // A record's storage image selects as the session keeps them (RuntimeImageSwizzle.Canonical).
             var specialization = RuntimeImageSwizzle.Canonical(plan, record.Specialization);
             var resources = ResourceMaterializer.ApplyTo(plan, specialization);
@@ -2374,7 +2391,8 @@ internal sealed partial class ShaderProgramCache
             var plan = ShaderResourcePlan.Extract(program, ShaderStage.Pixel, record.Hash, record.UserDataBase, record.UserDataCount,
                 waveSize: 32, bindlessNullDescriptors: BindlessNullDescriptors, bindlessHeap: host.SupportsBindlessHeap,
                 stableImageLimits: host.GraphicsImageDescriptorLimits,
-                deviceRecordCounts: DeviceRecordCountPlan.Enabled && record.DeviceRecordCounts);
+                deviceRecordCounts: DeviceRecordCountPlan.Enabled && record.DeviceRecordCounts,
+                preferHeapRecords: record.PreferHeapRecords);
             // A record's storage image selects as the session keeps them (RuntimeImageSwizzle.Canonical).
             var specialization = RuntimeImageSwizzle.Canonical(plan, record.Specialization);
             var resources = ResourceMaterializer.ApplyTo(plan, specialization);
@@ -2447,7 +2465,8 @@ internal sealed partial class ShaderProgramCache
                 dynamicUserData: record.VertexInfo?.StartInstanceUserData ?? -1,
                 bindlessNullDescriptors: BindlessNullDescriptors, bindlessHeap: host.SupportsBindlessHeap,
                 stableImageLimits: host.GraphicsImageDescriptorLimits,
-                deviceRecordCounts: DeviceRecordCountPlan.Enabled && record.DeviceRecordCounts);
+                deviceRecordCounts: DeviceRecordCountPlan.Enabled && record.DeviceRecordCounts,
+                preferHeapRecords: record.PreferHeapRecords);
             // A record's storage image selects as the session keeps them (RuntimeImageSwizzle.Canonical).
             var specialization = RuntimeImageSwizzle.Canonical(plan, record.Specialization);
             var resources = ResourceMaterializer.ApplyTo(plan, specialization);
