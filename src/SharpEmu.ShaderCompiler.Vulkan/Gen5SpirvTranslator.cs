@@ -80,6 +80,7 @@ public static partial class Gen5SpirvTranslator
         private static readonly bool PixelLiveExec = !string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_PS_LIVE_EXEC"), "0", StringComparison.Ordinal);
         private readonly bool _enableGraphicsSubgroupOperations;
+        private readonly bool _graphicsPartialSubgroupLanes;
         private readonly uint _waveLaneCount;
         private readonly IWaveLowering _waveLowering;
         private bool _guestLaneFromSubgroup;
@@ -219,6 +220,7 @@ public static partial class Gen5SpirvTranslator
         private uint _vertexIndexInput;
         private uint _instanceIndexInput;
         private uint _baseInstanceInput;
+        private uint _baseVertexInput;
         private uint _fragCoordInput;
         private uint _localInvocationIdInput;
         private uint _localInvocationIndexInput;
@@ -957,6 +959,17 @@ public static partial class Gen5SpirvTranslator
                         (uint)SpirvBuiltIn.BaseInstance);
                     _interfaces.Add(_baseInstanceInput);
                     _module.AddCapability(SpirvCapability.DrawParameters);
+                    if (_request.BaseVertexUserData >= 0)
+                    {
+                        _baseVertexInput = _module.AddGlobalVariable(
+                            _module.TypePointer(SpirvStorageClass.Input, _uintType),
+                            SpirvStorageClass.Input);
+                        _module.AddDecoration(
+                            _baseVertexInput,
+                            SpirvDecoration.BuiltIn,
+                            (uint)SpirvBuiltIn.BaseVertex);
+                        _interfaces.Add(_baseVertexInput);
+                    }
                 }
 
                 var outputPointer =
@@ -1322,7 +1335,17 @@ public static partial class Gen5SpirvTranslator
             {
                 if (_stage == Gen5SpirvStage.Vertex)
                 {
-                    StoreV(_request.Program.VertexIndexRegister, Load(_uintType, _vertexIndexInput), guardWithExec: false);
+                    // A base vertex the indirect draw names in user data reaches the program there, and the vertex
+                    // index counts from it, as the CP's base_vtx_loc write does.
+                    var vertexIndex = Load(_uintType, _vertexIndexInput);
+                    if (_baseVertexInput != 0)
+                    {
+                        var baseVertex = Load(_uintType, _baseVertexInput);
+                        vertexIndex = ISubU(vertexIndex, baseVertex);
+                        StoreS(_request.UserDataBase + (uint)_request.BaseVertexUserData, baseVertex);
+                    }
+
+                    StoreV(_request.Program.VertexIndexRegister, vertexIndex, guardWithExec: false);
                     var instanceIndex = Load(_uintType, _instanceIndexInput);
                     if (_baseInstanceInput != 0)
                         instanceIndex = ISubU(instanceIndex, Load(_uintType, _baseInstanceInput));
@@ -3971,7 +3994,8 @@ public static partial class Gen5SpirvTranslator
                 }
 
                 EmitExecConditional(() => TryEmitBufferFormatStore(bindingIndex, byteAddress, control, descriptorWord3, descriptorFormat,
-                    storedHalves, component => LoadBufferD16Component(control.VectorData, component, storedNumberFormat)));
+                    storedHalves, component => LoadBufferD16Component(control.VectorData,
+                        component + (IsFormatD16High(instruction.Opcode) ? 1u : 0u), storedNumberFormat)));
                 return true;
             }
 
@@ -4075,7 +4099,8 @@ public static partial class Gen5SpirvTranslator
                 var (_, loadedNumberFormat) = DecodeGfx10BufferFormat(
                     BitwiseAnd(ShiftRightLogical(descriptorWord3, UInt(12)), UInt(0x7F)));
                 StoreBufferD16Components(control.VectorData,
-                    BufferFormatLoadValues(bindingIndex, byteAddress, descriptorWord3, loadedHalves), loadedNumberFormat);
+                    BufferFormatLoadValues(bindingIndex, byteAddress, descriptorWord3, loadedHalves), loadedNumberFormat,
+                    IsFormatD16High(instruction.Opcode));
                 return true;
             }
 
@@ -4270,7 +4295,8 @@ public static partial class Gen5SpirvTranslator
                 var (_, deviceNumberFormat) = DecodeGfx10BufferFormat(
                     BitwiseAnd(ShiftRightLogical(descriptorWord3, UInt(12)), UInt(0x7F)));
                 StoreBufferD16Components(control.VectorData,
-                    DeviceBufferFormatLoadValues(baseAddress, size, byteAddress, descriptorWord3, deviceHalves), deviceNumberFormat);
+                    DeviceBufferFormatLoadValues(baseAddress, size, byteAddress, descriptorWord3, deviceHalves), deviceNumberFormat,
+                    IsFormatD16High(instruction.Opcode));
                 return true;
             }
 
@@ -4998,7 +5024,7 @@ public static partial class Gen5SpirvTranslator
         // The components a D16 format operation transfers (X to XYZW), or 0 for any other operation.
         private static uint FormatD16Components(string opcode) => opcode switch
         {
-            "BufferLoadFormatD16X" or "BufferStoreFormatD16X" => 1u,
+            "BufferLoadFormatD16X" or "BufferStoreFormatD16X" or "BufferLoadFormatD16HiX" or "BufferStoreFormatD16HiX" => 1u,
             "BufferLoadFormatD16Xy" or "BufferStoreFormatD16Xy" => 2u,
             "BufferLoadFormatD16Xyz" or "BufferStoreFormatD16Xyz" => 3u,
             "BufferLoadFormatD16Xyzw" or "BufferStoreFormatD16Xyzw" => 4u,
@@ -5007,8 +5033,9 @@ public static partial class Gen5SpirvTranslator
 
         // A D16 load returns its components as 16-bit values, two to a register with the first in the low half: halves for
         // the float and normalized formats, the low 16 bits for UINT and SINT (number formats 4 and 5). An odd last
-        // component leaves the high half zero.
-        private void StoreBufferD16Components(uint vectorData, uint[] values, uint numberFormat)
+        // component leaves the high half zero. The D16_HI form (highHalf) writes its one component to bits 16..31 and keeps
+        // bits 0..15 of the register.
+        private void StoreBufferD16Components(uint vectorData, uint[] values, uint numberFormat, bool highHalf = false)
         {
             var integer = _module.AddInstruction(SpirvOp.LogicalOr, _boolType,
                 _module.AddInstruction(SpirvOp.IEqual, _boolType, numberFormat, UInt(4)),
@@ -5020,9 +5047,19 @@ public static partial class Gen5SpirvTranslator
                 var halves = Ext(58, _uintType, _module.AddInstruction(SpirvOp.CompositeConstruct, _vec2Type,
                     Bitcast(_floatType, low), Bitcast(_floatType, high)));
                 var integers = BitwiseOr(BitwiseAnd(low, UInt(0xFFFF)), ShiftLeftLogical(BitwiseAnd(high, UInt(0xFFFF)), UInt(16)));
-                StoreV(vectorData + (uint)(index / 2), _module.AddInstruction(SpirvOp.Select, _uintType, integer, integers, halves));
+                var packed = _module.AddInstruction(SpirvOp.Select, _uintType, integer, integers, halves);
+                if (highHalf)
+                {
+                    packed = BitwiseOr(BitwiseAnd(LoadV(vectorData), UInt(0xFFFF)), ShiftLeftLogical(packed, UInt(16)));
+                }
+
+                StoreV(vectorData + (uint)(index / 2), packed);
             }
         }
+
+        // BUFFER_LOAD_FORMAT_D16_HI_X and BUFFER_STORE_FORMAT_D16_HI_X move their one component through bits 16..31.
+        private static bool IsFormatD16High(string opcode) =>
+            opcode is "BufferLoadFormatD16HiX" or "BufferStoreFormatD16HiX";
 
         // The 32-bit register value one component of a D16 store stands for: its half widened to a float for the float and
         // normalized formats, its 16 bits (sign-extended for SINT) for the integer ones.
@@ -6279,6 +6316,11 @@ public static partial class Gen5SpirvTranslator
                     return false;
                 }
 
+                if (IsHeapLoad(instruction, out var heapLoad))
+                {
+                    return TryEmitHeapLoad(instruction, image, heapLoad, out error);
+                }
+
                 if (IsHeapVolumeRead(instruction, out var heapVolume, out var volumeType))
                 {
                     return TryEmitHeapVolumeRead(instruction, image, heapVolume, volumeType, out error);
@@ -6296,6 +6338,57 @@ public static partial class Gen5SpirvTranslator
             }
 
             return EmitImageOperation(instruction, image, resource, imageObject, dstSelect, mipLevel, out error);
+        }
+
+        // A heap record can hold an integer texture, which shaders read with loads and size queries: the instruction is the
+        // same whatever the format, and its result is the texel's bits. A load of a class with integer forms reads the
+        // record through the declaration of the element's numeric class.
+        private bool IsHeapLoad(Gen5ShaderInstruction instruction, out HeapRecordUse heapImage)
+        {
+            heapImage = default;
+            if (instruction.Opcode is not ("ImageLoad" or "ImageLoadMip" or "ImageGetResinfo") ||
+                !_request.Memory.TryGetIndex(instruction.Pc, 0, out var memoryIndex) ||
+                !_request.HeapImageByMemoryIndex.TryGetValue(memoryIndex, out heapImage))
+            {
+                return false;
+            }
+
+            var entry = _request.Memory[memoryIndex];
+            var info = _request.Resources.Info;
+            return entry.Resource < (uint)info.Images.Count &&
+                ImageDescriptorBinding.ForImage(info.Images[(int)entry.Resource]) is { } kind &&
+                BindlessHeap.HoldsIntegers(BindlessHeap.ImageSlot(kind));
+        }
+
+        private bool TryEmitHeapLoad(Gen5ShaderInstruction instruction, Gen5ImageControl image, HeapRecordUse heapImage, out string error)
+        {
+            var elementClass = HeapElementClass(HeapRecordIndex(heapImage));
+            var emitted = true;
+            var branchError = string.Empty;
+            foreach (var numericClass in new[] { ImageNumericClass.Float, ImageNumericClass.Uint, ImageNumericClass.Sint })
+            {
+                if (!emitted)
+                {
+                    break;
+                }
+
+                EmitConditional(_module.AddInstruction(SpirvOp.IEqual, _boolType, elementClass, UInt(BindlessHeap.ClassCode(numericClass))), () =>
+                {
+                    if (numericClass == ImageNumericClass.Float && IsHeapVolumeRead(instruction, out var heapVolume, out var volumeType))
+                    {
+                        emitted = TryEmitHeapVolumeRead(instruction, image, heapVolume, volumeType, out branchError);
+                        return;
+                    }
+
+                    emitted = TryResolveLayoutImage(instruction, image, out var resource, out var imageObject, out var dstSelect, out branchError,
+                            heapNumericClass: numericClass) &&
+                        EmitImageOperation(instruction, image, resource, imageObject, dstSelect,
+                            HeapReadMipLevel(instruction, image, resource), out branchError);
+                });
+            }
+
+            error = branchError;
+            return emitted;
         }
 
         // A heap record a 3D read picks can hold a 2D texture, whose 3D element stays null; the hardware then takes the
@@ -6335,7 +6428,7 @@ public static partial class Gen5SpirvTranslator
             // A null descriptor reports no levels. Each branch builds its sampled image in the block that samples it, so the
             // query loads the 3D element on its own.
             _module.AddCapability(SpirvCapability.ImageQuery);
-            var (_, volumeImage) = LoadHeapElement(BindlessHeap.VolumeSlot, volumeType, HeapRecordIndex(heapImage));
+            var (_, volumeImage) = LoadHeapElement(BindlessHeap.VolumeSlot, volumeType, HeapImageIndex(heapImage, BindlessHeap.VolumeSlot));
             var levels = _module.AddInstruction(SpirvOp.ImageQueryLevels, _uintType, volumeImage);
             _module.AddDecoration(levels, SpirvDecoration.NonUniform);
             var isVolume = _module.AddInstruction(SpirvOp.INotEqual, _boolType, levels, UInt(0));
@@ -6999,6 +7092,25 @@ public static partial class Gen5SpirvTranslator
                     goto GatherComplete;
                 }
 
+                if (GatherCompareLod &&
+                    instruction.Opcode == "ImageGather4CL" &&
+                    resource.Dimension == SpirvImageDim.Dim2D)
+                {
+                    // OpImageDrefGather has no level operand either; compare the four texels at the requested level.
+                    sampled = EmitGatherAtLevel(
+                        image,
+                        resource,
+                        imageObject,
+                        coordinates,
+                        LoadImageFloatAddress(
+                            image,
+                            addressCursor + (int)coordinateComponentCount),
+                        reference,
+                        resource.EmulatedCompareFunction);
+                    writeAllComponents = true;
+                    goto GatherComplete;
+                }
+
                 var operands = new List<uint>
                 {
                     imageObject,
@@ -7225,12 +7337,21 @@ public static partial class Gen5SpirvTranslator
 
         // The four texels a gather reads, (i, j+1), (i+1, j+1), (i+1, j) and (i, j), taken from one level of
         // detail. Each is sampled at its centre, so the sampler still applies its addressing and its level clamp.
+        // image_gather4_c_l gathers at its LOD instead of the base level (SHARPEMU_GATHER_COMPARE_LOD=0 reads the base level,
+        // for bisecting). A terrain occlusion test gathers its HiZ pyramid at the patch's footprint level; at the base
+        // level it tests a 2x2-texel corner of the footprint, so patches behind a thin occluder (a character's legs) drop out of the list.
+        private static readonly bool GatherCompareLod = Environment.GetEnvironmentVariable("SHARPEMU_GATHER_COMPARE_LOD") != "0";
+
+        // reference != 0: each texel is the depth comparison against it (in the sampler, or emulated when
+        // emulatedCompare >= 0), as image_gather4_c* returns.
         private uint EmitGatherAtLevel(
             Gen5ImageControl image,
             SpirvImageResource resource,
             uint sampledImage,
             uint coordinates,
-            uint lod)
+            uint lod,
+            uint reference = 0,
+            int emulatedCompare = -1)
         {
             var imageValue = _module.AddInstruction(
                 SpirvOp.Image,
@@ -7310,6 +7431,19 @@ public static partial class Gen5SpirvTranslator
                         layer);
                 }
 
+                if (reference != 0 && emulatedCompare < 0)
+                {
+                    values[index] = _module.AddInstruction(
+                        SpirvOp.ImageSampleDrefExplicitLod,
+                        _floatType,
+                        sampledImage,
+                        centre,
+                        reference,
+                        2u,
+                        levelFloat);
+                    continue;
+                }
+
                 var texel = _module.AddInstruction(
                     SpirvOp.ImageSampleExplicitLod,
                     resource.VectorType,
@@ -7322,6 +7456,10 @@ public static partial class Gen5SpirvTranslator
                     resource.ComponentType,
                     texel,
                     component);
+                if (reference != 0)
+                {
+                    values[index] = EmulatedDepthCompare(reference, values[index], emulatedCompare);
+                }
             }
 
             return _module.AddInstruction(
@@ -9927,6 +10065,102 @@ public static partial class Gen5SpirvTranslator
                         ? BitwiseAnd(lane, UInt(PairedHalfLaneCount - 1))
                         : lane);
 
+        // A graphics host subgroup (a fragment one above all) can be partly empty: the lanes past the quads
+        // the rasterizer packed into it were never launched. The PS5 wave behind it still has those lanes,
+        // dead but with registers, and whole-wave code (S_ORN2_SAVEEXEC/S_OR_SAVEEXEC of EXEC) turns them on
+        // after filling them with a reduction's identity. A shuffle from an invocation that does not exist is
+        // undefined, so DPP, DPP8, PERMLANE and V_READLANE reads of such a lane go through ReadGraphicsLane.
+        // Compute and mesh subgroups are full. Opt-in (ShaderCompileRequest.GraphicsPartialSubgroupLanes).
+        private bool HostSubgroupMayBePartial =>
+            _graphicsPartialSubgroupLanes && _subgroupInvocationIdInput != 0 && !_pairedLanes && !_pairedMeshLanes &&
+            _stage is not (Gen5SpirvStage.Compute or Gen5SpirvStage.Mesh);
+
+        // The host invocation of a guest lane of a graphics wave. A graphics wave is one group of up to 32
+        // host lanes (GuestWaveLane), so the lane is at its position within the reading invocation's group;
+        // the upper half of an emulated wave64 has no host lanes and maps onto the same positions. A native
+        // wave64 is its subgroup.
+        private uint GraphicsHostLane(uint guestLane)
+        {
+            if (_guestLaneFromSubgroup)
+            {
+                return BitwiseAnd(guestLane, UInt(63));
+            }
+
+            var group = BitwiseAnd(Load(_uintType, _subgroupInvocationIdInput), UInt(~31u));
+            return BitwiseOr(group, BitwiseAnd(guestLane, UInt(31)));
+        }
+
+        // Whether the host invocation exists: its bit in a ballot of true.
+        private uint IsHostLanePresent(uint hostLane)
+        {
+            _module.AddCapability(SpirvCapability.GroupNonUniformBallot);
+            var ballot = _module.AddInstruction(
+                SpirvOp.GroupNonUniformBallot, _uvec4Type, UInt(3), _module.ConstantBool(true));
+            var word = _module.AddInstruction(
+                SpirvOp.VectorExtractDynamic, _uintType, ballot, ShiftRightLogical(hostLane, UInt(5)));
+            return IsNotZero(BitwiseAnd(ShiftRightLogical(word, BitwiseAnd(hostLane, UInt(31))), UInt(1)));
+        }
+
+        // A guest lane's bit in the guest EXEC mask, which keeps the bits of the lanes the host never launched.
+        private uint IsGuestLaneExecSet(uint guestLane)
+        {
+            uint word;
+            uint bit;
+            if (_waveLaneCount == 32)
+            {
+                word = LoadS(126);
+                bit = BitwiseAnd(guestLane, UInt(31));
+            }
+            else
+            {
+                var lane = BitwiseAnd(guestLane, UInt(63));
+                word = _module.AddInstruction(
+                    SpirvOp.Select,
+                    _uintType,
+                    _module.AddInstruction(SpirvOp.ULessThan, _boolType, lane, UInt(32)),
+                    LoadS(126),
+                    LoadS(127));
+                bit = BitwiseAnd(lane, UInt(31));
+            }
+
+            return IsNotZero(BitwiseAnd(ShiftRightLogical(word, bit), UInt(1)));
+        }
+
+        // Reads a guest lane's register in a graphics wave whatever its EXEC state. present reports whether
+        // the lane's host invocation exists. An absent lane has no register on the host and no value is
+        // right; it reads as the caller's own value, which keeps the min/max/and/or reductions that
+        // whole-wave code runs across dead lanes exact (a wave-minimum loop).
+        private uint ReadGraphicsLane(uint value, uint guestLane, out uint present)
+        {
+            var hostLane = GraphicsHostLane(guestLane);
+            present = IsHostLanePresent(hostLane);
+            var sourceLane = _module.AddInstruction(
+                SpirvOp.Select,
+                _uintType,
+                present,
+                hostLane,
+                Load(_uintType, _subgroupInvocationIdInput));
+            return ShuffleLane(value, sourceLane);
+        }
+
+        // The fetch-inactive-off read of a graphics lane: usable is the source lane's EXEC state, judged by
+        // the guest EXEC bit for a lane the host never launched (set means whole-wave code turned the dead
+        // lane on). The caller applies the ISA's invalid-source result where usable is false.
+        private uint ReadGraphicsLaneIfActive(uint value, uint guestLane, out uint usable)
+        {
+            usable = IsGraphicsLaneUsable(guestLane);
+            return ReadGraphicsLane(value, guestLane, out _);
+        }
+
+        private uint IsGraphicsLaneUsable(uint guestLane)
+        {
+            var activeWord = _module.AddInstruction(
+                SpirvOp.Select, _uintType, Load(_boolType, _exec), UInt(1), UInt(0));
+            var hostActive = IsNotZero(ReadGraphicsLane(activeWord, guestLane, out var present));
+            return _module.AddInstruction(
+                SpirvOp.Select, _boolType, present, hostActive, IsGuestLaneExecSet(guestLane));
+        }
+
         private uint CurrentLaneBit() =>
             _waveLowering.CurrentLaneBit();
 
@@ -10069,8 +10303,11 @@ public static partial class Gen5SpirvTranslator
              UsesSubgroupShuffle() ||
              UsesSubgroupBroadcast() ||
              UsesWaveControl() ||
+             // These need the invocation's lane in the guest wave. V_WRITELANE picks its lane by it: without the lane
+             // inputs every invocation is lane 0, and a write to any other lane was dropped.
              _request.Program.Instructions.Any(static instruction =>
-                 instruction.Opcode is "VMbcntLoU32B32" or "VMbcntHiU32B32" or "DsWriteAddtidB32" or "DsReadAddtidB32"));
+                 instruction.Opcode is "VMbcntLoU32B32" or "VMbcntHiU32B32" or "DsWriteAddtidB32" or "DsReadAddtidB32" or
+                     "VWritelaneB32"));
 
         private static bool IsWaveMaskOperand(Gen5Operand operand) =>
             operand.Kind == Gen5OperandKind.ScalarRegister &&

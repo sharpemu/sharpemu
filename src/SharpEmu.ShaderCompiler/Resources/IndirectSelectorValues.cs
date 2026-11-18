@@ -87,6 +87,10 @@ public sealed class IndirectSelectorValues
         return values.Length != 0;
     }
 
+    internal static bool WritesRegister(Gen5ShaderInstruction instruction, Gen5Operand register) => Builder.WritesRegister(instruction, register);
+
+    internal static bool MayExpandExecution(Gen5ShaderInstruction instruction) => Builder.MayExpandExecution(instruction);
+
     private sealed class Builder(ShaderResourcePlan plan)
     {
         private readonly HashSet<(Gen5Operand Operand, uint Address)> _active = [];
@@ -183,7 +187,7 @@ public sealed class IndirectSelectorValues
             return third is null ? null : new(Operation: ScalarOperation.IAdd32, Inputs: [result, third]);
         }
 
-        private static bool MayExpandExecution(Gen5ShaderInstruction instruction)
+        public static bool MayExpandExecution(Gen5ShaderInstruction instruction)
         {
             if (instruction.Opcode is "SAndSaveexecB64" or "SAndSaveexecB32") return false;
             return instruction.Opcode.Contains("Saveexec", StringComparison.Ordinal) ||
@@ -192,7 +196,7 @@ public sealed class IndirectSelectorValues
                 WritesRegister(instruction, Gen5Operand.Scalar(126)) || WritesRegister(instruction, Gen5Operand.Scalar(127));
         }
 
-        private static bool WritesRegister(Gen5ShaderInstruction instruction, Gen5Operand register)
+        public static bool WritesRegister(Gen5ShaderInstruction instruction, Gen5Operand register)
         {
             if (register.Kind == Gen5OperandKind.ScalarRegister && register.Value is 106 or 107 &&
                 instruction.Opcode.StartsWith('V')) return true;

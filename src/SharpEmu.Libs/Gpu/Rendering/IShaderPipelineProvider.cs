@@ -154,7 +154,8 @@ public interface IShaderPipelineProvider
         ReadOnlySpan<ColorComponentMap> targetExportMapping,
         bool pixelActive,
         bool depthBound,
-        int startInstanceUserData) =>
+        int startInstanceUserData,
+        int baseVertexUserData = -1) =>
         GetGraphicsPrograms(banks, targetExportMapping, pixelActive, depthBound);
 
     // taskLaunch: an automatic indirect draw launched by the task stage (MeshTaskLaunch). Providers without task launches

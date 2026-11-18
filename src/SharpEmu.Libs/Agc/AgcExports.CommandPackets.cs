@@ -862,7 +862,9 @@ public static partial class AgcExports
 
         var payloadDwords = Math.Max(((uint)marker.Length + 4) / 4, 1);
         var packetDwords = payloadDwords + 1;
-        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress) ||
+        // A marker from a thread other than the buffer's writer is skipped (null pointer): it must not reserve space inside
+        // that writer's unpublished inline packet.
+        if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress, isMarker: true) ||
             !TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, ItNop, RPushMarker)))
         {
             return ReturnPointer(ctx, 0);
@@ -912,7 +914,8 @@ public static partial class AgcExports
     {
         var commandBufferAddress = ctx[CpuRegister.Rdi];
         if (commandBufferAddress == 0 ||
-            !TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(2, ItNop, RPopMarker), 0))
+            !TryAllocateCommandDwords(ctx, commandBufferAddress, 2, out var commandAddress, isMarker: true) ||
+            !TryWriteCommandDwords(ctx, commandAddress, Pm4(2, ItNop, RPopMarker), 0))
         {
             return ReturnPointer(ctx, 0);
         }

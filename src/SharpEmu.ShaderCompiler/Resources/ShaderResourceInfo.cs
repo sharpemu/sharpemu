@@ -187,6 +187,10 @@ public sealed class ShaderResourceInfo
     // Some image access reads its image or sampler from a bindless heap through descriptor set 1.
     public bool UsesBindlessHeap { get; set; }
 
+    // The heap views of those accesses (ShaderResourcePlan.HeapRecordSources); the layout carries where each one's
+    // elements are as shader data (BindingLayout.HeapViewsDword).
+    public uint HeapViewCount { get; set; }
+
     // Some image access reads its image or sampler through a linked callee's record argument (see CallRecordSelector).
     public bool UsesCallRecords { get; set; }
 
@@ -222,6 +226,7 @@ public sealed class ShaderResourceInfo
         HasBitwiseExclusiveOr = HasBitwiseExclusiveOr,
         UsesDeviceAddresses = UsesDeviceAddresses,
         UsesBindlessHeap = UsesBindlessHeap,
+        HeapViewCount = HeapViewCount,
         UsesCallRecords = UsesCallRecords,
         UsesCallMarks = UsesCallMarks,
         UsesDeviceAddressFallback = UsesDeviceAddressFallback,
@@ -239,6 +244,9 @@ public sealed record IndirectImageSelector(
     uint KeyArgument)
 {
     public IndirectSelectorValues? SelectorValues { get; init; }
+
+    // An inclusive upper bound the shader's own clamps prove for the selector, when one exists.
+    public uint? SelectorBound { get; init; }
     public IReadOnlyList<DirectImageCandidate>? DirectCandidates { get; init; }
     public bool Dense { get; init; }
     public uint TableOffset { get; init; }

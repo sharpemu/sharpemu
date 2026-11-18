@@ -38,6 +38,7 @@ public static class StageStaticKey
 
         key.Add((uint)requiredOutputCount);
         key.Add((uint)info.StartInstanceUserData);
+        key.Add((uint)info.BaseVertexUserData);
         foreach (var attribute in info.Attributes)
         {
             var descriptor = attribute.Descriptor;

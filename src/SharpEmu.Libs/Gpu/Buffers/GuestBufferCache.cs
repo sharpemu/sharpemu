@@ -535,9 +535,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             throw SubmissionScheduler.Fatal(
                 $"Cannot reserve image staging space: address=0x{guestAddress:X16} size=0x{size:X16} capacity=0x{_staging.Size:X16} tick={_scheduler.CurrentTick}.");
         }
-        if (!_backing.TryReadBacking(guestAddress, _staging.Mapped.Slice((int)stageOffset, (int)size)) &&
-            !KernelMemoryCompatExports.TryReadPrtBacking(_backing, guestAddress,
-                _staging.Mapped.Slice((int)stageOffset, (int)size)))
+        if (!ResidentImageBacking.TryRead(_backing, guestAddress, _staging.Mapped.Slice((int)stageOffset, (int)size)))
         {
             throw SubmissionScheduler.Fatal(
                 $"Could not read the mapped guest image backing: address=0x{guestAddress:X16} size=0x{size:X16} range_backed={_backing.IsBackedRange(guestAddress, size)} first_byte_backed={_backing.IsBackedRange(guestAddress, 1)} last_byte_backed={_backing.IsBackedRange(guestAddress + size - 1, 1)} tick={_scheduler.CurrentTick}.");

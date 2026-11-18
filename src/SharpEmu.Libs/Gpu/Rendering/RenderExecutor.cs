@@ -331,7 +331,7 @@ public sealed partial class RenderExecutor
             expandedIndices is null ? indexSize : (ulong)expandedIndices.Length,
             indexType);
         ref var state = ref record.State;
-        state.Begin(arguments.StartInstanceUserData);
+        state.Begin(arguments.StartInstanceUserData, arguments.BaseVertexUserData);
         if (!TryResolveDrawTargets(banks, in draw, ref state, record))
         {
             TraceDisposition("no-targets");
@@ -522,7 +522,7 @@ public sealed partial class RenderExecutor
         ValidateChangedDrawRegisters(banks);
         var draw = new DrawCall("DrawAuto", RecordedOperation.DrawIndexAuto, arguments.VertexCount, arguments.InstanceCount, arguments.FirstInstance);
         ref var state = ref record.State;
-        state.Begin(arguments.StartInstanceUserData);
+        state.Begin(arguments.StartInstanceUserData, arguments.BaseVertexUserData);
         if (!TryResolveDrawTargets(banks, in draw, ref state, record))
         {
             TraceDrawTargets(banks, "no-targets");
@@ -971,6 +971,10 @@ public sealed partial class RenderExecutor
 
     private const uint TessellationStageBits = 0x7u;
 
+    // Whether the draw's vertex stage is a vertex program of its own: no tessellation, and no mesh stage the guest asks for.
+    internal static bool RunsPlainVertexProgram(uint stages) =>
+        (stages & TessellationStageBits) == 0 && !RequiresMeshExecution(stages);
+
     private bool UsesMeshExecution(RegisterBanks banks) =>
         _pipelines.MeshShadersSupported && RequiresMeshExecution(banks.Context.ShaderStages) &&
         banks.Shader.Vertex.ExportAddress != 0 &&
@@ -1023,7 +1027,8 @@ public sealed partial class RenderExecutor
             return;
         }
 
-        state.Programs = _pipelines.GetGraphicsPrograms(banks, targetExportMapping, state.PixelActive, state.Depth.HasTarget, state.StartInstanceUserData);
+        state.Programs = _pipelines.GetGraphicsPrograms(banks, targetExportMapping, state.PixelActive, state.Depth.HasTarget, state.StartInstanceUserData,
+            state.BaseVertexUserData);
     }
 
     [System.Runtime.CompilerServices.InlineArray(RenderingState.ColorAttachmentCapacity)]

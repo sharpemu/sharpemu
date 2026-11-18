@@ -4488,6 +4488,13 @@ public static partial class Gen5SpirvTranslator
             {
                 value = _module.AddInstruction(SpirvOp.Not, _ulongType, left);
             }
+            else if (instruction.Opcode == "SBrevB64")
+            {
+                // Vulkan limits OpBitReverse to 32-bit operands: reverse each half and swap them.
+                var low = _module.AddInstruction(SpirvOp.BitReverse, _uintType, Narrow(ShiftRightLogical64(left, ULong(32))));
+                var high = _module.AddInstruction(SpirvOp.BitReverse, _uintType, Narrow(left));
+                value = _module.AddInstruction(SpirvOp.BitwiseOr, _ulongType, Widen(low), ShiftLeftLogical64(Widen(high), ULong(32)));
+            }
             else
             {
                 if (instruction.Sources.Count < 2)
@@ -4746,6 +4753,17 @@ public static partial class Gen5SpirvTranslator
 
             var targetLane = IAdd(BitwiseAnd(lane, UInt(0xFFFF_FFF8)), selector);
             targetLane = BitwiseAnd(targetLane, UInt(NativeLaneMask));
+            if (HostSubgroupMayBePartial)
+            {
+                if (control.FetchInactive)
+                {
+                    return ReadGraphicsLane(value, targetLane, out _);
+                }
+
+                var graphicsValue = ReadGraphicsLaneIfActive(value, targetLane, out var usable);
+                return _module.AddInstruction(SpirvOp.Select, _uintType, usable, graphicsValue, UInt(0));
+            }
+
             var shuffled = ShuffleLane(value, targetLane);
             if (control.FetchInactive)
             {
@@ -4770,6 +4788,27 @@ public static partial class Gen5SpirvTranslator
 
         private uint ApplyDppSource(Gen5DppControl control, uint value)
         {
+            if (HostSubgroupMayBePartial)
+            {
+                GetDppSourceLane(control, out var targetLane, out var inRange);
+                var graphicsTarget = BitwiseAnd(
+                    _module.AddInstruction(SpirvOp.Select, _uintType, inRange, targetLane, GuestWaveLane()),
+                    UInt(NativeLaneMask));
+                if (control.FetchInactive)
+                {
+                    return _module.AddInstruction(
+                        SpirvOp.Select, _uintType, inRange, ReadGraphicsLane(value, graphicsTarget, out _), UInt(0));
+                }
+
+                var graphicsValue = ReadGraphicsLaneIfActive(value, graphicsTarget, out var usable);
+                return _module.AddInstruction(
+                    SpirvOp.Select,
+                    _uintType,
+                    _module.AddInstruction(SpirvOp.LogicalAnd, _boolType, inRange, usable),
+                    graphicsValue,
+                    UInt(0));
+            }
+
             GetDppSource(control, out var safeTarget, out var valid);
             var shuffled = _pairedMeshLanes
                 ? ShufflePairedValue(_pairedDppSources[0], _pairedDppSources[1], safeTarget)
@@ -5005,7 +5044,23 @@ public static partial class Gen5SpirvTranslator
                 UInt(control.BankMask),
                 ShiftLeftLogical(UInt(1), bank)));
             var sourceAllowsWrite = _module.ConstantBool(true);
-            if (!control.BoundControl)
+            if (!control.BoundControl && HostSubgroupMayBePartial)
+            {
+                // ISA: with BOUND_CTRL clear, a lane whose source is out of range or disabled keeps its
+                // old destination. A graphics source lane the host never launched is disabled unless
+                // whole-wave code turned it on.
+                GetDppSourceLane(control, out var sourceLane, out var inRange);
+                sourceAllowsWrite = inRange;
+                if (!control.FetchInactive)
+                {
+                    var safeSource = BitwiseAnd(
+                        _module.AddInstruction(SpirvOp.Select, _uintType, inRange, sourceLane, lane),
+                        UInt(NativeLaneMask));
+                    sourceAllowsWrite = _module.AddInstruction(
+                        SpirvOp.LogicalAnd, _boolType, inRange, IsGraphicsLaneUsable(safeSource));
+                }
+            }
+            else if (!control.BoundControl)
             {
                 GetDppSource(control, out _, out sourceAllowsWrite);
             }
@@ -5935,6 +5990,13 @@ public static partial class Gen5SpirvTranslator
                 var broadcast = BroadcastWaveLane(sourceValue, selectedLane);
                 StoreS(destination, ReadLaneSpillSlot(instruction, selectedLane, broadcast));
             }
+            else if (HostSubgroupMayBePartial)
+            {
+                // The selected lane of the invocation's own graphics wave, whatever its EXEC state; a lane
+                // the host never launched reads as the reading lane.
+                var read = ReadGraphicsLane(sourceValue, selectedLane, out _);
+                StoreS(destination, ReadLaneSpillSlot(instruction, selectedLane, read));
+            }
             else
             {
                 // Fallback: no subgroup ops, read current lane's value, or the
@@ -6013,8 +6075,29 @@ public static partial class Gen5SpirvTranslator
 
             var targetLane = IAdd(rowBase, selector);
             targetLane = BitwiseAnd(targetLane, UInt(NativeLaneMask));
-            var shuffled = ShuffleLane(value, targetLane);
             var fetchInactive = (control.OperandSelect & 1) != 0;
+            if (HostSubgroupMayBePartial)
+            {
+                if (fetchInactive)
+                {
+                    return ReadGraphicsLane(value, targetLane, out _);
+                }
+
+                // ISA: a disabled source lane gives zero with BOUND_CTRL (OP_SEL[1]) set and keeps the old
+                // destination with it clear.
+                var graphicsValue = ReadGraphicsLaneIfActive(value, targetLane, out var usable);
+                var boundControl = (control.OperandSelect & 2) != 0;
+                return _module.AddInstruction(
+                    SpirvOp.Select,
+                    _uintType,
+                    usable,
+                    graphicsValue,
+                    boundControl || instruction.Destinations.Count == 0
+                        ? UInt(0)
+                        : LoadV(instruction.Destinations[0].Value));
+            }
+
+            var shuffled = ShuffleLane(value, targetLane);
             if (fetchInactive)
             {
                 return shuffled;

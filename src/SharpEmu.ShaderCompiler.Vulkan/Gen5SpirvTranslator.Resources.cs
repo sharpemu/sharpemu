@@ -164,7 +164,7 @@ public static partial class Gen5SpirvTranslator
         private readonly bool _compactMemoryAccess;
         private readonly Dictionary<DescriptorBindingKind, LayoutImageClass> _imageClasses = [];
         private readonly Dictionary<int, uint> _indirectKeyScratch = [];
-        private readonly Dictionary<int, uint> _heapArrays = [];
+        private readonly Dictionary<(int Slot, ImageNumericClass NumericClass), uint> _heapArrays = [];
         private uint _heapFeedback;
         private uint _pushData;
         private uint _shaderData;
@@ -246,6 +246,7 @@ public static partial class Gen5SpirvTranslator
                 _stage == Gen5SpirvStage.Pixel && PixelLiveExec &&
                 request.Program.Instructions.Any(static instruction => instruction.Opcode is "DsAppend" or "DsConsume");
             _enableGraphicsSubgroupOperations = _stage is Gen5SpirvStage.Compute or Gen5SpirvStage.Mesh || request.EnableGraphicsSubgroupOperations;
+            _graphicsPartialSubgroupLanes = request.GraphicsPartialSubgroupLanes;
             _waveLaneCount = request.WaveSize == 64 ? 64u : 32u;
             _pairedMeshLanes = _stage == Gen5SpirvStage.Mesh && _waveLaneCount == 64 &&
                 request.Mesh?.DeviceSubgroupLaneCount == 32;
@@ -288,7 +289,8 @@ public static partial class Gen5SpirvTranslator
             {
                 _waveLowering = new HalfWave64Lowering(this);
             }
-            else if (_stage == Gen5SpirvStage.Compute && request.HostComputeSubgroup32 && PairedWave64Enabled)
+            else if (_stage == Gen5SpirvStage.Compute && request.HostComputeSubgroup32 &&
+                     PairsWave64Lanes(PairedWave64Mode, (ulong)_localSizeX * _localSizeY * _localSizeZ))
             {
                 _pairedLanes = true;
                 _waveLowering = new PairedWave64Lowering(this);
@@ -2414,7 +2416,8 @@ public static partial class Gen5SpirvTranslator
             out uint dstSelect,
             out string error,
             (uint Resource, uint Element)? fixedElement = null,
-            bool heapVolumeLayers = false)
+            bool heapVolumeLayers = false,
+            ImageNumericClass heapNumericClass = ImageNumericClass.Float)
         {
             error = string.Empty;
             resource = default;
@@ -2486,7 +2489,13 @@ public static partial class Gen5SpirvTranslator
             uint imageValue;
             if (fromHeap)
             {
-                (elementPointer, imageValue) = LoadHeapElement(heapImageSlot, imageClass.ImageType, HeapRecordIndex(heapImage));
+                if (heapNumericClass != ImageNumericClass.Float)
+                {
+                    imageClass = HeapIntegerClass(imageClass, heapNumericClass);
+                }
+
+                (elementPointer, imageValue) = LoadHeapElement(heapImageSlot, imageClass.ImageType,
+                    HeapImageIndex(heapImage, heapImageSlot, heapNumericClass), numericClass: heapNumericClass);
             }
             else if (fixedElement is null && heapImageSlot >= 0 &&
                 request.CallRecordImageByMemoryIndex.TryGetValue(memoryIndex, out var recordImage))
@@ -2588,22 +2597,75 @@ public static partial class Gen5SpirvTranslator
                 ImageComponentKind.Float, IsStorage: false, Arrayed: true, Cube: false, Multisampled: false, SpirvImageDim.Dim2D, []);
         }
 
-        // The record a heap read picks: the dynamic offset its key read kept plus the read's immediate, in records.
+        // The integer form of a float class of set 1: the same binding, declared with unsigned or signed texels.
+        private LayoutImageClass HeapIntegerClass(LayoutImageClass floatClass, ImageNumericClass numericClass)
+        {
+            var signed = numericClass == ImageNumericClass.Sint;
+            var componentType = signed ? _intType : _uintType;
+            var imageType = _module.TypeImage(componentType, floatClass.Dimension, depth: false, floatClass.Arrayed, multisampled: false,
+                sampled: 1u, SpirvImageFormat.Unknown);
+            return floatClass with
+            {
+                Variable = 0,
+                ImageType = imageType,
+                ElementPointer = _module.TypePointer(SpirvStorageClass.UniformConstant, imageType),
+                ComponentType = componentType,
+                Kind = signed ? ImageComponentKind.Sint : ImageComponentKind.Uint,
+                Resources = [],
+            };
+        }
+
+        // The numeric class of a set-1 image element (BindlessHeap.ClassCode), which the host keeps after the mark bitsets.
+        private uint HeapElementClass(uint index)
+        {
+            var word = IAdd(UInt(BindlessHeap.MarkWords), ShiftRightLogical(index, UInt(BindlessHeap.ClassWordShift)));
+            var shift = _module.AddInstruction(SpirvOp.IMul, _uintType,
+                BitwiseAnd(index, UInt(BindlessHeap.ClassesPerWord - 1)), UInt(BindlessHeap.ClassBits));
+            return BitwiseAnd(ShiftRightLogical(Load(_uintType, BlockWordPointer(HeapFeedback(), word)), shift), UInt(BindlessHeap.ClassMask));
+        }
+
+        // The element an image read takes through the declaration of one numeric class: the record's element when it
+        // holds a texture of that class and the null element otherwise, so no declaration reads a view of another class.
+        // A class without integer forms holds float views only.
+        private uint HeapImageIndex(HeapRecordUse use, int slot, ImageNumericClass numericClass = ImageNumericClass.Float)
+        {
+            var index = HeapRecordIndex(use);
+            if (!BindlessHeap.HoldsIntegers(slot))
+            {
+                return index;
+            }
+
+            var ofClass = _module.AddInstruction(SpirvOp.IEqual, _boolType, HeapElementClass(index), UInt(BindlessHeap.ClassCode(numericClass)));
+            return _module.AddInstruction(SpirvOp.Select, _uintType, ofClass, index, UInt(BindlessHeap.CallRecordNullIndex));
+        }
+
+        // The element of set 1 a heap read picks: the dynamic offset its key read kept plus the read's immediate is a
+        // byte offset in the heap, whose record the draw's heap view (HeapView, two dwords of shader data) has an element
+        // for. A read the view has no element for (past its records, or not at its descriptor's offset in a record)
+        // reads the null element.
         private uint HeapRecordIndex(HeapRecordUse use)
         {
             var key = _indirectKeyScratch.TryGetValue(use.KeyMemoryIndex, out var scratch) ? Load(_uintType, scratch) : UInt(0);
-            var shift = use.RecordBytes == BindlessHeap.SamplerRecordBytes ? 4u : 5u;
-            var record = ShiftRightLogical(IAdd(key, UInt(use.Immediate)), UInt(shift));
-            // Set 1 holds the heap's records below CallRecordFirstIndex (call records own the elements above); any other record
-            // reads the null element.
-            var inHeap = _module.AddInstruction(SpirvOp.ULessThan, _boolType, record, UInt(BindlessHeap.CallRecordFirstIndex));
-            return _module.AddInstruction(SpirvOp.Select, _uintType, inHeap, record, UInt(BindlessHeap.CallRecordNullIndex));
+            var offset = IAdd(key, UInt(use.Immediate));
+            var viewDword = _request.Bindings.HeapViewsDword + (uint)use.View * HeapView.DwordCount;
+            var word0 = LoadShaderDataDword(UInt(viewDword));
+            var word1 = LoadShaderDataDword(UInt(viewDword + 1));
+            var first = BitwiseAnd(word0, UInt(HeapView.ElementMask));
+            var stride = ShiftRightLogical(word0, UInt(HeapView.ElementBits));
+            var records = BitwiseAnd(word1, UInt(HeapView.ElementMask));
+            var fieldOffset = ShiftRightLogical(word1, UInt(HeapView.ElementBits));
+            // The host never gives a view a stride of zero.
+            var record = _module.AddInstruction(SpirvOp.UDiv, _uintType, offset, stride);
+            var atField = _module.AddInstruction(SpirvOp.IEqual, _boolType,
+                _module.AddInstruction(SpirvOp.ISub, _uintType, offset, _module.AddInstruction(SpirvOp.IMul, _uintType, record, stride)), fieldOffset);
+            var inView = LogicalAnd(atField, _module.AddInstruction(SpirvOp.ULessThan, _boolType, record, records));
+            return _module.AddInstruction(SpirvOp.Select, _uintType, inView, IAdd(first, record), UInt(BindlessHeap.CallRecordNullIndex));
         }
 
-        // One runtime array of set 1, declared at its first use.
-        private uint HeapArray(int slot, uint elementType)
+        // One runtime array of set 1, declared at its first use. The integer declarations of an image array share its binding.
+        private uint HeapArray(int slot, uint elementType, ImageNumericClass numericClass)
         {
-            if (_heapArrays.TryGetValue(slot, out var variable))
+            if (_heapArrays.TryGetValue((slot, numericClass), out var variable))
             {
                 return variable;
             }
@@ -2618,18 +2680,19 @@ public static partial class Gen5SpirvTranslator
             variable = _module.AddGlobalVariable(
                 _module.TypePointer(SpirvStorageClass.UniformConstant, _module.TypeRuntimeArray(elementType)),
                 SpirvStorageClass.UniformConstant);
-            _module.AddName(variable, $"heapArray{slot}");
+            _module.AddName(variable, numericClass == ImageNumericClass.Float ? $"heapArray{slot}" : $"heapArray{slot}{numericClass}");
             _module.AddDecoration(variable, SpirvDecoration.DescriptorSet, BindlessHeap.DescriptorSet);
             _module.AddDecoration(variable, SpirvDecoration.Binding, (uint)slot);
             _interfaces.Add(variable);
-            _heapArrays[slot] = variable;
+            _heapArrays[(slot, numericClass)] = variable;
             return variable;
         }
 
         // Loads one element of a set-1 array; a heap record is marked in the feedback bitset, so the host gives it a view.
-        private (uint Pointer, uint Value) LoadHeapElement(int slot, uint elementType, uint index, bool mark = true)
+        private (uint Pointer, uint Value) LoadHeapElement(int slot, uint elementType, uint index, bool mark = true,
+            ImageNumericClass numericClass = ImageNumericClass.Float)
         {
-            var array = HeapArray(slot, elementType);
+            var array = HeapArray(slot, elementType, numericClass);
             var pointer = _module.AddInstruction(
                 SpirvOp.AccessChain, _module.TypePointer(SpirvStorageClass.UniformConstant, elementType), array, index);
             _module.AddDecoration(pointer, SpirvDecoration.NonUniform);
@@ -2773,14 +2836,8 @@ public static partial class Gen5SpirvTranslator
             return _module.AddInstruction(SpirvOp.Select, _uintType, found, element, UInt(BindlessHeap.CallRecordNullIndex));
         }
 
-        // The records marked since the last branch, by slot, index and EXEC value (0: EXEC known full), and the block the
-        // last of those marks ended in.
-        private readonly HashSet<(int Slot, uint Index, uint Exec)> _markedHeapRecords = [];
-        private uint _markedHeapRecordsBlock;
-
-        // Sets the record's bit in its array's feedback words; a plain read first keeps marked records from repeating the atomic.
-        // A record marked again under the same EXEC value with no branch since finds its bit set, so that mark is left out.
-        private void MarkHeapRecord(int slot, uint index)
+        // The feedback buffer of set 1, declared at its first use.
+        private uint HeapFeedback()
         {
             if (_heapFeedback == 0)
             {
@@ -2795,6 +2852,19 @@ public static partial class Gen5SpirvTranslator
                 _interfaces.Add(_heapFeedback);
             }
 
+            return _heapFeedback;
+        }
+
+        // The records marked since the last branch, by slot, index and EXEC value (0: EXEC known full), and the block the
+        // last of those marks ended in.
+        private readonly HashSet<(int Slot, uint Index, uint Exec)> _markedHeapRecords = [];
+        private uint _markedHeapRecordsBlock;
+
+        // Sets the record's bit in its array's feedback words; a plain read first keeps marked records from repeating the atomic.
+        // A record marked again under the same EXEC value with no branch since finds its bit set, so that mark is left out.
+        private void MarkHeapRecord(int slot, uint index)
+        {
+            var feedback = HeapFeedback();
             if (_module.CurrentBlock != _markedHeapRecordsBlock)
             {
                 _markedHeapRecords.Clear();
@@ -2809,7 +2879,7 @@ public static partial class Gen5SpirvTranslator
 
             var word = IAdd(UInt((uint)slot * BindlessHeap.FeedbackWordsPerArray), ShiftRightLogical(index, UInt(5)));
             var bit = ShiftLeftLogical(UInt(1), BitwiseAnd(index, UInt(31)));
-            var pointer = BlockWordPointer(_heapFeedback, word);
+            var pointer = BlockWordPointer(feedback, word);
             var unmarked = _module.AddInstruction(SpirvOp.IEqual, _boolType, BitwiseAnd(Load(_uintType, pointer), bit), UInt(0));
             if (exec != 0)
             {

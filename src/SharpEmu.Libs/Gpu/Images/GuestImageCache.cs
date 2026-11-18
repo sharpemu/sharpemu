@@ -255,6 +255,11 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
                     $"cpuDirty={cached.IsCpuDirty} bufferDirty={cached.IsBufferModified} gpuDirty={cached.IsGpuModified} target={cached.Uses.RenderTarget}");
             }
         }
+        if (request.Description.FirstLevel != 0 && HoldsWholeChain(request, candidates))
+        {
+            request = ImageRequestBuilders.WithWholeMipChain(request);
+        }
+
         foreach (var imageIdentifier in candidates)
         {
             if (HasSameBacking(_slots[imageIdentifier].Description, request.Description, exactFormat))
@@ -291,7 +296,10 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             {
                 result = ResourceSlotIdentifier.Invalid;
             }
-            else if (resolved.Description.Resources < request.Description.Resources)
+            else if (resolved.Description.Resources < request.Description.Resources ||
+                     resolved.Description.FirstLevel > request.Description.FirstLevel ||
+                     resolved.Description.FirstLevel + resolved.Description.Resources.Levels <
+                     request.Description.FirstLevel + request.Description.Resources.Levels)
             {
                 ReleaseImage(result);
                 result = ResourceSlotIdentifier.Invalid;
@@ -387,6 +395,12 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         {
             request.View = request.View with { BaseLevel = (uint)viewMip };
         }
+        else
+        {
+            // The image starts at an earlier guest level than the request (a texture of a streamed
+            // chain's resident levels found the whole chain): its view starts that many levels later.
+            request.View = ImageRequestBuilders.RebaseView(request.View, request.Description.FirstLevel - image.Description.FirstLevel);
+        }
 
         if (viewLayer >= 0)
         {
@@ -402,6 +416,29 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
 
         TraceVolumeState("lookup", image, request);
         return result;
+    }
+
+    // A texture of a chain's resident levels is the whole chain once that memory is all mapped
+    // (a fully loaded or rendered chain sampled from a lower mip), and whenever an image over its
+    // range holds GPU-written contents the guest memory does not show: the request then shares
+    // that image instead of reading guest memory into a separate one.
+    private bool HoldsWholeChain(in ImageRequest request, in ImageQueryResults candidates)
+    {
+        var range = request.Description.Data;
+        if (_backing.IsBackedRange(range.Address, range.Size))
+        {
+            return true;
+        }
+
+        foreach (var candidate in candidates)
+        {
+            if (_slots.TryGet(candidate) is { } image && (image.IsGpuModified || image.Uses.RenderTarget || image.Uses.Storage))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // Uploads guest changes of an image that was found earlier.
@@ -425,6 +462,32 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         var found = _slots.TryGet(imageIdentifier);
         image = found!;
         return found != null;
+    }
+
+    // Whether the texels of an image over this range could be read from the guest: the range is valid and its first page
+    // is mapped (ResidentImageBacking reads a mapped prefix). A descriptor read from a table the guest no longer uses may
+    // name memory it has unmapped since.
+    public bool IsBackedImageRange(GuestSpan data) => ImageDescription.IsValidRange(data) && _backing.IsBackedRange(data.Address, 1);
+
+    // The registered depth image that owns the stencil plane starting at this span, with the
+    // newest GPU write when several do (a copied depth buffer shares its source's plane).
+    public bool TryFindStencilOwner(GuestSpan plane, out ResourceSlotIdentifier owner)
+    {
+        using var held = _lock.Hold();
+        var best = ResourceSlotIdentifier.Invalid;
+        long bestWrite = -1;
+        _slots.ForEach((identifier, image) =>
+        {
+            if (image.Registered && !image.DepthOwner.IsValid && image.Description.IsDepth && image.Description.HasStencil &&
+                image.Description.Stencil.Address == plane.Address && image.Description.Stencil.Size >= plane.Size &&
+                image.GpuWriteSequence > bestWrite)
+            {
+                best = identifier;
+                bestWrite = image.GpuWriteSequence;
+            }
+        });
+        owner = best;
+        return best.IsValid;
     }
 
     public CachedImage GetImage(ResourceSlotIdentifier imageIdentifier)

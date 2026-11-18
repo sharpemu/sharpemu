@@ -75,7 +75,8 @@ public class Wave64HalfMaskDeviceTests(HeadlessVulkanFixture fixture) : IClassFi
         if (HostSubgroup32 && laneLocal is { } oneLanePerInvocation)
         {
             var halfWavesEnabled = Environment.GetEnvironmentVariable("SHARPEMU_WAVE64_LANE_LOCAL") != "0";
-            Assert.Equal(oneLanePerInvocation && halfWavesEnabled ? sizeX : (threads + 63) / 64 * 32, LocalSizeX(shader.Spirv));
+            var paired = Gen5SpirvTranslator.PairsWave64Lanes(Environment.GetEnvironmentVariable("SHARPEMU_WAVE64_PAIRED"), threads);
+            Assert.Equal((oneLanePerInvocation && halfWavesEnabled) || !paired ? sizeX : (threads + 63) / 64 * 32, LocalSizeX(shader.Spirv));
         }
 
         Assert.NotNull(fixture.Vulkan);

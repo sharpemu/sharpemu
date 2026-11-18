@@ -330,6 +330,7 @@ public enum SpirvBuiltIn : uint
     PatchVertices = 14,
     VertexIndex = 42,
     InstanceIndex = 43,
+    BaseVertex = 4424,
     BaseInstance = 4425,
     FragCoord = 15,
     BaryCoordKhr = 5286,

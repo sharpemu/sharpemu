@@ -1215,6 +1215,13 @@ public sealed partial class ResourceMaterializationCache
                     descriptorChanged = true;
                 }
 
+                // The heaps are named by words the entry may have learned to move with a base: they are read again.
+                BindlessHeapDescriptor[] heaps = [];
+                if (validated && !ResourceMaterializer.TryEvaluateHeaps(plan, inputs, out heaps))
+                {
+                    validated = false;
+                }
+
                 if (validated)
                 {
                     if (previous is not null)
@@ -1229,7 +1236,7 @@ public sealed partial class ResourceMaterializationCache
                     variant.VolatilePeriod = 0;
                     Hits++;
                     _totalHits.Increment();
-                    snapshot = rebase.Apply(WithCurrentUserData(variant.Snapshot, inputs.UserData), inputs.UserData);
+                    snapshot = WithHeaps(rebase.Apply(WithCurrentUserData(variant.Snapshot, inputs.UserData), inputs.UserData), heaps);
                     if (_statisticsDiffer)
                     {
                         snapshot = WithMipStatistics(snapshot, MipStatisticsOf(variant));
@@ -1288,7 +1295,7 @@ public sealed partial class ResourceMaterializationCache
                     _outcome = MaterializeOutcome.RebaseHit;
                     Hits++;
                     _totalHits.Increment();
-                    snapshot = rebased;
+                    snapshot = WithCurrentHeaps(plan, inputs, rebased);
                     specialization = refreshedFrom.Specialization;
                     failure = default;
                     return true;
@@ -1320,7 +1327,7 @@ public sealed partial class ResourceMaterializationCache
                     _outcome = MaterializeOutcome.TableRefresh;
                     TableRefreshes++;
                     _totalRefreshes.Increment();
-                    snapshot = rebase.Apply(WithCurrentUserData(refreshed.Snapshot, inputs.UserData), inputs.UserData);
+                    snapshot = WithCurrentHeaps(plan, inputs, rebase.Apply(WithCurrentUserData(refreshed.Snapshot, inputs.UserData), inputs.UserData));
                     specialization = refreshed.Specialization;
                     failure = default;
                     return true;
@@ -1719,6 +1726,29 @@ public sealed partial class ResourceMaterializationCache
 
     // A cached snapshot is shared by every draw that hits it, so it keeps the user data of the draw
     // that built it; a draw whose unread words differ gets its own copy that carries its own.
+    // The snapshot with the heaps the draw's bindless records are read from now. A cached entry holds the heaps of the
+    // draw it was built for; the V# that names a heap can move with a base the entry rebases (a table the guest allocates
+    // per frame), and the host resolves the records of the heap it is told.
+    private static ResourceSnapshot WithHeaps(ResourceSnapshot snapshot, BindlessHeapDescriptor[] heaps) =>
+        snapshot.Heaps.AsSpan().SequenceEqual(heaps)
+            ? snapshot
+            : new ResourceSnapshot
+            {
+                Buffers = snapshot.Buffers,
+                Images = snapshot.Images,
+                Samplers = snapshot.Samplers,
+                FlattenedResourceTable = snapshot.FlattenedResourceTable,
+                UserData = snapshot.UserData,
+                DeviceAddressRanges = snapshot.DeviceAddressRanges,
+                MipStatistics = snapshot.MipStatistics,
+                Heaps = heaps,
+                Origin = snapshot.Origin,
+            };
+
+    // A draw served from an entry reads its heap V#s again; one that cannot be read has no heap (its records read null).
+    private static ResourceSnapshot WithCurrentHeaps(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, ResourceSnapshot snapshot) =>
+        WithHeaps(snapshot, ResourceMaterializer.TryEvaluateHeaps(plan, inputs, out var heaps) ? heaps : []);
+
     private static ResourceSnapshot WithCurrentUserData(ResourceSnapshot cached, IReadOnlyList<uint> userData)
     {
         var words = cached.UserData;

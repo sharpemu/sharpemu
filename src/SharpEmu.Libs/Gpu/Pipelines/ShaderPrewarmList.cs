@@ -144,6 +144,9 @@ internal sealed class ComputePrewarmRecord
     public required ResourceSpecialization Specialization { get; init; }
     public LinkedShaderPrewarm? Linked { get; init; }
     public bool DeviceRecordCounts { get; init; }
+    // The program's image table selects more images than a draw can bind, so its plan reads them from the bindless heap
+    // (ShaderProgramCache.PreferHeapRecords). The prewarm plans it the same way, or its compile would never be reused.
+    public bool PreferHeapRecords { get; init; }
 
     public (ulong Hash, uint CodeSize, ulong Address, ulong ContinuationAddressOffset) CodeKey =>
         (Hash, CodeSize, Address, ContinuationAddressOffset);
@@ -167,6 +170,9 @@ internal sealed class PixelPrewarmRecord
     public required uint InputAddress { get; init; }
     public required ResourceSpecialization Specialization { get; init; }
     public bool DeviceRecordCounts { get; init; }
+    // The program's image table selects more images than a draw can bind, so its plan reads them from the bindless heap
+    // (ShaderProgramCache.PreferHeapRecords). The prewarm plans it the same way, or its compile would never be reused.
+    public bool PreferHeapRecords { get; init; }
 
     public (ulong Hash, uint CodeSize, ulong Address, ulong ContinuationAddressOffset) CodeKey =>
         (Hash, CodeSize, Address, ContinuationAddressOffset);
@@ -183,6 +189,7 @@ internal sealed class StagePrewarmRecord
     public required uint PushDataCursor { get; init; }
     public required StageCompileOptions Options { get; init; }
     public required ResourceSpecialization Specialization { get; init; }
+    public bool PreferHeapRecords { get; init; }
 }
 
 internal sealed class GraphicsPrewarmRecord
@@ -387,6 +394,8 @@ internal sealed partial class ShaderPrewarmList : IDisposable
     private readonly HashSet<(ulong Hash, uint CodeSize, ulong Address, ulong ContinuationAddressOffset)> _extensionCodes = [];
     // The last recorded outcome of each linked program's module compile (true: it compiled for minutes).
     private readonly ConcurrentDictionary<ulong, bool> _linkedCompiles = new();
+    // The programs a record says plan their image tables as heap records, by hash, code size and continuation offset.
+    private readonly ConcurrentDictionary<(ulong Hash, uint CodeSize, ulong ContinuationAddressOffset), byte> _heapRecordPrograms = new();
     private readonly HashSet<ulong> _computes = [];
     private readonly Dictionary<ulong, float> _computeFirstUses = new();
     private readonly Dictionary<ulong, float> _computeCosts = new();
@@ -674,8 +683,22 @@ internal sealed partial class ShaderPrewarmList : IDisposable
     private static string ProgressKey(string stamp) =>
         XxHash3.HashToUInt64(Encoding.UTF8.GetBytes(stamp)).ToString("X16", CultureInfo.InvariantCulture);
 
+    // Whether a session found that the program must plan its image table as heap records, so a later session plans it so from
+    // the start instead of failing to materialize it first and replanning.
+    public bool PrefersHeapRecords(ulong hash, uint codeSize, ulong continuationAddressOffset) =>
+        _heapRecordPrograms.ContainsKey((hash, codeSize, continuationAddressOffset));
+
+    private void NoteHeapRecords(bool preferHeapRecords, ulong hash, uint codeSize, ulong continuationAddressOffset)
+    {
+        if (preferHeapRecords)
+        {
+            _heapRecordPrograms[(hash, codeSize, continuationAddressOffset)] = 0;
+        }
+    }
+
     public void RecordCompute(ShaderCodeCapture code, ComputePrewarmRecord record)
     {
+        NoteHeapRecords(record.PreferHeapRecords, record.Hash, record.CodeSize, record.ContinuationAddressOffset);
         var payload = SerializeCompute(record);
         var identity = Identity(record);
         var seconds = SessionSeconds();
@@ -735,6 +758,7 @@ internal sealed partial class ShaderPrewarmList : IDisposable
 
     public void RecordPixel(ShaderCodeCapture code, PixelPrewarmRecord record)
     {
+        NoteHeapRecords(record.PreferHeapRecords, record.Hash, record.CodeSize, record.ContinuationAddressOffset);
         var payload = SerializePixel(record, record.Address);
         var identity = Identity(record);
         lock (_gate)
@@ -780,6 +804,7 @@ internal sealed partial class ShaderPrewarmList : IDisposable
 
     public void RecordStage(ShaderCodeCapture code, ulong module, StagePrewarmRecord record)
     {
+        NoteHeapRecords(record.PreferHeapRecords, record.CodeKey.Hash, record.CodeKey.CodeSize, record.CodeKey.ContinuationAddressOffset);
         var payload = SerializeStage(record);
         var identity = XxHash3.HashToUInt64(payload);
         _stageByModule[module] = identity;
@@ -989,6 +1014,7 @@ internal sealed partial class ShaderPrewarmList : IDisposable
                     // By the record's identity, not its bytes: records that differ only in a buffer's stride word load
                     // as one.
                     var record = DeserializeCompute(payload);
+                    NoteHeapRecords(record.PreferHeapRecords, record.Hash, record.CodeSize, record.ContinuationAddressOffset);
                     if (_computes.Add(Identity(record)))
                     {
                         _loadedComputes.Add(record);
@@ -1002,7 +1028,13 @@ internal sealed partial class ShaderPrewarmList : IDisposable
                     // A pixel record of another schema is skipped, not refused, so the records after it still load. The
                     // pixel records of a main list written before the side file existed have no first use.
                     var (bytes, firstUse) = extension ? SplitFirstUse(payload) : (payload, 0f);
-                    if (TryDeserializePixel(bytes) is { } pixel && _pixels.Add(Identity(pixel)))
+                    var pixel = TryDeserializePixel(bytes);
+                    if (pixel is not null)
+                    {
+                        NoteHeapRecords(pixel.PreferHeapRecords, pixel.Hash, pixel.CodeSize, pixel.ContinuationAddressOffset);
+                    }
+
+                    if (pixel is not null && _pixels.Add(Identity(pixel)))
                     {
                         _loadedPixels.Add(pixel);
                         _graphicsOrder.Add((PixelKind, _loadedPixels.Count - 1, firstUse));
@@ -1070,7 +1102,9 @@ internal sealed partial class ShaderPrewarmList : IDisposable
                     var identity = XxHash3.HashToUInt64(payload);
                     if (_stages.Add(identity))
                     {
-                        _loadedStages[identity] = DeserializeStage(payload);
+                        var stage = DeserializeStage(payload);
+                        _loadedStages[identity] = stage;
+                        NoteHeapRecords(stage.PreferHeapRecords, stage.CodeKey.Hash, stage.CodeKey.CodeSize, stage.CodeKey.ContinuationAddressOffset);
                     }
 
                     return true;
@@ -1139,12 +1173,20 @@ internal sealed partial class ShaderPrewarmList : IDisposable
             builder.Append(type.ToString()).Append('{');
             foreach (var property in type.GetProperties().OrderBy(static property => property.Name, StringComparer.Ordinal))
             {
-                // A vertex record holds neither: tessellated programs are not recorded, and the start instance register
-                // follows the record as an optional field (SerializeVertex), so the lists recorded before them still load.
+                // A vertex record holds none: tessellated programs are not recorded, and the start instance and base vertex
+                // registers follow the record as optional fields (SerializeVertex), so the lists recorded before them still load.
                 if (vertexRecord && type == typeof(VertexInputInfo) &&
-                    property.Name is nameof(VertexInputInfo.Tessellation) or nameof(VertexInputInfo.StartInstanceUserData))
+                    property.Name is nameof(VertexInputInfo.Tessellation) or nameof(VertexInputInfo.StartInstanceUserData)
+                        or nameof(VertexInputInfo.BaseVertexUserData))
                 {
                     continue;
+                }
+
+                // A pixel or vertex record's heap flag follows the record as an optional byte (SerializePixel, SerializeVertex), so
+                // the lists recorded before it still load.
+                if (type == typeof(PixelPrewarmRecord) || type == typeof(VertexPrewarmRecord))
+                {
+                    if (property.Name == nameof(PixelPrewarmRecord.PreferHeapRecords)) continue;
                 }
 
                 builder.Append(property.PropertyType.ToString()).Append(' ').Append(property.Name).Append(';');
@@ -1287,8 +1329,10 @@ internal sealed partial class ShaderPrewarmList : IDisposable
         WriteSpecialization(writer, record.Specialization);
         writer.Write(record.Linked is not null);
         record.Linked?.Write(writer);
-        // Optional extension: old records retain their ordinary resource plan and byte identity.
-        if (record.DeviceRecordCounts) writer.Write((byte)1);
+        // Optional extension, a bit set (1: device record counts, 2: heap records): old records retain their ordinary
+        // resource plan and byte identity.
+        var extension = (record.DeviceRecordCounts ? 1 : 0) | (record.PreferHeapRecords ? 2 : 0);
+        if (extension != 0) writer.Write((byte)extension);
 
         writer.Flush();
         return stream.ToArray();
@@ -1335,10 +1379,13 @@ internal sealed partial class ShaderPrewarmList : IDisposable
         var specialization = ReadSpecialization(reader, payload.Length);
         var linked = reader.ReadBoolean() ? LinkedShaderPrewarm.Read(reader) : null;
         var deviceRecordCounts = false;
+        var preferHeapRecords = false;
         if (reader.BaseStream.Position + 1 == reader.BaseStream.Length)
         {
-            if (reader.ReadByte() != 1) throw new ArgumentException("Unknown prewarm compute extension.");
-            deviceRecordCounts = true;
+            var extension = reader.ReadByte();
+            if (extension is 0 or > 3) throw new ArgumentException("Unknown prewarm compute extension.");
+            deviceRecordCounts = (extension & 1) != 0;
+            preferHeapRecords = (extension & 2) != 0;
         }
         if (reader.BaseStream.Position != reader.BaseStream.Length)
             throw new ArgumentException("Trailing prewarm compute data.");
@@ -1357,6 +1404,7 @@ internal sealed partial class ShaderPrewarmList : IDisposable
             Specialization = specialization,
             Linked = linked,
             DeviceRecordCounts = deviceRecordCounts,
+            PreferHeapRecords = preferHeapRecords,
         };
     }
 
@@ -1530,6 +1578,7 @@ internal sealed partial class ShaderPrewarmList : IDisposable
         writer.Write(record.InputAddress);
         WriteSpecialization(writer, record.Specialization);
         writer.Write(record.DeviceRecordCounts);
+        if (record.PreferHeapRecords) writer.Write((byte)1);
         writer.Flush();
         return stream.ToArray();
     }
@@ -1612,6 +1661,17 @@ internal sealed partial class ShaderPrewarmList : IDisposable
             var inputAddress = reader.ReadUInt32();
             var specialization = ReadSpecialization(reader, payload.Length);
             var deviceRecordCounts = reader.ReadBoolean();
+            var preferHeapRecords = false;
+            if (reader.BaseStream.Position + 1 == reader.BaseStream.Length)
+            {
+                if (reader.ReadByte() != 1)
+                {
+                    return null;
+                }
+
+                preferHeapRecords = true;
+            }
+
             if (reader.BaseStream.Position != reader.BaseStream.Length)
             {
                 return null;
@@ -1632,6 +1692,7 @@ internal sealed partial class ShaderPrewarmList : IDisposable
                 InputAddress = inputAddress,
                 Specialization = specialization,
                 DeviceRecordCounts = deviceRecordCounts,
+                PreferHeapRecords = preferHeapRecords,
             };
         }
         catch (Exception exception) when (exception is EndOfStreamException or ArgumentException or IOException)
@@ -1700,6 +1761,7 @@ internal sealed partial class ShaderPrewarmList : IDisposable
         writer.Write(options.PixelInputAddress);
         writer.Write(options.DeviceRecordCounts);
         WriteSpecialization(writer, record.Specialization);
+        if (record.PreferHeapRecords) writer.Write((byte)1);
         writer.Flush();
         return stream.ToArray();
     }
@@ -1771,6 +1833,14 @@ internal sealed partial class ShaderPrewarmList : IDisposable
             throw new ArgumentException("The prewarm stage has no input info.");
         }
 
+        var specialization = ReadSpecialization(reader, limit);
+        var preferHeapRecords = false;
+        if (reader.BaseStream.Position + 1 == reader.BaseStream.Length)
+        {
+            if (reader.ReadByte() != 1) throw new ArgumentException("Unknown prewarm stage extension.");
+            preferHeapRecords = true;
+        }
+
         return new StagePrewarmRecord
         {
             Stage = stage,
@@ -1781,7 +1851,8 @@ internal sealed partial class ShaderPrewarmList : IDisposable
             UserDataCount = userDataCount,
             PushDataCursor = pushDataCursor,
             Options = options,
-            Specialization = ReadSpecialization(reader, limit),
+            Specialization = specialization,
+            PreferHeapRecords = preferHeapRecords,
         };
     }
 
@@ -1822,6 +1893,7 @@ internal sealed partial class ShaderPrewarmList : IDisposable
         writer.Write(clip.HalfExtentX);
         writer.Write(clip.HalfExtentY);
         writer.Write(info.StartInstanceUserData);
+        writer.Write(info.BaseVertexUserData);
     }
 
     private static VertexInputInfo ReadVertexInfo(BinaryReader reader, int limit)
@@ -1859,6 +1931,7 @@ internal sealed partial class ShaderPrewarmList : IDisposable
                 reader.ReadBoolean(), reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle(),
                 reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle()),
             StartInstanceUserData = reader.ReadInt32(),
+            BaseVertexUserData = reader.ReadInt32(),
         };
     }
 

@@ -33,11 +33,13 @@ internal struct DrawState
     public RenderingState Rendering;
     public GraphicsPrograms Programs;
     public int StartInstanceUserData;
+    public int BaseVertexUserData;
 
-    public static DrawState Create() => new() { PixelActive = true, Programs = null!, StartInstanceUserData = -1 };
+    public static DrawState Create() => new() { PixelActive = true, Programs = null!, StartInstanceUserData = -1, BaseVertexUserData = -1 };
 
-    public void Begin(int startInstanceUserData)
+    public void Begin(int startInstanceUserData, int baseVertexUserData = -1)
     {
+        BaseVertexUserData = baseVertexUserData;
         ColorCount = 0;
         Depth = default;
         DepthResolved = false;

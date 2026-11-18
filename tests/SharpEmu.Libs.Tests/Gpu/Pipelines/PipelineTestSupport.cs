@@ -63,6 +63,8 @@ internal class FakePipelineHost(ICpuMemory memory) : IShaderPipelineHost
 
     public bool SharedInt64AtomicsEnabled => false;
 
+    public bool SupportsBindlessHeap { get; set; }
+
     public bool RuntimeCallRecordsSupported { get; set; }
 
     public bool CallMarksSupported { get; set; }
@@ -258,6 +260,10 @@ internal sealed class FakeShaderCompiler(Func<ShaderCompileRequest, byte[]>? com
     }
 
     public void CountShaderCompilation() => Compilations++;
+
+    // The two fixed stages a tessellated draw adds; the fake host only counts their modules.
+    public (IGuestCompiledShader Vertex, IGuestCompiledShader Control) CompileTessellationBridge(BindingLayout layout, Gen5TessellationDomain domain) =>
+        (new FakeCompiledShader(null!), new FakeCompiledShader(null!));
 
     public IGuestCompiledShader GetDepthOnlyFragmentShader() => throw Unsupported();
 

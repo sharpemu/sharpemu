@@ -252,7 +252,7 @@ public sealed partial class GuestImageCache
             left.GuestFormat != right.GuestFormat || left.Type != right.Type ||
             left.Extent.Width != right.Extent.Width || left.Extent.Height != right.Extent.Height ||
             left.Extent.Depth != right.Extent.Depth || left.Resources != right.Resources ||
-            left.Pitch != right.Pitch || left.BytesPerBlock != right.BytesPerBlock ||
+            left.Pitch != right.Pitch || left.BytesPerBlock != right.BytesPerBlock || left.FirstLevel != right.FirstLevel ||
             left.Samples != right.Samples || left.TileMode != right.TileMode || left.Bgra16 != right.Bgra16)
         {
             return false;

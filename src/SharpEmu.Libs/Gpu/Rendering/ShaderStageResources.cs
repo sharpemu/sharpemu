@@ -237,6 +237,7 @@ public sealed class VertexInputInfo
     public uint PositionExportControl { get; init; }
     public ClipSpaceTransform ClipSpace { get; init; }
     public int StartInstanceUserData { get; set; } = -1;
+    public int BaseVertexUserData { get; set; } = -1;
     public ShaderStageResources Stage { get; set; }
 
     public VertexInputInfo WithoutStage()

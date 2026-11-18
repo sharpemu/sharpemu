@@ -184,6 +184,28 @@ public sealed partial class ShaderResourcePlan
     public IReadOnlyList<HeapRecordAccess> HeapRecords { get; private set; } = [];
     public IReadOnlyList<HeapRecordSource> HeapRecordSources { get; private set; } = [];
 
+    // The heap view a heap record access reads: its heap V#, descriptor kind and immediate offset.
+    public HeapRecordSource HeapRecordSourceOf(HeapRecordAccess record)
+    {
+        var heap = DescriptorSources[(int)record.Source].Heap!;
+        return new HeapRecordSource(heap.HeapSource, record.Sampler, heap.Immediate, heap.R128);
+    }
+
+    // That view's number among HeapRecordSources.
+    public int HeapViewOf(HeapRecordAccess record)
+    {
+        var source = HeapRecordSourceOf(record);
+        for (var view = 0; view < HeapRecordSources.Count; view++)
+        {
+            if (HeapRecordSources[view] == source)
+            {
+                return view;
+            }
+        }
+
+        throw new InvalidOperationException("A heap record access has no heap view.");
+    }
+
     // The image accesses whose image or sampler a linked callee's call record holds, and what each callee reads through its
     // records' arguments besides them (by its slot among the program's call targets; empty unless linked with run-time
     // arguments).
@@ -198,13 +220,21 @@ public sealed partial class ShaderResourcePlan
     // The accesses whose bindless image or sampler descriptor reads as null.
     public IReadOnlyList<uint> NullBindlessDescriptorPcs { get; private set; } = [];
 
+    // Planned with preferHeapRecords (see ResourceTracker.Track).
+    public bool PreferredHeapRecords { get; private set; }
+
+    // An indirect image table candidate of another kind than the table's first image reads as null, as a shared
+    // selector's always does, instead of failing the materialization. Set once by the program cache when such a table
+    // cannot be read from the bindless heap; tables of one kind materialize the same either way.
+    public bool NullIncompatibleImageCandidates { get; set; }
+
     public static ShaderResourcePlan Extract(Gen5ShaderProgram program, ShaderStage stage, ulong hash, uint userDataBase, uint userDataCount,
         IReadOnlySet<uint>? fixedFunctionVertexLoads = null, Action<ShaderResourcePlan>? beforeResourceTracking = null, uint waveSize = 64,
         bool bindlessNullDescriptors = false, bool bindlessHeap = false, bool callRecords = false, bool callMarks = false,
         int dynamicUserData = -1, BufferDescriptorNormalizer? normalizeBufferDescriptor = null,
         ImageDescriptorNormalizer? normalizeImageDescriptor = null, Func<long>? imageNormalizationVersion = null,
         StableImageDescriptorLimits stableImageLimits = default, bool? scalarDataOnDevice = null,
-        bool? deviceRecordCounts = null, bool? runtimeImageSwizzles = null)
+        bool? deviceRecordCounts = null, bool? runtimeImageSwizzles = null, bool preferHeapRecords = false)
     {
         // Mesh system inputs are not uniform user data, even when a GS pointer occupies s0:s1.
         var graph = ScalarGraphDiskCache.Build(program, userDataBase, userDataCount, fixedFunctionVertexLoads, waveSize,
@@ -253,16 +283,18 @@ public sealed partial class ShaderResourcePlan
 
         // Diagnostics observe rewritten values before descriptor validation.
         beforeResourceTracking?.Invoke(plan);
-        var tracked = ResourceTracker.Track(plan, bindlessNullDescriptors, bindlessHeap, callRecords);
+        var tracked = ResourceTracker.Track(plan, bindlessNullDescriptors, bindlessHeap, callRecords, preferHeapRecords);
         plan.DescriptorSources = tracked.Sources;
         plan.Info = tracked.Info;
         plan.NullBindlessDescriptorPcs = tracked.NullBindlessDescriptorPcs;
+        plan.PreferredHeapRecords = preferHeapRecords && bindlessHeap;
         plan.HeapRecords = tracked.HeapRecords;
         plan.CallRecords = tracked.CallRecords;
         plan.HeapRecordSources = tracked.HeapRecords
-            .Select(record => new HeapRecordSource(plan.DescriptorSources[(int)record.Source].Heap!.HeapSource, record.Sampler))
+            .Select(record => plan.HeapRecordSourceOf(record))
             .Distinct()
             .ToList();
+        plan.Info.HeapViewCount = (uint)plan.HeapRecordSources.Count;
         if (program.Instructions.Any(instruction => instruction.Control is ShaderCallFaultControl))
             plan.Info.UsesDeviceAddresses = true;
         // A program with shader calls, or a compute program with many device-address dwords (CompactMemoryAccessPolicy),

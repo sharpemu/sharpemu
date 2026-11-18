@@ -5,12 +5,25 @@ namespace SharpEmu.ShaderCompiler.Vulkan;
 
 public static partial class Gen5SpirvTranslator
 {
+    // Which wave64 compute workgroups on 32-lane host subgroups run as paired lanes (one host invocation per guest lane
+    // pair, both halves in one subgroup) instead of the emulated lowering (one host subgroup per half). A one-wave
+    // workgroup paired runs on a single subgroup that executes both halves in turn, while emulated its halves run as two
+    // subgroups side by side; with more than one wave the paired lowering is faster, because the emulated waves meet at
+    // rendezvous counters. Ghost of Yotei 02.002 on an RTX 3080: one-wave kernels ran 23% and 34% faster emulated,
+    // 512- and 1024-thread workgroups 17% and 80% slower. Unset (or =1) pairs every workgroup, =small pairs only
+    // workgroups of more than one wave, =0 none. The one-wave split is opt-in because it has been measured on one title.
+    public static bool PairsWave64Lanes(string? mode, ulong workgroupThreads) => mode switch
+    {
+        "0" => false,
+        "small" => workgroupThreads > 64,
+        _ => true,
+    };
+
     private sealed partial class CompilationContext
     {
         private const uint PairedHalfLaneCount = 32;
 
-        private static readonly bool PairedWave64Enabled = !string.Equals(
-            Environment.GetEnvironmentVariable("SHARPEMU_WAVE64_PAIRED"), "0", StringComparison.Ordinal);
+        private static readonly string? PairedWave64Mode = Environment.GetEnvironmentVariable("SHARPEMU_WAVE64_PAIRED");
 
         private readonly bool _pairedLanes;
         private int _laneHalf;

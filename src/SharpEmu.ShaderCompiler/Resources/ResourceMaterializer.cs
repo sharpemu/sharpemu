@@ -962,28 +962,9 @@ public static partial class ResourceMaterializer
             snapshot.BufferCandidateTables.Add(candidateTable);
         }
 
-        // The heap V#s the bindless heap records are read from, for the host's descriptor set 1.
-        if (plan.HeapRecordSources.Count != 0)
+        if (!TryEvaluateHeaps(plan, inputs, out snapshot.Heaps))
         {
-            var heapSources = new uint[plan.HeapRecordSources.Count];
-            for (var index = 0; index < heapSources.Length; index++)
-                heapSources[index] = plan.HeapRecordSources[index].Source;
-            if (!RuntimeValueEvaluator.EvaluateSources(plan, heapSources, inputs, [], evaluateTable: false, out var heaps, out _) ||
-                heaps.Count != heapSources.Length)
-            {
-                return false;
-            }
-
-            snapshot.Heaps = new BindlessHeapDescriptor[heaps.Count];
-            for (var index = 0; index < heaps.Count; index++)
-            {
-                if (heaps[index].DwordCount != 4)
-                {
-                    return false;
-                }
-
-                snapshot.Heaps[index] = BindlessHeapDescriptor.FromWords(plan.HeapRecordSources[index].Sampler, heaps[index].Dwords);
-            }
+            return false;
         }
 
         snapshot.UserData = inputs.UserData.ToArray();
@@ -1219,7 +1200,8 @@ public static partial class ResourceMaterializer
     {
         ReadOnlySpan<uint> reserved =
         [
-            0x00000000u, 0x20000000u, 0xf0003000u, 0x00000000u,
+            // GFX10/10.3 word 2 bit 31 is RESOURCE_LEVEL, not reserved.
+            0x00000000u, 0x20000000u, 0x70003000u, 0x00000000u,
             0xe000e000u, 0xf9000000u, 0x00007b00u, 0x00000000u,
         ];
         for (var dword = 0; dword < reserved.Length; dword++)
@@ -1295,18 +1277,57 @@ public static partial class ResourceMaterializer
         !NullImageDescriptor(candidate) && ValidImageDescriptor(candidate, r128) && ReservedImageBitsClear(candidate) &&
         GuestImageFormat.SampledNumericClass(GuestImageFormat.FormatOf(candidate)) != ImageNumericClass.Unsupported;
 
-    // A bindless heap record the host can give a float view without a conversion in the shader: a valid sampled T# of a
-    // float format. A freed record (0xFEFEFEFE words) fails the reserved-bit check.
-    public static bool IsFloatHeapImage(ReadOnlySpan<uint> words)
+    // The heap V#s the bindless heap records of a draw are read from, for the host's descriptor set 1. They are read for
+    // every draw, also one whose other descriptors a cache entry still holds: a table the guest allocates per frame names
+    // its heaps at another address each time.
+    internal static bool TryEvaluateHeaps(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, out BindlessHeapDescriptor[] heaps)
     {
-        if (words.Length < 8 || !UsableImageCandidate(words, r128: false))
+        heaps = [];
+        if (plan.HeapRecordSources.Count == 0)
+        {
+            return true;
+        }
+
+        var heapSources = new uint[plan.HeapRecordSources.Count];
+        for (var index = 0; index < heapSources.Length; index++)
+            heapSources[index] = plan.HeapRecordSources[index].Source;
+        if (!RuntimeValueEvaluator.EvaluateSources(plan, heapSources, inputs, [], evaluateTable: false, out var words, out _) ||
+            words.Count != heapSources.Length)
         {
             return false;
         }
 
+        heaps = new BindlessHeapDescriptor[words.Count];
+        for (var index = 0; index < words.Count; index++)
+        {
+            if (words[index].DwordCount != 4)
+            {
+                return false;
+            }
+
+            var view = plan.HeapRecordSources[index];
+            heaps[index] = BindlessHeapDescriptor.FromWords(view.Sampler, words[index].Dwords, view.Immediate, view.R128);
+        }
+
+        return true;
+    }
+
+    // The numeric class of a bindless heap record the host can give a view without a conversion in the shader: a valid
+    // sampled T# of a float, unsigned or signed format. Any other record is Unsupported; a freed record (0xFEFEFEFE
+    // words) fails the reserved-bit check. The words of an R128 T# are its first four, the rest zero.
+    public static ImageNumericClass HeapImageNumericClass(ReadOnlySpan<uint> words, bool r128 = false)
+    {
+        if (words.Length < 8 || !UsableImageCandidate(words, r128))
+        {
+            return ImageNumericClass.Unsupported;
+        }
+
         var format = GuestImageFormat.FormatOf(words);
-        return GuestImageFormat.SampledNumericClass(format) == ImageNumericClass.Float &&
-            ImageConversionFormat(format) == GuestImageFormat.Invalid;
+        var numericClass = GuestImageFormat.SampledNumericClass(format);
+        return numericClass is ImageNumericClass.Float or ImageNumericClass.Uint or ImageNumericClass.Sint &&
+            ImageConversionFormat(format) == GuestImageFormat.Invalid
+            ? numericClass
+            : ImageNumericClass.Unsupported;
     }
 
     private static ulong ScalarBufferSize(ReadOnlySpan<uint> descriptor)
@@ -1388,19 +1409,62 @@ public static partial class ResourceMaterializer
             }
         }
         var records = (ulong)material.Dwords[2];
-        if (provenOffsets is null && (indirect.SharedSelector ? records : probeCount) > MaxIndirectImageProbes)
+        // A selector the shader clamps or masks reaches exactly selector * stride + offset for
+        // selector in [0, bound]; that set is proven, so it replaces the exhaustive enumeration
+        // of every residue + k * step (the product wraps modulo 2^32 for an unbounded selector).
+        IEnumerable<ulong> offsets;
+        if (provenOffsets is not null)
         {
-            return false;
+            offsets = provenOffsets.Select(offset => (ulong)offset);
+        }
+        else if (indirect.SelectorBound is { } bound)
+        {
+            var last = (ulong)bound;
+            if (last * indirect.SelectorStride + indirect.SelectorOffset <= uint.MaxValue)
+            {
+                last = indirect.SelectorOffset > limit ? 0 : Math.Min(last, (limit - indirect.SelectorOffset) / indirect.SelectorStride);
+            }
+
+            if (last + 1 > MaxIndirectImageProbes)
+            {
+                failure = ResourceMaterializationFailure.ImageCapacityExceeded;
+                return false;
+            }
+
+            if (diagnostic is not null)
+            {
+                diagnostic.SelectionMode = "clamp_bounded";
+            }
+
+            offsets = Enumerable.Range(0, (int)last + 1)
+                .Select(selector => unchecked((ulong)((uint)selector * indirect.SelectorStride + indirect.SelectorOffset)))
+                .Distinct();
+        }
+        // A loop counter walks the table record by record: the keys are the ones its records hold, not every dword
+        // the stride lattice reaches. Anything past the last record reads as zero, which is key 0.
+        else if (indirect.SharedSelector && records <= MaxIndirectImageProbes)
+        {
+            offsets = Enumerable.Range(0, (int)records).Select(index => (ulong)unchecked(indirect.SelectorOffset + (uint)index * materialStride));
+        }
+        else if (!indirect.SharedSelector && probeCount <= MaxIndirectImageProbes)
+        {
+            offsets = Enumerable.Range(0, (int)probeCount).Select(index => residue + (ulong)index * step);
+        }
+        else
+        {
+            // A table this large cannot be enumerated into bindings. The access reads the null image, as a heap record at
+            // an index the host cannot evaluate does (BindlessNullDescriptors), so the draw still runs instead of being
+            // rejected (fatal with strict shaders): a pixel shader reads its terrain
+            // material table through such a selector.
+            result.Descriptors.Add(DescriptorWords.Empty(8));
+            result.Candidates.Add(0);
+            result.Keys.Add(0);
+            failure = ResourceMaterializationFailure.None;
+            return true;
         }
 
         var keys = new List<uint> { 0 };
         var seen = new HashSet<uint> { 0 };
-        // A loop counter walks the table record by record: the keys are the ones its records hold, not every dword
-        // the stride lattice reaches. Anything past the last record reads as zero, which is key 0.
-        var offsets = provenOffsets is not null ? provenOffsets.Select(offset => (ulong)offset) :
-            indirect.SharedSelector ?
-                Enumerable.Range(0, (int)records).Select(index => (ulong)unchecked(indirect.SelectorOffset + (uint)index * materialStride)) :
-                Enumerable.Range(0, (int)probeCount).Select(index => residue + (ulong)index * step);
         foreach (var offset in offsets)
         {
             if (!ReadScalarBufferWord(material.Dwords, (uint)offset, indirect.MaterialImmediate, inputs, out var key))
@@ -1963,8 +2027,11 @@ public static partial class ResourceMaterializer
                 image.IndirectRoot == DescriptorConstants.NoIndex;
             var shaderSwizzle = runtimeSwizzle ? DescriptorConstants.IdentityImageSwizzle
                 : storage || conversionFormat != GuestImageFormat.Invalid ? descriptor[3] & 0xFFF : image.ShaderSwizzle;
-            var rawSintStorage = storage && format == GuestImageFormat.Format32Sint && baseImage.Written && !baseImage.Read && !baseImage.Atomic;
             var numericClass = GuestImageFormat.SampledNumericClass(format);
+            // A signed-integer storage image the program only writes stores the low bits of each register, which are the
+            // same bits as unsigned: it is compiled and viewed as the unsigned format of its width (ImageRequestBuilders).
+            // A compute shader can write a 16_SINT image.
+            var rawSintStorage = storage && numericClass == ImageNumericClass.Sint && baseImage.Written && !baseImage.Read && !baseImage.Atomic;
             if (storage)
             {
                 if ((!rawSintStorage && numericClass == ImageNumericClass.Sint) || numericClass == ImageNumericClass.Unsupported)
@@ -2051,7 +2118,8 @@ public static partial class ResourceMaterializer
 
             var imageClass = images[(int)exemplar];
             var separateSampledDimensions = info.Images[rootIndex].ResourceClass == ImageResourceClass.Sampled;
-            var sharedSelector = plan.DescriptorSources[(int)info.Images[rootIndex].Source].IndirectImage is { SharedSelector: true };
+            var nullIncompatible = plan.NullIncompatibleImageCandidates ||
+                plan.DescriptorSources[(int)info.Images[rootIndex].Source].IndirectImage is { SharedSelector: true };
             for (var candidate = 0; candidate < images.Count; candidate++)
             {
                 var image = images[candidate];
@@ -2061,7 +2129,8 @@ public static partial class ResourceMaterializer
                 }
 
                 // A shared selector read such a table as null before it had one: a candidate of another class reads as null too.
-                if (sharedSelector && !NullImageDescriptor(snapshot.Images[candidate]) &&
+                // So does one of a table the program cache could not read from the heap (NullIncompatibleImageCandidates).
+                if (nullIncompatible && !NullImageDescriptor(snapshot.Images[candidate]) &&
                     !CompatibleCandidates(image, imageClass, separateSampledDimensions))
                 {
                     Array.Clear(snapshot.Images[candidate]);

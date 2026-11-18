@@ -68,6 +68,21 @@ public sealed class Gen5TypedBufferLoadDecodeTests
         Assert.Equal(0u, control.TypedFormat);
     }
 
+    // buffer_load_format_d16_hi_x / buffer_store_format_d16_hi_x v26, v20, s[4:7], 0 idxen: one register, whose high half
+    // the component goes through (a shipped compute shader stores with 0x27).
+    [Theory]
+    [InlineData(0x26u, "BufferLoadFormatD16HiX")]
+    [InlineData(0x27u, "BufferStoreFormatD16HiX")]
+    public void UntypedD16HiX_DecodesAsOneRegisterFormatAccess(uint opcode, string expected)
+    {
+        var instruction = Decode([0xE0002000u | (opcode << 18), 0x80011A14u, 0xBF810000u]).Instructions[0];
+
+        Assert.Equal(expected, instruction.Opcode);
+        var control = Assert.IsType<Gen5BufferMemoryControl>(instruction.Control);
+        Assert.Equal(1u, control.DwordCount);
+        Assert.Equal(26u, control.VectorData);
+    }
+
     private static Gen5ShaderProgram Decode(uint[] words)
     {
         var context = WriteProgram(new TestCpuMemory(ShaderAddress, 0x100), words);

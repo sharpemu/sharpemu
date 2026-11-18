@@ -35,7 +35,10 @@ public readonly record struct DrawIndexedArguments(
     // The indirect packet named a shader register for the base vertex or the start instance: the
     // value is in that register, and BaseVertex or FirstInstance is 0.
     bool BaseVertexInRegister = false,
-    bool FirstInstanceInRegister = false);
+    bool FirstInstanceInRegister = false,
+    // The vertex program's user data index the indirect packet names for the base vertex, or -1 (StartInstanceUserData
+    // likewise): the draw passes BaseVertex and the program stores it there.
+    int BaseVertexUserData = -1);
 
 // Arguments of a non-indexed draw as the packet stream describes them.
 public readonly record struct DrawAutoArguments(
@@ -53,7 +56,8 @@ public readonly record struct DrawAutoArguments(
     // The indirect packet named a shader register for the start vertex or the start instance: the
     // value is in that register, and FirstVertex or FirstInstance is 0.
     bool FirstVertexInRegister = false,
-    bool FirstInstanceInRegister = false);
+    bool FirstInstanceInRegister = false,
+    int BaseVertexUserData = -1);
 
 public enum EndOfPipeWriteKind
 {

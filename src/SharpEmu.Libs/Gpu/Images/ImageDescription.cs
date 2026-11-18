@@ -95,6 +95,42 @@ public struct ImageDescription
     public bool Bgra16;
     public MipLevelLayouts MipLayout;
 
+    // The first guest level the host image holds. A streamed texture maps only its resident
+    // mips and its descriptor starts at the first of them; its image starts there too, while
+    // Extent and MipLayout keep describing the whole guest chain the data is laid out in.
+    // Resources.Levels counts the host levels, from this one.
+    public uint FirstLevel;
+
+    // The host extent of the image's first level.
+    public readonly Extent3D HostExtent => FirstLevel == 0
+        ? Extent
+        : new Extent3D(Math.Max(Extent.Width >> (int)FirstLevel, 1u), Math.Max(Extent.Height >> (int)FirstLevel, 1u), Extent.Depth);
+
+    // The bytes of the guest range the image's levels occupy: the whole range, or for an image of
+    // resident levels only the span of those levels (the levels before FirstLevel are not part of
+    // the image and take no memory in the working-set accounting).
+    public readonly ulong HeldGuestSize
+    {
+        get
+        {
+            if (FirstLevel == 0)
+            {
+                return Data.Size;
+            }
+
+            var begin = ulong.MaxValue;
+            ulong end = 0;
+            for (var level = FirstLevel; level < FirstLevel + Resources.Levels && level < MaxLevels; level++)
+            {
+                var layout = MipLayout[(int)level];
+                begin = Math.Min(begin, layout.Offset);
+                end = Math.Max(end, layout.Offset + layout.Size);
+            }
+
+            return end > begin && end <= Data.Size ? end - begin : Data.Size;
+        }
+    }
+
     public static ImageDescription Create() => new()
     {
         HtileClearMask = uint.MaxValue,
@@ -159,7 +195,10 @@ public struct ImageDescription
     // Return the matching slice in the containing mip level, or -1 if none matches.
     public readonly int FindMatchingArraySlice(in ImageDescription container, int mip)
     {
-        if (!IsCompatible(container) || TileMode != container.TileMode || Type != container.Type || IsVolume ||
+        // A view inside another image's chain is found by guest level; an image holding only the
+        // resident tail of its chain numbers its levels from another one, so it never matches.
+        if (FirstLevel != 0 || container.FirstLevel != 0 ||
+            !IsCompatible(container) || TileMode != container.TileMode || Type != container.Type || IsVolume ||
             Resources.Levels != 1 || Resources.Layers == 0 || container.Resources.Layers == 0 || mip < 0 ||
             (uint)mip >= container.Resources.Levels || container.Resources.Levels > MaxLevels ||
             !IsValidRange(Data) || !IsValidRange(container.Data) || Data.Address < container.Data.Address || Data.End > container.Data.End)
@@ -359,6 +398,11 @@ public struct ImageDescription
                 break;
             default:
                 throw SubmissionScheduler.Fatal($"The image type is not a base type: type={(uint)Type}.");
+        }
+
+        if (FirstLevel != 0 && (Samples != 1 || IsVolume || FirstLevel + Resources.Levels > MaxLevels))
+        {
+            throw SubmissionScheduler.Fatal($"A resident-mip image needs a single-sample 2D chain: firstLevel={FirstLevel} levels={Resources.Levels} samples={Samples} type={Type}.");
         }
 
         if (Samples > 1 && Resources.Levels != 1)

@@ -104,6 +104,25 @@ internal static unsafe partial class VulkanVideoPresenter
         }
     }
 
+    // Shader writes reach every later consumer, including the argument read of an indirect draw whose
+    // arguments a graphics or compute stage wrote (GPU-driven culling).
+    internal static MemoryBarrierRequest ShaderWriteBarrierRequest(
+        PipelineStageFlags sourceStages, bool meshShader, bool taskShader, bool tessellation) => new(
+        sourceStages,
+        PipelineStageFlags.DrawIndirectBit | PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.VertexInputBit |
+        PipelineStageFlags.VertexShaderBit | PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.TransferBit |
+        PipelineStageFlags.ColorAttachmentOutputBit |
+        (meshShader ? PipelineStageFlags.MeshShaderBitExt : PipelineStageFlags.None) |
+        (taskShader ? PipelineStageFlags.TaskShaderBitExt : PipelineStageFlags.None) |
+        (tessellation
+            ? PipelineStageFlags.TessellationControlShaderBit | PipelineStageFlags.TessellationEvaluationShaderBit
+            : PipelineStageFlags.None),
+        AccessFlags.ShaderWriteBit,
+        AccessFlags.IndirectCommandReadBit | AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit |
+        AccessFlags.VertexAttributeReadBit | AccessFlags.IndexReadBit | AccessFlags.UniformReadBit |
+        AccessFlags.TransferReadBit | AccessFlags.TransferWriteBit |
+        AccessFlags.ColorAttachmentReadBit | AccessFlags.ColorAttachmentWriteBit);
+
     private sealed partial class RecordingHost : IRenderHost
     {
         // Keep each new stream allocation intact until the draw is recorded.
@@ -672,7 +691,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 if (binding.IsHostMovie || binding.CachedImage is not { } image ||
                     !ReferenceEquals(image, depthImage) || !ViewFormatRules.IsStencilViewFormat(binding.Request.View.Format) ||
-                    !ViewsOverlap(binding.Request.View, attachmentView))
+                    !ViewsOverlap(binding.Request.View, attachmentView) || !FitsStencilPlane(binding.Request.Description, image))
                 {
                     continue;
                 }
@@ -1717,19 +1736,9 @@ internal static unsafe partial class VulkanVideoPresenter
         public void ShaderWriteBarrier(PipelineStageFlags sourceStages)
         {
             NoteShaderMayWriteMappedMemory();
-            RecordMemoryBarrier(
-                sourceStages,
-                PipelineStageFlags.ComputeShaderBit | PipelineStageFlags.VertexInputBit | PipelineStageFlags.VertexShaderBit |
-                PipelineStageFlags.FragmentShaderBit | PipelineStageFlags.TransferBit | PipelineStageFlags.ColorAttachmentOutputBit |
-                (_presenter._supportsMeshShader ? PipelineStageFlags.MeshShaderBitExt : PipelineStageFlags.None) |
-                (_presenter._supportsTaskShader ? PipelineStageFlags.TaskShaderBitExt : PipelineStageFlags.None) |
-                (_presenter._supportsTessellation
-                    ? PipelineStageFlags.TessellationControlShaderBit | PipelineStageFlags.TessellationEvaluationShaderBit
-                    : PipelineStageFlags.None),
-                AccessFlags.ShaderWriteBit,
-                AccessFlags.ShaderReadBit | AccessFlags.ShaderWriteBit | AccessFlags.VertexAttributeReadBit | AccessFlags.IndexReadBit |
-                AccessFlags.UniformReadBit | AccessFlags.TransferReadBit | AccessFlags.TransferWriteBit |
-                AccessFlags.ColorAttachmentReadBit | AccessFlags.ColorAttachmentWriteBit);
+            var request = ShaderWriteBarrierRequest(
+                sourceStages, _presenter._supportsMeshShader, _presenter._supportsTaskShader, _presenter._supportsTessellation);
+            RecordMemoryBarrier(request.SourceStages, request.DestinationStages, request.SourceAccess, request.DestinationAccess);
         }
 
         private static readonly MemoryBarrierRequest ShaderWriteHazardRequest = new(

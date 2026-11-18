@@ -116,9 +116,9 @@ public sealed partial class GpuCommandInterpreter
 
     public ulong DispatchIndirectArgumentsBase { get; private set; }
 
-    // Persistent draw state: indirect draws update it for later draws. An indirect draw
-    // resolved on the GPU leaves the count in guest memory; it is read only if a later
-    // draw needs it.
+    // Persistent draw state (NUM_INSTANCES). Indirect draws update it for later draws as
+    // IndirectInstanceInherit says; with All, one resolved on the GPU leaves the count in
+    // guest memory, read only if a later draw needs it.
     public uint InstanceCount
     {
         get

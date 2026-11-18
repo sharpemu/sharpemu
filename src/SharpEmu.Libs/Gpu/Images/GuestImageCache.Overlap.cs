@@ -244,6 +244,13 @@ public sealed partial class GuestImageCache
         var destination = _slots[destinationImageIdentifier];
         var source = _slots[sourceImageIdentifier];
         WatchImage(destinationImageIdentifier);
+        // A description can match the source at a level its backing does not hold (CachedImage keeps no more levels
+        // than the backing's extent has): the destination keeps what it read from the guest.
+        if (mip >= destination.Backing.MipLevels)
+        {
+            return;
+        }
+
         if (source.IsBufferModified || source.Backing.Samples != destination.Backing.Samples)
         {
             throw SubmissionScheduler.Fatal($"The mip copy source ownership or sample count is invalid: bufferModified={source.IsBufferModified} sourceSamples={source.Backing.Samples} destinationSamples={destination.Backing.Samples}.");
@@ -461,6 +468,21 @@ public sealed partial class GuestImageCache
         // in it is past the removal window in between. As in collection, an image used this frame is not stale.
         var usedThisFrame = cached.Registered && _recencyQueue.GetLastUseTick(cached.RecencyEntryIndex) >= _collectionTick;
         var safeToDelete = !usedThisFrame && currentTick - Math.Min(currentTick, cached.LastAccessTick) > TicksBeforeRemoval;
+        if (requested.FirstLevel != 0 || cachedInfo.FirstLevel != 0)
+        {
+            // An image of a streamed chain's resident levels shares only an identical chain (the
+            // same-backing match). It is a copy of guest memory that a lookup recreates cheaply, so
+            // another resource over its range replaces it; a request for resident levels over
+            // another image is a separate texture (the lookup took the whole chain when that image
+            // holds GPU contents).
+            if (cachedInfo.FirstLevel != 0 && !cached.IsGpuModified)
+            {
+                cached.Binding.NeedsRebind |= cached.Binding.IsBound || cached.Binding.IsTarget;
+                ReleaseImage(cachedImageIdentifier);
+            }
+
+            return new OverlapResolution(mergedImageIdentifier);
+        }
         var requestedBlock = requested.BytesPerBlock * requested.Samples;
         var cachedBlock = cachedInfo.BytesPerBlock * cachedInfo.Samples;
         var requestedBlockExtent = requested.BlockExtent;

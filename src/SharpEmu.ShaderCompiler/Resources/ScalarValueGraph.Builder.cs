@@ -684,11 +684,14 @@ public sealed partial class ScalarValueGraph
                 return;
             }
 
-            if (opcode is "SBcnt1I32B64" or "SFF1I32B64" or "SFlbitI32B64" or "SWqmB64" or "SBfeI64")
+            if (opcode is "SBcnt1I32B64" or "SFF1I32B64" or "SFlbitI32B64" or "SWqmB64" or "SBrevB64" or "SBfeI64")
             {
                 var (low, high) = ReadPair(instruction.Sources[0], state);
                 switch (opcode)
                 {
+                    case "SBrevB64":
+                        state.WritePair(destinationRegister, Unary(ScalarOperation.BitReverse32, high), Unary(ScalarOperation.BitReverse32, low));
+                        break;
                     case "SWqmB64":
                     {
                         var quadLow = Unary(ScalarOperation.QuadMask32, low);

@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Ir;
 using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Tests.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
@@ -105,6 +106,106 @@ public sealed class Gen5TessellationTests
         Assert.Equal(256ul, lowered.Instructions.First(i => i.Pc == 264).ProgramOffset);
         Assert.Equal(0ul, lowered.Instructions.First(i => i.Pc == 4).ProgramOffset);
         Assert.Throws<ArgumentException>(() => Gen5TessellationLowering.PrepareMergedHull(Program(EndProgram(0)), 14));
+    }
+
+    // A complete hull binary (AGC shader type HS) in the shape a shipped game uses.
+    // The local half runs for the lanes below the low byte of s3, writes LDS and leaves v13.
+    // The hull half runs for the lanes below the second byte, reads LDS and v13 and stores
+    // through the factor offset in s4.
+    internal const uint CombinedHullEntry = 0x30;
+    internal static readonly uint[] CombinedHullWords =
+    [
+        0xBEFE04C1,             // 0x00 s_mov_b64 exec, -1
+        0xD7650000, 0x000100C1, // 0x04 v_mbcnt_lo_u32_b32 v0, -1, 0
+        0xD7660000, 0x000200C1, // 0x0C v_mbcnt_hi_u32_b32 v0, -1, v0
+        0x7DA206F9, 0x80060000, // 0x14 v_cmpx_lt_u32 v0, s3 (byte 0)
+        0xBF880004,             // 0x1C s_cbranch_execz 0x30
+        0x34140682,             // 0x20 v_lshlrev_b32 v10, 2, v3
+        0xD8340000, 0x0000020A, // 0x24 ds_write_b32 v10, v2
+        0x7E1A02A5,             // 0x2C v_mov_b32 v13, 37
+        0xBEFE04C1,             // 0x30 s_mov_b64 exec, -1
+        0x7DA206F9, 0x81060000, // 0x34 v_cmpx_lt_u32 v0, s3 (byte 1)
+        0xBF880009,             // 0x3C s_cbranch_execz 0x64
+        0x361606BF,             // 0x40 v_and_b32 v11, 63, v3
+        0x34161682,             // 0x44 v_lshlrev_b32 v11, 2, v11
+        0xD8D80000, 0x0400000B, // 0x48 ds_read_b32 v4, v11
+        0x34180683,             // 0x50 v_lshlrev_b32 v12, 3, v3
+        0xE0705000, 0x0402040C, // 0x54 buffer_store_dword v4, v12, s[8:11], s4
+        0xE0705004, 0x04020D0C, // 0x5C buffer_store_dword v13, v12, s[8:11], s4, offset 4
+        0xBF810000,             // 0x64 s_endpgm
+    ];
+
+    [Fact]
+    public void CombinedHull_EntryIsWhereTheHullHalfReopensExec()
+    {
+        var program = DecodeHarness.Decode(CombinedHullWords);
+        Assert.Equal(["SMovB64", "VMbcntLoU32B32", "VMbcntHiU32B32", "VCmpxLtU32", "SCbranchExecz", "VLshlrevB32", "DsWriteB32",
+            "VMovB32", "SMovB64", "VCmpxLtU32", "SCbranchExecz", "VAndB32", "VLshlrevB32", "DsReadB32", "VLshlrevB32",
+            "BufferStoreDword", "BufferStoreDword", "SEndpgm"], program.Instructions.Select(i => i.Opcode));
+        Assert.Null(program.FusedContinuationPc);
+        Assert.True(Gen5TessellationLowering.TryFindCombinedHullEntry(program, out var entry));
+        Assert.Equal(CombinedHullEntry, entry);
+
+        // Without a test of the second byte there is no hull half to enter.
+        var localOnly = CombinedHullWords.ToArray();
+        localOnly[14] = 0x80060000;
+        Assert.False(Gen5TessellationLowering.TryFindCombinedHullEntry(DecodeHarness.Decode(localOnly), out _));
+        // A mask restored from a register is a join inside one half, not the hull entry.
+        var restored = CombinedHullWords.ToArray();
+        restored[12] = 0xBEFE0400;
+        Assert.False(Gen5TessellationLowering.TryFindCombinedHullEntry(DecodeHarness.Decode(restored), out _));
+        Assert.False(Gen5TessellationLowering.TryFindCombinedHullEntry(Program(Nop(0), EndProgram(4)), out _));
+    }
+
+    [Fact]
+    public void CombinedHullLowering_PutsTheBarrierWhereTheLocalSkipLands()
+    {
+        var program = DecodeHarness.Decode(CombinedHullWords);
+        var lowered = Gen5TessellationLowering.PrepareCombinedHull(program);
+        Assert.Equal(program.Instructions.Count + 1, lowered.Instructions.Count);
+        // The hull half takes no separate table, so nothing is moved into s0:s1.
+        Assert.Equal(program.Instructions[0], lowered.Instructions[0]);
+        var barrier = Assert.Single(lowered.Instructions, i => i.Opcode == "SBarrier");
+        Assert.Equal(CombinedHullEntry, barrier.Pc);
+        var skips = lowered.Instructions.Where(i => i.Opcode == "SCbranchExecz").ToArray();
+        Assert.True(Gen5IrBranchResolver.Instance.TryGetBranchTarget(skips[0], out var target));
+        Assert.Equal(barrier.Pc, target);
+        Assert.True(Gen5IrBranchResolver.Instance.TryGetBranchTarget(skips[1], out target));
+        Assert.Equal("SEndpgm", lowered.Instructions.Single(i => i.Pc == target).Opcode);
+        var reopen = lowered.Instructions.Single(i => i.Pc == CombinedHullEntry + 4);
+        Assert.Equal("SMovB64", reopen.Opcode);
+        Assert.Equal((ulong)CombinedHullEntry, reopen.ProgramOffset);
+        Assert.Equal(0x20ul, lowered.Instructions.Single(i => i.Pc == 0x20).ProgramOffset);
+
+        var plan = ShaderResourcePlan.Extract(lowered, ShaderStage.Compute, Hash, 8, 8, waveSize: 64);
+        Assert.Equal(plan.Memory.Find(0x58)!.Resource, Gen5TessellationLowering.FindFactorBuffer(plan, CombinedHullEntry + 4));
+        Assert.Throws<ArgumentException>(() => Gen5TessellationLowering.PrepareCombinedHull(Program(EndProgram(0))));
+    }
+
+    [Fact]
+    public void CombinedHullLowering_RejectsABranchAcrossTheHullEntry()
+    {
+        // The local skip lands one instruction inside the hull half, past the barrier.
+        var words = CombinedHullWords.ToArray();
+        words[7] = 0xBF880005;
+        Assert.Throws<NotSupportedException>(() => Gen5TessellationLowering.PrepareCombinedHull(DecodeHarness.Decode(words)));
+    }
+
+    [Fact]
+    public void CombinedHull_CompilesAsOneCooperativeWorkgroup()
+    {
+        var lowered = Gen5TessellationLowering.PrepareCombinedHull(DecodeHarness.Decode(CombinedHullWords));
+        var plan = ShaderResourcePlan.Extract(lowered, ShaderStage.Compute, Hash, 8, 8, waveSize: 64);
+        var resources = ResourceMaterializer.ApplyTo(plan, ResourceSpecialization.Default(plan.Info));
+        var layout = BindingLayout.Allocate(resources.Info, BindingLayout.CollectUserDataRegisters(lowered, 8, 8),
+            false, false, false, usesTessellationData: true);
+        var request = new ShaderCompileRequest(plan, resources, layout)
+        {
+            LocalSizeX = 128, WaveSize = 64, CooperativeWave64Workgroup = true, LocalDataShareDwords = 64,
+            TessellationHull = new(2, 4, 32, CombinedHullEntry + 4),
+        };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Gen5MipStatisticsTests.ValidateWhenAvailable(shader.Spirv);
     }
 
     [Theory]

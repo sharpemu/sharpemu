@@ -520,6 +520,63 @@ public sealed class ShaderPipelineCacheTests : IDisposable
     public void MergedTessellationMask_DoesNotTakeOverOtherGraphicsPaths(uint mask, bool expected) =>
         Assert.Equal(expected, ShaderPipelineCache.IsMergedTessellationMask(mask));
 
+    // A game can bind a complete hull binary as the local program and never
+    // fuses two halves, so no continuation is registered and SPI_SHADER_PGM_LO_HS stays zero.
+    [Fact]
+    public void CombinedHull_BoundAsTheLocalProgramAloneCompilesWithItsOwnUserScalars()
+    {
+        var guest = new PipelineTestGuest();
+        var hull = PipelineTestGuest.MemoryBase + 0x1000;
+        var domain = PipelineTestGuest.MemoryBase + 0x2000;
+        guest.RegisterProgram(hull, PipelineTestGuest.MemoryBase + 0x8000, SharpEmu.ShaderCompiler.Tests.Gen5TessellationTests.CombinedHullWords);
+        guest.RegisterProgram(domain, PipelineTestGuest.MemoryBase + 0x8100, PipelineTestGuest.EndProgram);
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+        var banks = Banks(withPixel: false);
+        banks.Shader.Vertex.ExportAddress = domain;
+        banks.Shader.Vertex.LocalAddress = hull;
+        banks.Shader.Vertex.HullAddress = 0;
+        banks.Shader.Vertex.HullResource2 = HullResource2.Decode(0x00400090);
+        banks.Shader.Vertex.HullUserScalars.Set(2, 256, UserScalarKind.Unknown);
+        banks.Context.ShaderStages = 0x0200210D;
+        banks.Context.ShaderInterface.TessellationFactorParameter = 2u | (3u << 5);
+        banks.Context.ShaderInterface.LocalHullConfiguration = 32u | (2u << 8) | (4u << 14);
+
+        var programs = cache.GetGraphicsPrograms(banks, [], pixelActive: false, depthBound: false);
+
+        Assert.True(programs.Available);
+        var entry = SharpEmu.ShaderCompiler.Tests.Gen5TessellationTests.CombinedHullEntry;
+        Assert.Equal(new Gen5TessellationHullInfo(2, 4, 32, entry + 4), programs.Tessellation!.HullConfiguration);
+        var hullInput = programs.Tessellation.Hull.Input;
+        Assert.Equal((128u, 16u * 128), (hullInput.ThreadsX, hullInput.LocalDataShareDwords));
+        var request = Assert.Single(guest.Compiler.Requests, request => request.TessellationHull is not null);
+        Assert.Equal("SBarrier", request.Program.Instructions.Single(instruction => instruction.Pc == entry).Opcode);
+        // Eight user scalars from RSRC2, none appended and none moved into s0:s1.
+        Assert.Equal(8, hullInput.Stage.Resources.UserData.Length);
+        Assert.Equal(256u, hullInput.Stage.Resources.UserData[2]);
+        Assert.Equal("SMovB64", request.Program.Instructions[0].Opcode);
+        Assert.Equal(Gen5Operand.Scalar(126), request.Program.Instructions[0].Destinations[0]);
+    }
+
+    [Fact]
+    public void UnfusedLocalProgramWithoutAHullHalf_StopsTheTessellationDraw()
+    {
+        var guest = new PipelineTestGuest();
+        var local = PipelineTestGuest.MemoryBase + 0x1000;
+        var domain = PipelineTestGuest.MemoryBase + 0x2000;
+        guest.RegisterProgram(local, PipelineTestGuest.MemoryBase + 0x8000, PipelineTestGuest.EndProgram);
+        guest.RegisterProgram(domain, PipelineTestGuest.MemoryBase + 0x8100, PipelineTestGuest.EndProgram);
+        var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);
+        var banks = Banks(withPixel: false);
+        banks.Shader.Vertex.ExportAddress = domain;
+        banks.Shader.Vertex.LocalAddress = local;
+        banks.Context.ShaderStages = 0x0200210D;
+        banks.Context.ShaderInterface.TessellationFactorParameter = 2u | (3u << 5);
+        banks.Context.ShaderInterface.LocalHullConfiguration = 32u | (2u << 8) | (4u << 14);
+
+        var error = Assert.Throws<SchedulerFatalException>(() => cache.GetGraphicsPrograms(banks, [], pixelActive: false, depthBound: false));
+        Assert.Contains("merged local/hull program", error.Message);
+    }
+
     [Fact]
     public void GraphicsPipelineKey_SeparatesTessellationFromRectanglesAndIncludesBothStages()
     {

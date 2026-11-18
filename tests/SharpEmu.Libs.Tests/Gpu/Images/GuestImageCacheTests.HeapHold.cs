@@ -11,6 +11,24 @@ namespace SharpEmu.Libs.Tests.Gpu.Images;
 
 public sealed partial class GuestImageCacheTests
 {
+    // A heap record can name a texture the guest has unloaded (a table it no longer reads keeps the T#): the heap asks
+    // whether the texels could be read before it finds the record's image, since an image of unmapped memory cannot
+    // be populated. A streamed texture maps only a prefix of its range, which is enough.
+    [Fact]
+    public void AnImageRangeIsBackedWhenItsFirstPageIsMapped()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(65536, ReadWrite);
+
+        Assert.True(harness.Images.IsBackedImageRange(new SharpEmu.HLE.GpuMemory.GuestSpan(address, 4096)));
+        Assert.True(harness.Images.IsBackedImageRange(new SharpEmu.HLE.GpuMemory.GuestSpan(address, 4 * 65536)));
+        Assert.False(harness.Images.IsBackedImageRange(new SharpEmu.HLE.GpuMemory.GuestSpan(address + 16 * 65536, 4096)));
+        Assert.False(harness.Images.IsBackedImageRange(new SharpEmu.HLE.GpuMemory.GuestSpan(0, 0)));
+        Assert.False(harness.Images.IsBackedImageRange(new SharpEmu.HLE.GpuMemory.GuestSpan(0x0000_2045_2881_9A00, 0x1000)));
+        harness.Shutdown();
+    }
+
     // An image deleted while the bindless heap names its view keeps its memory through completed ticks and is freed
     // after the tick in which the heap lets go of it; an image the heap does not name is freed after its tick.
     [Fact]

@@ -477,6 +477,13 @@ internal static unsafe partial class VulkanVideoPresenter
                 shaderData[layout.ShaderBaseDword + 1] = (uint)(stage.ShaderBase >> 32);
             }
 
+            // A stage prepared without its heap views reads the null element.
+            for (var view = 0u; view < layout.HeapViewCount; view++)
+            {
+                shaderData[layout.HeapViewsDword + view * HeapView.DwordCount] = HeapView.None.Word0;
+                shaderData[layout.HeapViewsDword + view * HeapView.DwordCount + 1] = HeapView.None.Word1;
+            }
+
             stage.WriteDispatchThreadLimits(shaderData);
             stage.WriteMeshDrawParameters(shaderData);
             stage.WriteTessellationData(shaderData);
@@ -939,7 +946,20 @@ internal static unsafe partial class VulkanVideoPresenter
                     _presenter.ForgetHeapPreparation(preparation);
                 }
 
-                _presenter.PrepareBindlessHeap(preparation, snapshot.Heaps);
+                _presenter.PrepareBindlessHeap(preparation);
+            }
+
+            // Where the stage's heap views have their elements, found before the stage's own images: a run that moved
+            // to another heap gets the images of its records here.
+            Span<uint> heapViews = layout.HeapViewCount <= 32 ? stackalloc uint[(int)(layout.HeapViewCount * HeapView.DwordCount)] : new uint[layout.HeapViewCount * HeapView.DwordCount];
+            if (layout.HeapViewCount != 0)
+            {
+                if (snapshot.Heaps.Length != layout.HeapViewCount)
+                {
+                    throw SubmissionScheduler.Fatal($"The heap views do not match the layout: views={snapshot.Heaps.Length} layout={layout.HeapViewCount} hash=0x{program.Hash:X16}.");
+                }
+
+                _presenter.WriteHeapViews(snapshot.Heaps, heapViews);
             }
 
             if (layout.Find(DescriptorBindingKind.CallMarks) is not null)
@@ -1027,6 +1047,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var shaderData = AssembleShaderData(stage, program, layout);
+            heapViews.CopyTo(shaderData.AsSpan((int)layout.HeapViewsDword));
             prepared.ShaderData = shaderData;
             if (layout.Find(DescriptorBindingKind.GlobalDataShare) is not null)
             {
@@ -1420,7 +1441,9 @@ internal static unsafe partial class VulkanVideoPresenter
         private long _bdaSpanVersion = -1;
         private ulong _bdaSpanMapping;
 
-        private List<GuestSpan> DeviceAddressSpans(GuestGpuMemory memory)
+        internal ulong DeviceAddressSpanMapping => _bdaSpanMapping;
+
+        internal List<GuestSpan> DeviceAddressSpans(GuestGpuMemory memory)
         {
             var version = memory.SpanVersion;
             if (_bdaSpans is { } cached && ReferenceEquals(_bdaSpanMemory, memory) && _bdaSpanVersion == version)
@@ -1911,7 +1934,8 @@ internal static unsafe partial class VulkanVideoPresenter
             var images = prepared.Descriptors.Images;
             var nulled = RefindStaleBindings(
                 images.Length,
-                index => !images[index].IsHostMovie && IsStaleImage(images[index].ImageIdentifier, out _),
+                index => !images[index].IsHostMovie &&
+                    (IsStaleImage(images[index].ImageIdentifier, out _) || HoldsMovedStencilPlane(images[index])),
                 (index, asNull) =>
                 {
                     if (_imageCache.TryGetImage(images[index].ImageIdentifier, out var stale))
