@@ -290,23 +290,28 @@ internal static unsafe partial class VulkanVideoPresenter
             CompletePendingPublicationsForResourceRead(address, sizeof(uint));
             if (!_guestMemory.CanRead(address, sizeof(uint)))
             {
-                return false;
+                return RefuseOnTicketWorker("unreadable");
             }
 
             if (OnResolveWorker)
             {
-                if (IsGpuOwnedForWorkerCleanRead(address, sizeof(uint)) || IsPendingForWorker(address, sizeof(uint)))
+                if (IsGpuOwnedForWorkerCleanRead(address, sizeof(uint)))
                 {
-                    return false;
+                    return RefuseOnTicketWorker("gpu owned");
+                }
+
+                if (IsPendingForWorker(address, sizeof(uint)))
+                {
+                    return RefuseOnTicketWorker("pending");
                 }
 
                 Span<byte> cleanBytes = stackalloc byte[sizeof(uint)];
                 if (!_commandThread!.ReadOverlayBefore(address, cleanBytes, _resolveWorker!.Sequence))
                 {
-                    return false;
+                    return RefuseOnTicketWorker("overlay");
                 }
 
-                _resolveWorker.Reads.Add(address, cleanBytes);
+                _resolveWorker.Reads.Add(address, cleanBytes, clean: true);
                 word = System.Buffers.Binary.BinaryPrimitives.ReadUInt32LittleEndian(cleanBytes);
                 return true;
             }
@@ -387,7 +392,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             if (!_guestMemory.CanRead(address, size))
             {
-                return false;
+                return RefuseOnTicketWorker("unreadable");
             }
 
             if (!clean && _commandThread!.TryReadShadowBefore(address, destination, worker.Sequence, out var shadowSequence, out var shadowSource))
@@ -395,24 +400,30 @@ internal static unsafe partial class VulkanVideoPresenter
                 if ((_translation.PendingWrites is { } pending && pending.HasPendingBetween(address, size, shadowSequence, worker.Sequence)) ||
                     _commandThread.HasPendingRangeBetween(address, size, shadowSequence, worker.Sequence))
                 {
-                    return false;
+                    return RefuseOnTicketWorker("shadowed pending");
                 }
 
+                RefuseOnTicketWorker("shadow");
                 SharpEmu.Libs.Agc.AgcExports.NoteWorkerShadowRead((int)shadowSource);
                 return true;
             }
 
-            if ((clean ? IsGpuOwnedForWorkerCleanRead(address, size) : IsGpuOwnedForWorkerRead(address, size)) || IsPendingForWorker(address, size))
+            if (clean ? IsGpuOwnedForWorkerCleanRead(address, size) : IsGpuOwnedForWorkerRead(address, size))
             {
-                return false;
+                return RefuseOnTicketWorker("gpu owned");
+            }
+
+            if (IsPendingForWorker(address, size))
+            {
+                return RefuseOnTicketWorker("pending");
             }
 
             if (!_commandThread!.ReadOverlayBefore(address, destination, worker.Sequence))
             {
-                return false;
+                return RefuseOnTicketWorker("overlay");
             }
 
-            worker.Reads.Add(address, destination);
+            worker.Reads.Add(address, destination, clean);
             if (!clean)
             {
                 NoteCleanReadPage(address, size);

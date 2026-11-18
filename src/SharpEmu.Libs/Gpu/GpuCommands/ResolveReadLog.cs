@@ -7,12 +7,14 @@ namespace SharpEmu.Libs.Gpu.GpuCommands;
 public sealed class SerialResolveRequiredException(string reason) : Exception(reason);
 
 // The guest bytes a worker read while it resolved a draw ahead of the stream, so the stream
-// position can check them before it records the draw. Adjacent reads merge into one range.
+// position can check them before it records the draw. Adjacent reads of one class merge into one range: a clean read (one
+// the command thread refuses while a GPU write may own its page or an image's bytes) is checked again with that test.
 public sealed class ResolveReadLog
 {
     private ulong[] _addresses = new ulong[64];
     private int[] _offsets = new int[64];
     private int[] _lengths = new int[64];
+    private bool[] _clean = new bool[64];
     private byte[] _bytes = new byte[2048];
     private int _byteCount;
 
@@ -22,7 +24,9 @@ public sealed class ResolveReadLog
     public long Version;
     public long Publications;
 
-    public void Add(ulong address, ReadOnlySpan<byte> bytes)
+    public void Add(ulong address, ReadOnlySpan<byte> bytes) => Add(address, bytes, clean: false);
+
+    public void Add(ulong address, ReadOnlySpan<byte> bytes, bool clean)
     {
         if (_byteCount + bytes.Length > _bytes.Length)
         {
@@ -30,7 +34,8 @@ public sealed class ResolveReadLog
         }
 
         bytes.CopyTo(_bytes.AsSpan(_byteCount));
-        if (Count != 0 && _addresses[Count - 1] + (ulong)_lengths[Count - 1] == address && _offsets[Count - 1] + _lengths[Count - 1] == _byteCount)
+        if (Count != 0 && _clean[Count - 1] == clean && _addresses[Count - 1] + (ulong)_lengths[Count - 1] == address &&
+            _offsets[Count - 1] + _lengths[Count - 1] == _byteCount)
         {
             _lengths[Count - 1] += bytes.Length;
             _byteCount += bytes.Length;
@@ -42,11 +47,13 @@ public sealed class ResolveReadLog
             Array.Resize(ref _addresses, Count * 2);
             Array.Resize(ref _offsets, Count * 2);
             Array.Resize(ref _lengths, Count * 2);
+            Array.Resize(ref _clean, Count * 2);
         }
 
         _addresses[Count] = address;
         _offsets[Count] = _byteCount;
         _lengths[Count] = bytes.Length;
+        _clean[Count] = clean;
         _byteCount += bytes.Length;
         Count++;
     }
@@ -57,6 +64,8 @@ public sealed class ResolveReadLog
         System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(bytes, word);
         Add(address, bytes);
     }
+
+    public bool IsClean(int index) => _clean[index];
 
     public ReadOnlySpan<byte> Bytes(int index, out ulong address)
     {

@@ -219,6 +219,9 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             public Presenter? Owner;
             public long Sequence;
+            // A compute ticket's worker: it resolves ahead of every stream position, and the take checks again only the reads it
+            // logged.
+            public bool Ticket;
             public ResolveReadLog Reads = null!;
             public CleanReadPages? CleanReads;
             public ulong DirectPage = ulong.MaxValue;
@@ -230,6 +233,19 @@ internal static unsafe partial class VulkanVideoPresenter
         private static ResolveWorkerState? _resolveWorker;
 
         private bool OnResolveWorker => _resolveWorker is { Sequence: not 0 } worker && ReferenceEquals(worker.Owner, this);
+
+        // A read a compute ticket's worker cannot serve and log (unreadable, GPU-owned, pending, or served from a known GPU write)
+        // refuses the ticket. The take checks again only the logged reads, and the serial rebind there may serve the same read
+        // once the GPU work is done, so a ticket resolved without those bytes could differ from it.
+        private bool RefuseOnTicketWorker(string reason)
+        {
+            if (OnResolveWorker && _resolveWorker!.Ticket)
+            {
+                throw new SerialResolveRequiredException("ticket read " + reason);
+            }
+
+            return false;
+        }
 
         int ICommandStreamHost.ResolveWorkerCount => ResolveWorkerCount;
 
@@ -245,6 +261,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             worker.Sequence = sequence;
+            worker.Ticket = sequence == long.MaxValue;
             worker.Reads = reads;
             worker.DirectPage = ulong.MaxValue;
             reads.Version = _bufferCache.GpuModifiedVersion;
@@ -318,8 +335,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 var size = (ulong)bytes.Length;
                 // A queued fill or copy over the range, or a store, may have been queued after the ticket read and not run
                 // yet, so raw guest memory still matches: a fill refuses the ticket, and stores are read through the overlay,
-                // the view the serial rebind reads. The lock-free MayHavePending filters the locked pending-write query.
+                // the view the serial rebind reads. The lock-free MayHavePending filters the locked pending-write query. A clean
+                // read is checked again with the command thread's clean test, which also refuses a page a GPU write may own and an
+                // image's GPU-modified bytes: the serial rebind would see that read refused and could take another branch.
                 if (HasPendingMemoryPublication(address, size) || _bufferCache.HasGpuDirtyBytes(address, size) ||
+                    (reads.IsClean(index) && IsGpuOwnedForCleanRead(address, size)) ||
                     (_translation.PendingWrites is { } pending && pending.MayHavePending(address, size) &&
                      pending.HasPendingBetween(address, size, pending.Released, long.MaxValue)) ||
                     (thread is not null && (thread.HasShadowBefore(address, size, long.MaxValue) || thread.HasPendingRange(address, size))))
@@ -367,11 +387,12 @@ internal static unsafe partial class VulkanVideoPresenter
 
             if (!_guestMemory.CanRead(address, size))
             {
-                return false;
+                return RefuseOnTicketWorker("unreadable");
             }
 
             if (TryReadShadowForWorker(address, destination))
             {
+                RefuseOnTicketWorker("shadow");
                 return true;
             }
 
@@ -387,7 +408,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             if (!_commandThread!.ReadOverlayBefore(address, destination, worker.Sequence))
             {
-                return false;
+                return RefuseOnTicketWorker("overlay");
             }
 
             worker.Reads.Add(address, destination);

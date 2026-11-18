@@ -35,6 +35,26 @@ public sealed class ResolveReadLogTests
         Assert.Equal(new byte[] { 0x44, 0x33, 0x22, 0x11 }, word.ToArray());
     }
 
+    // A clean read is checked again at the take with the command thread's clean test, so it never merges with a plain read
+    // next to it; reads of one class still merge.
+    [Fact]
+    public void AdjacentReadsMergeOnlyWithinTheirClass()
+    {
+        var log = new ResolveReadLog();
+        log.Add(0x1000, new byte[] { 1, 2, 3, 4 }, clean: true);
+        log.Add(0x1004, new byte[] { 5, 6, 7, 8 }, clean: true);
+        log.Add(0x1008, new byte[] { 9, 10, 11, 12 });
+        log.Add(0x100C, new byte[] { 13, 14, 15, 16 });
+
+        Assert.Equal(2, log.Count);
+        Assert.True(log.IsClean(0));
+        Assert.False(log.IsClean(1));
+        Assert.Equal(new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 }, log.Bytes(0, out var clean).ToArray());
+        Assert.Equal(0x1000UL, clean);
+        Assert.Equal(new byte[] { 9, 10, 11, 12, 13, 14, 15, 16 }, log.Bytes(1, out var plain).ToArray());
+        Assert.Equal(0x1008UL, plain);
+    }
+
     [Fact]
     public void AdjacentReadsMergeIntoOneRange()
     {
