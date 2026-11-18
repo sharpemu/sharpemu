@@ -134,6 +134,34 @@ internal static partial class VulkanVideoPresenter
 
         private readonly List<Shadow> _shadows = new();
         private volatile Shadow[] _shadowSnapshot = [];
+        // The newest sequence and the address bounds of the snapshot, published with it: a shadow test returns at once
+        // when no shadow can match.
+        private volatile ShadowBounds _shadowBounds = ShadowBounds.Empty;
+
+        private sealed record ShadowBounds(long Newest, ulong Low, ulong High)
+        {
+            public static readonly ShadowBounds Empty = new(long.MinValue, ulong.MaxValue, 0);
+        }
+
+        private static ShadowBounds BoundsOf(List<Shadow> shadows)
+        {
+            if (shadows.Count == 0)
+            {
+                return ShadowBounds.Empty;
+            }
+
+            var newest = long.MinValue;
+            var low = ulong.MaxValue;
+            var high = 0UL;
+            foreach (var shadow in shadows)
+            {
+                newest = Math.Max(newest, shadow.Sequence);
+                low = Math.Min(low, shadow.Address);
+                high = Math.Max(high, shadow.Address + (ulong)shadow.Length);
+            }
+
+            return new ShadowBounds(newest, low, high);
+        }
         private volatile Item[] _pendingRangeSnapshot = [];
         private long _shadowGeneration;
 
@@ -382,6 +410,7 @@ internal static partial class VulkanVideoPresenter
 
                 _shadows.Add(new Shadow { Address = known.Address, Length = known.ByteCount, Sequence = sequence, Known = known, Source = source });
                 _shadowSnapshot = _shadows.ToArray();
+                _shadowBounds = BoundsOf(_shadows);
             }
 
             Interlocked.Increment(ref _shadowGeneration);
@@ -404,6 +433,7 @@ internal static partial class VulkanVideoPresenter
 
             _shadows.RemoveRange(kept, _shadows.Count - kept);
             _shadowSnapshot = _shadows.ToArray();
+            _shadowBounds = BoundsOf(_shadows);
         }
 
         public bool HasShadow(ulong address, ulong size) => HasShadowBefore(address, size, long.MaxValue);
@@ -413,6 +443,12 @@ internal static partial class VulkanVideoPresenter
         {
             var executed = Volatile.Read(ref _executed);
             var end = address + size;
+            var bounds = _shadowBounds;
+            if (bounds.Newest <= executed || end <= bounds.Low || bounds.High <= address)
+            {
+                return false;
+            }
+
             foreach (var shadow in _shadowSnapshot)
             {
                 if (shadow.Sequence > executed && shadow.Sequence < sequence && address < shadow.Address + (ulong)shadow.Length && shadow.Address < end)

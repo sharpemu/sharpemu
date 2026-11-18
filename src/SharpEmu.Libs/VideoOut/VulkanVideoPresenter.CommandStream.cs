@@ -311,13 +311,18 @@ internal static unsafe partial class VulkanVideoPresenter
         bool ICommandStreamHost.ValidateTicketReads(ResolveReadLog reads)
         {
             Span<byte> current = stackalloc byte[256];
+            var thread = _commandThread;
             for (var index = 0; index < reads.Count; index++)
             {
                 var bytes = reads.Bytes(index, out var address);
                 var size = (ulong)bytes.Length;
+                // A queued fill or copy over the range, or a store, may have been queued after the ticket read and not run
+                // yet, so raw guest memory still matches: a fill refuses the ticket, and stores are read through the overlay,
+                // the view the serial rebind reads. The lock-free MayHavePending filters the locked pending-write query.
                 if (HasPendingMemoryPublication(address, size) || _bufferCache.HasGpuDirtyBytes(address, size) ||
-                    (_translation.PendingWrites is { } pending && pending.HasPendingBetween(address, size, pending.Released, long.MaxValue)) ||
-                    (_commandThread is { } thread && thread.HasShadowBefore(address, size, long.MaxValue)))
+                    (_translation.PendingWrites is { } pending && pending.MayHavePending(address, size) &&
+                     pending.HasPendingBetween(address, size, pending.Released, long.MaxValue)) ||
+                    (thread is not null && (thread.HasShadowBefore(address, size, long.MaxValue) || thread.HasPendingRange(address, size))))
                 {
                     return false;
                 }
@@ -326,7 +331,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 try
                 {
                     var now = rented is null ? current[..bytes.Length] : rented.AsSpan(0, bytes.Length);
-                    if (!_guestMemory.TryRead(address, now) || !now.SequenceEqual(bytes))
+                    var read = thread is not null && thread.HasPendingStores(address, size)
+                        ? thread.ReadOverlay(address, now)
+                        : _guestMemory.TryRead(address, now);
+                    if (!read || !now.SequenceEqual(bytes))
                     {
                         return false;
                     }
@@ -437,7 +445,8 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool IsPendingForWorker(ulong address, ulong size)
         {
             var sequence = _resolveWorker!.Sequence;
-            return (_translation.PendingWrites is { } pending && pending.HasPendingBetween(address, size, pending.Released, sequence)) ||
+            return (_translation.PendingWrites is { } pending && pending.MayHavePending(address, size) &&
+                    pending.HasPendingBetween(address, size, pending.Released, sequence)) ||
                 _commandThread!.HasShadowBefore(address, size, sequence);
         }
 
