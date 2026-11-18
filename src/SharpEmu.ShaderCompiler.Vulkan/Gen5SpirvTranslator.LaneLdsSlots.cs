@@ -56,7 +56,8 @@ public static partial class Gen5SpirvTranslator
                 {
                     targets.Add(instruction.Pc + sizeof(uint) + (uint)((short)(instruction.Words[0] & 0xFFFF) * sizeof(uint)));
                 }
-                else if (instruction.Opcode is "SSetpcB64" or "SSwappcB64" or "SGetpcB64")
+                // A computed jump hides branch targets. s_getpc_b64 only reads the PC (a PC-relative constant buffer).
+                else if (instruction.Opcode is "SSetpcB64" or "SSwappcB64")
                 {
                     return null;
                 }
