@@ -456,7 +456,13 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 ref readonly var heap = ref heaps[index];
                 var table = heap.Sampler ? _heapSamplerViews : _heapImageViews;
-                var region = table.Acquire(heap, tick, completed, _heapRegionReleased!, out var moved, frame);
+                var region = table.Acquire(heap, tick, completed, _heapRegionReleased!, out var moved, out var grownFrom, frame);
+                // A packed heap that outgrew its run gets the elements of the old one at once.
+                if (region is not null && grownFrom is not null)
+                {
+                    CopyHeapEntries(grownFrom, region);
+                }
+
                 HeapRegionEntries? entries = null;
                 // Set 1 is updated after bind, but an element a command not yet completed reads must not change under it.
                 // A small view the guest rewrote while such commands still read its run gets another run for this command
@@ -562,6 +568,28 @@ internal static unsafe partial class VulkanVideoPresenter
 
             region.ResolvedRecords = Math.Max(region.ResolvedRecords, records);
             region.ResolvedSlots |= slots;
+        }
+
+        // A heap that grew past its run takes a larger one: the records its shaders read through the old run get their
+        // elements in the new run now, so a draw reads them at once instead of null until the next marks come back.
+        private void CopyHeapEntries(BindlessHeapViewTable.Region from, BindlessHeapViewTable.Region to)
+        {
+            if (!_heapRegionEntries.TryGetValue(from, out var entries))
+            {
+                return;
+            }
+
+            foreach (var entry in entries.Order.ToArray())
+            {
+                var index = to.View.First + (entry.Index - from.View.First);
+                if (!to.Holds(index) || _heapEntries.ContainsKey((entry.Slot, index)))
+                {
+                    continue;
+                }
+
+                _heapMarked[entry.Slot * (int)BindlessHeap.FeedbackWordsPerArray + (int)(index >> 5)] |= 1u << (int)(index & 31);
+                AddHeapEntry(entry.Slot, index, to);
+            }
         }
 
         private void AddHeapEntry(int slot, uint index, BindlessHeapViewTable.Region region)

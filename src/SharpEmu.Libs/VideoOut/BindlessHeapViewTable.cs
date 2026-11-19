@@ -10,7 +10,8 @@ namespace SharpEmu.Libs.VideoOut;
 // shaders marked stay resolved. A new view takes over a run long enough for it of a view of its shape that no pending command reads any more: a
 // table the guest allocates for each frame is the same records at another address, and most of its elements stay as they are, even when the
 // frame's table has a few records more or less (a terrain's tile list grows and shrinks while the camera moves). A view longer than every run of
-// its shape gets a longer run, so the counts that follow fit in it.
+// its shape gets a longer run, so the counts that follow fit in it. A packed heap is one view at any count (a texture heap the guest
+// streams more textures into): when it outgrows its run it takes a longer one, and the old run stays for the commands that read it.
 // Otherwise it takes free elements, then the elements of the views no pending command reads, least recently used first,
 // and at last shares the run of a view of its shape that is still read, as one heap that moved (a title's whole texture
 // heap, kept in two copies, is larger than half of set 1).
@@ -58,7 +59,13 @@ internal sealed class BindlessHeapViewTable(uint capacity)
     // its elements are taken), or shares the run of a view of its shape that is still read (moved). Null when the view has
     // no records or the table has no room for it.
     public Region? Acquire(in BindlessHeapDescriptor descriptor, ulong tick, ulong completedTick, Action<Region> released, out bool moved, long frame = 0) =>
-        AcquireKey(descriptor.ViewKey(), tick, completedTick, released, out moved, frame);
+        Acquire(descriptor, tick, completedTick, released, out moved, out _, frame);
+
+    // grownFrom is the run a packed heap outgrew: the view's new run holds the same records from the same first record on,
+    // so the caller can give it that run's elements at once.
+    public Region? Acquire(in BindlessHeapDescriptor descriptor, ulong tick, ulong completedTick, Action<Region> released, out bool moved,
+        out Region? grownFrom, long frame = 0) =>
+        AcquireKey(descriptor.ViewKey(), Math.Min(descriptor.ViewRecords, capacity), tick, completedTick, released, out moved, out grownFrom, frame);
 
     // A view whose records changed while commands not yet completed still read its run: the view gets another run (a free
     // one, or that of an idle view of its shape, moved), and the old run keeps its elements for those commands until it is
@@ -74,7 +81,7 @@ internal sealed class BindlessHeapViewTable(uint capacity)
         }
 
         _byHeap.Remove(heap);
-        var fork = AcquireKey(heap, tick, completedTick, released, out moved, frame);
+        var fork = AcquireKey(heap, region.View.Records, tick, completedTick, released, out moved, out _, frame);
         if (fork is null || ReferenceEquals(fork, region))
         {
             _byHeap[heap] = region;
@@ -85,39 +92,54 @@ internal sealed class BindlessHeapViewTable(uint capacity)
         return fork;
     }
 
-    private Region? AcquireKey(in BindlessHeapDescriptor heap, ulong tick, ulong completedTick, Action<Region> released, out bool moved, long frame)
+    private Region? AcquireKey(in BindlessHeapDescriptor heap, uint records, ulong tick, ulong completedTick, Action<Region> released,
+        out bool moved, out Region? grownFrom, long frame)
     {
         moved = false;
+        grownFrom = null;
         if (_byHeap.TryGetValue(heap, out var region))
         {
-            region.ReadByPending = region.LastUsedTick > completedTick;
-            region.LastUsedTick = tick;
-            region.LastUsedFrame = frame;
-            return region;
+            if (region.Length >= records)
+            {
+                // A heap that grew within its run's room: the shader reads its new records from now on.
+                if (records > region.View.Records)
+                {
+                    region.View = region.View with { Records = records };
+                }
+
+                region.ReadByPending = region.LastUsedTick > completedTick;
+                region.LastUsedTick = tick;
+                region.LastUsedFrame = frame;
+                return region;
+            }
+
+            // The guest grew a packed heap past the run (a texture heap it streams more textures into). The run stays for
+            // the commands that read it until it is idle; the view takes a run with room to grow again.
+            grownFrom = region;
+            _byHeap.Remove(heap);
         }
 
-        var records = Math.Min(heap.Records, capacity);
         if (heap.Base == 0 || records == 0)
         {
             return null;
         }
 
         var shape = HeapView.Of(heap, 0, records);
-        if (FindShape(heap, shape, tick, completedTick) is { } idle)
+        if (grownFrom is null && FindShape(heap, shape, tick, completedTick) is { } idle)
         {
             moved = true;
             idle.ReadByPending = false;
-            return Move(idle, heap, tick, frame);
+            return Move(idle, heap, records, tick, frame);
         }
 
         // The room to grow is taken from free elements only: no view gives its elements up for it.
-        var length = RunLength(heap, shape);
+        var length = grownFrom is null ? RunLength(heap, shape) : GrownLength(records);
         if (length > records && !TryFindGap(length, out _, out _))
         {
             length = records;
         }
 
-        var slots = LatestShape(heap, shape)?.Slots ?? 0;
+        var slots = grownFrom?.Slots ?? LatestShape(heap, shape)?.Slots ?? 0;
         int position;
         uint first;
         while (!TryFindGap(length, out position, out first))
@@ -125,7 +147,7 @@ internal sealed class BindlessHeapViewTable(uint capacity)
             Region? oldest = null;
             foreach (var candidate in _regions)
             {
-                if (candidate.LastUsedTick <= completedTick && candidate.LastUsedTick < tick &&
+                if (candidate != grownFrom && candidate.LastUsedTick <= completedTick && candidate.LastUsedTick < tick &&
                     (oldest is null || candidate.LastUsedTick < oldest.LastUsedTick))
                 {
                     oldest = candidate;
@@ -134,6 +156,18 @@ internal sealed class BindlessHeapViewTable(uint capacity)
 
             if (oldest is null)
             {
+                if (grownFrom is not null)
+                {
+                    // No room for a longer run: the view keeps the one it has.
+                    _byHeap.Add(heap, grownFrom);
+                    grownFrom.ReadByPending = grownFrom.LastUsedTick > completedTick;
+                    grownFrom.LastUsedTick = tick;
+                    grownFrom.LastUsedFrame = frame;
+                    var kept = grownFrom;
+                    grownFrom = null;
+                    return kept;
+                }
+
                 if (FindShape(heap, shape, ulong.MaxValue, ulong.MaxValue) is not { } shared)
                 {
                     return null;
@@ -141,7 +175,7 @@ internal sealed class BindlessHeapViewTable(uint capacity)
 
                 moved = true;
                 shared.ReadByPending = true;
-                return Move(shared, heap, tick, frame);
+                return Move(shared, heap, records, tick, frame);
             }
 
             Release(oldest, released);
@@ -210,7 +244,10 @@ internal sealed class BindlessHeapViewTable(uint capacity)
         return records;
     }
 
-    // A run forked away from its view is no longer the one its heap names.
+    // A packed heap that outgrew its run: an eighth more.
+    private uint GrownLength(uint records) => (uint)Math.Min((ulong)records + records / 8, capacity);
+
+    // A run forked away from its view, or one a grown heap left behind, is no longer the one its heap names.
     private void Unkey(Region region)
     {
         if (_byHeap.TryGetValue(region.Heap, out var keyed) && ReferenceEquals(keyed, region))
@@ -219,10 +256,10 @@ internal sealed class BindlessHeapViewTable(uint capacity)
         }
     }
 
-    private Region Move(Region region, in BindlessHeapDescriptor heap, ulong tick, long frame)
+    private Region Move(Region region, in BindlessHeapDescriptor heap, uint records, ulong tick, long frame)
     {
         Unkey(region);
-        region.View = region.View with { Records = Math.Min(heap.Records, region.Length) };
+        region.View = region.View with { Records = Math.Min(records, region.Length) };
         region.Heap = heap;
         region.LastUsedTick = tick;
         region.LastUsedFrame = frame;
