@@ -19,11 +19,16 @@ internal static partial class VulkanVideoPresenter
     // queued; a callback that returns a result waits for the render thread to run everything before it.
     private sealed class CommandThread : AgcExports.IDeferredWorkSink
     {
-        // The thread runs this far ahead of the render thread at most. Operand reads only drain the
-        // queue when a queued write targets them, so the depth mostly costs memory; too shallow and the
-        // two threads take turns waiting on each other (128 did, with draws resolving on the pool).
+        // The thread runs this far ahead of the render thread at most: 4,096 items, or a larger configured depth, so it keeps
+        // interpreting while the render side records and joins slices. Operand reads only drain the queue when a queued write
+        // targets them, so the depth mostly costs memory; too shallow and the two threads take turns waiting on each other
+        // (128 did, with draws resolving on the pool).
         private static readonly int MaxOutstanding =
-            int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_COMMAND_QUEUE_DEPTH"), out var depth) && depth >= 128 ? depth : 1024;
+            int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_COMMAND_QUEUE_DEPTH"), out var depth) && depth > 4096 ? depth : 4096;
+
+        // A producer waiting for room resumes once the queue is an eighth below its cap rather than half empty, so it
+        // keeps overlapping the render side instead of waiting for it to drain.
+        private static readonly int ResumeBelow = MaxOutstanding - MaxOutstanding / 8;
 
         private static readonly int SlicesAheadPerWorker =
             int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_SLICES_AHEAD"), out var ahead) && ahead >= 1 ? ahead : 2;
@@ -687,7 +692,7 @@ internal static partial class VulkanVideoPresenter
                 {
                     _waitingForSpace = true;
                     Interlocked.MemoryBarrier();
-                    if (Volatile.Read(ref _outstanding) < MaxOutstanding / 2 || _failure is not null)
+                    if (Volatile.Read(ref _outstanding) < ResumeBelow || _failure is not null)
                     {
                         break;
                     }
@@ -791,7 +796,7 @@ internal static partial class VulkanVideoPresenter
             var ran = 0;
             for (;;)
             {
-                FillUnits(maxItems);
+                FillUnits();
                 if (_unitHead == _units.Count)
                 {
                     _units.Clear();
@@ -839,7 +844,9 @@ internal static partial class VulkanVideoPresenter
             }
         }
 
-        private void FillUnits(int maxItems)
+        // A fill cuts slices up to the look-ahead limit rather than a fixed number of items, so the render workers keep
+        // recording while the render thread joins and the command thread runs ahead.
+        private void FillUnits()
         {
             var slicing = _presenter.SlicesEnabled;
             var slicesAhead = 0;
@@ -852,8 +859,7 @@ internal static partial class VulkanVideoPresenter
             }
 
             var limit = slicing ? SlicesAheadPerWorker * _presenter.WorkerCount : 0;
-            var pulled = 0;
-            while (slicesAhead <= limit && pulled < maxItems)
+            while (slicesAhead <= limit)
             {
                 if (_drainIndex == _draining.Count && !RefillDraining())
                 {
@@ -862,7 +868,6 @@ internal static partial class VulkanVideoPresenter
 
                 var item = _draining[_drainIndex];
                 _draining[_drainIndex++] = null!;
-                pulled++;
                 if (slicing && item.Kind == Kind.Deferred)
                 {
                     (_cutting ??= new RenderSlice()).Items.Add(item);
@@ -1077,7 +1082,7 @@ internal static partial class VulkanVideoPresenter
             var outstanding = Interlocked.Decrement(ref _outstanding);
             // One pulse per wait: the producer sets its flag again if it keeps waiting.
             var wakeForSync = item.Sync && _waitingForSync;
-            var wakeForSpace = _waitingForSpace && outstanding < MaxOutstanding / 2;
+            var wakeForSpace = _waitingForSpace && outstanding < ResumeBelow;
             var wakeForSequence = item.Sequence >= Volatile.Read(ref _waitingForSequence);
             if (wakeForSync || wakeForSpace || wakeForSequence)
             {
