@@ -179,19 +179,26 @@ public readonly record struct BindlessHeapDescriptor(bool Sampler, ulong Base, u
 
     // The heap as its view sees it, which keys the view's run of elements (BindlessHeapViewTable). Packed descriptors
     // (a stride of the descriptor's size or less) are one view at whatever immediate the shader reads them, since the
-    // read's whole offset picks the descriptor; their count is the V#'s bytes over the descriptor size (a raw V#, stride 0,
-    // counts bytes, a strided one records of its stride). A record view is keyed by the descriptor's offset in a record.
-    public BindlessHeapDescriptor ViewKey
+    // read's whole offset picks the descriptor, and at whatever count: a texture heap the guest streams more textures into
+    // grows from frame to frame and stays one view (ViewRecords is the count a draw names). A record view is keyed by the
+    // descriptor's offset in a record.
+    public BindlessHeapDescriptor ViewKey => Stride > DescriptorBytes
+        ? this with { Immediate = Immediate % Stride }
+        : this with { Records = 0, Immediate = 0 };
+
+    // How many records the view of this heap needs elements for: packed descriptors count the V#'s bytes over the
+    // descriptor size (a raw V#, stride 0, counts bytes, a strided one records of its stride).
+    public uint ViewRecords
     {
         get
         {
             if (Stride > DescriptorBytes)
             {
-                return this with { Immediate = Immediate % Stride };
+                return Records;
             }
 
             var bytes = Stride == 0 ? Records : (ulong)Records * Stride;
-            return this with { Records = (uint)Math.Min(bytes / DescriptorBytes, uint.MaxValue), Immediate = 0 };
+            return (uint)Math.Min(bytes / DescriptorBytes, uint.MaxValue);
         }
     }
 }
