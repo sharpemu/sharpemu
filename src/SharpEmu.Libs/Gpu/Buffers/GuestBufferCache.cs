@@ -441,7 +441,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                 BumpGpuModifiedVersion();
             }
 
-            NoteHotWindowWrite(guestAddress, size);
+            NoteHotWindowWrite(buffer, guestAddress, size);
         }
         else OverlayGuestPublications?.Invoke(buffer, buffer.Offset(guestAddress), guestAddress, size);
 
@@ -1795,38 +1795,65 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     }
 
     private const ulong ReadbackWindowBytes = 512 * 1024;
-    private const long HotWindowLifetime = 512;
-    private const int MaxEagerReadbacks = 4;
+    private const long HotWindowLifetime = 4096;
+    private const int MaxEagerReadbacks = 16;
     private const int MaxAsyncReadbackAttempts = 4;
     private const int MaxReadbackSlotWaits = 64;
     private const int EagerStrikeLimit = 3;
     private const long EagerMuteBatches = 4096;
+    private static readonly long EagerLandCheckTicks = System.Diagnostics.Stopwatch.Frequency / 20_000;
     private readonly Dictionary<ulong, HotWindow> _hotWindows = new();
     private readonly HashSet<ulong> _eagerCandidates = new();
+    // The tick of each candidate's newest write; the candidate is not looked at again before the GPU completes it.
+    private readonly Dictionary<ulong, ulong> _eagerWaitTicks = new();
     private readonly List<PendingDownload> _eagerDownloads = new();
+    // The completed tick at which the pump next looks at the candidates: the earliest one a candidate waits for, or 0 once a
+    // landing freed a download.
+    private ulong _nextEagerTick = ulong.MaxValue;
+    private long _lastEagerPump;
     private long _batchSerial;
     private static long _reportedEagerStarted;
     private static long _reportedEagerUsed;
     private static long _reportedEagerStale;
     private static long _reportedEagerMuted;
 
-    private readonly record struct HotWindow(ulong Address, ulong Size, long LastHit, int Strikes = 0, long MutedUntil = 0);
+    private readonly record struct HotWindow(ulong Key, ulong Address, ulong Size, long LastHit, int Strikes = 0, long MutedUntil = 0);
 
-    // Eager readbacks are off unless SHARPEMU_EAGER_READBACKS=1: the CPU consumes few of them, while each still ends
-    // rendering early to flush its batch and downloads its whole window.
-    internal bool EagerReadbacksEnabled { get; set; } =
-        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_EAGER_READBACKS"), "1", StringComparison.Ordinal);
+    // A window the guest read back is read ahead after its next GPU write, once that write's tick has completed: the copy
+    // waits on nothing, and it usually lands before the guest reads the window again.
+    internal bool EagerReadbacksEnabled { get; set; } = true;
 
     internal long EagerReadbacksStarted { get; private set; }
 
     internal long EagerReadbacksUsed { get; private set; }
 
+    // A buffer of up to one window has a hot entry of its own, so a GPU write anywhere in it starts its readback. Its key is the
+    // buffer address with bit 0 set: buffers are page aligned and window keys window aligned. A larger buffer keeps one entry
+    // per aligned window.
+    private ulong HotKeyFor(ulong guestAddress, ulong size) =>
+        FindOwner(guestAddress, Math.Max(size, 1)) is { Size: <= ReadbackWindowBytes } buffer
+            ? buffer.CpuAddress | 1
+            : guestAddress & ~(ReadbackWindowBytes - 1);
+
+    // The write that makes a candidate is in the tick being recorded.
+    private void AddEagerCandidate(ulong key)
+    {
+        _eagerCandidates.Add(key);
+        var tick = _scheduler.CurrentTick;
+        if (!_eagerWaitTicks.TryGetValue(key, out var waiting) || waiting < tick)
+        {
+            _eagerWaitTicks[key] = tick;
+        }
+
+        _nextEagerTick = Math.Min(_nextEagerTick, tick);
+    }
+
     private void NoteHotReadback(ulong guestAddress, ulong size)
     {
-        var key = guestAddress & ~(ReadbackWindowBytes - 1);
+        var key = HotKeyFor(guestAddress, size);
         _hotWindows[key] = _hotWindows.TryGetValue(key, out var hot)
             ? hot with { Address = guestAddress, Size = size, LastHit = _batchSerial }
-            : new HotWindow(guestAddress, size, _batchSerial);
+            : new HotWindow(key, guestAddress, size, _batchSerial);
     }
 
     internal long EagerReadbacksWasted { get; private set; }
@@ -1863,46 +1890,44 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         }
     }
 
-    private void NoteHotWindowWrite(ulong guestAddress, ulong size)
+    private void NoteHotWindowWrite(GpuBuffer buffer, ulong guestAddress, ulong size)
     {
         if (!EagerReadbacksEnabled || _hotWindows.Count == 0 || size == 0)
         {
             return;
         }
 
+        if (buffer.Size <= ReadbackWindowBytes)
+        {
+            NoteHotWrite(buffer.CpuAddress | 1);
+            return;
+        }
+
         var last = (guestAddress + size - 1) & ~(ReadbackWindowBytes - 1);
         for (var key = guestAddress & ~(ReadbackWindowBytes - 1); key <= last; key += ReadbackWindowBytes)
         {
-            if (_hotWindows.TryGetValue(key, out var hot) && _batchSerial - hot.LastHit <= HotWindowLifetime &&
-                _batchSerial >= hot.MutedUntil)
-            {
-                _eagerCandidates.Add(key);
-                HotWritePending |= hot.Strikes == 0;
-            }
+            NoteHotWrite(key);
         }
     }
 
-    public bool HotWritePending { get; private set; }
+    private void NoteHotWrite(ulong key)
+    {
+        if (_hotWindows.TryGetValue(key, out var hot) && _batchSerial - hot.LastHit <= HotWindowLifetime &&
+            _batchSerial >= hot.MutedUntil)
+        {
+            AddEagerCandidate(key);
+        }
+    }
 
     public void OnBatchSubmitted()
     {
         _batchSerial++;
-        HotWritePending = false;
         if (AsyncReadback is not { } readback)
         {
             return;
         }
 
-        for (var index = _eagerDownloads.Count - 1; index >= 0; index--)
-        {
-            var pending = _eagerDownloads[index];
-            if (readback.IsComplete(pending.Ticket))
-            {
-                _eagerDownloads.RemoveAt(index);
-                _ = CompleteReadMemoryOnGpu(pending, consumed: false);
-            }
-        }
-
+        LandEagerReadbacks(readback);
         if ((_batchSerial & 1023) == 0)
         {
             foreach (var key in _hotWindows.Where(pair => _batchSerial - pair.Value.LastHit > HotWindowLifetime && _batchSerial >= pair.Value.MutedUntil)
@@ -1912,35 +1937,114 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             }
         }
 
+        if (_eagerCandidates.Count != 0)
+        {
+            StartEagerCandidates(_scheduler.Timeline.CompletedTick);
+        }
+    }
+
+    // On the GPU queue thread between command items: lands the finished eager readbacks and starts the candidates whose
+    // writer has completed. While every candidate still waits for its writer and no readback is in flight it is one compare;
+    // readbacks in flight are checked at most every EagerLandCheckTicks.
+    internal void PumpEagerReadbacks()
+    {
+        if ((_eagerCandidates.Count == 0 && _eagerDownloads.Count == 0) || AsyncReadback is not { } readback)
+        {
+            return;
+        }
+
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        var due = _eagerCandidates.Count != 0 && _scheduler.Timeline.CompletedTick >= _nextEagerTick;
+        if (!due && (_eagerDownloads.Count == 0 || now - _lastEagerPump < EagerLandCheckTicks))
+        {
+            return;
+        }
+
+        _lastEagerPump = now;
+        if (LandEagerReadbacks(readback))
+        {
+            _nextEagerTick = 0;
+        }
+
         if (_eagerCandidates.Count == 0)
         {
             return;
         }
 
+        _scheduler.Timeline.RefreshCompletedTick();
+        var capped = StartEagerCandidates(_scheduler.Timeline.CompletedTick);
+        // Capped, the next landing frees a download; otherwise the pump waits for the earliest writer a candidate waits for.
+        var next = ulong.MaxValue;
+        if (!capped)
+        {
+            foreach (var key in _eagerCandidates)
+            {
+                next = Math.Min(next, _eagerWaitTicks.TryGetValue(key, out var waiting) ? waiting : 0);
+            }
+        }
+
+        _nextEagerTick = next;
+    }
+
+    // True when a readback landed.
+    private bool LandEagerReadbacks(VulkanAsyncReadback readback)
+    {
+        var landed = false;
+        for (var index = _eagerDownloads.Count - 1; index >= 0; index--)
+        {
+            var pending = _eagerDownloads[index];
+            if (readback.IsComplete(pending.Ticket))
+            {
+                _eagerDownloads.RemoveAt(index);
+                _ = CompleteReadMemoryOnGpu(pending, consumed: false);
+                landed = true;
+            }
+        }
+
+        return landed;
+    }
+
+    // Starts the candidates whose newest write completed by the given tick; true when the readbacks in flight reached the cap
+    // before every candidate was looked at.
+    private bool StartEagerCandidates(ulong completed)
+    {
         List<ulong>? settled = null;
+        var capped = false;
         foreach (var key in _eagerCandidates)
         {
             if (_eagerDownloads.Count >= MaxEagerReadbacks)
             {
+                capped = true;
                 break;
             }
 
-            if (!_hotWindows.TryGetValue(key, out var hot) || _batchSerial - hot.LastHit > HotWindowLifetime ||
-                _batchSerial < hot.MutedUntil || StartEagerReadback(hot) != EagerStart.Deferred)
+            if (!_hotWindows.TryGetValue(key, out var hot) || _batchSerial - hot.LastHit > HotWindowLifetime)
+            {
+                (settled ??= []).Add(key);
+                continue;
+            }
+
+            if (_eagerWaitTicks.TryGetValue(key, out var waitTick) && waitTick > completed)
+            {
+                continue;
+            }
+
+            if (_batchSerial < hot.MutedUntil || StartEagerReadback(hot) != EagerStart.Deferred)
             {
                 (settled ??= []).Add(key);
             }
         }
 
-        if (settled is null)
+        if (settled is not null)
         {
-            return;
+            foreach (var key in settled)
+            {
+                _eagerCandidates.Remove(key);
+                _eagerWaitTicks.Remove(key);
+            }
         }
 
-        foreach (var key in settled)
-        {
-            _eagerCandidates.Remove(key);
-        }
+        return capped;
     }
 
     private enum EagerStart
@@ -1952,7 +2056,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
     private EagerStart StartEagerReadback(HotWindow hot)
     {
-        if (FindOwner(hot.Address, hot.Size) is not { IsMapped: false } buffer)
+        if (FindOwner(hot.Address, hot.Size) is not { } buffer)
         {
             return EagerStart.Nothing;
         }
@@ -1968,6 +2072,20 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             return EagerStart.Nothing;
         }
 
+        // The copy starts only once the window's newest writer has finished, so it never waits on the readback queue.
+        var waitTick = 0UL;
+        foreach (var copy in copies)
+        {
+            waitTick = Math.Max(waitTick, copy.Buffer.LastGpuWriteTickIn(copy.SourceOffset, copy.Size));
+        }
+
+        if (waitTick > _scheduler.Timeline.CompletedTick)
+        {
+            _eagerWaitTicks[hot.Key] = waitTick;
+            _nextEagerTick = Math.Min(_nextEagerTick, waitTick);
+            return EagerStart.Deferred;
+        }
+
         if (!TryBeginDownloadAsync(copies, out var ticket, out var writeTicks, out _))
         {
             return EagerStart.Deferred;
@@ -1980,7 +2098,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
         _eagerDownloads.Add(new PendingDownload
         {
-            HotKey = hot.Address & ~(ReadbackWindowBytes - 1),
+            HotKey = hot.Key,
             Ticket = ticket,
             Copies = copies,
             WriteTicks = writeTicks,
@@ -2058,6 +2176,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
         _eagerDownloads.Clear();
         _eagerCandidates.Clear();
+        _eagerWaitTicks.Clear();
     }
 
     private static readonly bool GuestReadsAwaitOffQueue =

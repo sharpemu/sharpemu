@@ -541,6 +541,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void RunRelayBetweenCommandItems()
         {
+            _bufferCache.PumpEagerReadbacks();
             if (_relay.HasPendingCommands)
             {
                 using var relayScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.QueueRelay);
