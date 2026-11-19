@@ -20,6 +20,7 @@ internal sealed class BindlessHeapViewTable(uint capacity)
         public required BindlessHeapDescriptor Heap { get; set; }
         public required HeapView View { get; init; }
         public ulong LastUsedTick;
+        public long LastUsedFrame;
 
         public bool Holds(uint element) => element >= View.First && element - View.First < View.Records;
 
@@ -40,13 +41,14 @@ internal sealed class BindlessHeapViewTable(uint capacity)
     // or free elements, or those of the least recently used views no pending command reads (released sees each one before
     // its elements are taken), or shares the run of a view of its shape that is still read (moved). Null when the view has
     // no records or the table has no room for it.
-    public Region? Acquire(in BindlessHeapDescriptor descriptor, ulong tick, ulong completedTick, Action<Region> released, out bool moved)
+    public Region? Acquire(in BindlessHeapDescriptor descriptor, ulong tick, ulong completedTick, Action<Region> released, out bool moved, long frame = 0)
     {
         moved = false;
         var heap = descriptor.ViewKey;
         if (_byHeap.TryGetValue(heap, out var region))
         {
             region.LastUsedTick = tick;
+            region.LastUsedFrame = frame;
             return region;
         }
 
@@ -60,7 +62,7 @@ internal sealed class BindlessHeapViewTable(uint capacity)
         if (FindShape(heap, shape, tick, completedTick) is { } idle)
         {
             moved = true;
-            return Move(idle, heap, tick);
+            return Move(idle, heap, tick, frame);
         }
 
         int position;
@@ -85,13 +87,13 @@ internal sealed class BindlessHeapViewTable(uint capacity)
                 }
 
                 moved = true;
-                return Move(shared, heap, tick);
+                return Move(shared, heap, tick, frame);
             }
 
             Release(oldest, released);
         }
 
-        region = new Region { Heap = heap, View = HeapView.Of(heap, first, records), LastUsedTick = tick };
+        region = new Region { Heap = heap, View = HeapView.Of(heap, first, records), LastUsedTick = tick, LastUsedFrame = frame };
         _regions.Insert(position, region);
         _byHeap.Add(heap, region);
         return region;
@@ -114,11 +116,12 @@ internal sealed class BindlessHeapViewTable(uint capacity)
         return found;
     }
 
-    private Region Move(Region region, in BindlessHeapDescriptor heap, ulong tick)
+    private Region Move(Region region, in BindlessHeapDescriptor heap, ulong tick, long frame)
     {
         _byHeap.Remove(region.Heap);
         region.Heap = heap;
         region.LastUsedTick = tick;
+        region.LastUsedFrame = frame;
         _byHeap.Add(heap, region);
         return region;
     }
@@ -149,13 +152,13 @@ internal sealed class BindlessHeapViewTable(uint capacity)
         return null;
     }
 
-    // Gives up the runs last used before idleBefore that no pending command reads.
-    public void ReleaseIdle(ulong idleBefore, ulong completedTick, Action<Region> released)
+    // Gives up runs idle in both submission ticks and guest frames, once no pending command reads them.
+    public void ReleaseIdle(ulong idleBefore, ulong completedTick, Action<Region> released, long idleBeforeFrame = long.MaxValue)
     {
         for (var index = _regions.Count - 1; index >= 0; index--)
         {
             var region = _regions[index];
-            if (region.LastUsedTick < idleBefore && region.LastUsedTick <= completedTick)
+            if (region.LastUsedTick < idleBefore && region.LastUsedTick <= completedTick && region.LastUsedFrame < idleBeforeFrame)
             {
                 Release(region, released);
             }

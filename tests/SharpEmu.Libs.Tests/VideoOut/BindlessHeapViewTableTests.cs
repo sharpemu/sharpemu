@@ -233,4 +233,20 @@ public sealed class BindlessHeapViewTableTests
         Assert.Equal([idle], released);
         Assert.Equal([pending, used], table.Regions);
     }
+
+    [Fact]
+    public void AViewReadEachFrameSurvivesMoreThanTheIdleTickLimitBetweenReads()
+    {
+        var table = new BindlessHeapViewTable(1024);
+        var heap = new BindlessHeapDescriptor(false, 0x10000, 256, 32);
+        var view = table.Acquire(heap, tick: 100, completedTick: 90, Unreleased, out _, frame: 20)!;
+        var released = new List<BindlessHeapViewTable.Region>();
+
+        table.ReleaseIdle(idleBefore: 113, completedTick: 360, released.Add, idleBeforeFrame: 19);
+        Assert.False(released.Count != 0, "A view used in the previous frame was released.");
+        Assert.Same(view, table.Acquire(heap, tick: 369, completedTick: 360, Unreleased, out _, frame: 21));
+
+        table.ReleaseIdle(idleBefore: 449, completedTick: 700, released.Add, idleBeforeFrame: 22);
+        Assert.Equal([view], released);
+    }
 }
