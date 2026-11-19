@@ -455,7 +455,13 @@ internal static unsafe partial class VulkanVideoPresenter
             for (var index = 0; index < heaps.Length; index++)
             {
                 ref readonly var heap = ref heaps[index];
-                var region = (heap.Sampler ? _heapSamplerViews : _heapImageViews).Acquire(heap, tick, completed, _heapRegionReleased!, out var moved, frame);
+                var region = (heap.Sampler ? _heapSamplerViews : _heapImageViews).Acquire(heap, tick, completed, _heapRegionReleased!, out var moved,
+                    out var grownFrom, frame);
+                if (region is not null && grownFrom is not null)
+                {
+                    CopyHeapEntries(grownFrom, region);
+                }
+
                 var view = region?.View ?? HeapView.None;
                 words[index * (int)HeapView.DwordCount] = view.Word0;
                 words[index * (int)HeapView.DwordCount + 1] = view.Word1;
@@ -478,6 +484,28 @@ internal static unsafe partial class VulkanVideoPresenter
                     RevalidateHeapRegion(region, entries);
                 }
 
+            }
+        }
+
+        // A heap that grew past its run takes a larger one: the records its shaders read through the old run get their
+        // elements in the new run now, so a draw reads them at once instead of null until the next marks come back.
+        private void CopyHeapEntries(BindlessHeapViewTable.Region from, BindlessHeapViewTable.Region to)
+        {
+            if (!_heapRegionEntries.TryGetValue(from, out var entries))
+            {
+                return;
+            }
+
+            foreach (var entry in entries.Order.ToArray())
+            {
+                var index = to.View.First + (entry.Index - from.View.First);
+                if (!to.Holds(index) || _heapEntries.ContainsKey((entry.Slot, index)))
+                {
+                    continue;
+                }
+
+                _heapMarked[entry.Slot * (int)BindlessHeap.FeedbackWordsPerArray + (int)(index >> 5)] |= 1u << (int)(index & 31);
+                AddHeapEntry(entry.Slot, index, to);
             }
         }
 
@@ -534,7 +562,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var firstSlot = sampler ? BindlessHeap.SamplerSlot : 0;
             var endSlot = sampler ? BindlessHeap.ArrayCount : BindlessHeap.ImageKinds.Length;
             var firstWord = region.View.First >> 5;
-            var endWord = (region.View.First + region.View.Records + 31) >> 5;
+            var endWord = (region.View.First + region.Extent + 31) >> 5;
             _ = BeginBatchedGuestCommands();
             for (var slot = firstSlot; slot < endSlot; slot++)
             {

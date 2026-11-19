@@ -207,6 +207,40 @@ public sealed class BindlessHeapViewTableTests
         Assert.Same(terrain, table.Find(0));
     }
 
+    // A texture heap the guest streams more textures into names more records from frame to frame, and a draw prepared
+    // earlier still names fewer. It stays one view: a draw that names more records than the run holds gives the view a
+    // larger run with room to grow (the caller moves the resolved elements over), a draw that names fewer reads what the
+    // view holds, and the shader reads up to the most records a draw named, never into the spare room.
+    [Fact]
+    public void AGrowingPackedHeapStaysOneViewAndReadsUpToTheMostRecordsADrawNamed()
+    {
+        var table = new BindlessHeapViewTable(1000);
+        var heap = new BindlessHeapDescriptor(false, 0x10000, 100, 32);
+        var view = table.Acquire(heap, tick: 1, completedTick: 0, Unreleased, out _, out var grownFrom)!;
+        Assert.Null(grownFrom);
+        Assert.Equal(new HeapView(0, 32, 0, 100), view.View);
+
+        var grown = table.Acquire(heap with { Records = 160 }, tick: 2, completedTick: 0, Unreleased, out var moved, out grownFrom)!;
+        Assert.False(moved);
+        Assert.Same(view, grownFrom);
+        Assert.Equal(new HeapView(100, 32, 0, 160), grown.View);
+        Assert.Equal(180u, grown.Extent);
+        // The outgrown run stays for the commands that read it.
+        Assert.Equal(2, table.Regions.Count);
+
+        Assert.Same(grown, table.Acquire(heap with { Records = 170 }, tick: 3, completedTick: 0, Unreleased, out _, out grownFrom));
+        Assert.Null(grownFrom);
+        Assert.Equal(new HeapView(100, 32, 0, 170), grown.View);
+        Assert.Same(grown, table.Acquire(heap, tick: 4, completedTick: 0, Unreleased, out _, out _));
+        Assert.Equal(170u, grown.View.Records);
+
+        // Released once idle, the outgrown run leaves the heap's current run in place.
+        var released = new List<BindlessHeapViewTable.Region>();
+        table.ReleaseIdle(idleBefore: 3, completedTick: 4, released.Add);
+        Assert.Equal([view], released);
+        Assert.Same(grown, table.Acquire(heap, tick: 5, completedTick: 4, Unreleased, out _, out _));
+    }
+
     [Fact]
     public void AViewHasNoMoreElementsThanTheTable()
     {
