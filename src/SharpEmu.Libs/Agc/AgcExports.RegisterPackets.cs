@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Diagnostics;
 using SharpEmu.Libs.Kernel;
@@ -33,20 +34,24 @@ public static partial class AgcExports
             return ReturnPointer(ctx, 0);
         }
 
-        var registers = new RegisterDefaultValue[registerCount];
-        for (uint index = 0; index < registerCount; index++)
+        // The (offset, value) entries come in one read, and each run of consecutive registers is built in full and
+        // written with one allocation and one write.
+        var entries = new byte[registerCount * 8];
+        if (!ctx.Memory.TryRead(registersAddress, entries))
         {
-            var entryAddress = registersAddress + ((ulong)index * 8);
-            if (!TryReadUInt32(ctx, entryAddress, out var offset) ||
-                !TryReadUInt32(ctx, entryAddress + sizeof(uint), out var value))
-            {
-                return ReturnPointer(ctx, 0);
-            }
+            return ReturnPointer(ctx, 0);
+        }
 
-            registers[index] = new RegisterDefaultValue(offset, value);
+        var registers = new RegisterDefaultValue[registerCount];
+        for (var index = 0; index < registers.Length; index++)
+        {
+            registers[index] = new RegisterDefaultValue(
+                BinaryPrimitives.ReadUInt32LittleEndian(entries.AsSpan(index * 8)),
+                BinaryPrimitives.ReadUInt32LittleEndian(entries.AsSpan((index * 8) + sizeof(uint))));
         }
 
         Array.Sort(registers, static (left, right) => left.Offset.CompareTo(right.Offset));
+        var packet = new uint[registers.Length + 2];
         ulong firstCommandAddress = 0;
         var startIndex = 0;
         while (startIndex < registers.Length)
@@ -60,25 +65,19 @@ public static partial class AgcExports
 
             var valueCount = (uint)(endIndex - startIndex);
             var packetDwords = valueCount + 2;
-            if (!TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out var commandAddress) ||
-                !TryWriteUInt32(ctx, commandAddress, Pm4(packetDwords, ItSetShReg, 0)) ||
-                !TryWriteUInt32(ctx, commandAddress + 4, registers[startIndex].Offset & 0xFFFFu))
+            packet[0] = Pm4(packetDwords, ItSetShReg, 0);
+            packet[1] = registers[startIndex].Offset & 0xFFFFu;
+            for (var index = startIndex; index < endIndex; index++)
+            {
+                packet[2 + index - startIndex] = registers[index].Value;
+            }
+
+            if (!TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, packet.AsSpan(0, (int)packetDwords)))
             {
                 return ReturnPointer(ctx, 0);
             }
 
             firstCommandAddress = firstCommandAddress == 0 ? commandAddress : firstCommandAddress;
-            for (var index = startIndex; index < endIndex; index++)
-            {
-                if (!TryWriteUInt32(
-                        ctx,
-                        commandAddress + 8 + ((ulong)(index - startIndex) * sizeof(uint)),
-                        registers[index].Value))
-                {
-                    return ReturnPointer(ctx, 0);
-                }
-            }
-
             startIndex = endIndex;
         }
 
@@ -109,7 +108,21 @@ public static partial class AgcExports
         ulong commandAddress;
         using (AgcRegisterPacketProfile.Measure(AgcRegisterPacketProfile.Phase.PacketSetup))
         {
-            if (!TryEmitCommandDwords(ctx, commandBufferAddress, out _, Pm4(2, ItNop, RZero), CbSetShRegisterRangeMarker) ||
+            // The marker and the SET_SH_REG packet take one allocation, and the marker and header one write, when both
+            // packets fit without the buffer-full callback. Otherwise they are allocated apart, so a callback runs
+            // between them as it would for two separate packets.
+            if (TryAllocateFittingCommandDwords(ctx, commandBufferAddress, 2 + packetDwords, out var markerAddress))
+            {
+                if (!TryWriteCommandDwords(ctx, markerAddress, Pm4(2, ItNop, RZero), CbSetShRegisterRangeMarker,
+                        Pm4(packetDwords, ItSetShReg, 0), offset))
+                {
+                    AgcRegisterPacketProfile.RecordResult(false);
+                    return ReturnPointer(ctx, 0);
+                }
+
+                commandAddress = markerAddress + 8;
+            }
+            else if (!TryEmitCommandDwords(ctx, commandBufferAddress, out _, Pm4(2, ItNop, RZero), CbSetShRegisterRangeMarker) ||
                 !TryAllocateCommandDwords(ctx, commandBufferAddress, packetDwords, out commandAddress) ||
                 !TryWriteCommandDwords(ctx, commandAddress, Pm4(packetDwords, ItSetShReg, 0), offset))
             {
