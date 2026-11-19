@@ -194,6 +194,99 @@ public sealed partial class RenderExecutor
         Record(record);
     }
 
+    // Whether a direct dispatch runs no group (Dispatch records it skipped).
+    internal static bool IsEmptyDirectDispatch(ComputeStageRegisters compute, uint dispatchInitiator, uint groupsX, uint groupsY, uint groupsZ) =>
+        IsEmptyDispatch(compute, (dispatchInitiator & DispatchInitiatorUseThreadDimensions) != 0, groupsX, groupsY, groupsZ);
+
+    // The record of a deferred direct dispatch from its rebound program, built as Dispatch builds it after the program
+    // lookup. On a worker (serialOnly false), a program that is not plain, a decoded fill, copy or clear, or a linked program
+    // returns null: the member rolls back to the command thread. On the render thread (serialOnly true) every case is
+    // recorded as Dispatch records it, but a decoded word copy stays in the record instead of being posted.
+    internal ResolvedDispatch? ResolveDeferredDispatch(ulong submitId, ComputeStageRegisters compute, uint groupsX, uint groupsY, uint groupsZ,
+        uint dispatchInitiator, ComputeProgram computeProgram, bool serialOnly)
+    {
+        var record = _pool.RentDispatch();
+        record.Debug = new DebugInformation(RecordedOperation.DispatchDirect, submitId, groupsX, groupsY, groupsZ, dispatchInitiator, compute.Address);
+        record.Skipped = true;
+        record.SubmitId = submitId;
+        record.ShaderAddress = compute.Address;
+        if (computeProgram.ImageCopy is not null || computeProgram.Consumed || !computeProgram.Available || computeProgram.KnownWrite is not null)
+        {
+            if (!serialOnly)
+            {
+                _pool.Return(record);
+                return null;
+            }
+
+            if (computeProgram.ImageCopy is not null)
+            {
+                record.Program = computeProgram;
+                record.Skipped = false;
+                record.GroupsX = groupsX;
+                record.GroupsY = groupsY;
+                record.GroupsZ = groupsZ;
+                record.IndirectArgumentsAddress = 0;
+                return record;
+            }
+
+            if (computeProgram.Consumed || !computeProgram.Available)
+            {
+                return record;
+            }
+        }
+
+        var input = computeProgram.Input;
+        var program = input.Stage.Program ?? throw _host.Fatal($"The compute program is missing: shader=0x{compute.Address:X16}.");
+        if (program.Bindings is { CallTargetCount: not 0 })
+        {
+            if (!serialOnly)
+            {
+                _pool.Return(record);
+                return null;
+            }
+
+            if (SkipWhileLinkedModuleCompiles(input, computeProgram.Program, program))
+            {
+                return record;
+            }
+        }
+
+        record.MetadataClear = DecodeMetadataClear(input);
+        record.MetadataClearHasExclusiveOr = program.HasBitwiseExclusiveOr;
+        record.ConstantFill = DecodeConstantFill(input, groupsX, groupsY, groupsZ);
+        record.BoundedFill = DecodeBoundedFill(input, groupsX, groupsY, groupsZ, dispatchInitiator);
+        record.BoundedCopy = DecodeBoundedCopy(input, groupsX, groupsY, groupsZ, dispatchInitiator);
+        record.ImageClear = TryDecodeImageClear(input, groupsX, groupsY, groupsZ, dispatchInitiator);
+        if (!serialOnly && (record.ConstantFill is not null || record.BoundedFill is not null || record.BoundedCopy is not null || record.ImageClear is not null))
+        {
+            _pool.Return(record);
+            return null;
+        }
+
+        if ((dispatchInitiator & DispatchInitiatorUseThreadDimensions) != 0)
+        {
+            groupsX = GroupsFromThreads(groupsX, compute.ThreadsX);
+            groupsY = GroupsFromThreads(groupsY, compute.ThreadsY);
+            groupsZ = GroupsFromThreads(groupsZ, compute.ThreadsZ);
+        }
+
+        var hasStorageWrites = HasBufferWrites(input.Stage);
+        foreach (var image in program.Images)
+        {
+            hasStorageWrites |= image.Written && image.Class == ImageResourceClass.Storage;
+        }
+
+        record.Skipped = false;
+        record.Program = computeProgram;
+        record.GroupsX = groupsX;
+        record.GroupsY = groupsY;
+        record.GroupsZ = groupsZ;
+        record.IndirectArgumentsAddress = 0;
+        record.GpuThreadCounts = false;
+        record.HasStorageWrites = hasStorageWrites;
+        return record;
+    }
+
     // A program linked with the callees of its hit-group tables can take the driver minutes to compile, and the game
     // adds callees as it streams. Such programs are ray-traced passes that run every frame, so their dispatches are left
     // out while the module compiles instead of holding every queue behind it: the pass's output is stale for those

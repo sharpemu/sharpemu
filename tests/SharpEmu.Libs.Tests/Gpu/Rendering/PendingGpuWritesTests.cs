@@ -44,6 +44,29 @@ public sealed class PendingGpuWritesTests
     }
 
     [Fact]
+    public void AHoldKeepsReleasesBelowItsFirstSequenceUntilItEnds()
+    {
+        var pending = new PendingGpuWrites();
+        pending.Mark(0x1000, 0x10, sequence: 4);
+        pending.Mark(0x2000, 0x10, sequence: 6);
+        pending.HoldFrom(5);
+
+        pending.Release(3);
+        Assert.Equal(3, pending.Released);
+        pending.Release(7);
+        Assert.Equal(4, pending.Released);
+        Assert.False(pending.TryGetPending(0x1000, 4, out _));
+        Assert.True(pending.TryGetPending(0x2000, 4, out var sequence));
+        Assert.Equal(6, sequence);
+
+        pending.EndHold();
+        Assert.Equal(7, pending.Released);
+        Assert.False(pending.TryGetPending(0x2000, 4, out _));
+        pending.Release(8);
+        Assert.Equal(8, pending.Released);
+    }
+
+    [Fact]
     public void AMarkOfEverythingMakesEveryReadPendingUntilItIsReleased()
     {
         var pending = new PendingGpuWrites();

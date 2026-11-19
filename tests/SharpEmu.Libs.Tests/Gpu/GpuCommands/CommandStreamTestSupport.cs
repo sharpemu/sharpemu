@@ -31,6 +31,8 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     public SharpEmu.Libs.Gpu.Pipelines.ComputeTickets? ComputeTickets { get; set; }
 
+    public IDeferredDispatchRuns? DispatchRuns { get; set; }
+
     public Func<int, bool>? PendingPublications { get; set; }
 
     public Func<ulong, ulong, bool>? GpuWrittenCommandData { get; set; }

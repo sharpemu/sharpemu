@@ -1113,7 +1113,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 return WithPrediction(previous, kept.Kernel, kept.Source, kept.SystemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect);
             }
 
-            if (kept.Entry is { } entry && ++kept.Rebinds % IdentityRecheckPeriod != 0)
+            if (kept.Entry is { } entry && !kept.RecheckDue && ++kept.Rebinds % IdentityRecheckPeriod != 0)
             {
                 _computeRebound.Increment();
                 // A direct dispatch takes the rebind a compute ticket worker made ahead of it, while the ticket still holds.
@@ -1143,6 +1143,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         kept.Source = source;
+        kept.RecheckDue = false;
         kept.SystemRegisters = systemRegisters;
         kept.Kernel = decoded is not null && program.Available && !program.Consumed ? KernelFor(decoded) : null;
         kept.Entry = program.Available && !program.Consumed && source is not null ? ShaderProgramCache.LastEntry : null;
@@ -1259,6 +1260,84 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
         ticket.Program = program;
         ticket.Source = source;
+    }
+
+    // On the command thread: the kept program a direct dispatch would rebind, when a deferred dispatch worker may rebind it
+    // (as a ticket worker could), or null.
+    internal KeptComputeProgram? FindDeferrableKept(ComputeStageRegisters compute, uint dispatchInitiator)
+    {
+        if (_registry.HasFrontend || _keptComputes is not { } all || !all.TryGetValue(compute.Address, out var keptList))
+        {
+            return null;
+        }
+
+        var registrations = ShaderHeaderRegistry.Registrations;
+        KeptComputeProgram? kept = null;
+        foreach (var candidate in keptList)
+        {
+            if (candidate.Registrations == registrations && candidate.DispatchInitiator == dispatchInitiator && !candidate.GpuThreadCounts &&
+                SameComputeShape(candidate.Registers, compute))
+            {
+                kept = candidate;
+                break;
+            }
+        }
+
+        return kept is { Entry: { HasShaderCalls: false } entry, Source: not null, Kernel: null } &&
+            SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.CanMaterializeFast(entry.Plan)
+            ? kept
+            : null;
+    }
+
+    // On the command thread: takes a direct dispatch for a deferred dispatch worker. The kept state is left as the rebind
+    // path leaves it, but for the program, which the worker resolves: the program's next dispatch on the command thread
+    // rebinds. An identity recheck turn moves to that dispatch, unless a recheck already waits for one.
+    internal bool ClaimDeferral(KeptComputeProgram kept, ComputeStageRegisters compute, uint dimensionX, uint dimensionY, uint dimensionZ,
+        uint dispatchInitiator, DeferredDispatchInputs inputs)
+    {
+        if ((kept.Rebinds + 1) % IdentityRecheckPeriod == 0)
+        {
+            if (kept.RecheckDue)
+            {
+                return false;
+            }
+
+            kept.RecheckDue = true;
+        }
+
+        kept.Rebinds++;
+        _computeRebound.Increment();
+        inputs.Entry = kept.Entry;
+        inputs.BaseSource = kept.Source;
+        inputs.SystemRegisters = kept.SystemRegisters;
+        inputs.GpuThreadCounts = kept.GpuThreadCounts;
+        inputs.GroupsX = dimensionX;
+        inputs.GroupsY = dimensionY;
+        inputs.GroupsZ = dimensionZ;
+        inputs.Initiator = dispatchInitiator;
+        compute.CopyTo(inputs.Compute);
+        kept.Program = null;
+        if (kept.Registers is { } registers && SameComputeShape(registers, compute))
+        {
+            registers.UserScalars.CopyFrom(compute.UserScalars, compute.UserScalarCount);
+        }
+        else
+        {
+            kept.Registers = compute.Copy();
+        }
+
+        kept.DimensionX = dimensionX;
+        kept.DimensionY = dimensionY;
+        kept.DimensionZ = dimensionZ;
+        return true;
+    }
+
+    // A deferred member's rebind: on a worker between BeginWorkerResolve and EndWorkerResolve, or on the render thread.
+    internal bool RunDeferredRebind(DeferredDispatchInputs inputs, out ComputeProgram program)
+    {
+        var source = RebindSource(inputs.BaseSource!, inputs.Compute);
+        return TryRebindProgram(inputs.Entry!, source, inputs.SystemRegisters, inputs.GpuThreadCounts, inputs.Compute, inputs.Initiator,
+            inputs.GroupsX, inputs.GroupsY, inputs.GroupsZ, out program, out _);
     }
 
     internal static bool TicketMatches(ComputeTickets.Ticket ticket, KeptComputeProgram kept, ComputeStageRegisters compute, uint dispatchInitiator,
@@ -1961,6 +2040,9 @@ internal sealed class KeptComputeProgram
     public ProgramSourceEntry? Entry;
     public ShaderPipelineCache.KernelDemand? Kernel;
     public long Rebinds;
+    // The identity recheck turn came while one of the program's dispatches was deferred: its next dispatch on the command
+    // thread resolves it from scratch.
+    public bool RecheckDue;
     public long Registrations;
     public uint DispatchInitiator;
     public bool GpuThreadCounts;

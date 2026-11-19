@@ -1126,16 +1126,26 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private static void NoteReadsVersion(SliceRequests requests, SharpEmu.Libs.Agc.AgcExports.DeferredWork work)
         {
-            if (work is not SharpEmu.Libs.Agc.AgcExports.DeferredDraw draw)
+            long readsVersion;
+            if (work is SharpEmu.Libs.Agc.AgcExports.DeferredDraw draw)
+            {
+                readsVersion = draw.Reads.Version;
+            }
+            else if (work is SharpEmu.Libs.Agc.AgcExports.DeferredDispatch { Cancelled: false } dispatch)
+            {
+                // A deferred dispatch member's reads join the segment's check like a deferred draw's.
+                readsVersion = dispatch.Reads.Version;
+            }
+            else
             {
                 return;
             }
 
             if (requests.ReadsVersion is not { } version)
             {
-                requests.ReadsVersion = draw.Reads.Version;
+                requests.ReadsVersion = readsVersion;
             }
-            else if (version != draw.Reads.Version)
+            else if (version != readsVersion)
             {
                 requests.MixedReadsVersions = true;
             }

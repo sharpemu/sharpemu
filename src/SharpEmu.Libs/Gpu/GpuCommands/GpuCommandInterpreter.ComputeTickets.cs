@@ -48,6 +48,11 @@ public sealed partial class GpuCommandInterpreter
         var shadow = _ticketShadow ??= new RegisterBanks(_host.Fatal);
         shadow.Shader.Compute = TypedRegisters.Shader.Compute.Copy();
         var position = 0;
+        // The third dispatch of one shader in a row starts a deferred dispatch run, whose workers resolve it and the dispatches
+        // after it: tickets past it would go unused.
+        var runStops = _runs is { StopsTicketScan: true };
+        var runAddress = TypedRegisters.Shader.Compute.Address;
+        var runLength = 1;
         while (position < available)
         {
             if (!EnsureTicketWords(start, words, ref read, position + 1, available))
@@ -139,6 +144,17 @@ public sealed partial class GpuCommandInterpreter
             }
             else if (opcode == PacketOpcode.DispatchDirect && length == 5)
             {
+                if (runStops)
+                {
+                    var compute = shadow.Shader.Compute.Address;
+                    runLength = compute == runAddress ? runLength + 1 : 1;
+                    runAddress = compute;
+                    if (runLength >= 3 && _runs!.WouldDefer(shadow.Shader.Compute, payload[3]))
+                    {
+                        return true;
+                    }
+                }
+
                 if (address > requestedThrough)
                 {
                     tickets.Request(this, address, shadow.Shader.Compute, payload[0], payload[1], payload[2], payload[3]);

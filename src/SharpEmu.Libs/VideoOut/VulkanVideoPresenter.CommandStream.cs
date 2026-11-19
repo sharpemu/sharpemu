@@ -222,6 +222,8 @@ internal static unsafe partial class VulkanVideoPresenter
             // A compute ticket's worker: it resolves ahead of every stream position, and the take checks again only the reads it
             // logged.
             public bool Ticket;
+            // A deferred dispatch member's worker: a read it cannot serve and log refuses the member.
+            public bool Strict;
             public ResolveReadLog Reads = null!;
             public CleanReadPages? CleanReads;
             public ulong DirectPage = ulong.MaxValue;
@@ -236,10 +238,11 @@ internal static unsafe partial class VulkanVideoPresenter
 
         // A read a compute ticket's worker cannot serve and log (unreadable, GPU-owned, pending, or served from a known GPU write)
         // refuses the ticket. The take checks again only the logged reads, and the serial rebind there may serve the same read
-        // once the GPU work is done, so a ticket resolved without those bytes could differ from it.
+        // once the GPU work is done, so a ticket resolved without those bytes could differ from it. A deferred dispatch member
+        // refuses the same reads.
         private bool RefuseOnTicketWorker(string reason)
         {
-            if (OnResolveWorker && _resolveWorker!.Ticket)
+            if (OnResolveWorker && (_resolveWorker!.Ticket || _resolveWorker.Strict))
             {
                 throw new SerialResolveRequiredException("ticket read " + reason);
             }
@@ -262,11 +265,20 @@ internal static unsafe partial class VulkanVideoPresenter
 
             worker.Sequence = sequence;
             worker.Ticket = sequence == long.MaxValue;
+            worker.Strict = false;
             worker.Reads = reads;
             worker.DirectPage = ulong.MaxValue;
             reads.Version = _bufferCache.GpuModifiedVersion;
             reads.Publications = _guestPublications.Ordinal;
         }
+
+        void ICommandStreamHost.BeginStrictWorkerResolve(long sequence, ResolveReadLog reads)
+        {
+            ((ICommandStreamHost)this).BeginWorkerResolve(sequence, reads);
+            _resolveWorker!.Strict = true;
+        }
+
+        IDeferredDispatchRuns? ICommandStreamHost.DispatchRuns => _translation.DispatchRuns;
 
         void ICommandStreamHost.EndWorkerResolve()
         {

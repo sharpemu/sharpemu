@@ -255,6 +255,7 @@ public static partial class AgcExports
                     _host.RenderHost is { } renderHost && _host.ResolveWorkerCount > 0
                     ? new ResolvePool(this, renderHost, _host.ResolveWorkerCount)
                     : null;
+                ReplaceDispatchRuns(value is not null);
                 _computeTicketPool?.Dispose();
                 _computeTicketPool = value is not null && _executor is not null && _pipelines is { SupportsParallelResolution: true } pipelines &&
                     ComputeTickets.Mode != ComputeTickets.TicketMode.Off
@@ -319,6 +320,12 @@ public static partial class AgcExports
                 return;
             }
 
+            if (work is DeferredDispatch dispatch)
+            {
+                JoinDeferredDispatch(dispatch);
+                return;
+            }
+
             RunDeferred(work, _recorder!);
         }
 
@@ -334,6 +341,13 @@ public static partial class AgcExports
                     break;
                 case DeferredDraw deferred:
                     recorder.Record(deferred.Record!);
+                    break;
+                case DeferredDispatch dispatch:
+                    if (!dispatch.Cancelled)
+                    {
+                        recorder.Record(dispatch.Record!);
+                    }
+
                     break;
                 default:
                     throw _host.Fatal($"The deferred work is unknown: {work.GetType().Name}.");
@@ -359,6 +373,9 @@ public static partial class AgcExports
                     break;
                 case DeferredDraw deferred:
                     CompleteDeferredDraw(deferred);
+                    break;
+                case DeferredDispatch dispatch:
+                    CompleteDeferredDispatch(dispatch);
                     break;
             }
         }

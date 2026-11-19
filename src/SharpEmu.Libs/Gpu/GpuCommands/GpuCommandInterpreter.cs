@@ -53,6 +53,11 @@ public sealed partial class GpuCommandInterpreter
     private SoftWait? _softWait;
     private bool _suspendedForLanding;
     private ulong _packetAddress;
+    // The deferred dispatch runs of the stream thread, the rollback a handler asked for, and the raw shader register
+    // mirror's undo log while a run is open.
+    private IDeferredDispatchRuns? _runs;
+    private DeferredRewind? _rewind;
+    private readonly List<(uint Offset, uint Value, bool Written)> _runUndo = new();
 
     public GpuCommandInterpreter(ICommandStreamHost host, int queueId, int interruptEventId)
     {
@@ -255,6 +260,7 @@ public sealed partial class GpuCommandInterpreter
         _submittedRegisterTables = registerTables;
         _submittedCommandAddress = address;
         _execution = execution;
+        _runs = _host.DispatchRuns;
         try
         {
             RunPackets(execution, 0);
@@ -362,6 +368,12 @@ public sealed partial class GpuCommandInterpreter
 
             if (cursor.Offset == cursor.DwordCount)
             {
+                // A run belongs to its buffer; it closes before the buffer does.
+                if (_runs is { Active: true } && CloseRun(execution))
+                {
+                    continue;
+                }
+
                 execution.Pop();
                 continue;
             }
@@ -392,6 +404,11 @@ public sealed partial class GpuCommandInterpreter
             // Ring memory the guest has not written yet; retry after it appends more.
             if (header == 0 && cursor.FollowedChunkAdvance)
             {
+                if (_runs is { Active: true } && CloseRun(execution))
+                {
+                    continue;
+                }
+
                 execution.Suspended = true;
                 return;
             }
@@ -450,6 +467,17 @@ public sealed partial class GpuCommandInterpreter
                 _packetWindowGeneration++;
             }
 
+            // Any packet but a run packet closes an open run first, and breaks the chain of same-program dispatches that
+            // opens one.
+            if (_runs is { } runs && !IsRunPacket(header, payload))
+            {
+                runs.BreakChain();
+                if (runs.Active && CloseRun(execution))
+                {
+                    continue;
+                }
+            }
+
             var packet = new PacketContext(header & ~1u, packetAddress, offset, remaining, total);
             _packetAddress = packetAddress;
             uint consumed;
@@ -465,6 +493,15 @@ public sealed partial class GpuCommandInterpreter
                 SharpEmu.Libs.Diagnostics.PacketHandlerTally.Note(opcode, header,
                     Stopwatch.GetTimestamp() - handlerStarted - (SharpEmu.Libs.Diagnostics.PacketHandlerTally.WaitedTicks - waitedBefore));
             }
+
+            // The handler closed a run whose member was poisoned; the packets run again from the rollback point.
+            if (_rewind is { } rewind)
+            {
+                _rewind = null;
+                ApplyRewind(execution, rewind);
+                continue;
+            }
+
             if (consumed > remaining)
             {
                 throw _host.Fatal($"The handler consumed more than the buffer holds: consumed={consumed} remaining={remaining} header=0x{header:X8} address=0x{packetAddress:X16}.");
@@ -496,6 +533,106 @@ public sealed partial class GpuCommandInterpreter
             execution.At(cursorIndex).Offset += consumed;
             execution.MadeProgress = true;
         }
+    }
+
+    // The packets a deferred dispatch run may hold: shader register writes in the compute range only (a rollback restores
+    // the compute registers), shader register tables (an entry outside the compute range closes the run first), the events
+    // that only queue a GPU barrier in stream order or do nothing, inert NOPs and markers but flips, and direct dispatches.
+    private static bool IsRunPacket(uint header, ReadOnlySpan<uint> payload)
+    {
+        switch (PacketHeader.Opcode(header))
+        {
+            case PacketOpcode.EventWrite:
+                return !payload.IsEmpty && IsRunEvent(payload[0]);
+            case PacketOpcode.SetShaderRegister:
+                return !payload.IsEmpty && (payload[0] == RegisterBankLayout.ShaderRegisterNop || payload[0] >= RunComputeRangeStart);
+            case PacketOpcode.SetShaderRegisterIndirect:
+            case PacketOpcode.DispatchDirect:
+                return true;
+            case PacketOpcode.Nop:
+                var custom = PacketHeader.CustomCode(header);
+                if (custom is PacketCustomCode.ShaderRegisterTable or PacketCustomCode.PushMarker or PacketCustomCode.PopMarker)
+                {
+                    return true;
+                }
+
+                return custom == PacketCustomCode.Zero &&
+                    (payload.IsEmpty || (payload[0] & 0xFFFF_0000u) != MarkerMagic || (payload[0] & 0xFFFu) is not (0x777 or 0x778 or 0x781));
+            default:
+                return false;
+        }
+    }
+
+    // The cache and flush events RaiseEvent turns into a global barrier, and the ones it ignores.
+    private static bool IsRunEvent(uint control)
+    {
+        var type = control & 0x3Fu;
+        var index = (control >> 8) & 0x7u;
+        return type is 0x07 or 0x0F or 0x10 or 0x0D or 0x0E or 0x12 or 0x17 or 0x18 or 0x19 or 0x1A or 0x1B ||
+            (type is 0x16 or 0x31 or 0x2A or 0x2C or 0x2E && index is 0 or 7);
+    }
+
+    // COMPUTE_DISPATCH_INITIATOR, the first register of the compute range (RegisterBanks.PrepareShaderWrite).
+    private const uint RunComputeRangeStart = 0x200;
+
+    // Closes the open run; true when a poisoned member rolled the packets back (the caller continues the loop).
+    private bool CloseRun(PacketCursorStack execution)
+    {
+        if (_runs!.Barrier() is not { } rewind)
+        {
+            _runUndo.Clear();
+            return false;
+        }
+
+        ApplyRewind(execution, rewind);
+        return true;
+    }
+
+    // Inside a handler: closes the open run; true when the handler must stop, so the loop rolls the packets back.
+    private bool CloseRunInHandler()
+    {
+        if (_runs!.Barrier() is not { } rewind)
+        {
+            _runUndo.Clear();
+            return false;
+        }
+
+        _rewind = rewind;
+        return true;
+    }
+
+    private void ApplyRewind(PacketCursorStack execution, DeferredRewind rewind)
+    {
+        var depth = execution.Depth - 1;
+        ref var cursor = ref execution.At(depth);
+        if (depth != rewind.Depth || cursor.Address != rewind.CursorAddress)
+        {
+            throw _host.Fatal($"A deferred dispatch run rolled back to another buffer: depth={depth}/{rewind.Depth} address=0x{cursor.Address:X16}/0x{rewind.CursorAddress:X16}.");
+        }
+
+        for (var index = _runUndo.Count - 1; index >= rewind.RawUndoMark; index--)
+        {
+            var (offset, value, written) = _runUndo[index];
+            Registers.Shader.Restore(offset, value, written);
+        }
+
+        _runUndo.Clear();
+        const uint computeCount = RegisterBankLayout.ShaderRegisterCount - RunComputeRangeStart;
+        TypedRegisters.PrepareShaderWrite(RunComputeRangeStart, computeCount);
+        rewind.Compute.CopyTo(TypedRegisters.Shader.Compute);
+        TypedRegisters.MarkWritten(RegisterStamps.ShaderBitsFor(RunComputeRangeStart, computeCount));
+        UserDataMarker = rewind.UserDataMarker;
+        cursor.Offset = rewind.Offset;
+        cursor.DeferredAdvance = 0;
+        _packetWindowGeneration++;
+        execution.MadeProgress = true;
+    }
+
+    // The raw mirror's register before a write inside an open run.
+    private void NoteRunUndo(uint offset)
+    {
+        var (value, written) = Registers.Shader.Peek(offset);
+        _runUndo.Add((offset, value, written));
     }
 
     private sealed class PacketWindow

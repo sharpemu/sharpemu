@@ -139,6 +139,13 @@ public interface ICommandStreamHost
     // At the stream position of the draw: whether the bytes a worker read are what it would read now.
     bool ValidateWorkerReads(ResolveReadLog reads) => true;
 
+    // As BeginWorkerResolve, but a read the worker cannot serve and log refuses the resolve (SerialResolveRequiredException):
+    // a deferred dispatch member rolls back to the command thread instead.
+    void BeginStrictWorkerResolve(long sequence, ResolveReadLog reads) => BeginWorkerResolve(sequence, reads);
+
+    // The deferred dispatch runs of the stream thread, or null.
+    IDeferredDispatchRuns? DispatchRuns => null;
+
     // SHARPEMU_COMPUTE_TICKETS: the worker rebinds direct dispatches take ahead of the stream, or null.
     SharpEmu.Libs.Gpu.Pipelines.ComputeTickets? ComputeTickets => null;
 
