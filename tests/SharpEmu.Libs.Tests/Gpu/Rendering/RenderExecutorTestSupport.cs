@@ -220,6 +220,7 @@ internal sealed class RecordingRenderHost : IRenderHost
     public void ResetBindings() => Calls.Add("reset_bindings");
 
     public DrawScopeToken Scope { get; set; }
+    public bool EndScopeOnBindingCommit { get; set; }
 
     public DrawScopeToken DrawScope => Scope;
 
@@ -342,8 +343,14 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public void BindResources(IPreparedBindings prepared) => Calls.Add($"bind_resources {((RecordedBindings)prepared).Id}");
 
-    public void CommitBindings(PipelineBindPoint bindPoint, in PipelineHandle pipeline, ReadOnlySpan<IPreparedBindings> stages) =>
+    public void CommitBindings(PipelineBindPoint bindPoint, in PipelineHandle pipeline, ReadOnlySpan<IPreparedBindings> stages)
+    {
         Calls.Add($"commit {bindPoint} {pipeline.Pipeline:X} [{string.Join(",", stages.ToArray().Select(s => ((RecordedBindings)s).Id))}]");
+        if (EndScopeOnBindingCommit)
+        {
+            Scope = default;
+        }
+    }
 
     public void SetDynamicState(in DynamicDrawState state)
     {

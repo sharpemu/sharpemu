@@ -385,6 +385,35 @@ public sealed class RenderExecutorStateTests : IDisposable
     }
 
     [Fact]
+    public void Attachments_AScopeBreakDuringBindingDoesNotRepeatMetadataClears()
+    {
+        _host.Scope = new DrawScopeToken(1, 1, 1);
+        _host.ColorMetadataClears[ColorBase] = new ClearColorValue();
+        _host.DepthMetadataClear = true;
+        var banks = Banks(withDepth: true);
+        _executor.DrawIndexed(1, banks, Indexed(3));
+        Assert.True(_host.BegunRenderings[0].ColorAttachments[0].IsClear);
+        Assert.True(_host.BegunRenderings[0].DepthStencilAttachment.DepthClear);
+
+        _host.ColorMetadataClears.Clear();
+        _host.DepthMetadataClear = false;
+        _host.EndScopeOnBindingCommit = true;
+        _host.Calls.Clear();
+        _executor.DrawIndexed(2, banks, Indexed(3));
+
+        Assert.Contains("keep_depth 2", _host.Calls);
+        Assert.False(_host.BegunRenderings[1].ColorAttachments[0].IsClear);
+        Assert.False(_host.BegunRenderings[1].DepthStencilAttachment.DepthClear);
+
+        _host.EndScopeOnBindingCommit = false;
+        _host.ColorMetadataClears[ColorBase] = new ClearColorValue();
+        _host.DepthMetadataClear = true;
+        _executor.DrawIndexed(3, banks, Indexed(3));
+        Assert.True(_host.BegunRenderings[2].ColorAttachments[0].IsClear);
+        Assert.True(_host.BegunRenderings[2].DepthStencilAttachment.DepthClear);
+    }
+
+    [Fact]
     public void Attachments_AReadOnlyDepthTargetWritesNoAspect()
     {
         var banks = Banks(withDepth: true);

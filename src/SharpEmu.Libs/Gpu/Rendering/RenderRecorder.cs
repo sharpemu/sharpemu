@@ -122,7 +122,6 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         public readonly ImageView[] Views = new ImageView[RenderingState.ColorAttachmentCapacity];
         public readonly uint[] Slots = new uint[RenderingState.ColorAttachmentCapacity];
         public ImageView DepthView;
-        public bool DepthMetadataClear;
         public RenderingState Rendering;
     }
 
@@ -223,7 +222,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         if (state.Depth.HasTarget)
         {
             state.Depth.View = kept.DepthView;
-            state.Depth.MetadataClear = kept.DepthMetadataClear;
+            state.Depth.MetadataClear = false;
             _host.KeepDepthAttachment(in state.Depth);
         }
 
@@ -268,8 +267,26 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         }
 
         kept.DepthView = state.Depth.View;
-        kept.DepthMetadataClear = state.Depth.MetadataClear;
         kept.Rendering = state.Rendering;
+    }
+
+    private void BeginDrawRendering(ref DrawState state, bool reusedAttachments)
+    {
+        // Binding resources can end the scope after attachment reuse. Its metadata load clears
+        // already ran, so reopening the scope must preserve the pixels drawn since then.
+        if (reusedAttachments && _host.DrawScope.Scope != _inPlace.Token.Scope)
+        {
+            for (var index = 0; index < state.Rendering.ColorAttachmentCount; index++)
+            {
+                ref var color = ref state.Rendering.ColorAttachments[index];
+                color = color with { IsClear = false };
+            }
+
+            ref var depth = ref state.Rendering.DepthStencilAttachment;
+            depth = depth with { DepthClear = state.Depth.Target.State.DepthClearEnabled };
+        }
+
+        _host.BeginRendering(in state.Rendering);
     }
 
     private struct VertexBufferRange
@@ -637,7 +654,8 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
                 emission.Indexed ? RenderExecutor.IndexedIndirectArgumentsSize : RenderExecutor.AutoIndirectArgumentsSize, isWritten: false)
             : default;
         RenderExecutor.DropUnwrittenColorTargets(context, ref state, pixelProgram);
-        if (inPlace && TryRestoreAttachments(ref state))
+        var reusedAttachments = inPlace && TryRestoreAttachments(ref state);
+        if (reusedAttachments)
         {
             _inPlaceDraws.Increment();
         }
@@ -720,7 +738,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
 
         var imageSnapshot = _host.BeginImageSnapshot(pixelBindings);
         indirectMesh?.Prepare();
-        _host.BeginRendering(in state.Rendering);
+        BeginDrawRendering(ref state, reusedAttachments);
         if (MeshDrawTrace.Active) MeshDrawTrace.Write("rendering", $"width={state.Rendering.Width} height={state.Rendering.Height} layers={state.Rendering.Layers} colors={state.ColorCount}");
         _host.BindPipeline(PipelineBindPoint.Graphics, in pipeline);
         if (record.SetAutoDebug)
@@ -1024,7 +1042,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         }
 
         _host.SetDynamicState(in record.Dynamic);
-        _host.BeginRendering(in state.Rendering);
+        BeginDrawRendering(ref state, reusedAttachments: true);
         _host.BindPipeline(PipelineBindPoint.Graphics, in pipeline);
         if (record.SetAutoDebug)
         {
