@@ -740,17 +740,7 @@ public sealed partial class GuestImageCache
             throw SubmissionScheduler.Fatal($"A stencil association needs a depth/stencil image: address=0x{depth.Description.Data.Address:X16} format={(int)depth.Description.PixelFormat}.");
         }
 
-        var association = ResourceSlotIdentifier.Invalid;
-        foreach (var imageIdentifier in FindImagesInRange(stencil.Address, stencil.Size, pageOverlap: false))
-        {
-            var owner = _slots.TryGet(imageIdentifier);
-            if (owner != null && owner.Description.Data == stencil &&
-                owner.Description.Extent.Equals(depth.Description.Extent))
-            {
-                association = imageIdentifier;
-            }
-        }
-
+        var association = FindStencilAssociation(depth, stencil);
         if (!association.IsValid)
         {
             var description = ImageDescription.Create();
@@ -781,6 +771,12 @@ public sealed partial class GuestImageCache
         {
             UnwatchImage(association);
         }
+        if (record.DepthOwner.IsValid && record.DepthOwner != depthImageIdentifier)
+        {
+            // Another depth's aspect holds the plane: its bytes go to guest memory, and this depth loads them from there.
+            ReleaseStencilProxy(association, StencilProxyFate.Keep);
+        }
+
         record.AssociateDepth(depthImageIdentifier);
         return association;
     }

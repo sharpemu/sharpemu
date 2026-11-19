@@ -381,7 +381,24 @@ public sealed unsafe partial class CachedImage : IDisposable
         return usage;
     }
 
-    public void AssociateDepth(ResourceSlotIdentifier depthImage) => DepthOwner = depthImage;
+    // For a stencil proxy: the owner depth's write sequence when its aspect was last downloaded into guest-side memory.
+    public long StencilPublishedSequence;
+
+    public void AssociateDepth(ResourceSlotIdentifier depthImage)
+    {
+        if (DepthOwner != depthImage)
+        {
+            StencilPublishedSequence = 0;
+        }
+
+        DepthOwner = depthImage;
+    }
+
+    public void DetachDepth()
+    {
+        DepthOwner = ResourceSlotIdentifier.Invalid;
+        StencilPublishedSequence = 0;
+    }
 
     internal ulong LastCpuWriteAddress { get; private set; }
     internal ulong LastCpuWriteSize { get; private set; }

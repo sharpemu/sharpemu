@@ -412,6 +412,7 @@ public sealed unsafe partial class GuestImageCache
         }
 
         association.MarkBufferHoldsGpuContents();
+        association.StencilPublishedSequence = depth.GpuWriteSequence;
         return true;
     }
 

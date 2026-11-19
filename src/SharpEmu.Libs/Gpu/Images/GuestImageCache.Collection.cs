@@ -16,6 +16,16 @@ public sealed partial class GuestImageCache
     // texture it samples once per frame look stale, so it was deleted and uploaded again.
     public void RunGarbageCollector(bool endsFrame)
     {
+        RunLockedGarbageCollector(endsFrame);
+        if (ReleasePendingStencilPlanes())
+        {
+            // The deferred depths no longer hold unsaved planes.
+            RunLockedGarbageCollector(endsFrame: false);
+        }
+    }
+
+    private void RunLockedGarbageCollector(bool endsFrame)
+    {
         using var held = _lock.Hold();
         var tick = endsFrame ? _collectionTick++ : _collectionTick;
         if (endsFrame && SharpEmu.Libs.VideoOut.RenderPhaseProfile.Enabled && tick % 300 == 0)
@@ -62,6 +72,14 @@ public sealed partial class GuestImageCache
             if (owner == null || !owner.Registered || owner.DepthOwner.IsValid)
             {
                 if (profile && owner?.DepthOwner.IsValid == true) _collectionAssociations++;
+                continue;
+            }
+
+            // Its planes reach guest memory outside the lock first (the buffer cache cannot be entered here);
+            // the next pass evicts it.
+            if (owner.Description.HasStencil && HasUnsavedStencilPlane(imageIdentifier))
+            {
+                _pendingStencilReleases.Add(imageIdentifier);
                 continue;
             }
 
@@ -287,8 +305,16 @@ public sealed partial class GuestImageCache
 
     internal void DeleteImageForTest(ResourceSlotIdentifier imageIdentifier)
     {
-        using var held = _lock.Hold();
-        DeleteImage(imageIdentifier);
+        _preparedStencilBuffers = PrepareOwnedStencilBuffers(imageIdentifier);
+        try
+        {
+            using var held = _lock.Hold();
+            DeleteImage(imageIdentifier);
+        }
+        finally
+        {
+            _preparedStencilBuffers = null;
+        }
     }
 
     internal void ScheduleReadbackForTest(ResourceSlotIdentifier imageIdentifier)
@@ -299,8 +325,16 @@ public sealed partial class GuestImageCache
 
     internal void AssociateStencilForTest(ResourceSlotIdentifier depth, HLE.GpuMemory.GuestSpan stencil)
     {
-        using var held = _lock.Hold();
-        AssociateStencilRange(depth, stencil);
+        _preparedStencilBuffers = PrepareStencilBuffers(depth, stencil);
+        try
+        {
+            using var held = _lock.Hold();
+            AssociateStencilRange(depth, stencil);
+        }
+        finally
+        {
+            _preparedStencilBuffers = null;
+        }
     }
 
     internal bool TryDownloadForTest(ResourceSlotIdentifier imageIdentifier) => TryDownloadToGuest(imageIdentifier);

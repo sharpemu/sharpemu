@@ -133,9 +133,21 @@ public sealed unsafe partial class GuestImageCacheTests
         }
 
         Assert.Equal(protectionCalls, views.Log.Count(operation => operation == FailingHostViews.Op.ChangeAccess));
-        Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(stencilAddress));
-        harness.Write(stencilAddress, [0x05, 0x06, 0x07, 0x08]);
-        Assert.True(harness.WriteFault(stencilAddress));
+        // A new depth owner took the plane from the old one, which wrote it back through the buffer cache:
+        // the buffer owns the GPU-written bytes and the page faults on any guest access.
+        Assert.Equal(changeDepthOwner ? HostPageProtection.NoAccess : HostPageProtection.ReadOnly, harness.Protection(stencilAddress));
+        if (changeDepthOwner)
+        {
+            // The fault publishes the buffer's bytes over guest memory, so it comes before the store.
+            Assert.True(harness.WriteFault(stencilAddress));
+            harness.Write(stencilAddress, [0x05, 0x06, 0x07, 0x08]);
+        }
+        else
+        {
+            harness.Write(stencilAddress, [0x05, 0x06, 0x07, 0x08]);
+            Assert.True(harness.WriteFault(stencilAddress));
+        }
+
         Assert.False(record.IsWatched);
         Assert.True(record.IsDefinitelyCpuDirty);
         Assert.Equal(depthIdentifier, harness.Acquire(ref depth));
