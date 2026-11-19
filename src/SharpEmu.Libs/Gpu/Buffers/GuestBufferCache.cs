@@ -1033,8 +1033,67 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     // runs once per tick (and when the mapping changes; new buffers register with the current
     // tick), and uploads only visit buffers in blocks the tracker does not know to be clean.
     // Hot pages stay dirty and writable, so every preparation still re-uploads them.
-    private ulong _bdaTouchTick = ulong.MaxValue;
-    private ulong _bdaTouchMapping;
+    // A program whose device-address reads reach only its handles' windows prepares just the mapped spans inside them. Each
+    // set of prepared spans keeps its own state: the mapped spans one, reset when their key changes, and the windowed spans
+    // one each in a small table, tied to the key of the mapped spans they were cut from.
+    private sealed class BdaSweepState
+    {
+        public bool InUse;
+        public ulong Mapping;
+        public ulong FullMapping;
+        public ulong TouchTick = ulong.MaxValue;
+        public bool Swept;
+        public long Epoch = -1;
+        public long Registrations = -1;
+        public long Observation = -1;
+        public GuestPageTracker.SweepPlan? Plan;
+        public bool PlanBuilt;
+
+        public void Reset(ulong mapping, ulong fullMapping)
+        {
+            InUse = true;
+            Mapping = mapping;
+            FullMapping = fullMapping;
+            TouchTick = ulong.MaxValue;
+            Swept = false;
+            Epoch = -1;
+            Registrations = -1;
+            Observation = -1;
+            Plan = null;
+            PlanBuilt = false;
+        }
+    }
+
+    private const int BdaWindowStateCount = 8;
+    private readonly BdaSweepState _bdaFull = new();
+    private readonly BdaSweepState[] _bdaWindowStates = Enumerable.Range(0, BdaWindowStateCount).Select(_ => new BdaSweepState()).ToArray();
+    private int _bdaWindowNext;
+
+    private BdaSweepState FullBdaState(ulong mapping)
+    {
+        if (!_bdaFull.InUse || _bdaFull.Mapping != mapping)
+        {
+            _bdaFull.Reset(mapping, mapping);
+        }
+
+        return _bdaFull;
+    }
+
+    private BdaSweepState WindowBdaState(ulong mapping, ulong fullMapping)
+    {
+        foreach (var state in _bdaWindowStates)
+        {
+            if (state.InUse && state.Mapping == mapping && state.FullMapping == fullMapping)
+            {
+                return state;
+            }
+        }
+
+        var fresh = _bdaWindowStates[_bdaWindowNext];
+        _bdaWindowNext = (_bdaWindowNext + 1) % BdaWindowStateCount;
+        fresh.Reset(mapping, fullMapping);
+        return fresh;
+    }
 
     public static ulong MappingKey(IReadOnlyCollection<GuestSpan> spans)
     {
@@ -1044,13 +1103,65 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         return mapping;
     }
 
+    // The mapped spans (sorted and disjoint) cut to the union of the windows, which are sorted and merged in place.
+    public static void ClipSpansToWindows(IReadOnlyList<GuestSpan> spans, List<(ulong Start, ulong End)> windows, List<GuestSpan> into)
+    {
+        into.Clear();
+        if (windows.Count == 0)
+        {
+            return;
+        }
+
+        windows.Sort(static (left, right) => left.Start.CompareTo(right.Start));
+        var merged = 0;
+        for (var index = 1; index < windows.Count; index++)
+        {
+            if (windows[index].Start <= windows[merged].End)
+            {
+                windows[merged] = (windows[merged].Start, Math.Max(windows[merged].End, windows[index].End));
+            }
+            else
+            {
+                windows[++merged] = windows[index];
+            }
+        }
+
+        windows.RemoveRange(merged + 1, windows.Count - merged - 1);
+        var window = 0;
+        for (var index = 0; index < spans.Count && window < windows.Count; index++)
+        {
+            var spanStart = spans[index].Address;
+            var spanEnd = spanStart + spans[index].Size;
+            while (window < windows.Count && windows[window].End <= spanStart)
+            {
+                window++;
+            }
+
+            for (var current = window; current < windows.Count && windows[current].Start < spanEnd; current++)
+            {
+                var start = Math.Max(spanStart, windows[current].Start);
+                var end = Math.Min(spanEnd, windows[current].End);
+                if (start < end)
+                {
+                    into.Add(new GuestSpan(start, end - start));
+                }
+            }
+        }
+    }
+
     public void PrepareBda(IEnumerable<GuestSpan> mapped)
     {
         var spans = mapped as IReadOnlyList<GuestSpan> ?? mapped.ToList();
         PrepareBda(spans, MappingKey(spans));
     }
 
-    public void PrepareBda(IReadOnlyList<GuestSpan> spans, ulong mapping)
+    public void PrepareBda(IReadOnlyList<GuestSpan> spans, ulong mapping) => PrepareBda(spans, FullBdaState(mapping));
+
+    // The windows are the mapped spans cut to a windowed program's handle windows (ClipSpansToWindows).
+    public void PrepareWindowedBda(IReadOnlyList<GuestSpan> windows, ulong windowMapping, ulong fullMapping) =>
+        PrepareBda(windows, WindowBdaState(windowMapping, fullMapping));
+
+    private void PrepareBda(IReadOnlyList<GuestSpan> spans, BdaSweepState state)
     {
         if (SubmissionScheduler.ReadOnlyThread)
         {
@@ -1071,24 +1182,22 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         }
         else
         {
-            if (_retirementPolicy.CurrentTick != _bdaTouchTick || mapping != _bdaTouchMapping)
+            if (_retirementPolicy.CurrentTick != state.TouchTick)
             {
                 for (var index = 0; index < spans.Count; index++)
                     TouchBuffersInRange(spans[index].Address, spans[index].Size);
-                _bdaTouchTick = _retirementPolicy.CurrentTick;
-                _bdaTouchMapping = mapping;
+                state.TouchTick = _retirementPolicy.CurrentTick;
             }
 
             var epoch = _tracker.CpuDirtyEpoch;
             var registrations = _registrationGeneration;
-            if (mapping != _bdaSweepMapping || registrations != _bdaSweepRegistrations ||
-                (epoch != _bdaSweepEpoch && (!ObservationGated || _observation != _bdaSweepObservation)))
+            if (!state.Swept || registrations != state.Registrations ||
+                (epoch != state.Epoch && (!ObservationGated || _observation != state.Observation)))
             {
-                if (!_bdaSweepPlanBuilt || mapping != _bdaSweepPlanMapping)
+                if (!state.PlanBuilt)
                 {
-                    _bdaSweepPlan = GuestPageTracker.PlanSweep(spans);
-                    _bdaSweepPlanMapping = mapping;
-                    _bdaSweepPlanBuilt = true;
+                    state.Plan = GuestPageTracker.PlanSweep(spans);
+                    state.PlanBuilt = true;
                 }
 
                 // The buffers' copies are collected as the sweep visits them and staged when it ends.
@@ -1096,7 +1205,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                 _inDeviceAddressSweep = true;
                 try
                 {
-                    if (_bdaSweepPlan is { } plan && _bufferPages.Complete)
+                    if (state.Plan is { } plan && _bufferPages.Complete)
                     {
                         _handleWindows.Sort();
                         // Only a registered buffer has anything to upload, so only the pages buffers cover are looked at.
@@ -1128,13 +1237,13 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                     }
                 }
 
-                _bdaSweepEpoch = epoch;
-                _bdaSweepMapping = mapping;
-                _bdaSweepRegistrations = registrations;
-                _bdaSweepObservation = _observation;
+                state.Swept = true;
+                state.Epoch = epoch;
+                state.Registrations = registrations;
+                state.Observation = _observation;
                 Interlocked.Increment(ref BdaSweeps);
             }
-            else if (epoch != _bdaSweepEpoch)
+            else if (epoch != state.Epoch)
             {
                 Interlocked.Increment(ref BdaSweepsSkipped);
             }
@@ -1154,12 +1263,12 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             throw SubmissionScheduler.ReadOnlyViolation("bda");
         }
 
-        if (_retirementPolicy.CurrentTick != _bdaTouchTick || mapping != _bdaTouchMapping)
+        var state = FullBdaState(mapping);
+        if (_retirementPolicy.CurrentTick != state.TouchTick)
         {
             for (var index = 0; index < spans.Count; index++)
                 TouchBuffersInRange(spans[index].Address, spans[index].Size);
-            _bdaTouchTick = _retirementPolicy.CurrentTick;
-            _bdaTouchMapping = mapping;
+            state.TouchTick = _retirementPolicy.CurrentTick;
         }
 
         _faultProcessPending = true;
@@ -1296,12 +1405,8 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         VulkanSynchronization.PipelineBarrier(_device.Vk, native, sourceStages, destinationStages, 0, 1, &barrier, 0, null, 0, null, BarrierSource.Sweep);
     }
 
-    private long _bdaSweepEpoch = -1;
-
     // Every registration advances it: a new owner needs its first upload even when no CPU write moved the epoch.
     private long _registrationGeneration;
-    private long _bdaSweepRegistrations = -1;
-    private long _bdaSweepObservation = -1;
     private long _observation;
     public static long BdaSweeps;
     public static long BdaSweepsSkipped;
@@ -1313,11 +1418,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     public bool ObservationGated { get; set; }
 
     public void NoteObservation() => _observation++;
-    private ulong _bdaSweepMapping;
-    private GuestPageTracker.SweepPlan? _bdaSweepPlan;
     private readonly PageCoverage _bufferPages = new();
-    private ulong _bdaSweepPlanMapping;
-    private bool _bdaSweepPlanBuilt;
 
     // The uploads of the running sweep: each one's copies are a run of _sweepCopies, with source
     // offsets inside its own bytes until they are staged.

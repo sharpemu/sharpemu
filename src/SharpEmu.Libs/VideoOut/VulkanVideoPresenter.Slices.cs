@@ -322,6 +322,10 @@ internal static unsafe partial class VulkanVideoPresenter
         public long MetadataGeneration;
         public IReadOnlyList<GuestSpan>? BdaSpans;
         public ulong BdaMapping;
+        // The windows of the segment's windowed device-address programs; one program that is not windowed sweeps every
+        // mapped span.
+        public readonly List<(ulong Start, ulong End)> BdaWindows = new();
+        public bool BdaFullSweep;
     }
 
     // Items recorded into one command buffer; the item after them, if any, needs the render thread.
@@ -817,6 +821,8 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
+        private readonly List<GuestSpan> _prologueWindowSpans = [];
+
         private void RecordSlicePrologue(SliceRequests requests)
         {
             Recording.EndRendering();
@@ -839,7 +845,15 @@ internal static unsafe partial class VulkanVideoPresenter
                         mapping = Recording.DeviceAddressSpanMapping;
                     }
 
-                    _bufferCache.PrepareBda(spans, mapping);
+                    if (!requests.BdaFullSweep && requests.BdaWindows.Count != 0)
+                    {
+                        GuestBufferCache.ClipSpansToWindows(spans, requests.BdaWindows, _prologueWindowSpans);
+                        _bufferCache.PrepareWindowedBda(_prologueWindowSpans, GuestBufferCache.MappingKey(_prologueWindowSpans), mapping);
+                    }
+                    else
+                    {
+                        _bufferCache.PrepareBda(spans, mapping);
+                    }
                 }
                 else if (requests.NeedsBdaTouch && requests.BdaSpans is { } touched)
                 {

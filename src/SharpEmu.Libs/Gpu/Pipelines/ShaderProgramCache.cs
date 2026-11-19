@@ -2699,6 +2699,8 @@ internal sealed partial class ShaderProgramCache
             InstanceOffsetScalarRegister = entry.EmbeddedFetch?.InstanceOffsetScalarRegister ?? ShaderProgramInfo.NoScalarRegister,
             UsesDeviceAddresses = info.UsesDeviceAddresses,
             DeviceAddressReadsBounded = entry.Plan.DeviceAddressReadsBounded,
+            DeviceAddressReadsWindowed = entry.Plan.DeviceAddressReadsWindowed,
+            DeviceAddressWindowBytes = entry.Plan.DeviceAddressWindowBytes,
             ConstantStoreValue = FindConstantStoreValue(entry.Program),
             HasBitwiseExclusiveOr = entry.HasBitwiseExclusiveOr,
             ConstantFill = entry.ConstantFill,
