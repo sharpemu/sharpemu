@@ -9,6 +9,19 @@ using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Images;
 
+// What ApplyNativeColorClear would do for a request.
+internal enum NativeColorClearPrediction : byte
+{
+    // Nothing: the registration is current and no slice holds a clear code.
+    Settled,
+    // A registration update only: no slice holds a clear code, so it records nothing.
+    RegistrationOnly,
+    // A clear to record.
+    ClearCode,
+    // A view outside its slices, or metadata that cannot be read.
+    BadView,
+}
+
 public sealed unsafe partial class GuestImageCache
 {
     internal void SynchronizeColorMetadata(in ImageRequest request)
@@ -120,6 +133,44 @@ public sealed unsafe partial class GuestImageCache
         }
 
         return true;
+    }
+
+    // What ApplyNativeColorClear would do for the request, read-only. Unlike the settled check it reads the slices of an
+    // image whose registration is not current; metadata it cannot read is BadView, so the caller stops and the serial
+    // apply decides.
+    [SkipLocalsInit]
+    internal NativeColorClearPrediction PredictNativeColorClear(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
+    {
+        var description = request.Description;
+        var metadata = description.Metadata;
+        if (!metadata.NativeColorClear) return NativeColorClearPrediction.Settled;
+        var metadataKind = metadata.Kind == MetadataKind.Cmask ? SurfaceMetadataKind.CMask : SurfaceMetadataKind.Dcc;
+        var view = request.View;
+        var layers = description.TransferLayers;
+        var volumeTexture = description.IsVolume && view.Type == ImageViewType.Type3D;
+        var layerCount = volumeTexture ? description.Extent.Depth : view.LayerCount;
+        var sliceSize = metadata.Range.Size / layers;
+        if (sliceSize == 0 || metadata.ColorMetadataBaseLayer >= layers ||
+            layerCount > layers - metadata.ColorMetadataBaseLayer)
+            return NativeColorClearPrediction.BadView;
+
+        bool registered;
+        using (_lock.Read())
+        {
+            registered = NativeColorClearRegistered(imageIdentifier, in metadata, metadataKind, layers);
+        }
+
+        Span<byte> bytes = stackalloc byte[4096];
+        for (uint slice = 0; slice < layerCount; slice++)
+        {
+            var address = metadata.Range.Address + sliceSize * (metadata.ColorMetadataBaseLayer + slice);
+            if (!_backing.TryReadBacking(address, bytes[..1]))
+                return NativeColorClearPrediction.BadView;
+            if (TryInspectColorClear(request, view.BaseLayer + slice, address, sliceSize, bytes, out _))
+                return NativeColorClearPrediction.ClearCode;
+        }
+
+        return registered ? NativeColorClearPrediction.Settled : NativeColorClearPrediction.RegistrationOnly;
     }
 
     private bool NativeColorClearRegistered(ResourceSlotIdentifier imageIdentifier, in MetadataDescription metadata,

@@ -283,6 +283,8 @@ internal static unsafe partial class VulkanVideoPresenter
         public long? ReadsVersion;
         public bool MixedReadsVersions;
         public readonly List<(ResourceSlotIdentifier Image, ImageRequest Request)> NativeColorUses = new();
+        // Native color clears the worker passed because only their registration was not current; the join applies them.
+        public readonly List<(ResourceSlotIdentifier Image, ImageRequest Request)> NativeColorEntries = new();
         // One clear entry per depth view with HTILE first acquired in the segment, and their keys for the join's image check.
         public readonly List<SliceDepthClear> DepthClears = new();
         public readonly List<(ResourceSlotIdentifier Image, ImageViewDescription View)> DepthClearKeys = new();
@@ -788,7 +790,36 @@ internal static unsafe partial class VulkanVideoPresenter
                 return false;
             }
 
+            // Last, so nothing refuses the segment after its entries are applied.
+            if (valid && requests.NativeColorEntries.Count != 0 && !ApplyNativeColorEntries(requests))
+            {
+                return false;
+            }
+
             return valid;
+        }
+
+        // The native color clears the segment's worker passed with only their registration out of date. The segment is
+        // refused when one would now record a clear or its metadata is GPU-dirty; otherwise each serial apply runs in stream
+        // order, updating the registration without recording anything.
+        private bool ApplyNativeColorEntries(SliceRequests requests)
+        {
+            foreach (var (image, request) in requests.NativeColorEntries)
+            {
+                var range = request.Description.Metadata.Range;
+                if (_bufferCache.HasGpuDirtyBytes(range.Address, range.Size) ||
+                    _imageCache.PredictNativeColorClear(image, request) is NativeColorClearPrediction.ClearCode or NativeColorClearPrediction.BadView)
+                {
+                    return false;
+                }
+            }
+
+            foreach (var (image, request) in requests.NativeColorEntries)
+            {
+                _imageCache.ApplyNativeColorClear(image, request);
+            }
+
+            return true;
         }
 
         // A clear the join records ahead of the segment needs the area of its view's first rendering, and no other use of its
@@ -1308,12 +1339,19 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             else if (request.Description.Metadata.NativeColorClear)
             {
-                if (!_imageCache.NativeColorClearSettled(imageIdentifier, request))
+                // A clear whose only change would be its registration passes: no slice holds a clear code, so the serial
+                // apply records nothing, and the join runs it in stream order. Its use is not part of the join's settled check.
+                switch (_imageCache.PredictNativeColorClear(imageIdentifier, request))
                 {
-                    throw Serial("native color clear", resumable: true);
+                    case NativeColorClearPrediction.Settled:
+                        Requests.NativeColorUses.Add((imageIdentifier, request));
+                        break;
+                    case NativeColorClearPrediction.RegistrationOnly:
+                        Requests.NativeColorEntries.Add((imageIdentifier, request));
+                        break;
+                    default:
+                        throw Serial("native color clear", resumable: true);
                 }
-
-                Requests.NativeColorUses.Add((imageIdentifier, request));
             }
         }
 

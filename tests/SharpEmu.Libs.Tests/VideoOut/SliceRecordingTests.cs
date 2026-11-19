@@ -450,6 +450,47 @@ public sealed class SliceRecordingTests : IClassFixture<HeadlessVulkanFixture>
         harness.Shutdown();
     }
 
+    // A worker passes a native color clear whose only change would be its registration; the join applies it after every
+    // other check, unless the apply would now record a clear.
+    [Fact]
+    public void JoinAppliesARegistrationOnlyNativeColorClearUnlessItWouldNowClear()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var presenter = new PresenterUnderTest(_vulkan!);
+        var harness = presenter.Harness;
+        var address = harness.MapBacked(0x20000, ImageCacheTestSupport.ReadWrite);
+        var metadataAddress = address + 0x10000;
+        var target = ImageCacheTestSupport.AsColorTarget(ImageCacheTestSupport.LinearRequest(address, 8, Format.R16G16B16A16Sfloat,
+            GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 8, 1));
+        target.Description.Metadata.Kind = MetadataKind.Dcc;
+        target.Description.Metadata.Range = new GuestSpan(metadataAddress, 4096);
+        target.Description.Metadata.NativeColorClear = true;
+        target.Description.Metadata.PackedColorClearSupported = true;
+        target.Description.Metadata.PackedColorClear = new ClearColorValue(0f, 0f, 1f, 1f);
+        harness.Write(metadataAddress, Enumerable.Repeat((byte)0x20, 4096).ToArray());
+        var identifier = harness.Find(ref target);
+        presenter.Run(() =>
+        {
+            var slice = Activator.CreateInstance(SliceType, nonPublic: true)!;
+            var segment = Activator.CreateInstance(SegmentType, nonPublic: true)!;
+            var requests = SegmentType.GetField("Requests")!.GetValue(segment)!;
+            var requestsType = requests.GetType();
+            requestsType.GetField("BufferSerial")!.SetValue(requests, harness.Cache.RefreshSnapshot().Serial);
+            requestsType.GetField("LookupGeneration")!.SetValue(requests, harness.Images.LookupGeneration);
+            requestsType.GetField("MetadataGeneration")!.SetValue(requests, harness.Images.MetadataGeneration);
+            ((List<(ResourceSlotIdentifier, ImageRequest)>)requestsType.GetField("NativeColorEntries")!.GetValue(requests)!).Add((identifier, target));
+
+            // The slice holds a clear code by the join: the segment is refused and the registration stays as it was.
+            Assert.False(ValidateSegment(presenter, slice, segment));
+            harness.Write(metadataAddress, Enumerable.Repeat((byte)0xFF, 4096).ToArray());
+            Assert.Equal(NativeColorClearPrediction.RegistrationOnly, harness.Images.PredictNativeColorClear(identifier, target));
+
+            Assert.True(ValidateSegment(presenter, slice, segment));
+            Assert.Equal(NativeColorClearPrediction.Settled, harness.Images.PredictNativeColorClear(identifier, target));
+        });
+        harness.Shutdown();
+    }
+
     [Fact]
     public void ReadyPresentationYieldsQueuedWorkButShutdownStillDrainsIt()
     {
