@@ -1289,6 +1289,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     {
                         _arena.Commit(in reservation);
                         _streamCopies.Increment();
+                        _preparationStreamCopied = true;
                         return (reservation.Chunk.Buffer, reservation.Offset, (size + 3) & ~3UL);
                     }
                 }

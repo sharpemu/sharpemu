@@ -191,6 +191,9 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private readonly record struct HeldStorage(ulong Address, ulong Size, BufferResource Resource, GpuBuffer Buffer, ulong Offset);
 
+        // The open preparation bound a stream copy: a read-only range copied into the slice arena as it stood at this item.
+        private bool _preparationStreamCopied;
+
         private readonly List<HeldStorage> _stageStorage = new();
         private bool _holdingStorage;
         private HeldStorage[] _dispatchStorage = new HeldStorage[16];
@@ -210,7 +213,8 @@ internal static unsafe partial class VulkanVideoPresenter
         private DrawScopeToken _dispatchScope;
         private long _dispatchOwners;
         private static readonly string[] DispatchHostMissNames =
-            ["unsealed", "recording", "generation", "epoch", "segment", "scope", "owners", "layout", "patch", "written", "dirty", "texel"];
+            ["unsealed", "recording", "generation", "epoch", "segment", "scope", "owners", "layout", "patch", "written", "dirty", "texel",
+             "table_set", "table_layout", "table_shadow"];
         private static readonly long[] _dispatchHostMisses = new long[DispatchHostMissNames.Length];
 
         internal static string TakeDispatchHostMisses()
@@ -281,6 +285,12 @@ internal static unsafe partial class VulkanVideoPresenter
                 _dispatchStorage[index] = held;
             }
 
+            // A replay keeps the sealed descriptors, so a later item would read this item's stream copy.
+            if (_preparationStreamCopied)
+            {
+                return;
+            }
+
             _dispatchStorageCount = _stageStorage.Count;
             new ReadOnlySpan<uint>(pushData, (int)PushData.DwordCount).CopyTo(_dispatchPushData);
             _dispatchHasPush = hasPushData;
@@ -309,7 +319,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _dispatchSealed = true;
         }
 
-        bool IRenderHost.TryReplayDispatch(in PipelineHandle pipeline, in ShaderStageResources stage)
+        bool IRenderHost.TryReplayDispatch(in PipelineHandle pipeline, in ShaderStageResources stage, bool replaceTable)
         {
             if (!_dispatchSealed)
             {
@@ -382,28 +392,116 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
             }
 
+            // Only a pushed set can take one binding again. When the native state is shadowed, the shadow must still hold the
+            // sealed set, so the new descriptor can replace its entry there.
+            var tableBinding = 0u;
+            var tableEntry = -1;
+            DescriptorShadow? tableShadow = null;
+            if (replaceTable)
+            {
+                if (!entry.UsesPushDescriptors)
+                {
+                    return DispatchHostMiss(12);
+                }
+
+                if (stage.Program is not { } tableProgram || _dispatchStageLayout?.Find(DescriptorBindingKind.FlattenedResourceTable) is not { } table ||
+                    DescriptorWriter.DescriptorCount(table) != 1)
+                {
+                    return DispatchHostMiss(13);
+                }
+
+                tableBinding = BindingLayout.NativeBindingIndex(StageOf(tableProgram), DescriptorBindingKind.FlattenedResourceTable);
+                if (SyncNativeShadow(BeginBatchedGuestStateCommands()))
+                {
+                    tableShadow = _computeDescriptorShadow;
+                    if (tableShadow is not { Valid: true } || tableShadow.Layout.Handle != _dispatchLayout.Handle ||
+                        (tableEntry = FindShadowBufferEntry(tableShadow, tableBinding)) < 0)
+                    {
+                        return DispatchHostMiss(14);
+                    }
+                }
+            }
+
+            var push = stackalloc uint[(int)PushData.DwordCount];
+            var data = new Span<uint>(push, (int)PushData.DwordCount);
+            if (_dispatchHasPush)
+            {
+                _dispatchPushData.CopyTo(data);
+                var layout = _dispatchStageLayout;
+                if (!PatchReplayUserData(data, layout, _dispatchUserDataBase, stage.Resources.UserData))
+                {
+                    return DispatchHostMiss(8);
+                }
+
+                if (layout is { UsesPushData: true, UsesDispatchThreadLimits: true } && !stage.GpuThreadLimits)
+                {
+                    stage.WriteDispatchThreadLimits(data.Slice((int)layout.PushDataStartDword, (int)layout.ShaderDataDwordCount));
+                }
+            }
+
+            if (replaceTable)
+            {
+                PushTableBinding(in stage, tableBinding, tableShadow, tableEntry);
+            }
+
             if (!_dispatchHasPush)
             {
                 return true;
             }
 
-            var push = stackalloc uint[(int)PushData.DwordCount];
-            var data = new Span<uint>(push, (int)PushData.DwordCount);
-            _dispatchPushData.CopyTo(data);
-            var layout = _dispatchStageLayout;
-            if (!PatchReplayUserData(data, layout, _dispatchUserDataBase, stage.Resources.UserData))
-            {
-                return DispatchHostMiss(8);
-            }
-
-            if (layout is { UsesPushData: true, UsesDispatchThreadLimits: true } && !stage.GpuThreadLimits)
-            {
-                stage.WriteDispatchThreadLimits(data.Slice((int)layout.PushDataStartDword, (int)layout.ShaderDataDwordCount));
-            }
-
             data.CopyTo(_dispatchPushData);
             PushConstantsShadowed(BeginBatchedGuestStateCommands(), _dispatchLayout, ShaderStageFlags.ComputeBit, push);
             return true;
+        }
+
+        // Uploads the table as the full path does and pushes only its descriptor; the other pushed descriptors of the sealed
+        // dispatch stay bound. The shadow's entry takes the new descriptor, so the next full commit compares against it.
+        private void PushTableBinding(in ShaderStageResources stage, uint binding, DescriptorShadow? shadow, int entry)
+        {
+            var view = UploadDwords(stage.Resources.FlattenedResourceTable, "flattened resource table", stage.Program!, byIdentity: true);
+            var info = new DescriptorBufferInfo { Buffer = view.Buffer, Offset = view.Offset, Range = view.Range };
+            var write = new WriteDescriptorSet
+            {
+                SType = StructureType.WriteDescriptorSet,
+                DstBinding = binding,
+                DescriptorType = DescriptorWriter.DescriptorType(DescriptorBindingKind.FlattenedResourceTable),
+                DescriptorCount = 1,
+                PBufferInfo = &info,
+            };
+            var command = BeginBatchedGuestStateCommands();
+            using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+            {
+                _presenter._pushDescriptorApi.CmdPushDescriptorSet(command, PipelineBindPoint.Compute, _dispatchLayout, 0, 1, &write);
+            }
+
+            if (shadow is not null && entry >= 0)
+            {
+                shadow.Key[entry] = info.Buffer.Handle;
+                shadow.Key[entry + 1] = info.Offset;
+                shadow.Key[entry + 2] = info.Range;
+            }
+        }
+
+        // The key index of a binding's one buffer descriptor in a shadow (DescriptorKey's layout), or -1.
+        private static int FindShadowBufferEntry(DescriptorShadow shadow, uint binding)
+        {
+            var key = shadow.Key;
+            var index = 0;
+            while (index + 2 <= shadow.Length)
+            {
+                var flags = key[index + 1];
+                var count = (int)(uint)flags;
+                var hasBuffer = (flags & (1UL << 32)) != 0;
+                var described = hasBuffer || (flags & (1UL << 33)) != 0;
+                if ((uint)key[index] == binding)
+                {
+                    return hasBuffer && count == 1 && index + 5 <= shadow.Length ? index + 2 : -1;
+                }
+
+                index += 2 + (described ? count * 3 : 0);
+            }
+
+            return -1;
         }
 
         private static bool PatchReplayUserData(Span<uint> push, BindingLayout? layout, uint userDataBase, ReadOnlySpan<uint> userData)

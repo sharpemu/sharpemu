@@ -629,6 +629,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw SubmissionScheduler.Fatal("A resource preparation is already open.");
             }
 
+            _preparationStreamCopied = false;
             if (_worker)
             {
                 _preparation = (_sparePreparation ??= new RenderPreparation(this)).Open(null);
