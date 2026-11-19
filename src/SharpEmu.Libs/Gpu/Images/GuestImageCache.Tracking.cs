@@ -33,6 +33,7 @@ public sealed partial class GuestImageCache
         image.Registered = true;
         InvalidateLookups(image.Description.Data.Address, image.Description.Data.End);
         image.RecencyEntryIndex = _recencyQueue.Insert(imageIdentifier, _collectionTick);
+        image.PreviousUseTick = ulong.MaxValue;
         _totalUsedMemory += image.AccountedSize;
     }
 
@@ -258,6 +259,14 @@ public sealed partial class GuestImageCache
     {
         if (image.Registered)
         {
+            // The first use in a frame keeps the frame of the use before it: an image used in each of the two frames before
+            // the current one is a recurring alias (UsedThisFrameForOverlap).
+            var lastUse = _recencyQueue.GetLastUseTick(image.RecencyEntryIndex);
+            if (lastUse < _collectionTick)
+            {
+                image.PreviousUseTick = lastUse;
+            }
+
             _recencyQueue.Touch(image.RecencyEntryIndex, _collectionTick);
         }
     }

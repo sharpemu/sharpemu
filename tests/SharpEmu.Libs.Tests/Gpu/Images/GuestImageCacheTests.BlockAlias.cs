@@ -36,8 +36,8 @@ public sealed partial class GuestImageCacheTests
         return request;
     }
 
-    // An image the guest has not touched for more than the removal window, nor in the frame that ended or the one before
-    // it, may be deleted by an overlapping request: an image the frame before used still counts as used this frame.
+    // An image the guest has not touched for more than the removal window, nor since the frame ended, may be deleted by an
+    // overlapping request (an image used in each of the two frames before still counts as used this frame).
     private static void AgeBeyondTheRemovalWindow(CacheHarness harness, ResourceSlotIdentifier imageIdentifier, int framesEnded = 2)
     {
         for (var pass = 0; pass < 100 && harness.Scheduler.CurrentTick <= 40; pass++)

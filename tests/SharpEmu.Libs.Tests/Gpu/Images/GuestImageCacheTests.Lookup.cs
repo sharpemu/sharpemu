@@ -73,8 +73,8 @@ public sealed partial class GuestImageCacheTests
 
     // A title submits dozens of command buffers per frame. An image it writes early in a frame and reads late in it
     // is past the removal window of submissions in between, and an unrelated image the frame requested inside its
-    // memory deleted it with its contents: its next use uploaded stale guest memory. An image used this frame or the
-    // one before stays; after a whole frame without a use, the overlapping request parks it with its contents.
+    // memory deleted it with its contents: its next use uploaded stale guest memory. An image used this frame stays;
+    // once its frame has ended, the overlapping request parks it with its contents.
     [Theory]
     [InlineData(0)]
     [InlineData(1)]
@@ -97,9 +97,38 @@ public sealed partial class GuestImageCacheTests
         harness.Acquire(ref inside);
 
         Assert.True(harness.Images.Contains(writtenId));
-        Assert.Equal(framesEnded == 2, harness.Image(writtenId).Parked);
+        Assert.Equal(framesEnded != 0, harness.Image(writtenId).Parked);
         Assert.True(harness.Image(writtenId).IsGpuModified);
         Assert.Equal(Bytes(Enumerable.Repeat(deviceValue, (int)(width * width)).ToArray()), harness.ReadImageBytes(harness.Image(writtenId)));
+
+        harness.Shutdown();
+    }
+
+    // Two aliases of the same memory that a title uses every frame swapped at each one's first use in a frame, each
+    // request parking the other. An image used in each of the two frames before is a recurring alias and stays
+    // registered; an image used in one frame only is parked after it, as above.
+    [Fact]
+    public void FindImage_AnImageUsedInEachOfTheTwoFramesBeforeStaysRegistered()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        const uint width = 128;
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        var first = LinearRequest(address, width * width * 4, Format.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D,
+            new Extent3D(width, width, 1), 1, 4, 1);
+        var recurringId = harness.Acquire(ref first);
+        harness.Worker.Run(() => harness.Images.RunGarbageCollector());
+        var second = LinearRequest(address, width * width * 4, Format.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D,
+            new Extent3D(width, width, 1), 1, 4, 1);
+        Assert.Equal(recurringId, harness.Acquire(ref second));
+        AgeBeyondTheRemovalWindow(harness, recurringId, framesEnded: 1);
+
+        var inside = LinearRequest(address + 0x8000, 0x4000, Format.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D,
+            new Extent3D(64, 64, 1), 1, 4, 1);
+        harness.Acquire(ref inside);
+
+        Assert.True(harness.Images.Contains(recurringId));
+        Assert.False(harness.Image(recurringId).Parked);
 
         harness.Shutdown();
     }
