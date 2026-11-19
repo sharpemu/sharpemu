@@ -4,6 +4,7 @@
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
+using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Images;
 
@@ -237,6 +238,38 @@ public sealed partial class GuestImageCache
         {
             // Its native bytes, if any, predate the aspect's writes: they reload from guest memory.
             proxy.MarkBufferModified();
+        }
+    }
+
+    // An overlap resolution replaces or drops a depth image under the lock, where no buffer can be obtained to save its
+    // planes. The aspect's unsaved bytes move into each proxy's own R8 image instead, which becomes an ordinary
+    // GPU-written image of the plane: it publishes to guest memory like any other, and the next depth that takes the
+    // plane restores it natively. The caller holds the lock and records on the render thread.
+    private void KeepStencilPlanesInProxies(ResourceSlotIdentifier depthIdentifier)
+    {
+        if (_slots.TryGet(depthIdentifier) is not { } depth || depth.DepthOwner.IsValid || !depth.Description.HasStencil)
+        {
+            return;
+        }
+
+        List<StencilRelease>? owned = null;
+        FindStencilProxiesOf(depthIdentifier, downloadOnly: true, ref owned);
+        foreach (var release in owned ?? [])
+        {
+            var proxy = _slots[release.Proxy];
+            if (!proxy.Backing.Exists || proxy.Backing.Format is not (Format.R8Uint or Format.R8Unorm) ||
+                proxy.Backing.ImageType != ImageType.Type2D || proxy.Backing.Samples != 1 || proxy.Backing.MipLevels != 1 ||
+                depth.Backing.MipLevels != 1 || proxy.Backing.Layers != depth.Backing.Layers ||
+                !SameExtent(proxy.Backing.Extent, depth.Backing.Extent))
+            {
+                continue;
+            }
+
+            depth.CopyStencilStorage(proxy, _bufferCache.GetUtilityBuffer(GpuBufferUsage.DeviceLocal), writeBack: false);
+            proxy.DetachDepth();
+            TakeGpuOwnership(proxy);
+            // Older GPU-written images over the plane must not publish over what the proxy now holds.
+            MarkOlderOverlappingImagesOverwritten(release.Proxy, proxy);
         }
     }
 

@@ -464,6 +464,39 @@ public sealed partial class GuestImageCacheTests
         harness.ReadImageBytes(harness.Image(depthId), ImageAspectFlags.StencilBit)[..4];
 
     [Fact]
+    public void StencilRelease_DepthReplacedByAnOverlapKeepsItsGpuWrittenPlane()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var depthAddress = address + 0xc000;
+        var aAddress = address + 0xd000;
+        harness.Write(depthAddress, Bytes(0.75f, 0.5f, 0.25f, 1f));
+        harness.Write(aAddress, [0x01, 0x02, 0x03, 0x04]);
+        // The reader comes first so the plane's proxy gets a native R8 backing.
+        Assert.Equal(new byte[] { 0x01, 0x02, 0x03, 0x04 }, ReadPlane(harness, aAddress));
+        var depth = PlaneDepth(depthAddress, aAddress);
+        var depthId = harness.Acquire(ref depth);
+        ClearStencilPlane(harness, depthId, 0x66);
+        Assert.True(harness.Image(harness.ProxyAt(aAddress, 4)).Backing.Exists);
+
+        // A storage image over the depth's memory replaces the depth. Copying the
+        // depth drops its stencil aspect, so the released depth must hand the
+        // GPU-written plane to its proxy; guest memory still holds the old bytes.
+        var storage = AsStorage(LinearRequest(depthAddress, 16, Format.R32Uint, GuestPixelFormat.Bits32UInt,
+            GuestImageType.Color2D, new Extent3D(4, 1, 1), 1, 4, 1));
+        harness.Acquire(ref storage);
+        Assert.False(harness.Images.Contains(depthId));
+        Assert.Equal(Filled(0x66), ReadPlane(harness, aAddress));
+
+        var next = PlaneDepth(depthAddress, aAddress);
+        var nextId = harness.Acquire(ref next);
+        Assert.Equal(Filled(0x66), Aspect(harness, nextId));
+        harness.Shutdown();
+        _vulkan.AssertNoValidationMessages();
+    }
+
+    [Fact]
     public void StencilRelease_SavesAspectWritesMadeAfterAnEarlierPublish()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;

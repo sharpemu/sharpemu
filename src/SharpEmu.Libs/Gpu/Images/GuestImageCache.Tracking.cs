@@ -168,6 +168,7 @@ public sealed partial class GuestImageCache
     {
         var image = _slots[imageIdentifier];
         TraceVolumeState("release", image, ImageRequest.Refresh(image.Description, ImageRole.Texture));
+        KeepStencilPlanesInProxies(imageIdentifier);
         if (image.IsGpuModified)
         {
             image.ClearGpuModified();
