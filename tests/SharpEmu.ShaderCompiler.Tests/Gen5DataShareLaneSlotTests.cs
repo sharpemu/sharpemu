@@ -27,6 +27,24 @@ public sealed class Gen5DataShareLaneSlotTests
         Assert.DoesNotContain("lds", names);
     }
 
+    // s_getpc_b64 only reads the program counter (a PC-relative constant buffer); it does not jump.
+    [Fact]
+    public void AProgramCounterReadKeepsTheSlotVariables()
+    {
+        var names = CompileNames(Decode(
+        [
+            0xBE8C1F00,
+            SetM0ToZero,
+            0x7E1402FF, 0x3F800000,
+            0xDAC00100, 0x00000A00,
+            0xDAC40100, 0x04000000,
+            0xBF810000,
+        ]), ShaderStage.Pixel);
+
+        Assert.Contains("ldsLane64", names);
+        Assert.DoesNotContain("lds", names);
+    }
+
     [Fact]
     public void ThreadAddressedSpillsWithARegisterBaseKeepTheLdsArray()
     {
