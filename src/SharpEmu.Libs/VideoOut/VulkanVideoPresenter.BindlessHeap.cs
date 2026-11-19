@@ -455,7 +455,28 @@ internal static unsafe partial class VulkanVideoPresenter
             for (var index = 0; index < heaps.Length; index++)
             {
                 ref readonly var heap = ref heaps[index];
-                var region = (heap.Sampler ? _heapSamplerViews : _heapImageViews).Acquire(heap, tick, completed, _heapRegionReleased!, out var moved, frame);
+                var table = heap.Sampler ? _heapSamplerViews : _heapImageViews;
+                var region = table.Acquire(heap, tick, completed, _heapRegionReleased!, out var moved, frame);
+                HeapRegionEntries? entries = null;
+                // Set 1 is updated after bind, but an element a command not yet completed reads must not change under it.
+                // A small view the guest rewrote while such commands still read its run gets another run for this command
+                // (Fork); the old run keeps its textures for them.
+                if (region is { ReadByPending: true } && !moved && region.View.Records <= EagerHeapRecords &&
+                    _heapRegionEntries.TryGetValue(region, out entries) && entries.ValidatedTick != tick)
+                {
+                    if (!HeapRegionChanged(entries))
+                    {
+                        entries.ValidatedTick = tick;
+                    }
+                    else if (table.Fork(region, tick, completed, _heapRegionReleased!, out _, frame) is { } fork)
+                    {
+                        // A new run is resolved whole below; one taken over from an idle view is compared as moved.
+                        region = fork;
+                        moved = true;
+                        entries = null;
+                    }
+                }
+
                 var view = region?.View ?? HeapView.None;
                 words[index * (int)HeapView.DwordCount] = view.Word0;
                 words[index * (int)HeapView.DwordCount + 1] = view.Word1;
@@ -470,10 +491,22 @@ internal static unsafe partial class VulkanVideoPresenter
                     continue;
                 }
 
+                // A small view (a table of tile or material records the guest writes for each frame) is resolved whole
+                // before the command reads it, and compared with the guest's records at every submission tick: a record
+                // the shader reads for the first time would otherwise read null until its mark comes back, and one the
+                // guest rewrote would keep its old texture until the next revalidation. A culling pass that reads a null
+                // or stale depth pyramid culls what it should draw.
+                var small = region.View.Records <= EagerHeapRecords;
+                if (small)
+                {
+                    ResolveWholeHeapRegion(region);
+                }
+
                 // Only a view some draw reads is compared with the guest's records: an idle view's memory may hold
                 // anything, and is read again when a draw comes back to it. A run that moved to this heap is compared
                 // now: the records that are the same textures at the new address keep their elements.
-                if (_heapRegionEntries.TryGetValue(region, out var entries) && (moved || tick - entries.ValidatedTick >= HeapRevalidationTicks))
+                if ((entries is not null || _heapRegionEntries.TryGetValue(region, out entries)) &&
+                    (moved || tick - entries.ValidatedTick >= (small ? 1 : HeapRevalidationTicks)))
                 {
                     RevalidateHeapRegion(region, entries);
                 }
@@ -481,9 +514,60 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
+        // True when a record of the view's entries no longer holds the words the entry was resolved from.
+        private bool HeapRegionChanged(HeapRegionEntries entries)
+        {
+            Span<uint> words = stackalloc uint[8];
+            foreach (var entry in entries.Snapshot ?? [.. entries.Order])
+            {
+                if (!words[..ReadHeapRecord(entry, words)].SequenceEqual(entry.Words))
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        // Views of at most this many records are resolved whole (ResolveWholeHeapRegion); larger ones, a title's texture heap
+        // of tens of thousands of records, only resolve the records the shaders mark.
+        private const uint EagerHeapRecords = 1024;
+
+        // Gives every record of a small view an entry in each array the shaders have read the view's records through, as
+        // the marks of those reads would. A view no shader has read yet waits for its first marks, which name the arrays.
+        private void ResolveWholeHeapRegion(BindlessHeapViewTable.Region region)
+        {
+            var records = region.View.Records;
+            var slots = region.Slots;
+            if (slots == 0 || (records <= region.ResolvedRecords && (slots & ~region.ResolvedSlots) == 0))
+            {
+                return;
+            }
+
+            for (var remaining = slots; remaining != 0; remaining &= remaining - 1)
+            {
+                var slot = BitOperations.TrailingZeroCount(remaining);
+                for (var record = 0u; record < records; record++)
+                {
+                    var index = region.View.First + record;
+                    if (_heapEntries.ContainsKey((slot, index)))
+                    {
+                        continue;
+                    }
+
+                    _heapMarked[slot * (int)BindlessHeap.FeedbackWordsPerArray + (int)(index >> 5)] |= 1u << (int)(index & 31);
+                    AddHeapEntry(slot, index, region);
+                }
+            }
+
+            region.ResolvedRecords = Math.Max(region.ResolvedRecords, records);
+            region.ResolvedSlots |= slots;
+        }
+
         private void AddHeapEntry(int slot, uint index, BindlessHeapViewTable.Region region)
         {
             var entry = new HeapEntry { Slot = slot, Index = index, Region = region };
+            region.Slots |= 1u << slot;
             _heapEntries[(slot, index)] = entry;
             if (!_heapRegionEntries.TryGetValue(region, out var entries))
             {
@@ -534,7 +618,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var firstSlot = sampler ? BindlessHeap.SamplerSlot : 0;
             var endSlot = sampler ? BindlessHeap.ArrayCount : BindlessHeap.ImageKinds.Length;
             var firstWord = region.View.First >> 5;
-            var endWord = (region.View.First + region.View.Records + 31) >> 5;
+            var endWord = (region.View.First + region.Length + 31) >> 5;
             _ = BeginBatchedGuestCommands();
             for (var slot = firstSlot; slot < endSlot; slot++)
             {

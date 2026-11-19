@@ -181,18 +181,16 @@ public readonly record struct BindlessHeapDescriptor(bool Sampler, ulong Base, u
     // (a stride of the descriptor's size or less) are one view at whatever immediate the shader reads them, since the
     // read's whole offset picks the descriptor; their count is the V#'s bytes over the descriptor size (a raw V#, stride 0,
     // counts bytes, a strided one records of its stride). A record view is keyed by the descriptor's offset in a record.
-    public BindlessHeapDescriptor ViewKey
+    // A method, not a property: the record's printed members would print the key, whose own key, and so on.
+    public BindlessHeapDescriptor ViewKey()
     {
-        get
+        if (Stride > DescriptorBytes)
         {
-            if (Stride > DescriptorBytes)
-            {
-                return this with { Immediate = Immediate % Stride };
-            }
-
-            var bytes = Stride == 0 ? Records : (ulong)Records * Stride;
-            return this with { Records = (uint)Math.Min(bytes / DescriptorBytes, uint.MaxValue), Immediate = 0 };
+            return this with { Immediate = Immediate % Stride };
         }
+
+        var bytes = Stride == 0 ? Records : (ulong)Records * Stride;
+        return this with { Records = (uint)Math.Min(bytes / DescriptorBytes, uint.MaxValue), Immediate = 0 };
     }
 }
 
