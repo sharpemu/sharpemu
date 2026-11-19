@@ -283,6 +283,9 @@ internal static unsafe partial class VulkanVideoPresenter
         public long? ReadsVersion;
         public bool MixedReadsVersions;
         public readonly List<(ResourceSlotIdentifier Image, ImageRequest Request)> NativeColorUses = new();
+        // One clear entry per depth view with HTILE first acquired in the segment, and their keys for the join's image check.
+        public readonly List<SliceDepthClear> DepthClears = new();
+        public readonly List<(ResourceSlotIdentifier Image, ImageViewDescription View)> DepthClearKeys = new();
 
         public bool WritesRange(GuestSpan range)
         {
@@ -326,6 +329,24 @@ internal static unsafe partial class VulkanVideoPresenter
         // mapped span.
         public readonly List<(ulong Start, ulong End)> BdaWindows = new();
         public bool BdaFullSweep;
+    }
+
+    // A depth view with HTILE that a render worker acquired in a segment, and what the render thread's first acquisition of
+    // it would clear when its base layer's HTILE slice is clear at the join: the area of the segment's first rendering with
+    // the view, with the draw's clear value.
+    private sealed class SliceDepthClear
+    {
+        public ResourceSlotIdentifier Image;
+        public CachedImage Expected = null!;
+        public ImageViewDescription View;
+        public ImageView NativeView;
+        public ulong Htile;
+        public uint BaseLayer;
+        public uint ClearWord;
+        public bool HasArea;
+        public uint Width;
+        public uint Height;
+        public uint Layers;
     }
 
     // Items recorded into one command buffer; the item after them, if any, needs the render thread.
@@ -717,7 +738,8 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var started = System.Diagnostics.Stopwatch.GetTimestamp();
-            var valid = _imageCache.ValidateSliceImages(requests.Images, requests.LookupGeneration, requests.MetadataGeneration);
+            var valid = _imageCache.ValidateSliceImages(requests.Images, requests.LookupGeneration, requests.MetadataGeneration,
+                requests.DepthClearKeys.Count != 0 ? requests.DepthClearKeys : null);
             var imagesDone = System.Diagnostics.Stopwatch.GetTimestamp();
             _validateImageTicks.Add(imagesDone - started);
             if (!valid)
@@ -761,7 +783,40 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _validateDeferredTicks.Add(System.Diagnostics.Stopwatch.GetTimestamp() - buffersDone);
+            if (valid && requests.DepthClears.Count != 0 && !DepthClearsAppliable(requests))
+            {
+                return false;
+            }
+
             return valid;
+        }
+
+        // A clear the join records ahead of the segment needs the area of its view's first rendering, and no other use of its
+        // image in the segment: a sampled use there would see the clear before its turn.
+        private bool DepthClearsAppliable(SliceRequests requests)
+        {
+            foreach (var entry in requests.DepthClears)
+            {
+                if (!_imageCache.IsMetadataCleared(entry.Htile, entry.BaseLayer))
+                {
+                    continue;
+                }
+
+                if (!entry.HasArea)
+                {
+                    return false;
+                }
+
+                foreach (var use in requests.Images)
+                {
+                    if (use.Image == entry.Image && use.Request.Role != ImageRole.DepthTarget)
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            return true;
         }
 
         private bool ValidateDeferredItems(RenderSlice slice, SliceSegment segment)
@@ -887,6 +942,12 @@ internal static unsafe partial class VulkanVideoPresenter
                 _imageCache.ApplySliceUse(use.Image, in request);
             }
 
+            // After the image uses, so a refresh from guest memory comes before the clear, as before a load-op clear.
+            if (requests.DepthClears.Count != 0)
+            {
+                Recording.ApplySliceDepthClears(requests.DepthClears);
+            }
+
             foreach (var (address, words) in requests.KnownWrites)
             {
                 _bufferCache.NoteKnownGpuContents(address, words);
@@ -937,6 +998,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 for (var index = 0; index < slice.Items.Count; index++)
                 {
                     var started = System.Diagnostics.Stopwatch.GetTimestamp();
+                    var depthClearMark = -1;
                     try
                     {
                         if (!_presenter._translation.CanRecordDeferred(slice.Items[index].Work!))
@@ -959,6 +1021,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         }
 
                         segment ??= BeginSegment(index);
+                        depthClearMark = segment.Requests.DepthClears.Count;
                         _itemSequence = slice.Items[index].Sequence;
                         if (slice.Items[index].Work is SharpEmu.Libs.Agc.AgcExports.GlobalBarrierWork)
                         {
@@ -974,6 +1037,14 @@ internal static unsafe partial class VulkanVideoPresenter
                     }
                     catch (SerialRequiredException serial)
                     {
+                        // The item runs on the render thread, so the clear entries it made leave the segment.
+                        if (depthClearMark >= 0 && segment!.Requests.DepthClears.Count > depthClearMark)
+                        {
+                            var dropped = segment.Requests.DepthClears.Count - depthClearMark;
+                            segment.Requests.DepthClears.RemoveRange(depthClearMark, dropped);
+                            segment.Requests.DepthClearKeys.RemoveRange(depthClearMark, dropped);
+                        }
+
                         segment!.SerialReason = serial.Message;
                         Interlocked.Increment(ref _serialReasons.GetOrAdd(serial.Message, static _ => new StrongBox<long>()).Value);
                         EndSegment(slice, segment);
@@ -1380,14 +1451,27 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw Serial("stale depth target");
             }
 
+            // A pending HTILE clear passes when the segment holds a clear entry for the view: the join records the clear ahead
+            // of the segment. The draw's own depth clear, or an earlier use of the image other than as depth, stops the worker.
             var layer = resolution.Request.View.BaseLayer;
+            var pending = false;
             if (resolution.HasHtile && (resolution.DepthClearEnabled || _imageCache.IsMetadataCleared(resolution.HtileAddress, layer)))
             {
-                throw Serial("depth clear");
+                if (resolution.DepthClearEnabled || HasNonDepthUse(depth.Image))
+                {
+                    throw Serial("depth clear");
+                }
+
+                pending = true;
             }
 
             if (TryKeptAttachment(depth.Image, resolution.Request, out var keptView, out var keptImage))
             {
+                if (pending && !HasDepthClear(depth.Image, resolution.Request.View))
+                {
+                    throw Serial("depth clear");
+                }
+
                 return new DepthAttachmentAcquisition(keptView, keptImage.Backing.Samples, false);
             }
 
@@ -1399,7 +1483,119 @@ internal static unsafe partial class VulkanVideoPresenter
             var image = Image(depth.Image);
             Requests.AddImage(new ImageSliceUse(depth.Image, image, resolution.Request));
             _attachments.Add((depth.Image, resolution.Request, view, image));
+            if (resolution.HasHtile && !HasDepthClear(depth.Image, resolution.Request.View))
+            {
+                Requests.DepthClears.Add(new SliceDepthClear
+                {
+                    Image = depth.Image,
+                    Expected = image,
+                    View = resolution.Request.View,
+                    NativeView = view,
+                    Htile = resolution.HtileAddress,
+                    BaseLayer = layer,
+                    ClearWord = BitConverter.SingleToUInt32Bits(depth.Target.State.DepthClearValue),
+                });
+                Requests.DepthClearKeys.Add((depth.Image, resolution.Request.View));
+            }
+
             return new DepthAttachmentAcquisition(view, image.Backing.Samples, false);
+        }
+
+        private bool HasDepthClear(ResourceSlotIdentifier image, in ImageViewDescription view)
+        {
+            foreach (var key in Requests.DepthClearKeys)
+            {
+                if (key.Image == image && key.View == view)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private bool HasNonDepthUse(ResourceSlotIdentifier image)
+        {
+            foreach (var use in Requests.Images)
+            {
+                if (use.Image == image && use.Request.Role != ImageRole.DepthTarget)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        // A worker notes the area of the segment's first rendering with each clear entry's view.
+        private static void NoteDepthClearArea(SliceRequests requests, in RenderingState state)
+        {
+            if (!state.DepthStencilAttachment.HasDepth)
+            {
+                return;
+            }
+
+            foreach (var entry in requests.DepthClears)
+            {
+                if (!entry.HasArea && entry.NativeView.Handle == state.DepthStencilAttachment.View.Handle)
+                {
+                    entry.HasArea = true;
+                    entry.Width = state.Width;
+                    entry.Height = state.Height;
+                    entry.Layers = state.Layers;
+                }
+            }
+        }
+
+        // The render thread records a segment's pending depth clears ahead of it, as the first acquisition of each view would:
+        // it consumes the base layer's HTILE clear state and clears the area of the view's first rendering with the draw's
+        // value. Stencil is not touched.
+        internal void ApplySliceDepthClears(List<SliceDepthClear> clears)
+        {
+            foreach (var entry in clears)
+            {
+                if (!_imageCache.IsMetadataCleared(entry.Htile, entry.BaseLayer))
+                {
+                    continue;
+                }
+
+                if (!entry.HasArea)
+                {
+                    throw SubmissionScheduler.Fatal($"A slice depth clear has no rendering area: htile=0x{entry.Htile:X16}.");
+                }
+
+                if (!_imageCache.SetMetadataSlice(entry.Htile, entry.BaseLayer, false))
+                {
+                    throw SubmissionScheduler.Fatal($"The HTile clear state could not be consumed: htile=0x{entry.Htile:X16} layer={entry.BaseLayer}.");
+                }
+
+                EndRendering();
+                var command = BeginBatchedGuestCommands();
+                var view = entry.View;
+                TransitionImage(entry.Expected, AccessFlags.DepthStencilAttachmentReadBit | AccessFlags.DepthStencilAttachmentWriteBit,
+                    new SubresourceRange(view.BaseLevel, view.LevelCount, view.BaseLayer, view.LayerCount), command);
+                var depth = new RenderingAttachmentInfo
+                {
+                    SType = StructureType.RenderingAttachmentInfo,
+                    ImageView = entry.NativeView,
+                    ImageLayout = ImageLayout.General,
+                    LoadOp = AttachmentLoadOp.Clear,
+                    StoreOp = AttachmentStoreOp.Store,
+                    ClearValue = new ClearValue { DepthStencil = new ClearDepthStencilValue(BitConverter.UInt32BitsToSingle(entry.ClearWord), 0) },
+                };
+                var rendering = new RenderingInfo
+                {
+                    SType = StructureType.RenderingInfo,
+                    RenderArea = new Rect2D(new Offset2D(0, 0), new Extent2D(entry.Width, entry.Height)),
+                    LayerCount = entry.Layers,
+                    PDepthAttachment = &depth,
+                };
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdBeginRendering(command, &rendering);
+                    _vk.CmdEndRendering(command);
+                }
+            }
         }
 
         private ImageView AcquireTextureViewForSlice(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)

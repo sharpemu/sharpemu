@@ -517,14 +517,16 @@ public sealed partial class GuestImageCache
     // A slice segment can be recorded before a clear that an earlier stream item then runs and consumes. Its use still
     // holds when only clear-state events reached the metadata since the segment began and no slice the use's view covers
     // waits on a clear now: the recording worker stops at a pending clear, so it saw none, and the clear ran before the
-    // segment.
-    private bool ConsumedClearsOnly(in ImageSliceUse use, CachedImage image, long generation, bool requestChanged, bool imageChanged)
+    // segment. A use whose segment applies the view's pending clear at its join (clearApplied) may still find a covered
+    // slice waiting on a clear.
+    private bool ConsumedClearsOnly(in ImageSliceUse use, CachedImage image, long generation, bool requestChanged, bool imageChanged,
+        bool clearApplied = false)
     {
         var view = use.Request.View;
         if (requestChanged)
         {
             var address = use.Request.Description.Metadata.Range.Address;
-            if (!OnlyClearsSince(generation, address) || AnyCoveredSliceClear(address, in view))
+            if (!OnlyClearsSince(generation, address) || (!clearApplied && AnyCoveredSliceClear(address, in view)))
             {
                 return false;
             }
@@ -533,7 +535,7 @@ public sealed partial class GuestImageCache
         if (imageChanged)
         {
             var address = image.Description.Metadata.Range.Address;
-            if (!OnlyClearsSince(generation, address) || AnyCoveredSliceClear(address, in view))
+            if (!OnlyClearsSince(generation, address) || (!clearApplied && AnyCoveredSliceClear(address, in view)))
             {
                 return false;
             }

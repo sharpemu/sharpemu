@@ -1180,6 +1180,11 @@ internal static unsafe partial class VulkanVideoPresenter
         public void BeginRendering(in RenderingState state)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawRenderingSetup);
+            if (_worker && _segment is { Requests.DepthClears.Count: > 0 } segment)
+            {
+                NoteDepthClearArea(segment.Requests, in state);
+            }
+
             if (_renderingActive && _renderingState == state)
             {
                 _renderingWritesMemory |= _nextDrawWritesMemory;
