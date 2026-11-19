@@ -453,6 +453,13 @@ public sealed partial class GuestImageCache
         return replacementImageIdentifier;
     }
 
+    // Whether an overlapping cached image counts as used this frame, so it is not safe to park or delete. The frame before
+    // this one counts too: two aliases of the same memory that a title uses every frame both stay registered instead of
+    // swapping at each one's first use, and an alias unused for a whole frame is parked. The serial overlap and the render
+    // workers' read-only overlap must agree.
+    private bool UsedThisFrameForOverlap(CachedImage cached) =>
+        cached.Registered && _recencyQueue.GetLastUseTick(cached.RecencyEntryIndex) + 1 >= _collectionTick;
+
     private OverlapResolution ResolveOverlap(in ImageDescription requested, ImageRole role, ResourceSlotIdentifier cachedImageIdentifier, ResourceSlotIdentifier mergedImageIdentifier)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageOverlap);
@@ -466,7 +473,7 @@ public sealed partial class GuestImageCache
         var currentTick = _scheduler.CurrentTick;
         // A title submits dozens of command buffers per frame, so an image it writes early in a frame and reads late
         // in it is past the removal window in between. As in collection, an image used this frame is not stale.
-        var usedThisFrame = cached.Registered && _recencyQueue.GetLastUseTick(cached.RecencyEntryIndex) >= _collectionTick;
+        var usedThisFrame = UsedThisFrameForOverlap(cached);
         var safeToDelete = !usedThisFrame && currentTick - Math.Min(currentTick, cached.LastAccessTick) > TicksBeforeRemoval;
         if (requested.FirstLevel != 0 || cachedInfo.FirstLevel != 0)
         {

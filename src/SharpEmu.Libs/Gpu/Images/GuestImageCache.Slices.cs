@@ -235,7 +235,7 @@ public sealed partial class GuestImageCache
 
         ref readonly var cachedInfo = ref cached.Description;
         var currentTick = _scheduler.CurrentTick;
-        var usedThisFrame = cached.Registered && _recencyQueue.GetLastUseTick(cached.RecencyEntryIndex) >= _collectionTick;
+        var usedThisFrame = UsedThisFrameForOverlap(cached);
         var safeToDelete = !usedThisFrame && currentTick - Math.Min(currentTick, cached.LastAccessTick) > TicksBeforeRemoval;
         if (requested.Data.Address == cachedInfo.Data.Address &&
             requested.BlockExtent.Width == cachedInfo.BlockExtent.Width && requested.BlockExtent.Height == cachedInfo.BlockExtent.Height &&

@@ -73,12 +73,13 @@ public sealed partial class GuestImageCacheTests
 
     // A title submits dozens of command buffers per frame. An image it writes early in a frame and reads late in it
     // is past the removal window of submissions in between, and an unrelated image the frame requested inside its
-    // memory deleted it with its contents: its next use uploaded stale guest memory. An image used this frame stays;
-    // after the frame ends, the overlapping request parks it with its contents.
+    // memory deleted it with its contents: its next use uploaded stale guest memory. An image used this frame or the
+    // one before stays; after a whole frame without a use, the overlapping request parks it with its contents.
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void FindImage_AnUnrelatedImageInsideAnImageUsedThisFrameKeepsItsContents(bool frameEnded)
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void FindImage_AnUnrelatedImageInsideAnImageUsedThisFrameKeepsItsContents(int framesEnded)
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
         using var harness = new CacheHarness(_vulkan);
@@ -89,14 +90,14 @@ public sealed partial class GuestImageCacheTests
             new Extent3D(width, width, 1), 1, 4, 1);
         var writtenId = harness.Acquire(ref written);
         Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(address, width * width * 4, deviceValue)));
-        AgeBeyondTheRemovalWindow(harness, writtenId, endFrame: frameEnded);
+        AgeBeyondTheRemovalWindow(harness, writtenId, framesEnded);
 
         var inside = LinearRequest(address + 0x8000, 0x4000, Format.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D,
             new Extent3D(64, 64, 1), 1, 4, 1);
         harness.Acquire(ref inside);
 
         Assert.True(harness.Images.Contains(writtenId));
-        Assert.Equal(frameEnded, harness.Image(writtenId).Parked);
+        Assert.Equal(framesEnded == 2, harness.Image(writtenId).Parked);
         Assert.True(harness.Image(writtenId).IsGpuModified);
         Assert.Equal(Bytes(Enumerable.Repeat(deviceValue, (int)(width * width)).ToArray()), harness.ReadImageBytes(harness.Image(writtenId)));
 
@@ -115,7 +116,7 @@ public sealed partial class GuestImageCacheTests
             new Extent3D(width, width, 1), 1, 4, 1);
         var filledId = harness.Acquire(ref filled);
         Assert.False(harness.Image(filledId).IsGpuModified);
-        AgeBeyondTheRemovalWindow(harness, filledId, endFrame: true);
+        AgeBeyondTheRemovalWindow(harness, filledId);
 
         var inside = LinearRequest(address + 0x8000, 0x4000, Format.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D,
             new Extent3D(64, 64, 1), 1, 4, 1);
