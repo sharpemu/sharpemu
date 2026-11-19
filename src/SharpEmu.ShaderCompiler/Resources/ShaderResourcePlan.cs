@@ -86,6 +86,20 @@ public sealed partial class ShaderResourcePlan
         return Interlocked.CompareExchange(ref _materializationProgram, built, null) ?? built;
     }
 
+    private sealed record BranchSelectionBox(MaterializationProgram.BranchSelection? Selection);
+
+    private BranchSelectionBox? _branchSelection;
+
+    // The materialization program's branch selection, built on first use; null leaves the selection to the evaluator.
+    internal MaterializationProgram.BranchSelection? BranchSelection =>
+        (Volatile.Read(ref _branchSelection) ?? InitializeBranchSelection()).Selection;
+
+    private BranchSelectionBox InitializeBranchSelection()
+    {
+        var built = new BranchSelectionBox(Resources.MaterializationProgram.BranchSelection.Build(this));
+        return Interlocked.CompareExchange(ref _branchSelection, built, null) ?? built;
+    }
+
     internal object?[]? SpecializationMemos;
     internal int NextSpecializationMemo;
 

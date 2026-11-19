@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Runtime.InteropServices;
+
 namespace SharpEmu.ShaderCompiler.Resources;
 
 // SHARPEMU_BRANCHES_WITH_WRITES (on by default, =0 off): the branch selection of a plan that writes memory
@@ -52,21 +54,30 @@ public sealed class ResourceBranchWriteGuard : IDisposable
                 if (!Evaluator.Evaluate(source.Dwords[index], out words[index])) return false;
             }
 
-            // A descriptor that is not a buffer is bound as null (ResourceMaterializer.BuildSpecialization): nothing is written.
-            if ((words[3] >> 30) != 0) continue;
-            if ((words[1] >> 31) != 0 || ((words[3] >> 23) & 1) != 0) return false;
-            var stride = (words[1] >> 16) & 0x3FFFu;
-            var size = stride == 0 ? words[2] : (ulong)stride * words[2];
-            var start = words[0] | ((ulong)(words[1] & 0xFFFF) << 32);
-            var low = start > Margin ? start - Margin : 0;
-            var high = start + size + Margin;
-            for (var index = 0; index < predicateReads; index++)
-            {
-                if (_reads[index] + sizeof(uint) > low && _reads[index] < high) return false;
-            }
+            if (Reaches(words[0], words[1], words[2], words[3], CollectionsMarshal.AsSpan(_reads)[..predicateReads])) return false;
         }
 
         return true;
+    }
+
+    // Whether a written V# may reach one of the words the predicates read: one that swizzles or adds the thread id may, and
+    // so may one whose records, Margin bytes wider on each side, cover such a word.
+    internal static bool Reaches(uint word0, uint word1, uint word2, uint word3, ReadOnlySpan<ulong> predicateReads)
+    {
+        // A descriptor that is not a buffer is bound as null (ResourceMaterializer.BuildSpecialization): nothing is written.
+        if ((word3 >> 30) != 0) return false;
+        if ((word1 >> 31) != 0 || ((word3 >> 23) & 1) != 0) return true;
+        var stride = (word1 >> 16) & 0x3FFFu;
+        var size = stride == 0 ? word2 : (ulong)stride * word2;
+        var start = word0 | ((ulong)(word1 & 0xFFFF) << 32);
+        var low = start > Margin ? start - Margin : 0;
+        var high = start + size + Margin;
+        foreach (var read in predicateReads)
+        {
+            if (read + sizeof(uint) > low && read < high) return true;
+        }
+
+        return false;
     }
 
     public void Dispose() => _scratch.Dispose();
