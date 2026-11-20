@@ -7,7 +7,7 @@ public readonly record struct PkgExtractProgress(long BytesDone, long BytesTotal
 
 // A fake (fpkg) PS4 package opened for reading. Extraction streams every file block by block,
 // so a package of any size needs only a few hundred KiB of memory.
-public sealed class PkgPackage : IDisposable
+public sealed class PkgPackage : IGamePackage
 {
     private const int EntryKeysTableOffset = 32 + 7 * 32; // seed digest + 7 digests, then 7 RSA keys
     private const int EntryKeySize = 256;
@@ -29,6 +29,8 @@ public sealed class PkgPackage : IDisposable
     public PkgHeader Header { get; }
 
     public IReadOnlyList<PkgEntry> Entries { get; }
+
+    public string ContentId => Header.ContentId;
 
     public string TitleId => Header.TitleId;
 
