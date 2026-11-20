@@ -758,7 +758,8 @@ public sealed class Ps5PkgTests
         Inode(9, FileMode, 0x2000, 0x10000);
         Inode(10, FileMode, 0, 0);
         DirectoryBlock(0x1000, (0, 3, "."), (0, 3, ".."), (1, 3, "uroot"), (2, 2, "readme")).CopyTo(tail, 0x2000);
-        DirectoryBlock(0x1000, (1, 3, "."), (0, 3, ".."), (2, 2, "eboot.bin"), (3, 3, "sce_module"), (5, 3, "assets")).CopyTo(tail, 0x3000);
+        // Real packages type "." and ".." as PFS self (4) and parent (5) records.
+        DirectoryBlock(0x1000, (1, 4, "."), (0, 5, ".."), (2, 2, "eboot.bin"), (3, 3, "sce_module"), (5, 3, "assets")).CopyTo(tail, 0x3000);
         DirectoryBlock(0x1000, (3, 3, "."), (1, 3, ".."), (4, 2, spec.ModuleFileName)).CopyTo(tail, 0x4000);
         DirectoryBlock(0x1000, (5, 3, "."), (1, 3, ".."), (6, 2, "data.bin"), (7, 3, "sub"), (9, 2, "sparse.bin"), (10, 2, "empty.bin"))
             .CopyTo(tail, 0x5000);

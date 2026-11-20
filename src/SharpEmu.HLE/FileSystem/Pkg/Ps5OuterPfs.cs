@@ -330,8 +330,9 @@ internal sealed class Ps5OuterFile(Ps5Source source, long baseOffset, long block
 
 internal readonly record struct Ps5Dirent(uint Inode, uint Kind, byte[] Name)
 {
-    // The "." and ".." directory records. A file that merely carries one of those names is not one.
-    public bool IsSelfOrParentDirectory => Kind == 3 && (Name.AsSpan().SequenceEqual("."u8) || Name.AsSpan().SequenceEqual(".."u8));
+    // The "." and ".." directory records: typed as directories (3) by some builders, or with the
+    // PFS self (4) and parent (5) types by others. A file that merely carries one of those names is not one.
+    public bool IsSelfOrParentDirectory => Kind is 3 or 4 or 5 && (Name.AsSpan().SequenceEqual("."u8) || Name.AsSpan().SequenceEqual(".."u8));
 
     // Directory records: inode, type, name length, record size, then the name. An all-zero record
     // pads to the end of its block.
