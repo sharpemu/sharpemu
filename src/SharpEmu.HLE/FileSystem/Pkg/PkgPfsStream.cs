@@ -41,7 +41,7 @@ public sealed class PkgPfsStream : Stream
     public override long Position
     {
         get => _position;
-        set => _position = value;
+        set => _position = value < 0 ? throw new ArgumentOutOfRangeException(nameof(value)) : value;
     }
 
     public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));

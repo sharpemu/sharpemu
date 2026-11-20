@@ -67,6 +67,12 @@ public sealed class PkgPackage : IDisposable
                 throw new InvalidDataException("PKG entry table is implausibly large.");
             }
 
+            if ((ulong)header.TableEntryOffset + (ulong)header.TableEntryCount * PkgEntry.Size_ > header.PkgSize ||
+                (ulong)header.PfsImageOffset + header.PfsImageSize > header.PkgSize)
+            {
+                throw new InvalidDataException("PKG points outside its own bounds.");
+            }
+
             var table = new byte[checked((int)header.TableEntryCount * PkgEntry.Size_)];
             file.Position = header.TableEntryOffset;
             file.ReadExactly(table);
@@ -81,6 +87,12 @@ public sealed class PkgPackage : IDisposable
 
     public byte[] ReadEntry(PkgEntry entry)
     {
+        // A corrupt table must never make us allocate gigabytes before we notice.
+        if ((ulong)entry.Offset + entry.Size > Header.PkgSize)
+        {
+            throw new InvalidDataException("PKG entry lies outside the package.");
+        }
+
         var data = new byte[entry.Size];
         _file.Position = entry.Offset;
         _file.ReadExactly(data);
@@ -144,12 +156,15 @@ public sealed class PkgPackage : IDisposable
 
     private PkgPfsStream OpenPfsImageStream()
     {
-        var imageKeyEntry = FindEntry(PkgEntry.ImageKeyId, out var imageKeyRow)
-            ?? throw new InvalidDataException("PKG has no image key entry.");
-        var keysEntry = FindEntry(PkgEntry.EntryKeysId, out _)
-            ?? throw new InvalidDataException("PKG has no entry keys entry.");
+        var imageKeyEntry = FindEntry(PkgEntry.ImageKeyId, out var imageKeyRow);
+        var keysEntry = FindEntry(PkgEntry.EntryKeysId, out _);
+        if (imageKeyEntry is null || keysEntry is null)
+        {
+            // No key material means the PFS image is stored in the clear.
+            return new PkgPfsStream(_file, (long)Header.PfsImageOffset, (long)Header.PfsImageSize, null, null);
+        }
 
-        var keys = ReadEntry(keysEntry);
+        var keys = ReadEntry(keysEntry.Value);
         var key3Offset = EntryKeysTableOffset + 3 * EntryKeySize;
         if (keys.Length < key3Offset + EntryKeySize)
         {
@@ -157,7 +172,7 @@ public sealed class PkgPackage : IDisposable
         }
 
         var dk3 = PkgCrypto.DeriveDk3(keys.AsSpan(key3Offset, EntryKeySize));
-        var imageKey = ReadEntry(imageKeyEntry);
+        var imageKey = ReadEntry(imageKeyEntry.Value);
         if (imageKey.Length < EntryKeySize)
         {
             throw new InvalidDataException("PKG image key entry is truncated.");

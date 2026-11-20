@@ -243,6 +243,11 @@ public sealed class PfsImage
         {
             throw new InvalidDataException($"Unsupported PFS block size {Header.BlockSize}.");
         }
+
+        if (Header.BlockCount <= 0 || Header.BlockCount > _pfsc.BlockCount)
+        {
+            throw new InvalidDataException("PFS block count does not fit its PFSC container.");
+        }
     }
 
     public PfsHeader Header { get; }
@@ -261,8 +266,14 @@ public sealed class PfsImage
     // Inodes are packed per block (a block holds 390 of them); the table starts at block 1.
     private PfsInode[] ReadInodes()
     {
-        var count = checked((int)Header.DinodeCount);
         var perBlock = PfscImage.BlockSize / PfsInode.Stride;
+        if (Header.DinodeBlockCount <= 0 || Header.DinodeBlockCount > Header.BlockCount ||
+            Header.DinodeCount > Header.DinodeBlockCount * perBlock)
+        {
+            throw new InvalidDataException("PFS inode table is implausibly large.");
+        }
+
+        var count = checked((int)Header.DinodeCount);
         var inodes = new PfsInode[count];
         for (var i = 0; i < count; i++)
         {
@@ -283,7 +294,7 @@ public sealed class PfsImage
         var entries = new List<PfsDirent>();
         for (uint i = 0; i < directory.Blocks; i++)
         {
-            _pfsc.ReadBlock(directory.Location + i, _block);
+            _pfsc.ReadBlock((long)directory.Location + i, _block);
             entries.AddRange(PfsDirent.ParseBlock(_block));
         }
 
@@ -308,10 +319,15 @@ public sealed class PfsImage
     // Streams a file's blocks to `destination`; the last block is cut to the file size.
     public void CopyFile(PfsInode file, Stream destination, Action<long>? onBytes = null)
     {
+        if (file.Size < 0 || file.Blocks * (long)PfscImage.BlockSize < file.Size)
+        {
+            throw new InvalidDataException("PFS file claims more data than its blocks hold.");
+        }
+
         var remaining = file.Size;
         for (uint i = 0; i < file.Blocks && remaining > 0; i++)
         {
-            _pfsc.ReadBlock(file.Location + i, _block);
+            _pfsc.ReadBlock((long)file.Location + i, _block);
             var chunk = (int)Math.Min(remaining, PfscImage.BlockSize);
             destination.Write(_block, 0, chunk);
             remaining -= chunk;

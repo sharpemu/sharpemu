@@ -58,6 +58,11 @@ public static class PkgCrypto
     // ekpfs = RSA(Fake)(AES-CBC(SHA256(imageKeyEntryRow || dk3))(image key))
     public static byte[] DeriveEkpfs(ReadOnlySpan<byte> imageKeyEntryRow, ReadOnlySpan<byte> dk3, ReadOnlySpan<byte> imageKey)
     {
+        if (imageKey.Length % 16 != 0)
+        {
+            throw new InvalidDataException("PKG image key is not a whole number of AES blocks.");
+        }
+
         Span<byte> ivKeyInput = stackalloc byte[64];
         imageKeyEntryRow[..PkgEntry.Size_].CopyTo(ivKeyInput);
         dk3[..32].CopyTo(ivKeyInput[32..]);
@@ -65,7 +70,15 @@ public static class PkgCrypto
 
         using var aes = Aes.Create();
         aes.Key = ivKey[16..32];
-        var decrypted = aes.DecryptCbc(imageKey, ivKey.AsSpan(0, 16), PaddingMode.None);
+        byte[] decrypted;
+        try
+        {
+            decrypted = aes.DecryptCbc(imageKey, ivKey.AsSpan(0, 16), PaddingMode.None);
+        }
+        catch (CryptographicException exception)
+        {
+            throw new InvalidDataException("Could not decrypt the PKG image key.", exception);
+        }
         return Truncate(RsaDecrypt(decrypted, PkgKeys.FakeModulus, PkgKeys.FakePrivateExponent), 32);
     }
 
