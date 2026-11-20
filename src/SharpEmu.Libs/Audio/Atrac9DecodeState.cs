@@ -248,20 +248,8 @@ internal sealed class Atrac9DecodeState
                     break;
                 }
 
-                if (_compressedLength < config.SuperframeBytes)
-                {
-                    var copied = Math.Min(config.SuperframeBytes - _compressedLength, input.Length - consumed);
-                    input.Slice(consumed, copied).CopyTo(_compressed.AsSpan(_compressedLength));
-                    _compressedLength += copied;
-                    consumed += copied;
-                }
-
-                if (_compressedLength < config.SuperframeBytes)
-                {
-                    status |= ResultPartialInput;
-                    break;
-                }
-
+                // The room check comes before the superframe's bytes are taken: a superframe the output has no room for
+                // stays in the input, as the codec leaves it, instead of being reported consumed with nothing produced.
                 var skip = Math.Min(config.SuperframeSamples, (int)_gapless.SkipSamples);
                 var samples = config.SuperframeSamples - skip;
                 if (HasSampleLimit)
@@ -273,6 +261,20 @@ internal sealed class Atrac9DecodeState
                 if (output.Length - written < outputBytes)
                 {
                     status |= ResultNotEnoughRoom;
+                    break;
+                }
+
+                if (_compressedLength < config.SuperframeBytes)
+                {
+                    var copied = Math.Min(config.SuperframeBytes - _compressedLength, input.Length - consumed);
+                    input.Slice(consumed, copied).CopyTo(_compressed.AsSpan(_compressedLength));
+                    _compressedLength += copied;
+                    consumed += copied;
+                }
+
+                if (_compressedLength < config.SuperframeBytes)
+                {
+                    status |= ResultPartialInput;
                     break;
                 }
 

@@ -124,6 +124,20 @@ public sealed class Atrac9GaplessTests
     }
 
     [Fact]
+    public void ASuperframeWithoutRoomStaysInTheInput()
+    {
+        var decoder = CreateDecoder();
+
+        var first = DecodeSuperframes(decoder, 2, SuperframeSamples);
+        Assert.Equal((SuperframeBytes, SuperframeSamples * sizeof(short)), (first.InputConsumed, first.OutputWritten));
+        Assert.NotEqual(0, first.Status & Atrac9DecodeState.ResultNotEnoughRoom);
+
+        var second = DecodeSuperframes(decoder, 1, SuperframeSamples);
+        Assert.Equal((SuperframeBytes, SuperframeSamples * sizeof(short)), (second.InputConsumed, second.OutputWritten));
+        Assert.Equal((ulong)(SuperframeSamples * 2), second.TotalDecodedSamples);
+    }
+
+    [Fact]
     public void AJobWithoutInputReportsPartialInput()
     {
         var decoder = CreateDecoder();
