@@ -134,6 +134,8 @@ internal static class PkgEntryNames
 {
     private static readonly Dictionary<uint, string> Fixed = new()
     {
+        [0x0402] = "nptitle.dat",
+        [0x0403] = "npbind.dat",
         [0x1000] = "param.sfo",
         [0x1001] = "playgo-chunk.dat",
         [0x1002] = "playgo-chunk.sha",
