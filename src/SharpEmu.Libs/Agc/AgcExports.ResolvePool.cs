@@ -26,6 +26,8 @@ public static partial class AgcExports
         public long Sequence;
         public long FrontendImageVersion;
         public ResolvedDraw? Record;
+        // The sequence of the deferred draw right before this one when no register was written between them, or 0.
+        public long RepeatOf;
         public string? SerialReason;
         public Exception? Failure;
         public readonly ResolveReadLog Reads = new();
@@ -39,6 +41,7 @@ public static partial class AgcExports
         public void Reset()
         {
             Record = null;
+            RepeatOf = 0;
             SerialReason = null;
             Failure = null;
             FrontendImageVersion = 0;
@@ -128,7 +131,60 @@ public static partial class AgcExports
             work.AutoArguments = autoArguments;
             work.Sequence = Sink!.EnqueueDeferred(work, isDraw: true);
             Interlocked.Increment(ref _deferredDraws);
-            pool.Dispatch(work);
+            var repeatable = indexed && indexedArguments.OffsetSource == DrawOffsetSource.IndirectArguments;
+            var route = -1;
+            if (repeatable && _repeatPrevious && work.Sequence == _repeatSequence + 1 && submitId == _repeatSubmit &&
+                SameRegistersAsRepeatPrevious(work.Banks))
+            {
+                work.RepeatOf = _repeatSequence;
+                route = _repeatRoute;
+            }
+
+            route = pool.Dispatch(work, route);
+            _repeatPrevious = repeatable;
+            if (repeatable)
+            {
+                NoteRepeatPrevious(work.Banks, work.Sequence, submitId, route);
+            }
+        }
+
+        // The last deferred indexed indirect draw: its banks' write stamps (a group with no write since then is equal) and
+        // the draw-time markers, and the worker it went to.
+        private bool _repeatPrevious;
+        private long _repeatSequence;
+        private ulong _repeatSubmit;
+        private int _repeatRoute;
+        private RegisterStampSet _repeatStamps;
+        private uint _repeatIndexType;
+        private UserScalarKind _repeatMarker;
+        private uint? _repeatDepthSize;
+
+        private void NoteRepeatPrevious(RegisterBanks banks, long sequence, ulong submitId, int route)
+        {
+            _repeatSequence = sequence;
+            _repeatSubmit = submitId;
+            _repeatRoute = route;
+            for (var group = 0; group < RegisterStamps.Count; group++)
+            {
+                _repeatStamps[group] = banks.Stamp((RegisterStamp)group);
+            }
+
+            _repeatIndexType = banks.IndexTypeAndSize;
+            _repeatMarker = banks.UserDataMarker;
+            _repeatDepthSize = banks.CompositeDepthSizeXy;
+        }
+
+        private bool SameRegistersAsRepeatPrevious(RegisterBanks banks)
+        {
+            for (var group = 0; group < RegisterStamps.Count; group++)
+            {
+                if (banks.Stamp((RegisterStamp)group) != _repeatStamps[group])
+                {
+                    return false;
+                }
+            }
+
+            return banks.IndexTypeAndSize == _repeatIndexType && banks.UserDataMarker == _repeatMarker && banks.CompositeDepthSizeXy == _repeatDepthSize;
         }
 
         private static void WaitResolved(DeferredDraw deferred)
@@ -277,6 +333,14 @@ public static partial class AgcExports
                 public readonly CapturingSink Sink = new();
                 public Thread Thread = null!;
                 public RenderExecutor Executor = null!;
+
+                // The worker's copy of its last repeatable record, with its reads, image version and shader registrations;
+                // a repeat of that draw starts from it. TemplateSequence is -1 when there is none.
+                public readonly ResolvedDraw Template = new();
+                public readonly ResolveReadLog TemplateReads = new();
+                public long TemplateFrontendVersion;
+                public long TemplateRegistrations;
+                public long TemplateSequence = -1;
             }
 
             public ResolvePool(CommandStreamTranslation owner, IRenderHost host, int count)
@@ -296,12 +360,12 @@ public static partial class AgcExports
             private const int SpillQueueLength = 32;
 
             // One shader pair keeps one worker while that worker keeps up; a run of its draws spills to
-            // the least loaded worker rather than wait in line.
-            public void Dispatch(DeferredDraw work)
+            // the least loaded worker rather than wait in line. A repeat goes to the worker of the draw it repeats.
+            public int Dispatch(DeferredDraw work, int repeatRoute)
             {
                 var shader = work.Banks.Shader;
-                var route = (int)((uint)HashCode.Combine(shader.Vertex.ExportAddress, shader.Pixel.Address) % (uint)_workers.Length);
-                if (_workers[route].Queue.Count > SpillQueueLength)
+                var route = repeatRoute >= 0 ? repeatRoute : (int)((uint)HashCode.Combine(shader.Vertex.ExportAddress, shader.Pixel.Address) % (uint)_workers.Length);
+                if (repeatRoute < 0 && _workers[route].Queue.Count > SpillQueueLength)
                 {
                     var preferred = route;
                     for (var index = 0; index < _workers.Length; index++)
@@ -320,6 +384,7 @@ public static partial class AgcExports
 
                 Interlocked.Increment(ref _pending);
                 _workers[route].Queue.Add(work);
+                return route;
             }
 
             public void WaitAllResolved()
@@ -370,6 +435,66 @@ public static partial class AgcExports
             }
 
             private void Resolve(Worker worker, DeferredDraw work)
+            {
+                if (work.RepeatOf != 0 && work.RepeatOf == worker.TemplateSequence &&
+                    worker.TemplateRegistrations == ShaderHeaderRegistry.Registrations && TryRepeat(worker, work))
+                {
+                    worker.TemplateSequence = work.Sequence;
+                    return;
+                }
+
+                // Kept programs and program keys depend on the shader registrations a resolve began with.
+                var registrations = ShaderHeaderRegistry.Registrations;
+                ResolveInFull(worker, work);
+                if (work.Record is { RepeatableArguments: true } record && work.SerialReason is null && work.Failure is null)
+                {
+                    worker.Template.CopyFrom(record);
+                    worker.TemplateReads.CopyFrom(work.Reads);
+                    worker.TemplateFrontendVersion = work.FrontendImageVersion;
+                    worker.TemplateRegistrations = registrations;
+                    worker.TemplateSequence = work.Sequence;
+                }
+                else
+                {
+                    worker.TemplateSequence = -1;
+                }
+            }
+
+            // The repeat's read log is the template's, with the template's versions, plus the reads of its own arguments when
+            // the CPU reads them: the stream position checks every byte the record came from.
+            private bool TryRepeat(Worker worker, DeferredDraw work)
+            {
+                var host = _owner._host;
+                var started = Stopwatch.GetTimestamp();
+                work.Reads.CopyFrom(worker.TemplateReads);
+                host.BeginWorkerResolve(work.Sequence, work.Reads);
+                work.Reads.Version = worker.TemplateReads.Version;
+                work.Reads.Publications = worker.TemplateReads.Publications;
+                try
+                {
+                    worker.Sink.Sequence = work.Sequence;
+                    worker.Sink.Draw = null;
+                    if (worker.Executor.TryRepeatIndexed(worker.Template, work.SubmitId, work.Banks, in work.IndexedArguments))
+                    {
+                        work.Record = worker.Sink.Draw;
+                        work.FrontendImageVersion = worker.TemplateFrontendVersion;
+                        Diagnostics.ItemCostTally.Note(work.CostKind, Diagnostics.ItemCostTally.Resolve, Stopwatch.GetTimestamp() - started);
+                        return true;
+                    }
+                }
+                catch (SerialResolveRequiredException)
+                {
+                }
+                finally
+                {
+                    host.EndWorkerResolve();
+                }
+
+                work.Reads.Clear();
+                return false;
+            }
+
+            private void ResolveInFull(Worker worker, DeferredDraw work)
             {
                 var host = _owner._host;
                 work.FrontendImageVersion = _owner._pipelines!.FrontendImageVersion;

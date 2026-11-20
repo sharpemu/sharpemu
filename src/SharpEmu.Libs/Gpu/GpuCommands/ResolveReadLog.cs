@@ -73,6 +73,33 @@ public sealed class ResolveReadLog
         return _bytes.AsSpan(_offsets[index], _lengths[index]);
     }
 
+    public void CopyFrom(ResolveReadLog source)
+    {
+        if (_addresses.Length < source.Count)
+        {
+            var capacity = source._addresses.Length;
+            _addresses = new ulong[capacity];
+            _offsets = new int[capacity];
+            _lengths = new int[capacity];
+            _clean = new bool[capacity];
+        }
+
+        if (_bytes.Length < source._byteCount)
+        {
+            _bytes = new byte[source._bytes.Length];
+        }
+
+        source._addresses.AsSpan(0, source.Count).CopyTo(_addresses);
+        source._offsets.AsSpan(0, source.Count).CopyTo(_offsets);
+        source._lengths.AsSpan(0, source.Count).CopyTo(_lengths);
+        source._clean.AsSpan(0, source.Count).CopyTo(_clean);
+        source._bytes.AsSpan(0, source._byteCount).CopyTo(_bytes);
+        Count = source.Count;
+        _byteCount = source._byteCount;
+        Version = source.Version;
+        Publications = source.Publications;
+    }
+
     public void Clear()
     {
         Count = 0;
