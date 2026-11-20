@@ -994,7 +994,7 @@ internal static partial class Program
         return builder.ToString();
     }
 
-    // --install-pkg <file.pkg> [destination]: unpacks a fake PS4 package into a game folder (by
+    // --install-pkg <file.pkg> [destination]: unpacks a fake PS4 or PS5 package into a game folder (by
     // default <pkg folder>/<game title>) that can then be launched through its eboot.bin.
     private static int InstallPkg(string[] args)
     {
@@ -1013,7 +1013,7 @@ internal static partial class Program
 
         try
         {
-            using var package = SharpEmu.HLE.FileSystem.Pkg.PkgPackage.Open(pkgPath);
+            using var package = SharpEmu.HLE.FileSystem.Pkg.GamePackage.Open(pkgPath);
             if (!package.IsGameApplication)
             {
                 Log.Error($"{Path.GetFileName(pkgPath)} is not a base game (category '{package.Category}'). Patches and DLC packages are not supported yet.");
@@ -1025,7 +1025,7 @@ internal static partial class Program
                 : Path.Combine(
                     Path.GetDirectoryName(pkgPath)!,
                     package.GetFolderName(Path.GetFileNameWithoutExtension(pkgPath)));
-            Log.Info($"Installing {Path.GetFileName(pkgPath)} ({package.Header.ContentId}) into {destination}");
+            Log.Info($"Installing {Path.GetFileName(pkgPath)} ({package.ContentId}) into {destination}");
 
             var lastPercent = -1;
             var progress = new SynchronousProgress<SharpEmu.HLE.FileSystem.Pkg.PkgExtractProgress>(report =>
@@ -1056,7 +1056,7 @@ internal static partial class Program
     private static void PrintUsage()
     {
         Log.Info("Usage: SharpEmu.CLI [--strict[=on|off]] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--no-log-file] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin|path-to-game.zar>");
-        Log.Info("Install a fake PS4 package: SharpEmu.CLI --install-pkg <path-to-game.pkg> [destination-folder]");
+        Log.Info("Install a fake PS4 or PS5 package: SharpEmu.CLI --install-pkg <path-to-game.pkg> [destination-folder]");
         Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
         Log.Info("Debug server: --debug-server starts a live debug listener (default 127.0.0.1:5714); connect with SharpEmu.DebugClient.");
     }

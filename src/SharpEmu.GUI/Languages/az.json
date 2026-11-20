@@ -55,7 +55,7 @@
   "Library.Pkg.ConfirmInstall": "Quraşdır",
   "Library.Pkg.ConfirmSkip": "İndi yox",
   "Dialog.OpenPkg": "Quraşdırılacaq PKG-ni seçin",
-  "Dialog.PkgFiles": "PS4 paketləri",
+  "Dialog.PkgFiles": "PS4/PS5 paketləri",
   "Dialog.ChoosePkgInstallFolder": "Oyunun quraşdırılacağı yeri seçin",
   "Hero.GameSettings": "Oyun ayarları",
   "Hero.Console": "Konsol",
