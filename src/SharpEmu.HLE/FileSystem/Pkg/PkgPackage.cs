@@ -56,6 +56,12 @@ public sealed class PkgPackage : IDisposable
     public string GetFolderName(string fallback) =>
         ToFolderName(Title) ?? ToFolderName(TitleId) ?? fallback;
 
+    // The characters Windows refuses in a file name. The host's own list is only '/' and NUL on
+    // Linux, so extracted trees and folder names would differ by platform, and a package entry
+    // holding '\' would pass there and become a nested path once copied to Windows.
+    private static readonly char[] PortableInvalidNameChars =
+        ['"', '<', '>', '|', ':', '*', '?', '\\', '/', .. Enumerable.Range(0, 32).Select(code => (char)code)];
+
     internal static string? ToFolderName(string? name)
     {
         if (string.IsNullOrWhiteSpace(name))
@@ -63,12 +69,11 @@ public sealed class PkgPackage : IDisposable
             return null;
         }
 
-        var invalid = Path.GetInvalidFileNameChars();
         var builder = new System.Text.StringBuilder(name.Length);
         foreach (var c in name)
         {
             // Titles may hold line breaks or characters Windows refuses (':' in "Part I: ...").
-            builder.Append(char.IsControl(c) || Array.IndexOf(invalid, c) >= 0 ? ' ' : c);
+            builder.Append(char.IsControl(c) || Array.IndexOf(PortableInvalidNameChars, c) >= 0 ? ' ' : c);
         }
 
         var cleaned = string.Join(' ', builder.ToString().Split(' ', StringSplitOptions.RemoveEmptyEntries)).TrimEnd('.', ' ');
@@ -366,7 +371,7 @@ public sealed class PkgPackage : IDisposable
         foreach (var component in components)
         {
             if (component.Length == 0 || component is "." or ".." ||
-                component.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
+                component.IndexOfAny(PortableInvalidNameChars) >= 0)
             {
                 throw new InvalidDataException($"Unsafe path component '{component}' in package.");
             }
