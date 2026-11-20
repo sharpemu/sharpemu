@@ -71,7 +71,7 @@
   "Library.Pkg.ConfirmInstall": "Telepítés",
   "Library.Pkg.ConfirmSkip": "Most nem",
   "Dialog.OpenPkg": "Válassza ki a telepítendő PKG-t",
-  "Dialog.PkgFiles": "PS4-csomagok",
+  "Dialog.PkgFiles": "PS4/PS5-csomagok",
   "Dialog.ChoosePkgInstallFolder": "Válassza ki, hová települjön a játék",
   "Hero.GameSettings": "Játékbeállítások",
   "Hero.Console": "Konzol",

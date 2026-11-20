@@ -71,7 +71,7 @@
   "Library.Pkg.ConfirmInstall": "Installa",
   "Library.Pkg.ConfirmSkip": "Non ora",
   "Dialog.OpenPkg": "Scegli un PKG da installare",
-  "Dialog.PkgFiles": "Pacchetti PS4",
+  "Dialog.PkgFiles": "Pacchetti PS4/PS5",
   "Dialog.ChoosePkgInstallFolder": "Scegli dove installare il gioco",
   "Hero.GameSettings": "Impostazioni del gioco",
   "Hero.Console": "Console",

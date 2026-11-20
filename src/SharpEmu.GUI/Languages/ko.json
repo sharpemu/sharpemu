@@ -71,7 +71,7 @@
   "Library.Pkg.ConfirmInstall": "설치",
   "Library.Pkg.ConfirmSkip": "나중에",
   "Dialog.OpenPkg": "설치할 PKG 선택",
-  "Dialog.PkgFiles": "PS4 패키지",
+  "Dialog.PkgFiles": "PS4/PS5 패키지",
   "Dialog.ChoosePkgInstallFolder": "게임을 설치할 위치 선택",
   "Hero.GameSettings": "게임 설정",
   "Hero.Console": "콘솔",

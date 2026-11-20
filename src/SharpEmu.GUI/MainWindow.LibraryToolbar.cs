@@ -214,7 +214,7 @@ public partial class MainWindow
             {
                 try
                 {
-                    using var package = PkgPackage.Open(pkgPath);
+                    using var package = GamePackage.Open(pkgPath);
                     neededBytes += package.GetInstalledSize();
                 }
                 catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
@@ -289,7 +289,7 @@ public partial class MainWindow
     {
         try
         {
-            using var package = PkgPackage.Open(pkgPath);
+            using var package = GamePackage.Open(pkgPath);
             titleId = package.TitleId;
             folderName = package.GetFolderName(Path.GetFileNameWithoutExtension(pkgPath));
             category = package.Category;

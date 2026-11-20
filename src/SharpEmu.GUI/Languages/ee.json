@@ -71,7 +71,7 @@
   "Library.Pkg.ConfirmInstall": "Installi",
   "Library.Pkg.ConfirmSkip": "Mitte praegu",
   "Dialog.OpenPkg": "Vali installitav PKG",
-  "Dialog.PkgFiles": "PS4 paketid",
+  "Dialog.PkgFiles": "PS4/PS5 paketid",
   "Dialog.ChoosePkgInstallFolder": "Vali, kuhu mäng installida",
   "Hero.GameSettings": "Mängu seaded",
   "Hero.Console": "Konsool",

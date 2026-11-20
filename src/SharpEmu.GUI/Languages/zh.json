@@ -70,7 +70,7 @@
   "Library.Pkg.ConfirmInstall": "安装",
   "Library.Pkg.ConfirmSkip": "暂不",
   "Dialog.OpenPkg": "选择要安装的 PKG",
-  "Dialog.PkgFiles": "PS4 包",
+  "Dialog.PkgFiles": "PS4/PS5 包",
   "Dialog.ChoosePkgInstallFolder": "选择游戏的安装位置",
   "Hero.GameSettings": "游戏设置",
   "Hero.Console": "控制台",

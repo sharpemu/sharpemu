@@ -85,7 +85,7 @@ public partial class PkgInstallDialog : SheetView
         {
             await Task.Run(() =>
             {
-                using var package = PkgPackage.Open(_pkgPath);
+                using var package = GamePackage.Open(_pkgPath);
                 package.Extract(_destination, progress, _cancellation.Token);
             });
             _succeeded = true;
