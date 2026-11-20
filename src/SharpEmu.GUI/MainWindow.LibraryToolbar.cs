@@ -95,7 +95,7 @@ public partial class MainWindow
         UpdateSearchExpanded();
     }
 
-    // Unpacks a fake .pkg into <chosen folder>/<game title>, then adds the chosen folder to the library.
+    // Unpacks a fake .pkg into <chosen folder>/<game title>, then adds that game folder to the library.
     private async Task InstallPkgAsync()
     {
         var loc = Localization.Instance;
@@ -245,7 +245,7 @@ public partial class MainWindow
     }
 
     // Title id -> folder of every game already extracted under `root` (a folder with eboot.bin and
-    // sce_sys/param.sfo), searched as deep as the package scan.
+    // sce_sys/param.sfo or param.json), searched as deep as the package scan.
     private static Dictionary<string, string> FindInstalledTitles(string root)
     {
         var titles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -260,16 +260,9 @@ public partial class MainWindow
             }))
             {
                 var directory = Path.GetDirectoryName(eboot)!;
-                try
+                if (ReadInstalledTitleId(directory) is { } titleId)
                 {
-                    var sfo = File.ReadAllBytes(Path.Combine(directory, "sce_sys", "param.sfo"));
-                    if (PkgParamSfo.ReadString(sfo, "TITLE_ID") is { Length: > 0 } titleId)
-                    {
-                        titles.TryAdd(titleId, directory);
-                    }
-                }
-                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
-                {
+                    titles.TryAdd(titleId, directory);
                 }
             }
         }
@@ -278,6 +271,39 @@ public partial class MainWindow
         }
 
         return titles;
+    }
+
+    // TITLE_ID of an extracted game: sce_sys/param.sfo for PS4, sce_sys/param.json for PS5.
+    internal static string? ReadInstalledTitleId(string gameDirectory)
+    {
+        var sceSys = Path.Combine(gameDirectory, "sce_sys");
+        try
+        {
+            var sfoPath = Path.Combine(sceSys, "param.sfo");
+            if (File.Exists(sfoPath) &&
+                PkgParamSfo.ReadString(File.ReadAllBytes(sfoPath), "TITLE_ID") is { Length: > 0 } sfoTitleId)
+            {
+                return sfoTitleId;
+            }
+
+            var jsonPath = Path.Combine(sceSys, "param.json");
+            if (File.Exists(jsonPath))
+            {
+                using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllBytes(jsonPath));
+                if (document.RootElement.ValueKind == System.Text.Json.JsonValueKind.Object &&
+                    document.RootElement.TryGetProperty("titleId", out var titleId) &&
+                    titleId.ValueKind == System.Text.Json.JsonValueKind.String &&
+                    titleId.GetString() is { Length: > 0 } jsonTitleId)
+                {
+                    return jsonTitleId;
+                }
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+        {
+        }
+
+        return null;
     }
 
     private void ReportSkippedNotGame(string pkgPath, string? category) =>
@@ -311,24 +337,46 @@ public partial class MainWindow
     private async Task<bool> InstallPackageIntoAsync(string pkgPath, string parent, string folderName)
     {
         var destination = Path.Combine(parent, folderName);
-        if (File.Exists(Path.Combine(destination, "eboot.bin")))
+        if (!File.Exists(Path.Combine(destination, "eboot.bin")))
         {
-            return true; // Already installed; the folder scan will pick it up.
+            var dialog = new PkgInstallDialog(Path.GetFileName(pkgPath), pkgPath, destination);
+            if (await Sheets.ShowAsync(dialog) is not true)
+            {
+                return false;
+            }
         }
 
-        var dialog = new PkgInstallDialog(Path.GetFileName(pkgPath), pkgPath, destination);
-        if (await Sheets.ShowAsync(dialog) is not true)
-        {
-            return false;
-        }
-
-        if (!_settings.GameFolders.Contains(parent, GameLibraryPath.Comparer))
-        {
-            _settings.GameFolders.Add(parent);
-            _settings.Save();
-        }
-
+        AddInstalledGameToLibrary(destination);
         return true;
+    }
+
+    // Adds only the installed game's folder, not its parent: the parent may hold other games the
+    // user never added. Nothing changes when a library folder already covers the game.
+    private void AddInstalledGameToLibrary(string gameFolder)
+    {
+        if (IsUnderLibraryFolder(_settings.GameFolders, gameFolder))
+        {
+            return;
+        }
+
+        _settings.GameFolders.Add(Path.TrimEndingDirectorySeparator(Path.GetFullPath(gameFolder)));
+        _settings.Save();
+    }
+
+    internal static bool IsUnderLibraryFolder(IEnumerable<string> libraryFolders, string path)
+    {
+        var target = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        foreach (var folder in libraryFolders)
+        {
+            var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(folder));
+            if (string.Equals(target, root, GameLibraryPath.Comparison) ||
+                target.StartsWith(root + Path.DirectorySeparatorChar, GameLibraryPath.Comparison))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void OpenLibraryMenu()
