@@ -54,6 +54,9 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
         return OpenStream(sampleRate, channels, format, cap);
     }
 
+    public IHostAudioStream OpenPcmStream(uint sampleRate, int channels, HostPcmFormat format, int maxQueuedBytes) =>
+        maxQueuedBytes > 0 ? OpenStream(sampleRate, channels, format, maxQueuedBytes) : OpenPcmStream(sampleRate, channels, format);
+
     private static IHostAudioStream OpenStream(
         uint sampleRate,
         int channels,

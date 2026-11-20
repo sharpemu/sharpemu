@@ -255,6 +255,10 @@ public static class AudioOut2Exports
     private static IHostAudioStream? SecondaryBackend;
     private static string PrimaryBackendName = "none";
     private static string SecondaryBackendName = "none";
+    private static bool PrimaryBackendFloat;
+    private static bool SecondaryBackendFloat;
+    // A runaway gain cannot reach the device: float output is bounded far above full scale (+12 dBFS).
+    private const float FloatOutputBound = 4f;
     private static ulong PrimaryContextHandle;
     private static readonly object HostSubmitGate = new();
     private static Func<uint, IHostAudioStream?>? _streamFactoryForTests;
@@ -1226,6 +1230,31 @@ public static class AudioOut2Exports
         return SetReturn(ctx, 0);
     }
 
+    // A float stream keeps the mix's headroom: the 16-bit stream clipped every peak above full scale before the host
+    // applied its volume, which the host's float mixer does not. The queue cap is the same duration as the 16-bit one.
+    private static IHostAudioStream OpenContextStream(uint frequency, out bool isFloat)
+    {
+        var audio = HostPlatform.Current.Audio;
+        if (audio is IHostPcmAudioOutput pcm)
+        {
+            isFloat = true;
+            return pcm.OpenPcmStream(frequency, channels: 2, HostPcmFormat.Float32, maxQueuedBytes: 256 * 1024);
+        }
+
+        isFloat = false;
+        return audio.OpenStereoPcm16Stream(frequency, maxQueuedPcmBytes: 128 * 1024);
+    }
+
+    private static bool IsFloatBackend(IHostAudioStream backend)
+    {
+        lock (HostBackendGate)
+        {
+            return ReferenceEquals(backend, PrimaryBackend)
+                ? PrimaryBackendFloat
+                : ReferenceEquals(backend, SecondaryBackend) && SecondaryBackendFloat;
+        }
+    }
+
     private static IHostAudioStream? ResolveContextBackend(ContextState context, out string backendName)
     {
         lock (HostBackendGate)
@@ -1249,11 +1278,8 @@ public static class AudioOut2Exports
                         }
                         else
                         {
-                            var audio = HostPlatform.Current.Audio;
-                            PrimaryBackend = audio.OpenStereoPcm16Stream(
-                                context.Frequency,
-                                maxQueuedPcmBytes: 128 * 1024);
-                            PrimaryBackendName = audio.BackendName + "-primary";
+                            PrimaryBackend = OpenContextStream(context.Frequency, out PrimaryBackendFloat);
+                            PrimaryBackendName = HostPlatform.Current.Audio.BackendName + (PrimaryBackendFloat ? "-primary-f32" : "-primary");
                         }
                     }
                     catch (Exception exception)
@@ -1280,11 +1306,8 @@ public static class AudioOut2Exports
                     }
                     else
                     {
-                        var audio = HostPlatform.Current.Audio;
-                        SecondaryBackend = audio.OpenStereoPcm16Stream(
-                            context.Frequency,
-                            maxQueuedPcmBytes: 128 * 1024);
-                        SecondaryBackendName = audio.BackendName + "-secondary";
+                        SecondaryBackend = OpenContextStream(context.Frequency, out SecondaryBackendFloat);
+                        SecondaryBackendName = HostPlatform.Current.Audio.BackendName + (SecondaryBackendFloat ? "-secondary-f32" : "-secondary");
                     }
                 }
                 catch (Exception exception)
@@ -1380,7 +1403,7 @@ public static class AudioOut2Exports
         lock (HostSubmitGate)
         {
             var mix = ArrayPool<float>.Shared.Rent(frames * 2);
-            var output = ArrayPool<byte>.Shared.Rent(frames * AudioPcmConversion.OutputFrameSize);
+            var output = ArrayPool<byte>.Shared.Rent(frames * 2 * sizeof(float));
             try
             {
                 mix.AsSpan(0, frames * 2).Clear();
@@ -1440,21 +1463,6 @@ public static class AudioOut2Exports
                     return false;
                 }
 
-                var outputSpan = output.AsSpan(0, frames * AudioPcmConversion.OutputFrameSize);
-                var peak = 0f;
-                for (var frame = 0; frame < frames; frame++)
-                {
-                    var left = Math.Clamp(mix[frame * 2], -1f, 1f);
-                    var right = Math.Clamp(mix[(frame * 2) + 1], -1f, 1f);
-                    peak = Math.Max(peak, Math.Max(Math.Abs(left), Math.Abs(right)));
-                    BinaryPrimitives.WriteInt16LittleEndian(
-                        outputSpan[(frame * AudioPcmConversion.OutputFrameSize)..],
-                        FloatToPcm16(left));
-                    BinaryPrimitives.WriteInt16LittleEndian(
-                        outputSpan[((frame * AudioPcmConversion.OutputFrameSize) + 2)..],
-                        FloatToPcm16(right));
-                }
-
                 var backend = ResolveContextBackend(context, out var backendName);
                 if (backend is null)
                 {
@@ -1462,6 +1470,10 @@ public static class AudioOut2Exports
                     return false;
                 }
 
+                float peak;
+                var outputSpan = IsFloatBackend(backend)
+                    ? WriteFloatOutput(mix.AsSpan(0, frames * 2), output, out peak)
+                    : WritePcm16Output(mix.AsSpan(0, frames * 2), output, out peak);
                 context.DeviceBackend = backend;
 
                 var n = Interlocked.Increment(ref _submitTraceCount);
@@ -1529,6 +1541,8 @@ public static class AudioOut2Exports
             SecondaryBackend = null;
             PrimaryBackendName = "none";
             SecondaryBackendName = "none";
+            PrimaryBackendFloat = false;
+            SecondaryBackendFloat = false;
             PrimaryContextHandle = 0;
         }
 
@@ -1666,6 +1680,36 @@ public static class AudioOut2Exports
         }
 
         return BinaryPrimitives.ReadInt16LittleEndian(sample) / 32768f;
+    }
+
+    // The mix as interleaved float samples, bounded far above full scale only.
+    internal static Span<byte> WriteFloatOutput(ReadOnlySpan<float> mix, Span<byte> output, out float peak)
+    {
+        peak = 0f;
+        var span = output[..(mix.Length * sizeof(float))];
+        for (var i = 0; i < mix.Length; i++)
+        {
+            var value = Math.Clamp(mix[i], -FloatOutputBound, FloatOutputBound);
+            peak = Math.Max(peak, Math.Abs(value));
+            BinaryPrimitives.WriteSingleLittleEndian(span[(i * sizeof(float))..], value);
+        }
+
+        return span;
+    }
+
+    // The mix as interleaved 16-bit samples, clipped at full scale.
+    internal static Span<byte> WritePcm16Output(ReadOnlySpan<float> mix, Span<byte> output, out float peak)
+    {
+        peak = 0f;
+        var span = output[..(mix.Length * sizeof(short))];
+        for (var i = 0; i < mix.Length; i++)
+        {
+            var value = Math.Clamp(mix[i], -1f, 1f);
+            peak = Math.Max(peak, Math.Abs(value));
+            BinaryPrimitives.WriteInt16LittleEndian(span[(i * sizeof(short))..], FloatToPcm16(value));
+        }
+
+        return span;
     }
 
     private static short FloatToPcm16(float value)

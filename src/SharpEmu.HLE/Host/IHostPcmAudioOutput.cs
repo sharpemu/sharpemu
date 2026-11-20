@@ -10,6 +10,13 @@ namespace SharpEmu.HLE.Host;
 public interface IHostPcmAudioOutput : IHostAudioOutput
 {
     IHostAudioStream OpenPcmStream(uint sampleRate, int channels, HostPcmFormat format);
+
+    /// <summary>
+    /// The same stream with a caller-chosen backpressure cap in bytes, for callers that pace the guest themselves and
+    /// need a deeper queue than the default.
+    /// </summary>
+    IHostAudioStream OpenPcmStream(uint sampleRate, int channels, HostPcmFormat format, int maxQueuedBytes) =>
+        OpenPcmStream(sampleRate, channels, format);
 }
 
 public enum HostPcmFormat

@@ -85,6 +85,26 @@ public sealed class AudioOut2MixTests
     }
 
     [Fact]
+    public void FloatOutputKeepsPeaksAboveFullScaleAndSixteenBitOutputClipsThem()
+    {
+        float[] mix = [1.5f, -0.25f, -9f, 0.5f];
+        var output = new byte[mix.Length * sizeof(float)];
+
+        var floats = AudioOut2Exports.WriteFloatOutput(mix, output, out var floatPeak);
+        Assert.Equal(mix.Length * sizeof(float), floats.Length);
+        Assert.Equal(1.5f, BinaryPrimitives.ReadSingleLittleEndian(floats));
+        Assert.Equal(-0.25f, BinaryPrimitives.ReadSingleLittleEndian(floats[4..]));
+        Assert.Equal(-4f, BinaryPrimitives.ReadSingleLittleEndian(floats[8..]));
+        Assert.Equal(4f, floatPeak);
+
+        var shorts = AudioOut2Exports.WritePcm16Output(mix, output, out var shortPeak);
+        Assert.Equal(mix.Length * sizeof(short), shorts.Length);
+        Assert.Equal(short.MaxValue, BinaryPrimitives.ReadInt16LittleEndian(shorts));
+        Assert.Equal(short.MinValue, BinaryPrimitives.ReadInt16LittleEndian(shorts[4..]));
+        Assert.Equal(1f, shortPeak);
+    }
+
+    [Fact]
     public void SetAttributesStoresGainAmbisonicsAndPassthrough()
     {
         var memory = new FakeCpuMemory(MemoryBase, 0x1000);
