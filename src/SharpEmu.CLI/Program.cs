@@ -1014,6 +1014,12 @@ internal static partial class Program
         try
         {
             using var package = SharpEmu.HLE.FileSystem.Pkg.PkgPackage.Open(pkgPath);
+            if (!package.IsGameApplication)
+            {
+                Log.Error($"{Path.GetFileName(pkgPath)} is not a base game (category '{package.Category}'). Patches and DLC packages are not supported yet.");
+                return 2;
+            }
+
             var destination = args.Length == 3
                 ? Path.GetFullPath(args[2])
                 : Path.Combine(
