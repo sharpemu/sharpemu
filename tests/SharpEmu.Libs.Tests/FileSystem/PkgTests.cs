@@ -264,6 +264,133 @@ public sealed class PkgTests
     public void SafePathComponentsStayBelowTheRoot() =>
         Assert.Equal(Path.Combine("root", "sce_sys", "param.sfo"), PkgPackage.ResolveSafe("root", ["sce_sys", "param.sfo"]));
 
+    [Fact]
+    public void ExtractWritesMetadataAndPfsTreeWithProgress()
+    {
+        var eboot = Encoding.ASCII.GetBytes("FAKE EBOOT BIN");
+        var pkg = BuildSyntheticPkg(
+            BuildSyntheticImage(eboot),
+            (0x1000, Encoding.ASCII.GetBytes("PARAM")),
+            (0x1200, Encoding.ASCII.GetBytes("PNG")));
+        var packagePath = Path.Combine(Path.GetTempPath(), $"sharpemu-pkg-{Guid.NewGuid():N}.pkg");
+        var destination = Path.Combine(Path.GetTempPath(), $"sharpemu-pkg-out-{Guid.NewGuid():N}");
+        try
+        {
+            File.WriteAllBytes(packagePath, pkg);
+            using var package = PkgPackage.Open(packagePath);
+            Assert.Equal("CUSA99999", package.TitleId);
+
+            var reports = new List<PkgExtractProgress>();
+            package.Extract(destination, new CollectingProgress<PkgExtractProgress>(reports.Add));
+
+            Assert.Equal("PARAM", File.ReadAllText(Path.Combine(destination, "sce_sys", "param.sfo")));
+            Assert.Equal("PNG", File.ReadAllText(Path.Combine(destination, "sce_sys", "icon0.png")));
+            Assert.Equal(eboot, File.ReadAllBytes(Path.Combine(destination, "eboot.bin")));
+            Assert.NotEmpty(reports);
+            Assert.Equal(reports[^1].BytesTotal, reports[^1].BytesDone);
+            Assert.Equal(eboot.Length, reports[^1].BytesTotal);
+            Assert.All(reports, report => Assert.True(report.BytesDone <= report.BytesTotal));
+        }
+        finally
+        {
+            File.Delete(packagePath);
+            if (Directory.Exists(destination))
+            {
+                Directory.Delete(destination, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void ExtractRefusesAnEntryLargerThanThePackage()
+    {
+        var pkg = BuildSyntheticPkg(
+            BuildSyntheticImage(Encoding.ASCII.GetBytes("EBOOT")),
+            (0x1000, Encoding.ASCII.GetBytes("PARAM")));
+        BinaryPrimitives.WriteUInt32BigEndian(pkg.AsSpan(PkgHeader.Size + 20), uint.MaxValue);
+        var packagePath = Path.Combine(Path.GetTempPath(), $"sharpemu-pkg-{Guid.NewGuid():N}.pkg");
+        var destination = Path.Combine(Path.GetTempPath(), $"sharpemu-pkg-out-{Guid.NewGuid():N}");
+        try
+        {
+            File.WriteAllBytes(packagePath, pkg);
+            using var package = PkgPackage.Open(packagePath);
+            Assert.Throws<InvalidDataException>(() => package.Extract(destination));
+        }
+        finally
+        {
+            File.Delete(packagePath);
+            if (Directory.Exists(destination))
+            {
+                Directory.Delete(destination, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
+    public void ExtractRefusesAnImplausibleInodeTable()
+    {
+        const int imageOffset = 0x20000;
+        var pkg = BuildSyntheticPkg(BuildSyntheticImage(Encoding.ASCII.GetBytes("EBOOT")));
+        BinaryPrimitives.WriteInt64LittleEndian(pkg.AsSpan(imageOffset + 0x20000 + 0x30), 100_000);
+        var packagePath = Path.Combine(Path.GetTempPath(), $"sharpemu-pkg-{Guid.NewGuid():N}.pkg");
+        var destination = Path.Combine(Path.GetTempPath(), $"sharpemu-pkg-out-{Guid.NewGuid():N}");
+        try
+        {
+            File.WriteAllBytes(packagePath, pkg);
+            using var package = PkgPackage.Open(packagePath);
+            Assert.Throws<InvalidDataException>(() => package.Extract(destination));
+        }
+        finally
+        {
+            File.Delete(packagePath);
+            if (Directory.Exists(destination))
+            {
+                Directory.Delete(destination, recursive: true);
+            }
+        }
+    }
+
+    private sealed class CollectingProgress<T>(Action<T> handler) : IProgress<T>
+    {
+        public void Report(T value) => handler(value);
+    }
+
+    // A minimal PKG with one unencrypted PFS image and a few sce_sys entries. No key entries:
+    // the reader falls back to reading the image as-is, which keeps this fixture self-contained.
+    private static byte[] BuildSyntheticPkg(byte[] image, params (uint Id, byte[] Data)[] entries)
+    {
+        const int imageOffset = 0x20000;
+        // FindOffset starts looking for PFSC after the image's own header blocks.
+        const int pfsPrefix = 0x20000;
+        var storedImage = new byte[pfsPrefix + image.Length];
+        image.CopyTo(storedImage, pfsPrefix);
+        var tableOffset = PkgHeader.Size;
+        var bodyOffset = tableOffset + entries.Length * PkgEntry.Size_;
+        var package = new byte[imageOffset + storedImage.Length];
+
+        BinaryPrimitives.WriteUInt32BigEndian(package, PkgHeader.Magic);
+        BinaryPrimitives.WriteUInt32BigEndian(package.AsSpan(0x10), (uint)entries.Length);
+        BinaryPrimitives.WriteUInt32BigEndian(package.AsSpan(0x18), (uint)tableOffset);
+        BinaryPrimitives.WriteUInt64BigEndian(package.AsSpan(0x20), (ulong)bodyOffset);
+        Encoding.ASCII.GetBytes("UP9000-CUSA99999_00-SYNTHETIC000000").CopyTo(package, 0x40);
+        BinaryPrimitives.WriteUInt32BigEndian(package.AsSpan(0x404), 1);
+        BinaryPrimitives.WriteUInt64BigEndian(package.AsSpan(0x410), imageOffset);
+        BinaryPrimitives.WriteUInt64BigEndian(package.AsSpan(0x418), (ulong)storedImage.Length);
+        BinaryPrimitives.WriteUInt64BigEndian(package.AsSpan(0x430), (ulong)package.Length);
+
+        var body = bodyOffset;
+        for (var i = 0; i < entries.Length; i++)
+        {
+            WriteEntry(package.AsSpan(tableOffset + i * PkgEntry.Size_, PkgEntry.Size_),
+                entries[i].Id, 0, 0, 0, (uint)body, (uint)entries[i].Data.Length);
+            entries[i].Data.CopyTo(package, body);
+            body += entries[i].Data.Length;
+        }
+
+        storedImage.CopyTo(package, imageOffset);
+        return package;
+    }
+
     private static void WriteEntry(Span<byte> row, uint id, uint nameOffset, uint flags1, uint flags2, uint offset, uint size)
     {
         BinaryPrimitives.WriteUInt32BigEndian(row, id);
@@ -304,6 +431,7 @@ public sealed class PkgTests
 
         var header = new byte[PfscImage.BlockSize];
         BinaryPrimitives.WriteInt32LittleEndian(header.AsSpan(0x20), PfscImage.BlockSize);
+        BinaryPrimitives.WriteInt64LittleEndian(header.AsSpan(0x28), 4 + fileBlocks);
         BinaryPrimitives.WriteInt64LittleEndian(header.AsSpan(0x30), 3);
         BinaryPrimitives.WriteInt64LittleEndian(header.AsSpan(0x40), 1);
         BinaryPrimitives.WriteInt64LittleEndian(header.AsSpan(0x48), 0);
