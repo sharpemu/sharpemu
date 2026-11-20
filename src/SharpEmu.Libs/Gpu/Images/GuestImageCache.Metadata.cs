@@ -399,7 +399,8 @@ public sealed partial class GuestImageCache
     }
 
     private const int MetadataEventSlots = 1024;
-    private readonly (long Generation, ulong Address)[] _metadataEvents = new (long, ulong)[MetadataEventSlots];
+    // ClearOnly marks an event that changed only clear state: a slice's clear bit, a register clear or a tracked DCC fill.
+    private readonly (long Generation, ulong Address, bool ClearOnly)[] _metadataEvents = new (long, ulong, bool)[MetadataEventSlots];
     private long _metadataGeneration = 1;
 
     public long MetadataGeneration => Volatile.Read(ref _metadataGeneration);
@@ -420,7 +421,7 @@ public sealed partial class GuestImageCache
         return parts.Count == 0 ? "none" : string.Join(",", parts);
     }
 
-    private void NoteMetadataChange(ulong address,
+    private void NoteMetadataChange(ulong address, bool clearOnly = false,
         [System.Runtime.CompilerServices.CallerMemberName] string caller = "", [System.Runtime.CompilerServices.CallerLineNumber] int line = 0)
     {
         if (RenderPhaseProfile.Enabled)
@@ -429,7 +430,7 @@ public sealed partial class GuestImageCache
         }
 
         var generation = _metadataGeneration + 1;
-        _metadataEvents[generation & (MetadataEventSlots - 1)] = (generation, address);
+        _metadataEvents[generation & (MetadataEventSlots - 1)] = (generation, address, clearOnly);
         Volatile.Write(ref _metadataGeneration, generation);
     }
 
@@ -461,6 +462,92 @@ public sealed partial class GuestImageCache
         }
 
         return true;
+    }
+
+    // Whether every metadata event at the address since the generation changed only clear state.
+    private bool OnlyClearsSince(long generation, ulong address)
+    {
+        var current = _metadataGeneration;
+        if (current - generation >= MetadataEventSlots)
+        {
+            return false;
+        }
+
+        for (var at = current; at > generation; at--)
+        {
+            var entry = _metadataEvents[at & (MetadataEventSlots - 1)];
+            if (entry.Address == address && !entry.ClearOnly)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    // Whether a tracked clear waits on a slice the view covers (every slice for a 3D view). An entry that is missing,
+    // invalidated or a pending DCC fill counts as waiting.
+    private bool AnyCoveredSliceClear(ulong address, in ImageViewDescription view)
+    {
+        if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Invalidated || found.Kind == SurfaceMetadataKind.PendingDcc)
+        {
+            return true;
+        }
+
+        var count = found.Kind == SurfaceMetadataKind.Dcc ? found.DccSliceCount : 32u;
+        var first = 0u;
+        var end = count;
+        if (view.Type != ImageViewType.Type3D && view.LayerCount < count && view.BaseLayer < count)
+        {
+            first = view.BaseLayer;
+            end = Math.Min(count, view.BaseLayer + view.LayerCount);
+        }
+
+        for (var slice = first; slice < end; slice++)
+        {
+            if (found.IsSliceClear(slice))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    // A slice segment can be recorded before a clear that an earlier stream item then runs and consumes. Its use still
+    // holds when only clear-state events reached the metadata since the segment began and no slice the use's view covers
+    // waits on a clear now: the recording worker stops at a pending clear, so it saw none, and the clear ran before the
+    // segment. A use whose segment applies the view's pending clear at its join (clearApplied) may still find a covered
+    // slice waiting on a clear.
+    private bool ConsumedClearsOnly(in ImageSliceUse use, CachedImage image, long generation, bool requestChanged, bool imageChanged,
+        bool clearApplied = false)
+    {
+        var view = use.Request.View;
+        if (requestChanged)
+        {
+            var address = use.Request.Description.Metadata.Range.Address;
+            if (!OnlyClearsSince(generation, address) || (!clearApplied && AnyCoveredSliceClear(address, in view)))
+            {
+                return false;
+            }
+        }
+
+        if (imageChanged)
+        {
+            var address = image.Description.Metadata.Range.Address;
+            if (!OnlyClearsSince(generation, address) || (!clearApplied && AnyCoveredSliceClear(address, in view)))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    internal bool ConsumedClearsOnlyForTest(long generation, ulong address, ImageViewDescription view)
+    {
+        using var held = _lock.Read();
+        return !MetadataUnchangedSince(generation, address) && OnlyClearsSince(generation, address) && !AnyCoveredSliceClear(address, in view);
     }
 
     public bool IsMetadata(ulong address)
@@ -543,7 +630,7 @@ public sealed partial class GuestImageCache
         }
 
         found.ClearMask = uint.MaxValue;
-        NoteMetadataChange(address);
+        NoteMetadataChange(address, clearOnly: true);
         return true;
     }
 
@@ -568,8 +655,10 @@ public sealed partial class GuestImageCache
         };
         using var held = _lock.Hold();
         RecordMetadataEvent("dcc-fill-request", address, size, fillValue);
-        NoteMetadataChange(address);
-        if (!_surfaceMetadata.TryGetValue(address, out var found) || found.Invalidated)
+        var known = _surfaceMetadata.TryGetValue(address, out var found);
+        // Only a fill tracked on a registered DCC surface changes clear state alone.
+        NoteMetadataChange(address, clearOnly: known && !found!.Invalidated && found.Kind == SurfaceMetadataKind.Dcc && !found.NativeColorClear);
+        if (!known || found!.Invalidated)
         {
             IncludeMetadataWriteRange(address, size);
             // The fill may precede color-target discovery; a pending entry stays invisible until then.
@@ -688,7 +777,7 @@ public sealed partial class GuestImageCache
             return false;
         }
 
-        NoteMetadataChange(address);
+        NoteMetadataChange(address, clearOnly: true);
         found.SetSliceClear(slice, isClear);
 
         return true;

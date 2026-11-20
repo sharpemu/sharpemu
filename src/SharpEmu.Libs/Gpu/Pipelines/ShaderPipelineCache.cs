@@ -1069,6 +1069,9 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         return null;
     }
 
+    // SHARPEMU_COMPUTE_TICKETS: worker rebinds that direct dispatches take ahead of the command thread, or null.
+    internal ComputeTickets? Tickets { get; set; }
+
     public ComputeProgram GetComputeProgram(RegisterBanks banks, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ) =>
         GetComputeProgram(banks, dispatchInitiator, dimensionX, dimensionY, dimensionZ, indirect: false);
 
@@ -1110,10 +1113,14 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 return WithPrediction(previous, kept.Kernel, kept.Source, kept.SystemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect);
             }
 
-            if (kept.Entry is { } entry && ++kept.Rebinds % IdentityRecheckPeriod != 0)
+            if (kept.Entry is { } entry && !kept.RecheckDue && ++kept.Rebinds % IdentityRecheckPeriod != 0)
             {
                 _computeRebound.Increment();
-                var rebound = RebindComputeProgram(kept, entry, compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
+                // A direct dispatch takes the rebind a compute ticket worker made ahead of it, while the ticket still holds.
+                var rebound = !indirect && Tickets is { } tickets &&
+                    tickets.TryTake(kept, compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ) is { } ticket
+                    ? TakeComputeTicket(tickets, ticket, kept, entry, compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ)
+                    : RebindComputeProgram(kept, entry, compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
                 KeepComputeProgram(kept, rebound, compute, dimensionX, dimensionY, dimensionZ);
                 return WithPrediction(rebound, kept.Kernel, kept.Source, kept.SystemRegisters, compute, dimensionX, dimensionY, dimensionZ, indirect);
             }
@@ -1136,6 +1143,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         kept.Source = source;
+        kept.RecheckDue = false;
         kept.SystemRegisters = systemRegisters;
         kept.Kernel = decoded is not null && program.Available && !program.Consumed ? KernelFor(decoded) : null;
         kept.Entry = program.Available && !program.Consumed && source is not null ? ShaderProgramCache.LastEntry : null;
@@ -1164,25 +1172,241 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         uint dimensionX, uint dimensionY, uint dimensionZ)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ProgramPreparation);
-        var userData = UserData(compute.UserScalars, compute.UserScalarCount, probeWrittenRegisters: false, compute.Address, "compute").ToArray();
-        var source = kept.Source! with { UserData = userData };
+        var source = RebindSource(kept.Source!, compute);
         kept.Source = source;
-        var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !_host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ,
-            kept.GpuThreadCounts);
-        var pushDataCursor = ComputePushDataCursor(input);
-        var options = new StageCompileOptions
-        {
-            ComputeInfo = input, ComputeSystemRegisters = kept.SystemRegisters,
-            ComputeDispatch = CountedDispatch(input, kept.SystemRegisters, dimensionX, dimensionY, dimensionZ, kept.GpuThreadCounts),
-        };
-        if (!_programs.TryGetProgramForEntry(entry, source, options, _strictShaders, ref pushDataCursor, out var handle, out var stage, out var rejection))
+        if (!TryRebindProgram(entry, source, kept.SystemRegisters, kept.GpuThreadCounts, compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ,
+            out var program, out var rejection))
         {
             ReportShaderSkip(source, rejection);
             return new ComputeProgram { Available = false };
         }
 
+        return program;
+    }
+
+    private static ShaderSource RebindSource(ShaderSource kept, ComputeStageRegisters compute) =>
+        kept with { UserData = UserData(compute.UserScalars, compute.UserScalarCount, probeWrittenRegisters: false, compute.Address, "compute").ToArray() };
+
+    // The rebind of a kept program's entry for new user data and dimensions. It touches no kept state, so a ticket worker runs
+    // it as well (reads recorded between BeginWorkerResolve and EndWorkerResolve).
+    private bool TryRebindProgram(ProgramSourceEntry entry, ShaderSource source, Gen5ComputeSystemRegisters systemRegisters, bool gpuThreadCounts,
+        ComputeStageRegisters compute, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ, out ComputeProgram program,
+        out string rejection)
+    {
+        var input = ComputeStageInputResolver.Resolve(compute, source.Registered, dispatchInitiator, !_host.ComputeWave64Supported, dimensionX, dimensionY, dimensionZ,
+            gpuThreadCounts);
+        var pushDataCursor = ComputePushDataCursor(input);
+        var options = new StageCompileOptions
+        {
+            ComputeInfo = input, ComputeSystemRegisters = systemRegisters,
+            ComputeDispatch = CountedDispatch(input, systemRegisters, dimensionX, dimensionY, dimensionZ, gpuThreadCounts),
+        };
+        if (!_programs.TryGetProgramForEntry(entry, source, options, _strictShaders, ref pushDataCursor, out var handle, out var stage, out rejection))
+        {
+            program = null!;
+            return false;
+        }
+
         input.Stage = stage;
-        return new ComputeProgram { Program = handle, Input = input };
+        program = new ComputeProgram { Program = handle, Input = input };
+        return true;
+    }
+
+    // SHARPEMU_COMPUTE_TICKETS, on the command thread: the kept program a scanned dispatch would rebind. Programs with shader
+    // calls or without a fast materialization rebind on the command thread only.
+    internal bool PrepareComputeTicket(ComputeTickets.Ticket ticket)
+    {
+        var compute = ticket.Compute;
+        var registrations = ShaderHeaderRegistry.Registrations;
+        KeptComputeProgram? kept = null;
+        if (!_registry.HasFrontend && _keptComputes is { } all && all.TryGetValue(compute.Address, out var keptList))
+        {
+            foreach (var candidate in keptList)
+            {
+                if (candidate.Registrations == registrations && candidate.DispatchInitiator == ticket.Initiator &&
+                    candidate.GpuThreadCounts == ticket.GpuThreadCounts && SameComputeShape(candidate.Registers, compute))
+                {
+                    kept = candidate;
+                    break;
+                }
+            }
+        }
+
+        if (kept is null || kept.Entry is not { } entry || kept.Source is not { } source || entry.HasShaderCalls ||
+            !SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.CanMaterializeFast(entry.Plan))
+        {
+            return false;
+        }
+
+        ticket.Kept = kept;
+        ticket.Entry = entry;
+        ticket.BaseSource = source;
+        ticket.SystemRegisters = kept.SystemRegisters;
+        ticket.GpuThreadCounts = kept.GpuThreadCounts;
+        ticket.Registrations = registrations;
+        return true;
+    }
+
+    // On a ticket worker, between BeginWorkerResolve and EndWorkerResolve.
+    internal void RunComputeTicket(ComputeTickets.Ticket ticket)
+    {
+        var source = RebindSource(ticket.BaseSource!, ticket.Compute);
+        if (!TryRebindProgram(ticket.Entry!, source, ticket.SystemRegisters, ticket.GpuThreadCounts, ticket.Compute, ticket.Initiator,
+            ticket.GroupsX, ticket.GroupsY, ticket.GroupsZ, out var program, out _))
+        {
+            ticket.Refused = true;
+            return;
+        }
+
+        ticket.Program = program;
+        ticket.Source = source;
+    }
+
+    // On the command thread: the kept program a direct dispatch would rebind, when a deferred dispatch worker may rebind it
+    // (as a ticket worker could), or null.
+    internal KeptComputeProgram? FindDeferrableKept(ComputeStageRegisters compute, uint dispatchInitiator)
+    {
+        if (_registry.HasFrontend || _keptComputes is not { } all || !all.TryGetValue(compute.Address, out var keptList))
+        {
+            return null;
+        }
+
+        var registrations = ShaderHeaderRegistry.Registrations;
+        KeptComputeProgram? kept = null;
+        foreach (var candidate in keptList)
+        {
+            if (candidate.Registrations == registrations && candidate.DispatchInitiator == dispatchInitiator && !candidate.GpuThreadCounts &&
+                SameComputeShape(candidate.Registers, compute))
+            {
+                kept = candidate;
+                break;
+            }
+        }
+
+        return kept is { Entry: { HasShaderCalls: false } entry, Source: not null, Kernel: null } &&
+            SharpEmu.ShaderCompiler.Resources.ResourceMaterializer.CanMaterializeFast(entry.Plan)
+            ? kept
+            : null;
+    }
+
+    // On the command thread: takes a direct dispatch for a deferred dispatch worker. The kept state is left as the rebind
+    // path leaves it, but for the program, which the worker resolves: the program's next dispatch on the command thread
+    // rebinds. An identity recheck turn moves to that dispatch, unless a recheck already waits for one.
+    internal bool ClaimDeferral(KeptComputeProgram kept, ComputeStageRegisters compute, uint dimensionX, uint dimensionY, uint dimensionZ,
+        uint dispatchInitiator, DeferredDispatchInputs inputs)
+    {
+        if ((kept.Rebinds + 1) % IdentityRecheckPeriod == 0)
+        {
+            if (kept.RecheckDue)
+            {
+                return false;
+            }
+
+            kept.RecheckDue = true;
+        }
+
+        kept.Rebinds++;
+        _computeRebound.Increment();
+        inputs.Entry = kept.Entry;
+        inputs.BaseSource = kept.Source;
+        inputs.SystemRegisters = kept.SystemRegisters;
+        inputs.GpuThreadCounts = kept.GpuThreadCounts;
+        inputs.GroupsX = dimensionX;
+        inputs.GroupsY = dimensionY;
+        inputs.GroupsZ = dimensionZ;
+        inputs.Initiator = dispatchInitiator;
+        compute.CopyTo(inputs.Compute);
+        kept.Program = null;
+        if (kept.Registers is { } registers && SameComputeShape(registers, compute))
+        {
+            registers.UserScalars.CopyFrom(compute.UserScalars, compute.UserScalarCount);
+        }
+        else
+        {
+            kept.Registers = compute.Copy();
+        }
+
+        kept.DimensionX = dimensionX;
+        kept.DimensionY = dimensionY;
+        kept.DimensionZ = dimensionZ;
+        return true;
+    }
+
+    // A deferred member's rebind: on a worker between BeginWorkerResolve and EndWorkerResolve, or on the render thread.
+    internal bool RunDeferredRebind(DeferredDispatchInputs inputs, out ComputeProgram program)
+    {
+        var source = RebindSource(inputs.BaseSource!, inputs.Compute);
+        return TryRebindProgram(inputs.Entry!, source, inputs.SystemRegisters, inputs.GpuThreadCounts, inputs.Compute, inputs.Initiator,
+            inputs.GroupsX, inputs.GroupsY, inputs.GroupsZ, out program, out _);
+    }
+
+    internal static bool TicketMatches(ComputeTickets.Ticket ticket, KeptComputeProgram kept, ComputeStageRegisters compute, uint dispatchInitiator,
+        uint dimensionX, uint dimensionY, uint dimensionZ) =>
+        ReferenceEquals(ticket.Kept, kept) && ReferenceEquals(ticket.Entry, kept.Entry) && ticket.Registrations == ShaderHeaderRegistry.Registrations &&
+        ticket.Initiator == dispatchInitiator && ticket.GroupsX == dimensionX && ticket.GroupsY == dimensionY && ticket.GroupsZ == dimensionZ &&
+        ticket.GpuThreadCounts == kept.GpuThreadCounts && ticket.SystemRegisters == kept.SystemRegisters &&
+        kept.Source is { } source && ticket.BaseSource is { } baseSource && (baseSource with { UserData = source.UserData }) == source &&
+        SameComputeShape(ticket.Compute, compute) && SameUserScalars(ticket.Compute.UserScalars, compute.UserScalars, compute.UserScalarCount);
+
+    private ComputeProgram TakeComputeTicket(ComputeTickets tickets, ComputeTickets.Ticket ticket, KeptComputeProgram kept, ProgramSourceEntry entry,
+        ComputeStageRegisters compute, uint dispatchInitiator, uint dimensionX, uint dimensionY, uint dimensionZ)
+    {
+        var program = ticket.Program!;
+        var source = ticket.Source!;
+        tickets.Recycle(ticket);
+        if (!tickets.Verify)
+        {
+            kept.Source = source;
+            return program;
+        }
+
+        var serial = RebindComputeProgram(kept, entry, compute, dispatchInitiator, dimensionX, dimensionY, dimensionZ);
+        tickets.NoteVerify(SameRebind(program, source, serial, kept.Source!));
+        return serial;
+    }
+
+    internal static bool SameRebind(ComputeProgram ticket, ShaderSource ticketSource, ComputeProgram serial, ShaderSource serialSource)
+    {
+        if (ticket.Available != serial.Available || ticket.Program != serial.Program || !ticketSource.UserData.AsSpan().SequenceEqual(serialSource.UserData))
+        {
+            return false;
+        }
+
+        var left = ticket.Input.Stage;
+        var right = serial.Input.Stage;
+        if (left.Program?.Hash != right.Program?.Hash)
+        {
+            return false;
+        }
+
+        var a = left.Resources;
+        var b = right.Resources;
+        if (a is null || b is null)
+        {
+            return ReferenceEquals(a, b);
+        }
+
+        return SameWords(a.Buffers, b.Buffers) && SameWords(a.Images, b.Images) && SameWords(a.Samplers, b.Samplers) &&
+            a.FlattenedResourceTable.AsSpan().SequenceEqual(b.FlattenedResourceTable) && a.UserData.AsSpan().SequenceEqual(b.UserData) &&
+            a.DeviceAddressRanges.AsSpan().SequenceEqual(b.DeviceAddressRanges);
+    }
+
+    private static bool SameWords(uint[][] left, uint[][] right)
+    {
+        if (left.Length != right.Length)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < left.Length; index++)
+        {
+            if (!left[index].AsSpan().SequenceEqual(right[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static bool SameUserScalars(UserScalarRegisters kept, UserScalarRegisters current, int count) =>
@@ -1816,6 +2040,9 @@ internal sealed class KeptComputeProgram
     public ProgramSourceEntry? Entry;
     public ShaderPipelineCache.KernelDemand? Kernel;
     public long Rebinds;
+    // The identity recheck turn came while one of the program's dispatches was deferred: its next dispatch on the command
+    // thread resolves it from scratch.
+    public bool RecheckDue;
     public long Registrations;
     public uint DispatchInitiator;
     public bool GpuThreadCounts;

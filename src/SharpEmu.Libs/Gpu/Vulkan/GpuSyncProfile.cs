@@ -50,7 +50,7 @@ internal static class GpuSyncProfile
         FormattableString.Invariant($"deferred={Interlocked.Exchange(ref _deferredBarriers, 0)} skipped={Interlocked.Exchange(ref _skippedBarriers, 0)} transfer_kept={Interlocked.Exchange(ref _transferKeptDeferred, 0)} ") +
         FormattableString.Invariant($"promoted_handle={Interlocked.Exchange(ref _deferredPromotions[(int)DeferredBarrierPromotion.Handle], 0)} promoted_request={Interlocked.Exchange(ref _deferredPromotions[(int)DeferredBarrierPromotion.Request], 0)} ") +
         FormattableString.Invariant($"chain_open={Interlocked.Exchange(ref _chainDecisions[(int)Rendering.ChainDecision.Open], 0)} chain_start={Interlocked.Exchange(ref _chainDecisions[(int)Rendering.ChainDecision.Start], 0)} ") +
-        FormattableString.Invariant($"chain_skipped={Interlocked.Exchange(ref _chainDecisions[(int)Rendering.ChainDecision.Skipped], 0)} chain_overlap={Interlocked.Exchange(ref _chainDecisions[(int)Rendering.ChainDecision.Overlap], 0)} chain_conservative={Interlocked.Exchange(ref _chainDecisions[(int)Rendering.ChainDecision.Conservative], 0)}");
+        FormattableString.Invariant($"chain_skipped={Interlocked.Exchange(ref _chainDecisions[(int)Rendering.ChainDecision.Skipped], 0)} chain_overlap={Interlocked.Exchange(ref _chainDecisions[(int)Rendering.ChainDecision.Overlap], 0)} chain_conservative={Interlocked.Exchange(ref _chainDecisions[(int)Rendering.ChainDecision.Conservative], 0)} chain_same_program={Interlocked.Exchange(ref _chainDecisions[(int)Rendering.ChainDecision.SameProgramWrites], 0)}");
 
     private static readonly long[] _nativeStateRecorded = new long[(int)NativeStateKind.Count];
     private static readonly long[] _nativeStateReused = new long[(int)NativeStateKind.Count];

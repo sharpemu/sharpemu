@@ -255,8 +255,24 @@ public static partial class AgcExports
                     _host.RenderHost is { } renderHost && _host.ResolveWorkerCount > 0
                     ? new ResolvePool(this, renderHost, _host.ResolveWorkerCount)
                     : null;
+                ReplaceDispatchRuns(value is not null);
+                _computeTicketPool?.Dispose();
+                _computeTicketPool = value is not null && _executor is not null && _pipelines is { SupportsParallelResolution: true } pipelines &&
+                    ComputeTickets.Mode != ComputeTickets.TicketMode.Off
+                    ? new ComputeTickets(pipelines, reads => _host.BeginWorkerResolve(long.MaxValue, reads), () => _host.EndWorkerResolve(),
+                        reads => _host.ValidateTicketReads(reads), ComputeTickets.WorkerCount, verify: ComputeTickets.Mode == ComputeTickets.TicketMode.Verify)
+                    : null;
+                if (_pipelines is not null)
+                {
+                    _pipelines.Tickets = _computeTicketPool;
+                }
             }
         }
+
+        // SHARPEMU_COMPUTE_TICKETS: worker rebinds for direct dispatches, with the command stream on its own thread.
+        private ComputeTickets? _computeTicketPool;
+
+        internal ComputeTickets? ComputeTicketPool => _computeTicketPool;
 
         private bool Producing => Sink is { IsProducerThread: true };
 
@@ -304,6 +320,12 @@ public static partial class AgcExports
                 return;
             }
 
+            if (work is DeferredDispatch dispatch)
+            {
+                JoinDeferredDispatch(dispatch);
+                return;
+            }
+
             RunDeferred(work, _recorder!);
         }
 
@@ -319,6 +341,13 @@ public static partial class AgcExports
                     break;
                 case DeferredDraw deferred:
                     recorder.Record(deferred.Record!);
+                    break;
+                case DeferredDispatch dispatch:
+                    if (!dispatch.Cancelled)
+                    {
+                        recorder.Record(dispatch.Record!);
+                    }
+
                     break;
                 default:
                     throw _host.Fatal($"The deferred work is unknown: {work.GetType().Name}.");
@@ -344,6 +373,9 @@ public static partial class AgcExports
                     break;
                 case DeferredDraw deferred:
                     CompleteDeferredDraw(deferred);
+                    break;
+                case DeferredDispatch dispatch:
+                    CompleteDeferredDispatch(dispatch);
                     break;
             }
         }

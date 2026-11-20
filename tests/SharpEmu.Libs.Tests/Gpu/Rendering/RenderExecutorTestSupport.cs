@@ -427,6 +427,21 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     long IRenderHost.DeferredBarrierPromotions => Promotions;
 
+    // The stream position of the item being recorded; zero keeps dispatches from sealing a replay basis.
+    public long ItemSequence { get; set; }
+
+    long IRenderHost.CurrentItemSequence => ItemSequence;
+
+    public bool AcceptDispatchReplay { get; set; } = true;
+
+    void IRenderHost.SealDispatchReplay() => Calls.Add("seal_dispatch");
+
+    bool IRenderHost.TryReplayDispatch(in PipelineHandle pipeline, in ShaderStageResources stage, bool replaceTable)
+    {
+        Calls.Add($"replay_dispatch table={replaceTable}");
+        return AcceptDispatchReplay;
+    }
+
     public bool RetainTargetlessDraws { get; set; }
 
     public List<(RegisterBanks Banks, GraphicsPrograms Programs, TargetlessDrawArguments Arguments)> RetainedDraws { get; } = new();

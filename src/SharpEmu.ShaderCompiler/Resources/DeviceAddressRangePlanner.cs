@@ -63,9 +63,23 @@ public static class DeviceAddressRangePlanner
 
     public static IReadOnlyList<DeviceAddressRangePlan> Plan(ShaderResourcePlan plan) => Plan(plan, out _);
 
-    public static IReadOnlyList<DeviceAddressRangePlan> Plan(ShaderResourcePlan plan, out bool readsBounded)
+    public static IReadOnlyList<DeviceAddressRangePlan> Plan(ShaderResourcePlan plan, out bool readsBounded) =>
+        Plan(plan, out readsBounded, out _, out _);
+
+    // A scalar address read, and a global read with a scalar base, address the handle's 64-bit base plus a zero-extended
+    // 32-bit offset (the translator widens it with UConvert) and a signed immediate, so such a handle reaches only
+    // [base + first byte, base + 2^32 + end byte). A program is windowed when every range it does not bound exactly is such
+    // a handle, read only, with a plannable base. windowBytes is the widest window measured from the host's range base
+    // (EvaluateRange: base + min(first byte, 0), dword-aligned for scalar reads), with a pad for that alignment.
+    public const ulong WindowOffsetBytes = 1UL << 32;
+    private const long WindowPadBytes = 16;
+
+    public static IReadOnlyList<DeviceAddressRangePlan> Plan(ShaderResourcePlan plan, out bool readsBounded, out bool readsWindowed,
+        out ulong windowBytes)
     {
         readsBounded = true;
+        var windowable = true;
+        var windowSafe = new List<bool>();
         var ranges = new List<DeviceAddressRangePlan>();
         var handles = new List<ScalarValue>();
         var slotsByHash = new Dictionary<int, List<int>>();
@@ -75,6 +89,7 @@ public static class DeviceAddressRangePlanner
             if (memory.DeviceDescriptor || memory.Opcode is "ImageBvhIntersectRay" or "ImageBvh64IntersectRay")
             {
                 readsBounded = false;
+                windowable = false;
             }
 
             if (memory.Kind is not (MemoryResourceKind.Flat or MemoryResourceKind.Global or MemoryResourceKind.ScalarAddress))
@@ -85,12 +100,14 @@ public static class DeviceAddressRangePlanner
             if (memory.PlanningOnly)
             {
                 readsBounded &= memory.Kind == MemoryResourceKind.ScalarAddress;
+                windowable &= memory.Kind == MemoryResourceKind.ScalarAddress;
                 continue;
             }
 
             if (plan.Accesses[index]?.Handle is not { Kind: ScalarValueKind.AddressHandle } handle || handle.Operands.Length != 2)
             {
                 readsBounded = false;
+                windowable = false;
                 continue;
             }
 
@@ -128,12 +145,15 @@ public static class DeviceAddressRangePlanner
                 slot = handles.Count;
                 hashSlots.Add(slot);
                 handles.Add(handle);
+                windowSafe.Add(true);
                 ranges.Add(new DeviceAddressRangePlan((uint)slot, handle.Operands[0], handle.Operands[1], [], false, true, long.MaxValue, long.MinValue, false)
                     { AlignScalarReads = true });
             }
 
             // The immediate offset is signed; the span keeps the lowest and highest byte.
             var written = memory.Access is MemoryAccess.Write or MemoryAccess.Atomic;
+            windowSafe[slot] = windowSafe[slot] &&
+                (memory.Kind == MemoryResourceKind.ScalarAddress || (memory.Kind == MemoryResourceKind.Global && !memory.AddressIsFull));
             readsBounded &= memory.Access == MemoryAccess.Read;
             var bytes = Math.Max((memory.DataBits + 7) / 8, 1u) * Math.Max(memory.DataDwords, 1u);
             var firstByte = (long)unchecked((int)memory.Offset);
@@ -158,6 +178,8 @@ public static class DeviceAddressRangePlanner
             };
         }
 
+        var anyWindowed = false;
+        long margin = 0;
         for (var slot = 0; slot < ranges.Count; slot++)
         {
             ranges[slot] = ranges[slot] with
@@ -165,10 +187,27 @@ public static class DeviceAddressRangePlanner
                 Plannable = plan.ValidateRuntimeValue(ranges[slot].BaseLow) && plan.ValidateRuntimeValue(ranges[slot].BaseHigh),
             };
             var range = ranges[slot];
-            readsBounded &= range.Bounded && range.Plannable && !range.Written && range.Extent <= MaxRangeBytes;
+            var exact = range.Bounded && range.Plannable && !range.Written && range.Extent <= MaxRangeBytes;
+            readsBounded &= exact;
+            if (exact)
+            {
+                continue;
+            }
+
+            if (!range.Bounded && range.Plannable && !range.Written && windowSafe[slot] && range.EndByte >= range.FirstByte)
+            {
+                anyWindowed = true;
+                margin = Math.Max(margin, range.EndByte - Math.Min(range.FirstByte, 0));
+                continue;
+            }
+
+            windowable = false;
         }
 
-        readsBounded &= ranges.Count != 0 && plan.DeviceRecordCounts is null && plan.Graph.Program.FunctionBufferAccesses.Count == 0;
+        var plainProgram = ranges.Count != 0 && plan.DeviceRecordCounts is null && plan.Graph.Program.FunctionBufferAccesses.Count == 0;
+        readsBounded &= plainProgram;
+        readsWindowed = windowable && anyWindowed && plainProgram;
+        windowBytes = readsWindowed ? WindowOffsetBytes + (ulong)(margin + WindowPadBytes) : 0;
         return ranges;
     }
 

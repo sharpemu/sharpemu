@@ -475,6 +475,45 @@ public sealed partial class GpuCommandInterpreter
             throw _host.Fatal($"The dispatch header is not supported: header=0x{packet.Header:X8} address=0x{packet.PacketAddress:X16}.");
         }
 
+        // A member of a deferred dispatch run goes to the run's workers; any other dispatch closes an open run first (a
+        // poisoned member rolls the packets back instead).
+        if (_runs is { } runs)
+        {
+            var execution = RequireExecution();
+            var depth = execution.Depth - 1;
+            var site = new DeferredIssueSite(SubmitId, depth, execution.At(depth).Address, packet.Offset, _runUndo.Count, UserDataMarker);
+            var issue = runs.TryIssue(in site, payload[0], payload[1], payload[2], payload[3]);
+            if (issue == DeferredIssue.Issued)
+            {
+                return 4;
+            }
+
+            if ((issue == DeferredIssue.Rewind || runs.IsOpen) && CloseRunInHandler())
+            {
+                return 4;
+            }
+        }
+
+        if (_host.ComputeTickets is { } tickets)
+        {
+            if (tickets.NeedsScan(this, packet.PacketAddress, out var requestedThrough))
+            {
+                ScanComputeTickets(tickets, in packet, requestedThrough);
+            }
+
+            tickets.BeginDispatch(this, packet.PacketAddress);
+            try
+            {
+                DispatchDirect(payload[0], payload[1], payload[2], payload[3]);
+            }
+            finally
+            {
+                tickets.EndDispatch();
+            }
+
+            return 4;
+        }
+
         DispatchDirect(payload[0], payload[1], payload[2], payload[3]);
         return 4;
     }

@@ -61,9 +61,17 @@ internal static partial class VulkanVideoPresenter
                 return refusal;
             }
 
-            var data = GC.AllocateUninitializedArray<byte>((int)size);
+            // A copy of 64 KiB or more uses a pooled buffer, returned when its store lands or here when the copy is refused.
+            var length = (int)size;
+            var pooled = length >= StoreBufferPool.ClassBytes;
+            var data = pooled ? StoreBufferPool.Shared.Rent(length) : GC.AllocateUninitializedArray<byte>(length);
             if (!TryPeekResidentGuestBytes(source, data.AsSpan(0, (int)sourceSize)))
             {
+                if (pooled)
+                {
+                    StoreBufferPool.Shared.Return(data);
+                }
+
                 if (RenderPhaseProfile.Enabled)
                 {
                     ShaderPipelineCache.NoteWordCopyInput(
@@ -78,19 +86,26 @@ internal static partial class VulkanVideoPresenter
                 return KernelWriteRefusal.Input;
             }
 
-            for (var filled = (int)sourceSize; filled < data.Length;)
+            for (var filled = (int)sourceSize; filled < length;)
             {
-                var count = Math.Min(filled, data.Length - filled);
+                var count = Math.Min(filled, length - filled);
                 data.AsSpan(0, count).CopyTo(data.AsSpan(filled));
                 filled += count;
             }
 
-            _commandThread!.PostOwnedWrite(destination, data, kernel: true);
+            if (pooled)
+            {
+                _commandThread!.PostPooledWrite(destination, data, length, kernel: true);
+            }
+            else
+            {
+                _commandThread!.PostOwnedWrite(destination, data, kernel: true);
+            }
             return KernelWriteRefusal.None;
         }
 
         // On the render thread at the store's stream position: a store into GPU-dirty pages lands on both copies.
-        internal bool TryApplyKernelWriteOverGpuBytes(ulong address, byte[] data)
+        internal bool TryApplyKernelWriteOverGpuBytes(ulong address, ReadOnlySpan<byte> data)
         {
             var size = (ulong)data.Length;
             if (!_bufferCache.MayHaveGpuDirtyPages(address, size) || !_bufferCache.HasGpuDirtyPages(address, size) ||

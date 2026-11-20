@@ -453,6 +453,24 @@ public sealed partial class GuestImageCache
         return replacementImageIdentifier;
     }
 
+    // Whether an overlapping cached image counts as used this frame, so it is not safe to park or delete. A recurring alias
+    // counts too, one used in each of the two frames before this one: two aliases of the same memory that a title uses every
+    // frame both stay registered instead of swapping at each one's first use. An image the frame before used but the one
+    // before it did not is parked as before, so the one-off images a title places in the same memory frame after frame do
+    // not pile up (each registered image watches its pages, and a page holds at most 127 watches). The serial overlap and
+    // the render workers' read-only overlap must agree.
+    private bool UsedThisFrameForOverlap(CachedImage cached)
+    {
+        if (!cached.Registered)
+        {
+            return false;
+        }
+
+        var lastUse = _recencyQueue.GetLastUseTick(cached.RecencyEntryIndex);
+        return lastUse >= _collectionTick ||
+               (lastUse + 1 == _collectionTick && cached.PreviousUseTick != ulong.MaxValue && cached.PreviousUseTick + 2 == _collectionTick);
+    }
+
     private OverlapResolution ResolveOverlap(in ImageDescription requested, ImageRole role, ResourceSlotIdentifier cachedImageIdentifier, ResourceSlotIdentifier mergedImageIdentifier)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageOverlap);
@@ -466,7 +484,7 @@ public sealed partial class GuestImageCache
         var currentTick = _scheduler.CurrentTick;
         // A title submits dozens of command buffers per frame, so an image it writes early in a frame and reads late
         // in it is past the removal window in between. As in collection, an image used this frame is not stale.
-        var usedThisFrame = cached.Registered && _recencyQueue.GetLastUseTick(cached.RecencyEntryIndex) >= _collectionTick;
+        var usedThisFrame = UsedThisFrameForOverlap(cached);
         var safeToDelete = !usedThisFrame && currentTick - Math.Min(currentTick, cached.LastAccessTick) > TicksBeforeRemoval;
         if (requested.FirstLevel != 0 || cachedInfo.FirstLevel != 0)
         {

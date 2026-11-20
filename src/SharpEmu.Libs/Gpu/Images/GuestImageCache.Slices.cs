@@ -235,7 +235,7 @@ public sealed partial class GuestImageCache
 
         ref readonly var cachedInfo = ref cached.Description;
         var currentTick = _scheduler.CurrentTick;
-        var usedThisFrame = cached.Registered && _recencyQueue.GetLastUseTick(cached.RecencyEntryIndex) >= _collectionTick;
+        var usedThisFrame = UsedThisFrameForOverlap(cached);
         var safeToDelete = !usedThisFrame && currentTick - Math.Min(currentTick, cached.LastAccessTick) > TicksBeforeRemoval;
         if (requested.Data.Address == cachedInfo.Data.Address &&
             requested.BlockExtent.Width == cachedInfo.BlockExtent.Width && requested.BlockExtent.Height == cachedInfo.BlockExtent.Height &&
@@ -711,7 +711,10 @@ public sealed partial class GuestImageCache
         };
     }
 
-    public bool ValidateSliceImages(List<ImageSliceUse> uses, ulong lookupGeneration, long metadataGeneration)
+    // depthClears are the depth views whose pending HTILE clear the segment's join applies itself: a depth use of one of them
+    // passes when only clear-state events reached its metadata, even with a covered slice still waiting on a clear.
+    public bool ValidateSliceImages(List<ImageSliceUse> uses, ulong lookupGeneration, long metadataGeneration,
+        IReadOnlyList<(ResourceSlotIdentifier Image, ImageViewDescription View)>? depthClears = null)
     {
         using var held = _lock.Read();
         foreach (var use in uses)
@@ -738,14 +741,38 @@ public sealed partial class GuestImageCache
                 return SliceLookupFailed(SliceLookupFailure.ChangedAtJoin, use.Request.Role);
             }
 
-            if ((use.Request.Description.HasMetadata && !MetadataUnchangedSince(metadataGeneration, use.Request.Description.Metadata.Range.Address)) ||
-                (image.Description.HasMetadata && !MetadataUnchangedSince(metadataGeneration, image.Description.Metadata.Range.Address)))
+            var requestChanged = use.Request.Description.HasMetadata &&
+                                 !MetadataUnchangedSince(metadataGeneration, use.Request.Description.Metadata.Range.Address);
+            var imageChanged = image.Description.HasMetadata &&
+                               !MetadataUnchangedSince(metadataGeneration, image.Description.Metadata.Range.Address);
+            if ((requestChanged || imageChanged) &&
+                !ConsumedClearsOnly(in use, image, metadataGeneration, requestChanged, imageChanged,
+                    use.Request.Role == ImageRole.DepthTarget && HasDepthClear(depthClears, use.Image, use.Request.View)))
             {
                 return SliceLookupFailed(SliceLookupFailure.MetadataChangedAtJoin, use.Request.Role);
             }
         }
 
         return true;
+    }
+
+    private static bool HasDepthClear(IReadOnlyList<(ResourceSlotIdentifier Image, ImageViewDescription View)>? clears, ResourceSlotIdentifier image,
+        in ImageViewDescription view)
+    {
+        if (clears is null)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < clears.Count; index++)
+        {
+            if (clears[index].Image == image && clears[index].View == view)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // Applies in stream order what a slice's recording thread only read: recency, refreshes from

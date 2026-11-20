@@ -289,11 +289,6 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _presenter.RunPendingCommands();
-            if (_presenter._batchOpen && _preparation is null && _bufferCache?.HotWritePending == true && _presenter._batchDrawCount >= Presenter.MinimumFlushDraws)
-            {
-                EndRendering();
-                FlushBatchedGuestCommands();
-            }
         }
 
         public void SetDebugInformation(RecordedOperation operation, ulong submitId, uint argument0, uint argument1, uint argument2, uint argument3, ulong argument4) =>
@@ -634,6 +629,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw SubmissionScheduler.Fatal("A resource preparation is already open.");
             }
 
+            _preparationStreamCopied = false;
             if (_worker)
             {
                 _preparation = (_sparePreparation ??= new RenderPreparation(this)).Open(null);
@@ -1185,6 +1181,11 @@ internal static unsafe partial class VulkanVideoPresenter
         public void BeginRendering(in RenderingState state)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawRenderingSetup);
+            if (_worker && _segment is { Requests.DepthClears.Count: > 0 } segment)
+            {
+                NoteDepthClearArea(segment.Requests, in state);
+            }
+
             if (_renderingActive && _renderingState == state)
             {
                 _renderingWritesMemory |= _nextDrawWritesMemory;

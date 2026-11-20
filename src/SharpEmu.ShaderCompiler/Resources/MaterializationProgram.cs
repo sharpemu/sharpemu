@@ -5,7 +5,7 @@ using System.Collections.Generic;
 
 namespace SharpEmu.ShaderCompiler.Resources;
 
-internal sealed class MaterializationProgram
+internal sealed partial class MaterializationProgram
 {
     private const ulong AddressMask = 0x0000_FFFF_FFFF_FFFFul;
     private const int MinimumRunWords = 2;
@@ -53,6 +53,11 @@ internal sealed class MaterializationProgram
         public bool[] Absolute = new bool[64];
         public byte[] Bytes = new byte[1024];
         public int Count;
+
+        // Active-source arrays by length: TryRunInto reads its array before the scratch goes back to the thread.
+        private readonly bool[]?[] _activeSources = new bool[]?[65];
+
+        public bool[] ActiveSources(int count) => count < _activeSources.Length ? _activeSources[count] ??= new bool[count] : new bool[count];
 
         public void Ensure(int registers)
         {
@@ -210,6 +215,28 @@ internal sealed class MaterializationProgram
         }
 
         private int LevelOf(int register) => _registerLevels[register];
+
+        // Every register as a node a branch selection evaluates on demand: its constant, step or read.
+        public BranchNode[] Nodes()
+        {
+            var nodes = new BranchNode[_constants.Count];
+            for (var register = 0; register < nodes.Length; register++)
+            {
+                nodes[register] = new BranchNode(BranchNodeKind.Constant, _constants[register], default, default);
+            }
+
+            foreach (var (_, step) in _steps)
+            {
+                nodes[step.Target] = new BranchNode(BranchNodeKind.Step, 0, step, default);
+            }
+
+            foreach (var (_, read) in _reads)
+            {
+                nodes[read.Target] = new BranchNode(BranchNodeKind.Read, 0, default, read);
+            }
+
+            return nodes;
+        }
 
         public bool Register(ScalarValue value, out int register)
         {
@@ -401,7 +428,7 @@ internal sealed class MaterializationProgram
     internal bool TryRun(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, int additionalTableWords, out List<DescriptorWords> sources,
         out uint[] table, out DeviceAddressRange[] ranges, out bool[] activeSources)
     {
-        activeSources = plan.ResourceBranches.Count != 0 ? RuntimeValueEvaluator.EvaluateActiveSources(plan, inputs) : [];
+        activeSources = plan.ResourceBranches.Count != 0 ? SelectActiveSources(plan, inputs, reuse: null) : [];
         var scratch = _scratch ?? new Scratch();
         _scratch = null;
         try
@@ -433,11 +460,11 @@ internal sealed class MaterializationProgram
 
     internal bool TryRunInto(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, int additionalTableWords, Output output)
     {
-        var activeSources = plan.ResourceBranches.Count != 0 ? RuntimeValueEvaluator.EvaluateActiveSources(plan, inputs) : [];
         var scratch = _scratch ?? new Scratch();
         _scratch = null;
         try
         {
+            var activeSources = plan.ResourceBranches.Count != 0 ? SelectActiveSources(plan, inputs, reuse: scratch) : [];
             Evaluate(inputs, scratch);
             return Emit(plan, additionalTableWords, scratch, activeSources, output);
         }

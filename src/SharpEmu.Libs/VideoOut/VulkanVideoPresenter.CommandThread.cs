@@ -19,11 +19,16 @@ internal static partial class VulkanVideoPresenter
     // queued; a callback that returns a result waits for the render thread to run everything before it.
     private sealed class CommandThread : AgcExports.IDeferredWorkSink
     {
-        // The thread runs this far ahead of the render thread at most. Operand reads only drain the
-        // queue when a queued write targets them, so the depth mostly costs memory; too shallow and the
-        // two threads take turns waiting on each other (128 did, with draws resolving on the pool).
+        // The thread runs this far ahead of the render thread at most: 4,096 items, or a larger configured depth, so it keeps
+        // interpreting while the render side records and joins slices. Operand reads only drain the queue when a queued write
+        // targets them, so the depth mostly costs memory; too shallow and the two threads take turns waiting on each other
+        // (128 did, with draws resolving on the pool).
         private static readonly int MaxOutstanding =
-            int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_COMMAND_QUEUE_DEPTH"), out var depth) && depth >= 128 ? depth : 1024;
+            int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_COMMAND_QUEUE_DEPTH"), out var depth) && depth > 4096 ? depth : 4096;
+
+        // A producer waiting for room resumes once the queue is an eighth below its cap rather than half empty, so it
+        // keeps overlapping the render side instead of waiting for it to drain.
+        private static readonly int ResumeBelow = MaxOutstanding - MaxOutstanding / 8;
 
         private static readonly int SlicesAheadPerWorker =
             int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_SLICES_AHEAD"), out var ahead) && ahead >= 1 ? ahead : 2;
@@ -56,7 +61,13 @@ internal static partial class VulkanVideoPresenter
             public Action? Action;
             public ulong Address;
             public byte[]? Data;
+            // The store's length; a pooled Data can be longer.
+            public int Length;
             public bool Kernel;
+            // A store over more than PendingStorePages.LargePages pages, kept as one range in the page index.
+            public bool Large;
+            // Data came from StoreBufferPool.Shared and returns there once the store lands.
+            public bool Pooled;
             // The guest range a queued fill or copy writes; zero for other items.
             public ulong RangeSize;
             public RangeKind Range;
@@ -122,7 +133,7 @@ internal static partial class VulkanVideoPresenter
         // this thread see them over guest memory.
         private readonly object _writeLock = new();
         private readonly Queue<Item> _pendingWrites = new();
-        private readonly ConcurrentDictionary<ulong, int> _pendingStorePages = new();
+        private readonly PendingStorePages _storePages = new();
         private readonly Dictionary<ulong, Queue<Item>> _storesByPage = new();
         private readonly Stack<Queue<Item>> _spareStoreQueues = new();
         private volatile int _pendingWriteCount;
@@ -134,6 +145,34 @@ internal static partial class VulkanVideoPresenter
 
         private readonly List<Shadow> _shadows = new();
         private volatile Shadow[] _shadowSnapshot = [];
+        // The newest sequence and the address bounds of the snapshot, published with it: a shadow test returns at once
+        // when no shadow can match.
+        private volatile ShadowBounds _shadowBounds = ShadowBounds.Empty;
+
+        private sealed record ShadowBounds(long Newest, ulong Low, ulong High)
+        {
+            public static readonly ShadowBounds Empty = new(long.MinValue, ulong.MaxValue, 0);
+        }
+
+        private static ShadowBounds BoundsOf(List<Shadow> shadows)
+        {
+            if (shadows.Count == 0)
+            {
+                return ShadowBounds.Empty;
+            }
+
+            var newest = long.MinValue;
+            var low = ulong.MaxValue;
+            var high = 0UL;
+            foreach (var shadow in shadows)
+            {
+                newest = Math.Max(newest, shadow.Sequence);
+                low = Math.Min(low, shadow.Address);
+                high = Math.Max(high, shadow.Address + (ulong)shadow.Length);
+            }
+
+            return new ShadowBounds(newest, low, high);
+        }
         private volatile Item[] _pendingRangeSnapshot = [];
         private long _shadowGeneration;
 
@@ -162,29 +201,28 @@ internal static partial class VulkanVideoPresenter
         public long ShadowGeneration => Volatile.Read(ref _shadowGeneration);
 
         // Whether a queued store of the stream lands on a page of the range.
-        public bool HasPendingStores(ulong address, ulong size)
-        {
-            if (_pendingWriteCount == 0)
-            {
-                return false;
-            }
+        public bool HasPendingStores(ulong address, ulong size) => _pendingWriteCount != 0 && _storePages.Overlaps(address, size);
 
-            var last = (address + size - 1) >> StorePageShift;
-            for (var page = address >> StorePageShift; page <= last; page++)
-            {
-                if (_pendingStorePages.ContainsKey(page))
-                {
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
+        // A large store has no page queues: a single-page overlay read it overlaps scans the ordered store queue instead.
         private void NotePendingStorePages(Item item, int delta)
         {
             var address = item.Address;
-            var last = (address + (ulong)item.Data!.Length - 1) >> StorePageShift;
+            var length = (ulong)item.Length;
+            if (delta > 0)
+            {
+                _storePages.Add(address, length, item.Large);
+            }
+            else
+            {
+                _storePages.Remove(address, length, item.Large);
+            }
+
+            if (item.Large)
+            {
+                return;
+            }
+
+            var last = (address + length - 1) >> StorePageShift;
             for (var page = address >> StorePageShift; page <= last; page++)
             {
                 if (delta > 0)
@@ -212,11 +250,6 @@ internal static partial class VulkanVideoPresenter
                             _spareStoreQueues.Push(queued);
                         }
                     }
-                }
-
-                if (_pendingStorePages.AddOrUpdate(page, delta, (_, count) => count + delta) == 0)
-                {
-                    _pendingStorePages.TryRemove(new KeyValuePair<ulong, int>(page, 0));
                 }
             }
         }
@@ -274,9 +307,18 @@ internal static partial class VulkanVideoPresenter
 
         public void PostWrite(ulong address, ReadOnlySpan<byte> data, bool kernel = false) => PostOwnedWrite(address, data.ToArray(), kernel);
 
-        public void PostOwnedWrite(ulong address, byte[] data, bool kernel)
+        public void PostOwnedWrite(ulong address, byte[] data, bool kernel) => PostStore(address, data, data.Length, kernel, pooled: false);
+
+        // The first length bytes of a buffer rented from StoreBufferPool.Shared, which takes it back once the store lands.
+        public void PostPooledWrite(ulong address, byte[] data, int length, bool kernel) => PostStore(address, data, length, kernel, pooled: true);
+
+        private void PostStore(ulong address, byte[] data, int length, bool kernel, bool pooled)
         {
-            var item = new Item { Kind = Kind.Write, Address = address, Data = data, Kernel = kernel };
+            var item = new Item
+            {
+                Kind = Kind.Write, Address = address, Data = data, Length = length, Kernel = kernel, Pooled = pooled,
+                Large = PendingStorePages.IsLarge(address, (ulong)length),
+            };
             lock (_writeLock)
             {
                 _pendingWrites.Enqueue(item);
@@ -382,6 +424,7 @@ internal static partial class VulkanVideoPresenter
 
                 _shadows.Add(new Shadow { Address = known.Address, Length = known.ByteCount, Sequence = sequence, Known = known, Source = source });
                 _shadowSnapshot = _shadows.ToArray();
+                _shadowBounds = BoundsOf(_shadows);
             }
 
             Interlocked.Increment(ref _shadowGeneration);
@@ -404,6 +447,7 @@ internal static partial class VulkanVideoPresenter
 
             _shadows.RemoveRange(kept, _shadows.Count - kept);
             _shadowSnapshot = _shadows.ToArray();
+            _shadowBounds = BoundsOf(_shadows);
         }
 
         public bool HasShadow(ulong address, ulong size) => HasShadowBefore(address, size, long.MaxValue);
@@ -413,6 +457,12 @@ internal static partial class VulkanVideoPresenter
         {
             var executed = Volatile.Read(ref _executed);
             var end = address + size;
+            var bounds = _shadowBounds;
+            if (bounds.Newest <= executed || end <= bounds.Low || bounds.High <= address)
+            {
+                return false;
+            }
+
             foreach (var shadow in _shadowSnapshot)
             {
                 if (shadow.Sequence > executed && shadow.Sequence < sequence && address < shadow.Address + (ulong)shadow.Length && shadow.Address < end)
@@ -488,6 +538,13 @@ internal static partial class VulkanVideoPresenter
             }
         }
 
+        // Tests: ReadOverlay into a new array.
+        internal byte[] ReadOverlayForTest(ulong address, int length)
+        {
+            var bytes = new byte[length];
+            return ReadOverlay(address, bytes) ? bytes : throw new InvalidOperationException("The overlay read failed.");
+        }
+
         // Guest memory as a draw at this stream position sees it: the queued stores before it applied,
         // none of the later ones. A queued fill or copy before it into the range cannot be read ahead.
         public bool ReadOverlayBefore(ulong address, Span<byte> destination, long sequence)
@@ -536,7 +593,7 @@ internal static partial class VulkanVideoPresenter
         {
             var end = address + (ulong)destination.Length;
             var page = address >> StorePageShift;
-            if (page == (end - 1) >> StorePageShift)
+            if (page == (end - 1) >> StorePageShift && (!_storePages.HasLarge || !_storePages.OverlapsLarge(address, end)))
             {
                 if (_storesByPage.TryGetValue(page, out var queued))
                 {
@@ -557,7 +614,7 @@ internal static partial class VulkanVideoPresenter
 
         private static void ApplyPendingStore(Item write, ulong address, ulong end, Span<byte> destination, long afterSequence, long beforeSequence)
         {
-            var writeEnd = write.Address + (ulong)write.Data!.Length;
+            var writeEnd = write.Address + (ulong)write.Length;
             if (write.Sequence <= afterSequence || write.Address >= end || writeEnd <= address ||
                 (beforeSequence != long.MaxValue && (write.Sequence == 0 || write.Sequence >= beforeSequence)))
             {
@@ -635,7 +692,7 @@ internal static partial class VulkanVideoPresenter
                 {
                     _waitingForSpace = true;
                     Interlocked.MemoryBarrier();
-                    if (Volatile.Read(ref _outstanding) < MaxOutstanding / 2 || _failure is not null)
+                    if (Volatile.Read(ref _outstanding) < ResumeBelow || _failure is not null)
                     {
                         break;
                     }
@@ -739,7 +796,7 @@ internal static partial class VulkanVideoPresenter
             var ran = 0;
             for (;;)
             {
-                FillUnits(maxItems);
+                FillUnits();
                 if (_unitHead == _units.Count)
                 {
                     _units.Clear();
@@ -787,7 +844,9 @@ internal static partial class VulkanVideoPresenter
             }
         }
 
-        private void FillUnits(int maxItems)
+        // A fill cuts slices up to the look-ahead limit rather than a fixed number of items, so the render workers keep
+        // recording while the render thread joins and the command thread runs ahead.
+        private void FillUnits()
         {
             var slicing = _presenter.SlicesEnabled;
             var slicesAhead = 0;
@@ -800,8 +859,7 @@ internal static partial class VulkanVideoPresenter
             }
 
             var limit = slicing ? SlicesAheadPerWorker * _presenter.WorkerCount : 0;
-            var pulled = 0;
-            while (slicesAhead <= limit && pulled < maxItems)
+            while (slicesAhead <= limit)
             {
                 if (_drainIndex == _draining.Count && !RefillDraining())
                 {
@@ -810,7 +868,6 @@ internal static partial class VulkanVideoPresenter
 
                 var item = _draining[_drainIndex];
                 _draining[_drainIndex++] = null!;
-                pulled++;
                 if (slicing && item.Kind == Kind.Deferred)
                 {
                     (_cutting ??= new RenderSlice()).Items.Add(item);
@@ -1025,7 +1082,7 @@ internal static partial class VulkanVideoPresenter
             var outstanding = Interlocked.Decrement(ref _outstanding);
             // One pulse per wait: the producer sets its flag again if it keeps waiting.
             var wakeForSync = item.Sync && _waitingForSync;
-            var wakeForSpace = _waitingForSpace && outstanding < MaxOutstanding / 2;
+            var wakeForSpace = _waitingForSpace && outstanding < ResumeBelow;
             var wakeForSequence = item.Sequence >= Volatile.Read(ref _waitingForSequence);
             if (wakeForSync || wakeForSpace || wakeForSequence)
             {
@@ -1111,7 +1168,8 @@ internal static partial class VulkanVideoPresenter
         {
             lock (_writeLock)
             {
-                var written = (item.Kernel && _presenter.TryApplyKernelWriteOverGpuBytes(item.Address, item.Data!)) || _memory.TryWrite(item.Address, item.Data);
+                var data = item.Data.AsSpan(0, item.Length);
+                var written = (item.Kernel && _presenter.TryApplyKernelWriteOverGpuBytes(item.Address, data)) || _memory.TryWrite(item.Address, data);
                 if (!ReferenceEquals(_pendingWrites.Peek(), item))
                 {
                     throw SubmissionScheduler.Fatal("The command stream stores ran out of order.");
@@ -1123,7 +1181,14 @@ internal static partial class VulkanVideoPresenter
                 if (!written)
                 {
                     throw SubmissionScheduler.Fatal(
-                        $"The command stream cannot write guest memory: address=0x{item.Address:X16} size={item.Data!.Length}.");
+                        $"The command stream cannot write guest memory: address=0x{item.Address:X16} size={item.Length}.");
+                }
+
+                // No reader reaches the store once it left the queue and the index under this lock.
+                if (item.Pooled)
+                {
+                    StoreBufferPool.Shared.Return(item.Data!);
+                    item.Data = null;
                 }
             }
         }

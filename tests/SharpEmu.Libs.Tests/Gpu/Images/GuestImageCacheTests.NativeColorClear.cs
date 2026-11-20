@@ -111,6 +111,37 @@ public sealed partial class GuestImageCacheTests
         harness.Shutdown();
     }
 
+    [Fact]
+    public void NativeColorClearPredictionSeparatesARegistrationUpdateFromAClear()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        var metadataAddress = address + 0x10000;
+        var target = AsColorTarget(LinearRequest(address, 8, Format.R16G16B16A16Sfloat,
+            GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 8, 1));
+        target.Description.Metadata.Kind = MetadataKind.Dcc;
+        target.Description.Metadata.Range = new GuestSpan(metadataAddress, 4096);
+        target.Description.Metadata.NativeColorClear = true;
+        target.Description.Metadata.PackedColorClearSupported = true;
+        target.Description.Metadata.PackedColorClear = new ClearColorValue(0f, 0f, 1f, 1f);
+        harness.Write(metadataAddress, Enumerable.Repeat((byte)0xFF, 4096).ToArray());
+        var identifier = harness.Find(ref target);
+
+        // No slice holds a clear code: the apply would only register the metadata.
+        Assert.Equal(NativeColorClearPrediction.RegistrationOnly, harness.Images.PredictNativeColorClear(identifier, target));
+        harness.Worker.Run(() => harness.Images.ApplyNativeColorClear(identifier, target));
+        Assert.Equal(NativeColorClearPrediction.Settled, harness.Images.PredictNativeColorClear(identifier, target));
+
+        harness.Write(metadataAddress, Enumerable.Repeat((byte)0x20, 4096).ToArray());
+        Assert.Equal(NativeColorClearPrediction.ClearCode, harness.Images.PredictNativeColorClear(identifier, target));
+
+        var outside = target;
+        outside.Description.Metadata.ColorMetadataBaseLayer = 1;
+        Assert.Equal(NativeColorClearPrediction.BadView, harness.Images.PredictNativeColorClear(identifier, outside));
+        harness.Shutdown();
+    }
+
     [Theory]
     [InlineData(0u, false, true)]
     [InlineData(0u, true, false)]

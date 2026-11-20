@@ -86,6 +86,20 @@ public sealed partial class ShaderResourcePlan
         return Interlocked.CompareExchange(ref _materializationProgram, built, null) ?? built;
     }
 
+    private sealed record BranchSelectionBox(MaterializationProgram.BranchSelection? Selection);
+
+    private BranchSelectionBox? _branchSelection;
+
+    // The materialization program's branch selection, built on first use; null leaves the selection to the evaluator.
+    internal MaterializationProgram.BranchSelection? BranchSelection =>
+        (Volatile.Read(ref _branchSelection) ?? InitializeBranchSelection()).Selection;
+
+    private BranchSelectionBox InitializeBranchSelection()
+    {
+        var built = new BranchSelectionBox(Resources.MaterializationProgram.BranchSelection.Build(this));
+        return Interlocked.CompareExchange(ref _branchSelection, built, null) ?? built;
+    }
+
     internal object?[]? SpecializationMemos;
     internal int NextSpecializationMemo;
 
@@ -365,9 +379,11 @@ public sealed partial class ShaderResourcePlan
         plan.ResourceBranches = ResourceBranchBlock.Build(plan, Rewrite);
         plan.ResourceBranchesWithWrites = plan.ResourceBranches.Count != 0 && ResourceBranchBlock.Writes(plan);
         plan.ResourceBranchWrites = plan.ResourceBranchesWithWrites ? ResourceBranchBlock.WrittenBuffers(plan) ?? [] : [];
-        plan.DeviceAddressRanges = DeviceAddressRangePlanner.Plan(plan, out var readsBounded);
+        plan.DeviceAddressRanges = DeviceAddressRangePlanner.Plan(plan, out var readsBounded, out var readsWindowed, out var windowBytes);
         plan.CallRecordCallees = CallRecordPlanner.Plan(plan);
         plan.DeviceAddressReadsBounded = readsBounded && plan.CallRecordCallees.Count == 0;
+        plan.DeviceAddressReadsWindowed = !plan.DeviceAddressReadsBounded && readsWindowed && plan.CallRecordCallees.Count == 0;
+        plan.DeviceAddressWindowBytes = plan.DeviceAddressReadsWindowed ? windowBytes : 0;
 
         // Each written handle owns three flattened slots after the table reads: base
         // low, base high and size, which the shader checks every store against.
@@ -392,6 +408,12 @@ public sealed partial class ShaderResourcePlan
     public IReadOnlyList<DeviceAddressRangePlan> DeviceAddressRanges { get; private set; } = [];
 
     public bool DeviceAddressReadsBounded { get; private set; }
+
+    // Every device-address read the plan does not bound exactly is a handle base plus a 32-bit offset, and
+    // DeviceAddressWindowBytes from each evaluated range base covers what it reaches.
+    public bool DeviceAddressReadsWindowed { get; private set; }
+
+    public ulong DeviceAddressWindowBytes { get; private set; }
 
     public IReadOnlyDictionary<uint, uint> WrittenRangeSlotByHandle { get; private set; } = new Dictionary<uint, uint>();
 

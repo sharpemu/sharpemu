@@ -202,7 +202,9 @@ public interface IRenderHost
     {
     }
 
-    bool TryReplayDispatch(in PipelineHandle pipeline, in ShaderStageResources stage) => false;
+    // replaceTable: the stage differs from the sealed dispatch only in its flattened resource table, which the replay
+    // uploads again and binds by pushing that one descriptor.
+    bool TryReplayDispatch(in PipelineHandle pipeline, in ShaderStageResources stage, bool replaceTable) => false;
 
     void RebindBuffers(IPreparedBindings prepared)
     {

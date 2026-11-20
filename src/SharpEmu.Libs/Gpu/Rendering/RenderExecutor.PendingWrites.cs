@@ -66,38 +66,54 @@ public sealed partial class RenderExecutor
         }
     }
 
-    private void MarkPendingWrites(ResolvedDispatch record)
+    private void MarkPendingWrites(ResolvedDispatch record) => MarkDispatchWrites(record, record.Sequence, null);
+
+    // The marks a dispatch record would make, collected for a deferred dispatch's finalization.
+    internal void CollectDispatchWrites(ResolvedDispatch record, List<PendingMark> into) => MarkDispatchWrites(record, 0, into);
+
+    private void MarkDispatchWrites(ResolvedDispatch record, long sequence, List<PendingMark>? into)
     {
         if (record.Skipped)
         {
             return;
         }
 
-        var sequence = record.Sequence;
         if (record.Program.ImageCopy is { } imageCopy)
         {
-            Mark(imageCopy.Destination.Description.Data, sequence, PendingWriteKind.Target);
+            MarkRange(imageCopy.Destination.Description.Data.Address, imageCopy.Destination.Description.Data.Size, sequence, PendingWriteKind.Target, into);
             return;
         }
-        MarkStageWrites(record.Program.Input.Stage, sequence);
+        MarkStageWrites(record.Program.Input.Stage, sequence, into);
         if (record.ConstantFill is { } fill)
         {
-            PendingWrites.Mark(fill.Address, fill.Size, sequence, PendingWriteKind.Fill);
+            MarkRange(fill.Address, fill.Size, sequence, PendingWriteKind.Fill, into);
         }
 
         if (record.BoundedFill is { } bounded)
         {
-            PendingWrites.Mark(bounded.Address, bounded.Size, sequence, PendingWriteKind.Fill);
+            MarkRange(bounded.Address, bounded.Size, sequence, PendingWriteKind.Fill, into);
         }
 
         if (record.BoundedCopy is { } copy)
         {
-            PendingWrites.Mark(copy.Destination, copy.Words * sizeof(uint), sequence, PendingWriteKind.Copy);
+            MarkRange(copy.Destination, copy.Words * sizeof(uint), sequence, PendingWriteKind.Copy, into);
         }
 
         if (record.ImageClear is { } clear)
         {
-            PendingWrites.Mark(clear.Descriptor.Address, clear.Size, sequence, PendingWriteKind.Fill);
+            MarkRange(clear.Descriptor.Address, clear.Size, sequence, PendingWriteKind.Fill, into);
+        }
+    }
+
+    private void MarkRange(ulong address, ulong size, long sequence, PendingWriteKind kind, List<PendingMark>? into)
+    {
+        if (into is null)
+        {
+            PendingWrites.Mark(address, size, sequence, kind);
+        }
+        else if (size != 0)
+        {
+            into.Add(new PendingMark(address, size, kind));
         }
     }
 
@@ -117,7 +133,7 @@ public sealed partial class RenderExecutor
 
     private void Mark(in GuestSpan data, long sequence, PendingWriteKind kind) => PendingWrites.Mark(data.Address, data.Size, sequence, kind);
 
-    private void MarkStageWrites(in ShaderStageResources stage, long sequence)
+    private void MarkStageWrites(in ShaderStageResources stage, long sequence, List<PendingMark>? into = null)
     {
         if (stage.Program is not { } program)
         {
@@ -136,7 +152,7 @@ public sealed partial class RenderExecutor
             var descriptor = BufferDescriptorWords.From(buffers[index]);
             if (descriptor.Address != 0 && descriptor.Footprint() is { } footprint)
             {
-                PendingWrites.Mark(descriptor.Address, footprint, sequence, PendingWriteKind.Buffer);
+                MarkRange(descriptor.Address, footprint, sequence, PendingWriteKind.Buffer, into);
             }
         }
 
@@ -152,7 +168,7 @@ public sealed partial class RenderExecutor
 
             if (shapes is not null && index < shapes.Count && TryGetImageData(program, shapes[index], images[index], index, out var data))
             {
-                Mark(data, sequence, PendingWriteKind.Image);
+                MarkRange(data.Address, data.Size, sequence, PendingWriteKind.Image, into);
             }
         }
 
@@ -160,7 +176,7 @@ public sealed partial class RenderExecutor
         {
             if (range.Written)
             {
-                PendingWrites.Mark(range.Base, range.Size, sequence, PendingWriteKind.Range);
+                MarkRange(range.Base, range.Size, sequence, PendingWriteKind.Range, into);
             }
         }
 
@@ -169,7 +185,7 @@ public sealed partial class RenderExecutor
         {
             if (range.Written)
             {
-                PendingWrites.Mark(range.Base, range.Size, sequence, PendingWriteKind.Range);
+                MarkRange(range.Base, range.Size, sequence, PendingWriteKind.Range, into);
             }
         }
     }
@@ -190,3 +206,6 @@ public sealed partial class RenderExecutor
         return data.Size != 0;
     }
 }
+
+// One write mark a deferred dispatch publishes when it is finalized.
+public readonly record struct PendingMark(ulong Address, ulong Size, PendingWriteKind Kind);
