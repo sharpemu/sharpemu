@@ -1,0 +1,30 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<local:SheetView xmlns="https://github.com/avaloniaui"
+                 xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                 xmlns:local="clr-namespace:SharpEmu.GUI"
+                 x:Class="SharpEmu.GUI.PkgConfirmDialog"
+                 SheetWidth="520">
+  <StackPanel Margin="28" Spacing="14">
+    <TextBlock Classes="sheetTitle"
+               Text="{Binding [Library.Pkg.ConfirmTitle], Source={x:Static local:Localization.Instance}}"
+               TextWrapping="Wrap" />
+
+    <TextBlock x:Name="MessageText"
+               TextWrapping="Wrap" />
+
+    <StackPanel Margin="0,8,0,0"
+                Orientation="Horizontal"
+                HorizontalAlignment="Right"
+                Spacing="10">
+      <Button x:Name="SkipButton"
+              Classes="ghost"
+              Content="{Binding [Library.Pkg.ConfirmSkip], Source={x:Static local:Localization.Instance}}" />
+      <Button x:Name="InstallButton"
+              Content="{Binding [Library.Pkg.ConfirmInstall], Source={x:Static local:Localization.Instance}}" />
+    </StackPanel>
+  </StackPanel>
+</local:SheetView>

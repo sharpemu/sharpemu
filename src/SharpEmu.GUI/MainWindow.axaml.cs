@@ -1800,6 +1800,8 @@ public partial class MainWindow : Window
             _settings.Save();
         }
 
+        // A downloaded folder often holds .pkg files rather than an extracted game.
+        await InstallPackagesInFolderAsync(path);
         await RescanLibraryAsync(addingFolder: true);
     }
 
