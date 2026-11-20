@@ -115,15 +115,8 @@ public partial class MainWindow
             return;
         }
 
-        string titleId;
-        try
+        if (!TryReadTitleId(pkgPath, out var titleId))
         {
-            using var package = PkgPackage.Open(pkgPath);
-            titleId = package.TitleId;
-        }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
-        {
-            AppendConsoleLine(loc.Format("Library.Pkg.Failed", exception.Message), ErrorLineBrush);
             return;
         }
 
@@ -138,11 +131,80 @@ public partial class MainWindow
             return;
         }
 
+        if (!await InstallPackageIntoAsync(pkgPath, parent, titleId))
+        {
+            return;
+        }
+
+        await RescanLibraryAsync(addingFolder: true);
+    }
+
+    // A folder picked by "Add folder" may hold downloaded .pkg files instead of extracted games.
+    // Install those packages in place so they end up in the library without a second manual step.
+    // Only the chosen folder is considered: recursing into a parent such as Downloads would pull
+    // in every package the user has ever downloaded.
+    private async Task InstallPackagesInFolderAsync(string folder)
+    {
+        string[] packages;
+        try
+        {
+            packages = Directory.EnumerateFiles(folder, "*.pkg", new EnumerationOptions
+            {
+                IgnoreInaccessible = true,
+                RecurseSubdirectories = false,
+                MatchCasing = MatchCasing.CaseInsensitive,
+            }).ToArray();
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            AppendConsoleLine(Localization.Instance.Format("Library.Pkg.Failed", exception.Message), ErrorLineBrush);
+            return;
+        }
+
+        foreach (var pkgPath in packages)
+        {
+            if (!TryReadTitleId(pkgPath, out var titleId))
+            {
+                continue;
+            }
+
+            // Cancelling one package stops the batch; later packages stay untouched.
+            if (!await InstallPackageIntoAsync(pkgPath, folder, titleId))
+            {
+                return;
+            }
+        }
+    }
+
+    private bool TryReadTitleId(string pkgPath, out string titleId)
+    {
+        try
+        {
+            using var package = PkgPackage.Open(pkgPath);
+            titleId = package.TitleId;
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            AppendConsoleLine(Localization.Instance.Format("Library.Pkg.Failed", exception.Message), ErrorLineBrush);
+            titleId = string.Empty;
+            return false;
+        }
+    }
+
+    // Shows the install sheet for one package. The caller owns the library rescan.
+    private async Task<bool> InstallPackageIntoAsync(string pkgPath, string parent, string titleId)
+    {
         var destination = Path.Combine(parent, string.IsNullOrWhiteSpace(titleId) ? Path.GetFileNameWithoutExtension(pkgPath) : titleId);
+        if (File.Exists(Path.Combine(destination, "eboot.bin")))
+        {
+            return true; // Already installed; the folder scan will pick it up.
+        }
+
         var dialog = new PkgInstallDialog(Path.GetFileName(pkgPath), pkgPath, destination);
         if (await Sheets.ShowAsync(dialog) is not true)
         {
-            return;
+            return false;
         }
 
         if (!_settings.GameFolders.Contains(parent, GameLibraryPath.Comparer))
@@ -151,7 +213,7 @@ public partial class MainWindow
             _settings.Save();
         }
 
-        await RescanLibraryAsync(addingFolder: true);
+        return true;
     }
 
     private void OpenLibraryMenu()
