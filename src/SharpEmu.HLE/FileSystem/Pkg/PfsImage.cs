@@ -7,7 +7,9 @@ using System.Text;
 
 namespace SharpEmu.HLE.FileSystem.Pkg;
 
-// The superblock at the start of the logical PFS image. Layout from shadPS4 (pfs.h).
+// The superblock at the start of the logical PFS image. Layout from shadPS4 (pfs.h), checked
+// against a retail fake PKG: the image's total block count is at 0x38 (it equals the PFSC block
+// count); the 64-bit field at 0x28 holds 1 there and is not a size.
 public readonly record struct PfsHeader(
     long Version,
     long Magic,
@@ -30,7 +32,7 @@ public readonly record struct PfsHeader(
             BinaryPrimitives.ReadInt64LittleEndian(block[0x08..]),
             BinaryPrimitives.ReadUInt16LittleEndian(block[0x1C..]),
             BinaryPrimitives.ReadInt32LittleEndian(block[0x20..]),
-            BinaryPrimitives.ReadInt64LittleEndian(block[0x28..]),
+            BinaryPrimitives.ReadInt64LittleEndian(block[0x38..]),
             BinaryPrimitives.ReadInt64LittleEndian(block[0x30..]),
             BinaryPrimitives.ReadInt64LittleEndian(block[0x40..]),
             BinaryPrimitives.ReadInt64LittleEndian(block[0x48..]));

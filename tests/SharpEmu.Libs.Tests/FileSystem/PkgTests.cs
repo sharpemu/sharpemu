@@ -202,6 +202,23 @@ public sealed class PkgTests
     public void KeyAndLicenceEntriesAreNotExtractedAsMetadata(uint id) =>
         Assert.Null(PkgEntryNames.Get(id));
 
+    // The first 0x50 bytes of the PFS superblock of a retail fake PKG (Bloodborne, CUSA00900).
+    [Fact]
+    public void RetailPfsHeaderReadsTheBlockCountAt0x38()
+    {
+        var block = Convert.FromHexString(
+            "0100000000000000" + "0B2A330100000000" + "0000000000000000" + "0000010008000000" +
+            "0000010000000000" + "0100000000000000" + "E942000000000000" + "DA53060000000000" +
+            "2C00000000000000" + "0000000000000000");
+        var header = PfsHeader.Parse(block);
+        Assert.Equal(20130315, header.Magic);
+        Assert.Equal(0x10000, header.BlockSize);
+        Assert.Equal(414682, header.BlockCount);
+        Assert.Equal(17129, header.DinodeCount);
+        Assert.Equal(44, header.DinodeBlockCount);
+        Assert.Equal(0, header.SuperrootInode);
+    }
+
     [Fact]
     public void InodeFieldsAreDecoded()
     {
@@ -604,7 +621,8 @@ public sealed class PkgTests
 
         var header = new byte[PfscImage.BlockSize];
         BinaryPrimitives.WriteInt32LittleEndian(header.AsSpan(0x20), PfscImage.BlockSize);
-        BinaryPrimitives.WriteInt64LittleEndian(header.AsSpan(0x28), 4 + fileBlocks);
+        BinaryPrimitives.WriteInt64LittleEndian(header.AsSpan(0x28), 1); // as in retail images
+        BinaryPrimitives.WriteInt64LittleEndian(header.AsSpan(0x38), 4 + fileBlocks);
         BinaryPrimitives.WriteInt64LittleEndian(header.AsSpan(0x30), 3);
         BinaryPrimitives.WriteInt64LittleEndian(header.AsSpan(0x40), 1);
         BinaryPrimitives.WriteInt64LittleEndian(header.AsSpan(0x48), 0);
