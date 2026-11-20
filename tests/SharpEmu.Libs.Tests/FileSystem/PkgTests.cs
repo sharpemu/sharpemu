@@ -85,6 +85,98 @@ public sealed class PkgTests
         Assert.Equal(expected, PkgEntryNames.Get(id));
 
     [Fact]
+    public void ParamSfoReaderFindsStringKeys()
+    {
+        var sfo = BuildSfo(("TITLE_ID", "CUSA99999"), ("CATEGORY", "gp"));
+        Assert.Equal("gp", PkgParamSfo.ReadString(sfo, "CATEGORY"));
+        Assert.Equal("CUSA99999", PkgParamSfo.ReadString(sfo, "TITLE_ID"));
+        Assert.Null(PkgParamSfo.ReadString(sfo, "APP_VER"));
+    }
+
+    [Fact]
+    public void ParamSfoReaderReturnsNullForMalformedData()
+    {
+        var sfo = BuildSfo(("CATEGORY", "gd"));
+        Assert.Null(PkgParamSfo.ReadString([], "CATEGORY"));
+        Assert.Null(PkgParamSfo.ReadString(new byte[64], "CATEGORY"));
+        for (var length = 0; length < sfo.Length; length++)
+        {
+            // Truncation at any point must never throw; short of the value it must yield null.
+            var truncated = sfo.AsSpan(0, length).ToArray();
+            var value = PkgParamSfo.ReadString(truncated, "CATEGORY");
+            Assert.True(value is null || value == "gd");
+        }
+
+        Assert.Null(PkgParamSfo.ReadString(sfo.AsSpan(0, sfo.Length - 1), "CATEGORY"));
+
+        var hugeCount = (byte[])sfo.Clone();
+        BinaryPrimitives.WriteUInt32LittleEndian(hugeCount.AsSpan(0x10), uint.MaxValue);
+        Assert.Null(PkgParamSfo.ReadString(hugeCount, "CATEGORY"));
+
+        var badOffset = (byte[])sfo.Clone();
+        BinaryPrimitives.WriteUInt32LittleEndian(badOffset.AsSpan(0x14 + 12), 0x7FFFFFFF);
+        Assert.Null(PkgParamSfo.ReadString(badOffset, "CATEGORY"));
+    }
+
+    [Theory]
+    [InlineData("gd", true)]
+    [InlineData("gde", true)]
+    [InlineData("gp", false)]
+    [InlineData("ac", false)]
+    [InlineData(null, true)]
+    public void PackageCategoryDecidesWhetherItIsAGame(string? category, bool isGame)
+    {
+        var pkg = BuildSyntheticPkg(
+            BuildSyntheticImage(Encoding.ASCII.GetBytes("EBOOT")),
+            (0x1000, category is null ? BuildSfo(("TITLE_ID", "CUSA99999")) : BuildSfo(("CATEGORY", category))));
+        var packagePath = Path.Combine(Path.GetTempPath(), $"sharpemu-pkg-{Guid.NewGuid():N}.pkg");
+        try
+        {
+            File.WriteAllBytes(packagePath, pkg);
+            using var package = PkgPackage.Open(packagePath);
+            Assert.Equal(category, package.Category);
+            Assert.Equal(isGame, package.IsGameApplication);
+        }
+        finally
+        {
+            File.Delete(packagePath);
+        }
+    }
+
+    private static byte[] BuildSfo(params (string Key, string Value)[] values)
+    {
+        var keys = new MemoryStream();
+        var data = new MemoryStream();
+        var index = new MemoryStream();
+        foreach (var (key, value) in values)
+        {
+            var entry = new byte[16];
+            BinaryPrimitives.WriteUInt16LittleEndian(entry, (ushort)keys.Length);
+            BinaryPrimitives.WriteUInt16LittleEndian(entry.AsSpan(2), 0x0204);
+            var bytes = Encoding.UTF8.GetBytes(value + "\0");
+            BinaryPrimitives.WriteUInt32LittleEndian(entry.AsSpan(4), (uint)bytes.Length);
+            BinaryPrimitives.WriteUInt32LittleEndian(entry.AsSpan(8), (uint)bytes.Length);
+            BinaryPrimitives.WriteUInt32LittleEndian(entry.AsSpan(12), (uint)data.Length);
+            index.Write(entry);
+            keys.Write(Encoding.ASCII.GetBytes(key + "\0"));
+            data.Write(bytes);
+        }
+
+        var keyTable = 0x14 + (int)index.Length;
+        var dataTable = keyTable + (int)keys.Length;
+        var sfo = new byte[dataTable + (int)data.Length];
+        BinaryPrimitives.WriteUInt32LittleEndian(sfo, 0x46535000);
+        BinaryPrimitives.WriteUInt32LittleEndian(sfo.AsSpan(4), 0x101);
+        BinaryPrimitives.WriteUInt32LittleEndian(sfo.AsSpan(8), (uint)keyTable);
+        BinaryPrimitives.WriteUInt32LittleEndian(sfo.AsSpan(0xC), (uint)dataTable);
+        BinaryPrimitives.WriteUInt32LittleEndian(sfo.AsSpan(0x10), (uint)values.Length);
+        index.ToArray().CopyTo(sfo, 0x14);
+        keys.ToArray().CopyTo(sfo, keyTable);
+        data.ToArray().CopyTo(sfo, dataTable);
+        return sfo;
+    }
+
+    [Fact]
     public void PfsStreamSeekRejectsNegativePositions()
     {
         using var stream = new PkgPfsStream(new MemoryStream(new byte[PkgCrypto.SectorSize * 2]), 0, PkgCrypto.SectorSize * 2, null, null);

@@ -15,6 +15,8 @@ public sealed class PkgPackage : IDisposable
 
     private readonly FileStream _file;
     private readonly byte[] _entryTable;
+    private string? _category;
+    private bool _categoryRead;
 
     private PkgPackage(FileStream file, PkgHeader header, byte[] entryTable, PkgEntry[] entries)
     {
@@ -29,6 +31,26 @@ public sealed class PkgPackage : IDisposable
     public IReadOnlyList<PkgEntry> Entries { get; }
 
     public string TitleId => Header.TitleId;
+
+    // param.sfo CATEGORY (gd = game, gp = patch, ac = DLC...), or null when absent. Read once.
+    public string? Category
+    {
+        get
+        {
+            if (!_categoryRead)
+            {
+                var sfo = ReadParamSfo();
+                _category = sfo is null ? null : PkgParamSfo.ReadString(sfo, "CATEGORY");
+                _categoryRead = true;
+            }
+
+            return _category;
+        }
+    }
+
+    // Base games are "gd" (and variants such as "gde"). Packages without a category are treated as
+    // games; patches ("gp") and DLC ("ac") are not.
+    public bool IsGameApplication => Category is null || Category.StartsWith("gd", StringComparison.OrdinalIgnoreCase);
 
     public static bool IsPkgPath(string path)
     {
