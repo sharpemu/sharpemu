@@ -79,6 +79,22 @@ public sealed class PkgTests
     }
 
     [Theory]
+    [InlineData(0x402u, "nptitle.dat")]
+    [InlineData(0x403u, "npbind.dat")]
+    public void TrophyBindingEntriesAreExtractedIntoSceSys(uint id, string expected) =>
+        Assert.Equal(expected, PkgEntryNames.Get(id));
+
+    [Fact]
+    public void PfsStreamSeekRejectsNegativePositions()
+    {
+        using var stream = new PkgPfsStream(new MemoryStream(new byte[PkgCrypto.SectorSize * 2]), 0, PkgCrypto.SectorSize * 2, null, null);
+        Assert.Throws<IOException>(() => stream.Seek(-1, SeekOrigin.Begin));
+        Assert.Throws<IOException>(() => stream.Seek(-1, SeekOrigin.Current));
+        Assert.Throws<IOException>(() => stream.Seek(-(PkgCrypto.SectorSize * 2 + 1), SeekOrigin.End));
+        Assert.Equal(PkgCrypto.SectorSize * 2 - 4, stream.Seek(-4, SeekOrigin.End));
+    }
+
+    [Theory]
     [InlineData(0x1201u, "icon0_01.png")]
     [InlineData(0x1259u, "pic1_25.png")]
     [InlineData(0x1400u, "trophy/trophy00.trp")]

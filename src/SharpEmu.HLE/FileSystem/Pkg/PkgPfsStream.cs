@@ -104,12 +104,19 @@ public sealed class PkgPfsStream : Stream
 
     public override long Seek(long offset, SeekOrigin origin)
     {
-        _position = origin switch
+        var target = origin switch
         {
             SeekOrigin.Begin => offset,
             SeekOrigin.Current => _position + offset,
-            _ => _length + offset,
+            SeekOrigin.End => _length + offset,
+            _ => throw new ArgumentOutOfRangeException(nameof(origin)),
         };
+        if (target < 0)
+        {
+            throw new IOException("An attempt was made to move the position before the beginning of the stream.");
+        }
+
+        _position = target;
         return _position;
     }
 
