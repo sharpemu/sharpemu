@@ -285,6 +285,22 @@ public sealed class Ps5PkgTests
     }
 
     [Fact]
+    public void ImplausibleMountSizeIsRefused()
+    {
+        var blob = new byte[90];
+        BinaryPrimitives.WriteUInt64LittleEndian(blob, 1UL | (9UL << 32));
+        BinaryPrimitives.WriteUInt64LittleEndian(blob.AsSpan(8), 1UL);
+        blob[32] = 0x24;
+        blob[34] = 0xFF; // mount size 0xFF00240000, about 1 TiB
+        blob[35] = 0x40;
+        blob[74] = 4;
+        blob[81] = 10;
+
+        var refused = Assert.Throws<InvalidDataException>(() => Ps5Naps.Parse(blob));
+        Assert.Contains("mount size", refused.Message);
+    }
+
+    [Fact]
     public void U2cMayStartRightAfterTheFileOffsets()
     {
         var blob = new byte[74];
