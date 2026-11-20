@@ -89,6 +89,13 @@ public static class AudioOut2Exports
     private const float AmbisonicsY = 0.52100538f;
     private const float FumaW = AmbisonicsW * 1.41421356f;
     private const ushort PortStateOutputConnectedPrimary = 0x01;
+    // The output a port reaches when it plays on the controller's speaker.
+    private const ushort PortStateOutputConnectedController = 0x04;
+    private const ushort AudioOut2PortTypePadSpeaker = 3;
+    // The controller stream holds at most this much audio (its oldest audio goes past it): the guest is paced by its
+    // main output, and the controller's device runs on a clock of its own.
+    private const int ControllerQueueLimitMilliseconds = 80;
+    private const int ControllerChannelCount = 4;
 
     // A host device that already holds this much audio is pacing the context; anything beyond the
     // cushion counts as queued grains. The cushion stays below the emulated queue so host
@@ -262,6 +269,13 @@ public static class AudioOut2Exports
     private static ulong PrimaryContextHandle;
     private static readonly object HostSubmitGate = new();
     private static Func<uint, IHostAudioStream?>? _streamFactoryForTests;
+
+    // The controller's own output device, opened once on first need: the pad speaker port plays on its first two
+    // channels and the vibration port on its actuators, the last two (when the device has them). Without it both ports
+    // stay silent, as before.
+    private static IHostAudioStream? ControllerBackend;
+    private static bool ControllerOpenTried;
+    private static Func<uint, IHostAudioStream?>? _controllerFactoryForTests;
 
     [SysAbiExport(
         Nid = "g2tViFIohHE",
@@ -756,7 +770,7 @@ public static class AudioOut2Exports
             byte[]? pcmData = null;
             if (pcmAddress != 0 &&
                 TryDecodeDataFormat(port.DataFormat, out var channels, out var bytesPerSample, out _) &&
-                IsSnapshotPcmPort(port.PortType, channels))
+                IsSnapshotPcmPort(port, channels))
             {
                 int byteLength;
                 try
@@ -898,7 +912,12 @@ public static class AudioOut2Exports
             channels = (byte)Math.Clamp(decodedChannels, 1, SpeakerMax);
         }
 
-        BinaryPrimitives.WriteUInt16LittleEndian(state[0x00..], PortStateOutputConnectedPrimary);
+        // A pad speaker port that plays on the controller's speaker reports that output.
+        BinaryPrimitives.WriteUInt16LittleEndian(
+            state[0x00..],
+            port is not null && (port.PortType & 0xFF) == AudioOut2PortTypePadSpeaker && ControllerTakes(port)
+                ? PortStateOutputConnectedController
+                : PortStateOutputConnectedPrimary);
         state[0x02] = channels;
         BinaryPrimitives.WriteInt16LittleEndian(state[0x04..], 127);
 
@@ -1408,11 +1427,37 @@ public static class AudioOut2Exports
             {
                 mix.AsSpan(0, frames * 2).Clear();
                 var mixedPorts = 0;
+                float[]? controllerMix = null;
                 foreach (var port in Ports.Values)
                 {
                     if (port.ContextHandle != context.Handle ||
                         !TryDecodeDataFormat(port.DataFormat, out var ch, out var bps, out var isFloat))
                     {
+                        continue;
+                    }
+
+                    if (ControllerTakes(port))
+                    {
+                        var padBytes = frames * ch * bps;
+                        if (TakePortPcmSnapshot(port) is { } padPcm && padPcm.Length >= padBytes)
+                        {
+                            if (controllerMix is null)
+                            {
+                                controllerMix = ArrayPool<float>.Shared.Rent(frames * ControllerChannelCount);
+                                controllerMix.AsSpan(0, frames * ControllerChannelCount).Clear();
+                            }
+
+                            MixPortIntoController(
+                                padPcm.AsSpan(0, padBytes),
+                                controllerMix,
+                                frames,
+                                ch,
+                                bps,
+                                isFloat,
+                                port.Gain,
+                                (port.PortType & 0xFF) == AudioOut2PortTypePadSpeaker ? 0 : 2);
+                        }
+
                         continue;
                     }
 
@@ -1455,6 +1500,20 @@ public static class AudioOut2Exports
                         leftGain,
                         rightGain);
                     mixedPorts++;
+                }
+
+                if (controllerMix is not null && ControllerBackend is { } controller)
+                {
+                    var controllerOutput = ArrayPool<byte>.Shared.Rent(frames * ControllerChannelCount * sizeof(float));
+                    try
+                    {
+                        controller.Submit(WriteFloatOutput(controllerMix.AsSpan(0, frames * ControllerChannelCount), controllerOutput, out _));
+                    }
+                    finally
+                    {
+                        ArrayPool<byte>.Shared.Return(controllerOutput);
+                        ArrayPool<float>.Shared.Return(controllerMix);
+                    }
                 }
 
                 if (mixedPorts == 0)
@@ -1544,9 +1603,13 @@ public static class AudioOut2Exports
             PrimaryBackendFloat = false;
             SecondaryBackendFloat = false;
             PrimaryContextHandle = 0;
+            ControllerBackend?.Dispose();
+            ControllerBackend = null;
+            ControllerOpenTried = false;
         }
 
         Volatile.Write(ref _streamFactoryForTests, null);
+        Volatile.Write(ref _controllerFactoryForTests, null);
     }
 
     private static bool IsMainOrBgmPort(ushort portType)
@@ -1618,10 +1681,85 @@ public static class AudioOut2Exports
         return false;
     }
 
-    private static bool IsSnapshotPcmPort(ushort portType, int channels) =>
-        RoutesToSpeakers(portType) &&
-        (portType & 0xFF) != AudioOut2PortTypeVibration &&
-        (!IsObjectPort(portType) || channels == 1);
+    private static bool IsSnapshotPcmPort(PortState port, int channels) =>
+        (RoutesToSpeakers(port.PortType) &&
+         (port.PortType & 0xFF) != AudioOut2PortTypeVibration &&
+         (!IsObjectPort(port.PortType) || channels == 1)) ||
+        ControllerTakes(port);
+
+    private static bool IsControllerPort(ushort portType) =>
+        !IsObjectPort(portType) && (portType & 0xFF) is AudioOut2PortTypePadSpeaker or AudioOut2PortTypeVibration;
+
+    // A pad speaker or vibration port plays on the controller's own output device, when the host has one.
+    private static bool ControllerTakes(PortState port) =>
+        IsControllerPort(port.PortType) && EnsureControllerBackend(port.SamplingFrequency) is not null;
+
+    private static IHostAudioStream? EnsureControllerBackend(uint frequency)
+    {
+        lock (HostBackendGate)
+        {
+            if (ControllerOpenTried)
+            {
+                return ControllerBackend;
+            }
+
+            ControllerOpenTried = true;
+            var maxQueuedBytes = (int)(frequency * ControllerChannelCount * sizeof(float) * (long)ControllerQueueLimitMilliseconds / 1000);
+            try
+            {
+                if (Volatile.Read(ref _streamFactoryForTests) is not null)
+                {
+                    // Tests choose the controller; without one there is none.
+                    ControllerBackend = Volatile.Read(ref _controllerFactoryForTests)?.Invoke(frequency);
+                }
+                else if (HostPlatform.Current.Audio is IHostPcmAudioOutput pcm &&
+                         pcm.TryOpenControllerStream(frequency, maxQueuedBytes, out var channels) is { } stream)
+                {
+                    if (channels == ControllerChannelCount)
+                    {
+                        ControllerBackend = stream;
+                    }
+                    else
+                    {
+                        stream.Dispose();
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                ControllerBackend = null;
+                Console.Error.WriteLine($"[LOADER][WARN] AudioOut2 controller output unavailable: {exception.Message}");
+            }
+
+            return ControllerBackend;
+        }
+    }
+
+    // A port's first two channels onto a pair of the controller's four: the speaker pair at 0, the actuators at 2. A mono
+    // port plays on both channels of its pair.
+    internal static void MixPortIntoController(
+        ReadOnlySpan<byte> source,
+        Span<float> mix,
+        int frames,
+        int channels,
+        int bytesPerSample,
+        bool isFloat,
+        float gain,
+        int firstChannel)
+    {
+        var frameSize = channels * bytesPerSample;
+        for (var frame = 0; frame < frames; frame++)
+        {
+            var frameBytes = source.Slice(frame * frameSize, frameSize);
+            var first = ReadNormalizedSample(frameBytes, 0, bytesPerSample, isFloat);
+            var second = channels == 1 ? first : ReadNormalizedSample(frameBytes, 1, bytesPerSample, isFloat);
+            mix[(frame * ControllerChannelCount) + firstChannel] += first * gain;
+            mix[(frame * ControllerChannelCount) + firstChannel + 1] += second * gain;
+        }
+    }
+
+    internal static void SetControllerFactoryForTests(Func<uint, IHostAudioStream?>? controllerFactory) =>
+        Volatile.Write(ref _controllerFactoryForTests, controllerFactory);
 
     internal static void MixPortIntoStereo(
         ReadOnlySpan<byte> source,

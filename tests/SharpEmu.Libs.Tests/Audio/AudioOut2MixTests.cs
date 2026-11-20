@@ -85,6 +85,25 @@ public sealed class AudioOut2MixTests
     }
 
     [Fact]
+    public void ControllerMixPutsTheSpeakerPairInFrontAndTheActuatorsBehind()
+    {
+        var mix = new float[2 * 4];
+        var mono = new byte[2 * sizeof(float)];
+        BinaryPrimitives.WriteSingleLittleEndian(mono, 0.5f);
+        BinaryPrimitives.WriteSingleLittleEndian(mono.AsSpan(4), -0.25f);
+        var stereo = new byte[2 * 2 * sizeof(short)];
+        BinaryPrimitives.WriteInt16LittleEndian(stereo, 8192);
+        BinaryPrimitives.WriteInt16LittleEndian(stereo.AsSpan(2), -16384);
+        BinaryPrimitives.WriteInt16LittleEndian(stereo.AsSpan(4), 16384);
+        BinaryPrimitives.WriteInt16LittleEndian(stereo.AsSpan(6), 0);
+
+        AudioOut2Exports.MixPortIntoController(mono, mix, 2, 1, sizeof(float), true, 1f, firstChannel: 0);
+        AudioOut2Exports.MixPortIntoController(stereo, mix, 2, 2, sizeof(short), false, 0.5f, firstChannel: 2);
+
+        Assert.Equal([0.5f, 0.5f, 0.125f, -0.25f, -0.25f, -0.25f, 0.25f, 0f], mix);
+    }
+
+    [Fact]
     public void FloatOutputKeepsPeaksAboveFullScaleAndSixteenBitOutputClipsThem()
     {
         float[] mix = [1.5f, -0.25f, -9f, 0.5f];
