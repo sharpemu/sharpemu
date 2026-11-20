@@ -179,6 +179,32 @@ public static class UserServiceExports
             : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
+    // Unity's PS4 player aborts a login (and never opens that user's pad) when this fails.
+    [SysAbiExport(
+        Nid = "lUoqwTQu4Go",
+        ExportName = "sceUserServiceGetUserColor",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceUserService")]
+    public static int UserServiceGetUserColor(CpuContext ctx)
+    {
+        const int UserColorBlue = 0;
+        var userId = unchecked((int)ctx[CpuRegister.Rdi]);
+        var colorAddress = ctx[CpuRegister.Rsi];
+        if (colorAddress == 0)
+        {
+            return SetReturn(ctx, OrbisUserServiceErrorInvalidArgument);
+        }
+
+        if (userId != PrimaryUserId && userId != 1)
+        {
+            return SetReturn(ctx, OrbisUserServiceErrorInvalidParameter);
+        }
+
+        return TryWriteInt32(ctx, colorAddress, UserColorBlue)
+            ? SetReturnWithTrace(ctx, 0, $"get_user_color user={userId} color={UserColorBlue} out=0x{colorAddress:X16}")
+            : SetReturn(ctx, (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
     // Name not yet in ps5_names.txt and the NID was captured from titles; revisit when the symbol is catalogued.
     #pragma warning disable SHEM006
     [SysAbiExport(
