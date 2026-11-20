@@ -190,6 +190,65 @@ public sealed class ComputeTicketTests
         Assert.Equal(0x33u, runner.Interpreter.TypedRegisters.Shader.Compute.UserScalars.ValueSpan(1)[0]);
     }
 
+    // A PS4 title writes the compute CU masks and its own stage registers between dispatches (Bloodborne). The scan predicts
+    // through them: the masks are host-scheduled, and a graphics stage register cannot change a compute prediction.
+    [Fact]
+    public void TheScanPassesCuMasksAndStageRegistersOfAPs4Stream()
+    {
+        var (_, tickets) = CreateCache(workers: 0);
+        var requested = new List<string>();
+        tickets.RequestObserver = (_, compute, x, _, _, _) => requested.Add($"{compute.UserScalars.ValueSpan(1)[0]:X} {x}");
+        var runner = new StreamRunner();
+        runner.Host.ComputeTickets = tickets;
+        var packets = typeof(SharpEmu.GnmMode.GnmRuntime).Assembly.GetType("SharpEmu.GnmMode.Gpu.GnmCommandPackets")!;
+        runner.Interpreter.SetPacketHandlers((PacketHandler?[])packets.GetField("Handlers",
+            System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.NonPublic)!.GetValue(null)!);
+
+        runner.Run(
+            StreamRunner.Packet(PacketOpcode.DispatchDirect, 1, 1, 1, 0x41),
+            StreamRunner.Packet(PacketOpcode.SetShaderRegister, ShaderRegisterOffset.ComputeStaticThreadMgmtSe0, 0xFFFF_FFFFu, 0xFFFF_FFFFu),
+            StreamRunner.Packet(PacketOpcode.SetShaderRegister, 0x4C, 0x55),
+            StreamRunner.Packet(PacketOpcode.SetShaderRegister, ShaderRegisterOffset.ComputeUserData0, 0x22),
+            StreamRunner.Packet(PacketOpcode.DispatchDirect, 2, 1, 1, 0x41));
+
+        Assert.Equal(new[] { "22 2" }, requested);
+        Assert.Equal(2, runner.Host.Calls.Count(call => call.StartsWith("dispatch", StringComparison.Ordinal)));
+    }
+
+    // The PS5 bank takes the CU masks too, in a run with the registers around them.
+    [Fact]
+    public void TheCuMasksAreHostScheduledComputeRegisters()
+    {
+        var runner = new StreamRunner();
+
+        runner.Run(StreamRunner.Packet(PacketOpcode.SetShaderRegister, ShaderRegisterOffset.ComputeResourceLimits, 1, 2, 3, 4, 5, 6));
+
+        Assert.Equal(0, runner.Host.Calls.Count(call => call.StartsWith("dispatch", StringComparison.Ordinal)));
+    }
+
+    // A compute register the shadow cannot apply ends the prediction; the packet that writes it reports it when it runs,
+    // after the dispatch that scanned it.
+    [Fact]
+    public void AnUnsupportedRegisterEndsTheScanWithoutAFatalError()
+    {
+        var (_, tickets) = CreateCache(workers: 0);
+        var requested = 0;
+        tickets.RequestObserver = (_, _, _, _, _, _) => requested++;
+        var runner = new StreamRunner();
+        runner.Host.ComputeTickets = tickets;
+
+        var fatal = runner.RunExpectingFatal(
+            StreamRunner.Packet(PacketOpcode.DispatchDirect, 1, 1, 1, 0x41),
+            StreamRunner.Packet(PacketOpcode.SetShaderRegister, UnsupportedComputeRegister, 1),
+            StreamRunner.Packet(PacketOpcode.DispatchDirect, 2, 1, 1, 0x41));
+
+        Assert.Contains($"unsupported=0x{UnsupportedComputeRegister:X4}", fatal.Message);
+        Assert.Equal(0, requested);
+        Assert.Equal(1, runner.Host.Calls.Count(call => call.StartsWith("dispatch", StringComparison.Ordinal)));
+    }
+
+    private const uint UnsupportedComputeRegister = 0x21C;
+
     // A ticket worker never compiles: a missing permutation asks for the serial resolve.
     [Fact]
     public void ASpeculativeResolveNeverCompilesAPermutation()

@@ -13,6 +13,10 @@ public sealed partial class GpuCommandInterpreter
     private const int TicketScanChunkDwords = 256;
     private const uint TicketTableEntries = 512;
 
+    // The compute registers, through the last compute user scalar: the only ones a prediction reads.
+    private const uint FirstComputeRegister = 0x200;
+    private const uint ComputeRegisterEnd = 0x250;
+
     private RegisterBanks? _ticketShadow;
     private uint[]? _ticketWords;
     private ulong[]? _ticketFound;
@@ -27,7 +31,17 @@ public sealed partial class GpuCommandInterpreter
     {
         var found = _ticketFound ??= new ulong[ComputeTickets.MaxLead];
         var count = 0;
-        var stopped = ScanComputeTicketsCore(tickets, in packet, requestedThrough, found, ref count);
+        bool stopped;
+        try
+        {
+            stopped = ScanComputeTicketsCore(tickets, in packet, requestedThrough, found, ref count);
+        }
+        catch (TicketScanStop)
+        {
+            // A register write the shadow cannot apply ends the prediction; the dispatch that makes it reports it.
+            stopped = true;
+        }
+
         tickets.EndScan(this, packet.PacketAddress, found.AsSpan(0, count), stopped);
     }
 
@@ -45,7 +59,7 @@ public sealed partial class GpuCommandInterpreter
         var available = (int)Math.Min(remaining, (uint)ComputeTickets.MaxScanDwords);
         var words = _ticketWords ??= new uint[ComputeTickets.MaxScanDwords];
         var read = 0;
-        var shadow = _ticketShadow ??= new RegisterBanks(_host.Fatal);
+        var shadow = _ticketShadow ??= new RegisterBanks(static message => new TicketScanStop(message));
         shadow.Shader.Compute = TypedRegisters.Shader.Compute.Copy();
         var position = 0;
         // The third dispatch of one shader in a row starts a deferred dispatch run, whose workers resolve it and the dispatches
@@ -97,10 +111,18 @@ public sealed partial class GpuCommandInterpreter
                         return true;
                     }
 
-                    var context = new PacketContext(header & ~1u, address, (uint)position, (uint)(available - position), (uint)available);
-                    if (RegisterWriteTable.WriteShaderPacket(shadow, in context, offset, payload.Slice(1, (int)values)) != values)
+                    // Only the compute registers of the run reach the shadow: a graphics stage register cannot change a
+                    // prediction, and a mode may write it in another layout (Gnm's PS4 stages) that its own packets translate.
+                    var first = Math.Max(offset, FirstComputeRegister);
+                    var end = Math.Min(offset + values, ComputeRegisterEnd);
+                    if (first < end)
                     {
-                        return true;
+                        var context = new PacketContext(header & ~1u, address, (uint)position, (uint)(available - position), (uint)available);
+                        var written = payload.Slice(1 + (int)(first - offset), (int)(end - first));
+                        if (RegisterWriteTable.WriteShaderPacket(shadow, in context, first, written) != (uint)written.Length)
+                        {
+                            return true;
+                        }
                     }
                 }
             }
@@ -246,9 +268,15 @@ public sealed partial class GpuCommandInterpreter
                 return false;
             }
 
-            RegisterWriteTable.WriteShaderEntry(shadow, offset, value, tableAddress);
+            if (offset is >= FirstComputeRegister and < ComputeRegisterEnd)
+            {
+                RegisterWriteTable.WriteShaderEntry(shadow, offset, value, tableAddress);
+            }
         }
 
         return true;
     }
 }
+
+// Ends a compute ticket scan at a register write the shadow cannot apply.
+internal sealed class TicketScanStop(string message) : Exception(message);
