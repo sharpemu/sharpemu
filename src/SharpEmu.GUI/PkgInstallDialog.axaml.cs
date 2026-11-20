@@ -7,8 +7,8 @@ using SharpEmu.HLE.FileSystem.Pkg;
 namespace SharpEmu.GUI;
 
 // Extracts a .pkg into a game folder on a worker thread and shows its progress. The button cancels
-// while installing and closes once done; the dialog returns true when the folder was written. A
-// cancelled or failed install removes the partial folder, unless that folder was there before.
+// while installing. The sheet closes itself on success (returning true) and stays open on a
+// failure. A cancelled or failed install removes the partial folder, unless it was there before.
 public partial class PkgInstallDialog : SheetView
 {
     private readonly CancellationTokenSource _cancellation = new();
@@ -128,15 +128,19 @@ public partial class PkgInstallDialog : SheetView
             return;
         }
 
+        // A finished install closes by itself, so a batch of packages runs without a click per
+        // game; only a failure waits for the user to read it.
         if (_succeeded)
         {
-            InstallProgress.Value = 1;
-            FileText.Text = string.Empty;
+            if (IsOpen)
+            {
+                Close(true);
+            }
+
+            return;
         }
 
-        StatusText.Text = _succeeded
-            ? Localization.Instance.Get("Library.Pkg.Done")
-            : Localization.Instance.Format("Library.Pkg.Failed", error ?? string.Empty);
+        StatusText.Text = Localization.Instance.Format("Library.Pkg.Failed", error ?? string.Empty);
         CloseButton.Content = Localization.Instance.Get("Library.Pack.Close");
         CloseButton.IsEnabled = true;
     }
