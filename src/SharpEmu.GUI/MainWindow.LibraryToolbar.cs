@@ -5,6 +5,8 @@ using Avalonia;
 using Avalonia.Animation;
 using Avalonia.Input;
 using Avalonia.Media.Transformation;
+using Avalonia.Platform.Storage;
+using SharpEmu.HLE.FileSystem.Pkg;
 
 namespace SharpEmu.GUI;
 
@@ -83,8 +85,73 @@ public partial class MainWindow
             await OpenFileAsync();
         };
 
+        _libraryMenu.InstallPkgButton.Click += async (_, _) =>
+        {
+            _libraryMenu.Close();
+            await InstallPkgAsync();
+        };
+
         PageTabStrip.SizeChanged += (_, _) => MovePageTabThumb(animate: false);
         UpdateSearchExpanded();
+    }
+
+    // Unpacks a fake .pkg into <chosen folder>/<title id>, then adds the chosen folder to the library.
+    private async Task InstallPkgAsync()
+    {
+        var loc = Localization.Instance;
+        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
+        {
+            Title = loc.Get("Dialog.OpenPkg"),
+            AllowMultiple = false,
+            FileTypeFilter =
+            [
+                new FilePickerFileType(loc.Get("Dialog.PkgFiles")) { Patterns = ["*.pkg"] },
+                FilePickerFileTypes.All,
+            ],
+        });
+        var pkgPath = files.FirstOrDefault()?.TryGetLocalPath();
+        if (string.IsNullOrEmpty(pkgPath))
+        {
+            return;
+        }
+
+        string titleId;
+        try
+        {
+            using var package = PkgPackage.Open(pkgPath);
+            titleId = package.TitleId;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            AppendConsoleLine(loc.Format("Library.Pkg.Failed", exception.Message), ErrorLineBrush);
+            return;
+        }
+
+        var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
+        {
+            Title = loc.Get("Dialog.ChoosePkgInstallFolder"),
+            AllowMultiple = false,
+        });
+        var parent = folders.FirstOrDefault()?.TryGetLocalPath();
+        if (string.IsNullOrEmpty(parent))
+        {
+            return;
+        }
+
+        var destination = Path.Combine(parent, string.IsNullOrWhiteSpace(titleId) ? Path.GetFileNameWithoutExtension(pkgPath) : titleId);
+        var dialog = new PkgInstallDialog(Path.GetFileName(pkgPath), pkgPath, destination);
+        if (await Sheets.ShowAsync(dialog) is not true)
+        {
+            return;
+        }
+
+        if (!_settings.GameFolders.Contains(parent, GameLibraryPath.Comparer))
+        {
+            _settings.GameFolders.Add(parent);
+            _settings.Save();
+        }
+
+        await RescanLibraryAsync(addingFolder: true);
     }
 
     private void OpenLibraryMenu()
