@@ -115,8 +115,14 @@ public partial class MainWindow
             return;
         }
 
-        if (!TryReadTitleId(pkgPath, out var titleId))
+        if (!TryReadPackageInfo(pkgPath, out var titleId, out var isGame, out var category))
         {
+            return;
+        }
+
+        if (!isGame)
+        {
+            ReportSkippedNotGame(pkgPath, category);
             return;
         }
 
@@ -162,13 +168,62 @@ public partial class MainWindow
             return;
         }
 
+        // Patches and DLC share the base game's title id and the emulator cannot overlay them, so
+        // only base games are installed.
+        var installable = new List<(string Path, string TitleId)>();
         foreach (var pkgPath in packages)
         {
-            if (!TryReadTitleId(pkgPath, out var titleId))
+            if (!TryReadPackageInfo(pkgPath, out var titleId, out var isGame, out var category))
             {
                 continue;
             }
 
+            if (!isGame)
+            {
+                ReportSkippedNotGame(pkgPath, category);
+                continue;
+            }
+
+            if (!File.Exists(Path.Combine(PackageDestination(pkgPath, folder, titleId), "eboot.bin")))
+            {
+                installable.Add((pkgPath, titleId));
+            }
+        }
+
+        if (installable.Count == 0)
+        {
+            return;
+        }
+
+        long neededBytes = 0;
+        await Task.Run(() =>
+        {
+            foreach (var (pkgPath, _) in installable)
+            {
+                try
+                {
+                    using var package = PkgPackage.Open(pkgPath);
+                    neededBytes += package.GetInstalledSize();
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
+                {
+                    // The install itself reports the problem; the estimate just misses this package.
+                }
+            }
+        });
+
+        var confirm = new PkgConfirmDialog(
+            Localization.Instance.Format(
+                "Library.Pkg.ConfirmMessage",
+                installable.Count,
+                (neededBytes / (1024.0 * 1024 * 1024)).ToString("0.0", System.Globalization.CultureInfo.CurrentCulture)));
+        if (await Sheets.ShowAsync(confirm) is not true)
+        {
+            return;
+        }
+
+        foreach (var (pkgPath, titleId) in installable)
+        {
             // Cancelling one package stops the batch; later packages stay untouched.
             if (!await InstallPackageIntoAsync(pkgPath, folder, titleId))
             {
@@ -177,26 +232,38 @@ public partial class MainWindow
         }
     }
 
-    private bool TryReadTitleId(string pkgPath, out string titleId)
+    private void ReportSkippedNotGame(string pkgPath, string? category) =>
+        AppendConsoleLine(
+            Localization.Instance.Format("Library.Pkg.SkippedNotGame", Path.GetFileName(pkgPath), category ?? string.Empty),
+            ErrorLineBrush);
+
+    private bool TryReadPackageInfo(string pkgPath, out string titleId, out bool isGame, out string? category)
     {
         try
         {
             using var package = PkgPackage.Open(pkgPath);
             titleId = package.TitleId;
+            category = package.Category;
+            isGame = package.IsGameApplication;
             return true;
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
         {
             AppendConsoleLine(Localization.Instance.Format("Library.Pkg.Failed", exception.Message), ErrorLineBrush);
             titleId = string.Empty;
+            category = null;
+            isGame = false;
             return false;
         }
     }
 
+    private static string PackageDestination(string pkgPath, string parent, string titleId) =>
+        Path.Combine(parent, string.IsNullOrWhiteSpace(titleId) ? Path.GetFileNameWithoutExtension(pkgPath) : titleId);
+
     // Shows the install sheet for one package. The caller owns the library rescan.
     private async Task<bool> InstallPackageIntoAsync(string pkgPath, string parent, string titleId)
     {
-        var destination = Path.Combine(parent, string.IsNullOrWhiteSpace(titleId) ? Path.GetFileNameWithoutExtension(pkgPath) : titleId);
+        var destination = PackageDestination(pkgPath, parent, titleId);
         if (File.Exists(Path.Combine(destination, "eboot.bin")))
         {
             return true; // Already installed; the folder scan will pick it up.
