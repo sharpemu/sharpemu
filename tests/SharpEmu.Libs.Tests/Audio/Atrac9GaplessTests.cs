@@ -32,6 +32,53 @@ public sealed class Atrac9GaplessTests
         return decoder.Decode(input, output, Atrac9PcmEncoding.Signed16, requestedChannels: 0, multipleFrames: true);
     }
 
+    // A RIFF/WAVE header with a fact chunk (sample count, lead-in) and the data chunk header; the superframes follow.
+    private static byte[] RiffPass(uint totalSamples, uint skipSamples, int superframes)
+    {
+        var pass = new byte[40 + SuperframeBytes * superframes];
+        "RIFF"u8.CopyTo(pass);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(pass.AsSpan(4), (uint)pass.Length - 8);
+        "WAVE"u8.CopyTo(pass.AsSpan(8));
+        "fact"u8.CopyTo(pass.AsSpan(12));
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(pass.AsSpan(16), 12);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(pass.AsSpan(20), totalSamples);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(pass.AsSpan(24), skipSamples);
+        "data"u8.CopyTo(pass.AsSpan(32));
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(pass.AsSpan(36), (uint)(SuperframeBytes * superframes));
+        for (var superframe = 0; superframe < superframes; superframe++)
+        {
+            SilentFrame.CopyTo(pass, 40 + superframe * SuperframeBytes);
+        }
+
+        return pass;
+    }
+
+    [Fact]
+    public void AStreamBackAtItsHeaderRestartsTheWindowItsLastPassUsedUp()
+    {
+        var decoder = CreateDecoder();
+        var pass = RiffPass(totalSamples: 300, skipSamples: 100, superframes: 2);
+
+        var first = decoder.Decode(pass, new byte[SuperframeSamples * 4], Atrac9PcmEncoding.Signed16, requestedChannels: 0, multipleFrames: true);
+        Assert.Equal((pass.Length, 300 * sizeof(short), 300ul), (first.InputConsumed, first.OutputWritten, first.TotalDecodedSamples));
+
+        var spent = DecodeSuperframes(decoder, 1, SuperframeSamples);
+        Assert.Equal((0, 0), (spent.InputConsumed, spent.OutputWritten));
+
+        var again = decoder.Decode(pass, new byte[SuperframeSamples * 4], Atrac9PcmEncoding.Signed16, requestedChannels: 0, multipleFrames: true);
+        Assert.Equal((pass.Length, 300 * sizeof(short), 300ul), (again.InputConsumed, again.OutputWritten, again.TotalDecodedSamples));
+    }
+
+    [Fact]
+    public void AJobWithoutInputReportsPartialInput()
+    {
+        var decoder = CreateDecoder();
+
+        var result = decoder.Decode(ReadOnlySpan<byte>.Empty, new byte[SuperframeSamples * 2], Atrac9PcmEncoding.Signed16, requestedChannels: 0, multipleFrames: true);
+
+        Assert.Equal((Atrac9DecodeState.ResultPartialInput, 0, 0), (result.Status, result.InputConsumed, result.OutputWritten));
+    }
+
     [Fact]
     public void WithoutAWindowEverySuperframeSampleIsWritten()
     {

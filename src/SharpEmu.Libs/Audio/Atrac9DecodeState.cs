@@ -209,18 +209,15 @@ internal sealed class Atrac9DecodeState
             while (_compressedLength == config.SuperframeBytes ||
                    consumed < input.Length)
             {
-                if (HasSampleLimit && _gapless.TotalSamples == 0)
-                {
-                    break;
-                }
-
                 // Titles that stream whole .at9 files hand AJM the RIFF/WAVE
                 // container rather than a pointer into its `data` chunk, so the
                 // stream has to be advanced past the header before the first
                 // superframe — otherwise every job fails with invalid data and
                 // the title drops the voice. This is checked at every superframe
                 // boundary, not just after initialize, because a looping voice
-                // rewinds to the file header without reinitialising.
+                // rewinds to the file header without reinitialising. It comes before
+                // the window check: the header of the next pass restarts a window the
+                // last pass used up.
                 if (_compressedLength == 0 && (_containerHeaderLength != 0 || consumed < input.Length))
                 {
                     var scan = ScanContainerHeader(input[consumed..], out var headerBytes);
@@ -238,6 +235,11 @@ internal sealed class Atrac9DecodeState
                         consumed += headerBytes;
                         continue;
                     }
+                }
+
+                if (HasSampleLimit && _gapless.TotalSamples == 0)
+                {
+                    break;
                 }
 
                 if (_compressedLength < config.SuperframeBytes)
@@ -314,6 +316,12 @@ internal sealed class Atrac9DecodeState
                 }
             }
 
+            // A job without input reports that it needs some, as for a partial superframe.
+            if (input.IsEmpty && written == 0 && _compressedLength < config.SuperframeBytes)
+            {
+                status |= ResultPartialInput;
+            }
+
             return new Atrac9DecodeResult(
                 status,
                 consumed,
@@ -339,7 +347,7 @@ internal sealed class Atrac9DecodeState
         input[..copied].CopyTo(_containerHeader.AsSpan(previousLength));
         var totalLength = previousLength + copied;
 
-        if (!TryFindRiffDataOffset(_containerHeader.AsSpan(0, totalLength), out var dataOffset))
+        if (!TryFindRiffDataOffset(_containerHeader.AsSpan(0, totalLength), out var dataOffset, out var fact))
         {
             if (totalLength >= MaxContainerHeaderBytes)
             {
@@ -358,13 +366,38 @@ internal sealed class Atrac9DecodeState
         }
 
         inputHeaderBytes = dataOffset - previousLength;
-        Trace($"container_header_skipped bytes={dataOffset} from_this_input={inputHeaderBytes}");
+        if (fact is { } window)
+        {
+            RestartAtHeader(window.Total, window.Skip);
+        }
+
+        Trace($"container_header_skipped bytes={dataOffset} from_this_input={inputHeaderBytes} fact={fact}");
         return ContainerScan.Found;
     }
 
-    private static bool TryFindRiffDataOffset(ReadOnlySpan<byte> header, out int dataOffset)
+    // The header's fact chunk holds the stream's sample count and lead-in. A stream that reaches its header again (a
+    // looping voice rewinds to the file header without initializing the instance) starts over: that count and lead-in
+    // are the new window, as when the hardware parses the header, and the codec starts fresh. Without it, a window the
+    // previous pass used up kept the voice silent for good while the title went on feeding it.
+    private void RestartAtHeader(uint totalSamples, uint skipSamples)
+    {
+        _gaplessInit = new Atrac9Gapless(totalSamples, (ushort)Math.Min(skipSamples, ushort.MaxValue), 0);
+        _gapless = _gaplessInit;
+        _producedSinceReset = 0;
+        _skippedSinceReset = 0;
+        _totalDecodedSamples = 0;
+        if (_configData is not null)
+        {
+            var decoder = new Atrac9Decoder();
+            decoder.Initialize((byte[])_configData.Clone());
+            _decoder = decoder;
+        }
+    }
+
+    private static bool TryFindRiffDataOffset(ReadOnlySpan<byte> header, out int dataOffset, out (uint Total, uint Skip)? fact)
     {
         dataOffset = 0;
+        fact = null;
         if (header.Length < 12 ||
             !header[..4].SequenceEqual("RIFF"u8) ||
             !header.Slice(8, 4).SequenceEqual("WAVE"u8))
@@ -382,6 +415,12 @@ internal sealed class Atrac9DecodeState
             {
                 dataOffset = offset;
                 return true;
+            }
+
+            if (chunkId.SequenceEqual("fact"u8) && chunkSize >= 8 && offset + 8 <= header.Length)
+            {
+                fact = (BinaryPrimitives.ReadUInt32LittleEndian(header.Slice(offset, 4)),
+                    BinaryPrimitives.ReadUInt32LittleEndian(header.Slice(offset + 4, 4)));
             }
 
             // RIFF chunks are word aligned.
