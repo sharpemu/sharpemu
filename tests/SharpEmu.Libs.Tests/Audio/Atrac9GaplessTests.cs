@@ -32,25 +32,47 @@ public sealed class Atrac9GaplessTests
         return decoder.Decode(input, output, Atrac9PcmEncoding.Signed16, requestedChannels: 0, multipleFrames: true);
     }
 
-    // A RIFF/WAVE header with a fact chunk (sample count, lead-in) and the data chunk header; the superframes follow.
-    private static byte[] RiffPass(uint totalSamples, uint skipSamples, int superframes)
+    // A RIFF/WAVE header as an .at9 file has it: a WAVE_FORMAT_EXTENSIBLE format chunk with the ATRAC9 subformat and codec
+    // configuration, a fact chunk (sample count, lead-in) and the data chunk header; the superframes follow.
+    private static byte[] RiffPass(uint totalSamples, uint skipSamples, int superframes, byte[]? config = null, int superframeBytes = SuperframeBytes)
     {
-        var pass = new byte[40 + SuperframeBytes * superframes];
-        "RIFF"u8.CopyTo(pass);
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(pass.AsSpan(4), (uint)pass.Length - 8);
-        "WAVE"u8.CopyTo(pass.AsSpan(8));
-        "fact"u8.CopyTo(pass.AsSpan(12));
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(pass.AsSpan(16), 12);
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(pass.AsSpan(20), totalSamples);
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(pass.AsSpan(24), skipSamples);
-        "data"u8.CopyTo(pass.AsSpan(32));
-        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(pass.AsSpan(36), (uint)(SuperframeBytes * superframes));
+        byte[] subFormat = [0xD2, 0x42, 0xE1, 0x47, 0xBA, 0x36, 0x8D, 0x4D, 0x88, 0xFC, 0x61, 0x65, 0x4F, 0x8C, 0x83, 0x6C];
+        const int Header = 12 + 8 + 52 + 8 + 12 + 8;
+        var pass = new byte[Header + superframeBytes * superframes];
+        var span = pass.AsSpan();
+        "RIFF"u8.CopyTo(span);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(span[4..], (uint)pass.Length - 8);
+        "WAVE"u8.CopyTo(span[8..]);
+        "fmt "u8.CopyTo(span[12..]);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(span[16..], 52);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(span[20..], 0xFFFE);
+        subFormat.CopyTo(span[(20 + 24)..]);
+        (config ?? MonoConfig).CopyTo(span[(20 + 44)..]);
+        "fact"u8.CopyTo(span[72..]);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(span[76..], 12);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(span[80..], totalSamples);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(span[84..], skipSamples);
+        "data"u8.CopyTo(span[92..]);
+        System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(span[96..], (uint)(superframeBytes * superframes));
         for (var superframe = 0; superframe < superframes; superframe++)
         {
-            SilentFrame.CopyTo(pass, 40 + superframe * SuperframeBytes);
+            SilentFrame.CopyTo(pass, Header + superframe * superframeBytes);
         }
 
         return pass;
+    }
+
+    [Fact]
+    public void AHeaderWithAnotherCodecConfigurationSwitchesTheDecoderToIt()
+    {
+        var decoder = CreateDecoder();
+        byte[] smallFrames = [0xFE, 0x70, 0x0B, 0xE0];
+        var pass = RiffPass(totalSamples: 0, skipSamples: 0, superframes: 2, smallFrames, superframeBytes: 96);
+
+        var result = decoder.Decode(pass, new byte[SuperframeSamples * 4], Atrac9PcmEncoding.Signed16, requestedChannels: 0, multipleFrames: true);
+
+        Assert.Equal(96, decoder.Config!.SuperframeBytes);
+        Assert.Equal((pass.Length, SuperframeSamples * 2 * sizeof(short)), (result.InputConsumed, result.OutputWritten));
     }
 
     [Fact]
