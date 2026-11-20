@@ -140,9 +140,9 @@ public partial class MainWindow
     }
 
     // A folder picked by "Add folder" may hold downloaded .pkg files instead of extracted games.
-    // Install those packages in place so they end up in the library without a second manual step.
-    // Only the chosen folder is considered: recursing into a parent such as Downloads would pull
-    // in every package the user has ever downloaded.
+    // Walk it recursively with the same depth limit as the library scan, install every package
+    // under the chosen root (named after its title id) and let the caller's rescan pick them all
+    // up. Packages whose game folder already has an eboot.bin are left alone.
     private async Task InstallPackagesInFolderAsync(string folder)
     {
         string[] packages;
@@ -151,7 +151,8 @@ public partial class MainWindow
             packages = Directory.EnumerateFiles(folder, "*.pkg", new EnumerationOptions
             {
                 IgnoreInaccessible = true,
-                RecurseSubdirectories = false,
+                RecurseSubdirectories = true,
+                MaxRecursionDepth = 8,
                 MatchCasing = MatchCasing.CaseInsensitive,
             }).ToArray();
         }
