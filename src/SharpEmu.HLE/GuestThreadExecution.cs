@@ -174,6 +174,39 @@ public interface IGuestThreadScheduler
         ulong handler,
         int exceptionType,
         out string? error);
+
+    /// <summary>
+    /// Same as the signal overload, but lets the caller choose how the handler is
+    /// called. Schedulers that only know signal delivery refuse the other conventions.
+    /// </summary>
+    bool TryRaiseGuestException(
+        CpuContext callerContext,
+        ulong threadHandle,
+        ulong handler,
+        int exceptionType,
+        GuestExceptionHandlerArguments arguments,
+        out string? error)
+    {
+        if (arguments == GuestExceptionHandlerArguments.Signal)
+        {
+            return TryRaiseGuestException(callerContext, threadHandle, handler, exceptionType, out error);
+        }
+
+        error = $"guest exception arguments {arguments} are not supported";
+        return false;
+    }
+}
+
+/// <summary>
+/// Argument convention a raised guest exception handler is called with.
+/// </summary>
+public enum GuestExceptionHandlerArguments
+{
+    /// <summary>Signal handler: (exception type, mcontext pointer).</summary>
+    Signal,
+
+    /// <summary>Unity GC suspend callback: (mcontext pointer, interrupted rsp).</summary>
+    UnityGcSuspend,
 }
 
 public readonly record struct GuestImportCallFrame(
