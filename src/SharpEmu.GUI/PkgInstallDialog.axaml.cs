@@ -8,12 +8,13 @@ namespace SharpEmu.GUI;
 
 // Extracts a .pkg into a game folder on a worker thread and shows its progress. The button cancels
 // while installing and closes once done; the dialog returns true when the folder was written. A
-// cancelled or failed install removes the partial folder.
+// cancelled or failed install removes the partial folder, unless that folder was there before.
 public partial class PkgInstallDialog : SheetView
 {
     private readonly CancellationTokenSource _cancellation = new();
     private readonly string _pkgPath = string.Empty;
     private readonly string _destination = string.Empty;
+    private readonly bool _destinationExisted;
     private bool _finished;
     private bool _succeeded;
 
@@ -27,6 +28,7 @@ public partial class PkgInstallDialog : SheetView
     {
         _pkgPath = pkgPath;
         _destination = destination;
+        _destinationExisted = Directory.Exists(destination);
         HeadingText.Text = Localization.Instance.Format("Library.Pkg.Heading", gameName);
         DestinationText.Text = destination;
         StatusText.Text = Localization.Instance.Get("Library.Pkg.Preparing");
@@ -97,9 +99,10 @@ public partial class PkgInstallDialog : SheetView
             error = exception.Message;
         }
 
-        if (!_succeeded)
+        if (!_succeeded && !_destinationExisted)
         {
-            // A partial game folder would look installed yet not boot.
+            // A partial game folder would look installed yet not boot. Never delete a folder the
+            // user already had: the title id can collide with their own directory.
             try
             {
                 if (Directory.Exists(_destination))
