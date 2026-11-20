@@ -52,7 +52,8 @@ public sealed class GuestExceptionExecutorHandoffTests
             pendingType,
             handler,
             exceptionType,
-            exceptionStack);
+            exceptionStack,
+            GuestExceptionHandlerArguments.Signal);
         Assert.NotNull(pending);
         var pendingDictionary = Assert.IsAssignableFrom<IDictionary>(
             backendType.GetField(

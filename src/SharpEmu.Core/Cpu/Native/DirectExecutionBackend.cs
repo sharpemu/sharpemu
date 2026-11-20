@@ -559,7 +559,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private readonly record struct PendingGuestException(
 		ulong Handler,
 		int ExceptionType,
-		ulong ExceptionStackBase);
+		ulong ExceptionStackBase,
+		GuestExceptionHandlerArguments Arguments);
 
 	private sealed class GuestContinuationRunner : IDisposable
 	{
@@ -5048,6 +5049,23 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		int exceptionType,
 		out string? error)
 	{
+		return TryRaiseGuestException(
+			callerContext,
+			threadHandle,
+			handler,
+			exceptionType,
+			GuestExceptionHandlerArguments.Signal,
+			out error);
+	}
+
+	public bool TryRaiseGuestException(
+		CpuContext callerContext,
+		ulong threadHandle,
+		ulong handler,
+		int exceptionType,
+		GuestExceptionHandlerArguments arguments,
+		out string? error)
+	{
 		error = null;
 		var logGuestExceptions = string.Equals(
 			Environment.GetEnvironmentVariable("SHARPEMU_LOG_GUEST_EXCEPTIONS"),
@@ -5111,7 +5129,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					QueuePendingGuestExceptionLocked(threadHandle, new PendingGuestException(
 						handler,
 						exceptionType,
-						external.ExceptionStackBase));
+						external.ExceptionStackBase,
+						arguments));
 					return true;
 				}
 
@@ -5123,7 +5142,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				QueuePendingGuestExceptionLocked(threadHandle, new PendingGuestException(
 					handler,
 					exceptionType,
-					external.ExceptionStackBase));
+					external.ExceptionStackBase,
+					arguments));
 				if (logGuestExceptions)
 				{
 					Console.Error.WriteLine(
@@ -5171,14 +5191,16 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					QueuePendingGuestExceptionLocked(threadHandle, new PendingGuestException(
 						handler,
 						exceptionType,
-						exceptionStackBase));
+						exceptionStackBase,
+						arguments));
 					return true;
 				}
 
 				QueuePendingGuestExceptionLocked(threadHandle, new PendingGuestException(
 					handler,
 					exceptionType,
-					exceptionStackBase));
+					exceptionStackBase,
+					arguments));
 				if (logGuestExceptions)
 				{
 					Console.Error.WriteLine(
@@ -5290,11 +5312,18 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			var deliveryStarted = Stopwatch.GetTimestamp();
 			try
 			{
+				ResolveGuestExceptionHandlerArguments(
+					target.Context,
+					arguments,
+					exceptionType,
+					exceptionContextAddress,
+					out var handlerArg0,
+					out var handlerArg1);
 				deliverySucceeded = TryCallGuestFunction(
 						target.Context,
 						handler,
-						unchecked((ulong)exceptionType),
-						exceptionContextAddress,
+						handlerArg0,
+						handlerArg1,
 						exceptionStackBase + callbackStackOffset,
 						callbackStackSize,
 						$"kernel exception 0x{exceptionType:X2}",
@@ -5349,6 +5378,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 						threadHandle,
 						pendingFollowUp.Handler,
 						pendingFollowUp.ExceptionType,
+						pendingFollowUp.Arguments,
 						out var followUpError))
 				{
 					Console.Error.WriteLine(
@@ -5498,11 +5528,18 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					$"rip=0x{interruptedContinuation.Rip:X16}");
 			}
 
+			ResolveGuestExceptionHandlerArguments(
+				currentContext,
+				pending.Arguments,
+				pending.ExceptionType,
+				exceptionContextAddress,
+				out var handlerArg0,
+				out var handlerArg1);
 			if (!TryCallGuestFunction(
 					currentContext,
 					pending.Handler,
-					unchecked((ulong)pending.ExceptionType),
-					exceptionContextAddress,
+					handlerArg0,
+					handlerArg1,
 					pending.ExceptionStackBase + callbackStackOffset,
 					callbackStackSize,
 					$"kernel exception 0x{pending.ExceptionType:X2} safe point",
@@ -5521,6 +5558,29 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				_activeGuestExceptionDeliveries.Remove(threadHandle);
 			}
 		}
+	}
+
+	// A Unity GC suspend callback takes (mcontext, interrupted rsp), where the signal
+	// convention takes (type, mcontext). The rsp is read back from the context the
+	// writer just filled in, so both paths agree on the interrupted stack pointer.
+	internal static void ResolveGuestExceptionHandlerArguments(
+		CpuContext context,
+		GuestExceptionHandlerArguments arguments,
+		int exceptionType,
+		ulong exceptionContextAddress,
+		out ulong arg0,
+		out ulong arg1)
+	{
+		if (arguments == GuestExceptionHandlerArguments.UnityGcSuspend)
+		{
+			_ = context.TryReadUInt64(exceptionContextAddress + 0xB8, out var interruptedRsp);
+			arg0 = exceptionContextAddress;
+			arg1 = interruptedRsp;
+			return;
+		}
+
+		arg0 = unchecked((ulong)exceptionType);
+		arg1 = exceptionContextAddress;
 	}
 
 	private void QueuePendingGuestExceptionLocked(
@@ -6246,6 +6306,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					thread.ThreadHandle,
 					pendingException.Handler,
 					pendingException.ExceptionType,
+					pendingException.Arguments,
 					out var pendingError))
 			{
 				Console.Error.WriteLine(
