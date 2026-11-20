@@ -66,6 +66,7 @@
   "Library.Pkg.Done": "Terminé. Le jeu a été ajouté à la bibliothèque.",
   "Library.Pkg.Failed": "Échec de l’installation : {0}",
   "Library.Pkg.SkippedNotGame": "{0} ignoré : les paquets de correctif et de DLC ne sont pas encore pris en charge ({1}).",
+  "Library.Pkg.AlreadyInstalled": "{0} ignoré : déjà installé dans {1}.",
   "Library.Pkg.ConfirmTitle": "Installer les fichiers PKG ?",
   "Library.Pkg.ConfirmMessage": "{0} fichier(s) PKG trouvé(s) dans ce dossier. Les installer maintenant ? Cela nécessite {1} Go d’espace libre.",
   "Library.Pkg.ConfirmInstall": "Installer",

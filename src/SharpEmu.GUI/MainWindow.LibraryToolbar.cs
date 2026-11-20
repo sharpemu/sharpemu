@@ -148,7 +148,7 @@ public partial class MainWindow
     // A folder picked by "Add folder" may hold downloaded .pkg files instead of extracted games.
     // Walk it recursively with the same depth limit as the library scan, install every package
     // under the chosen root (named after its title id) and let the caller's rescan pick them all
-    // up. Packages whose game folder already has an eboot.bin are left alone.
+    // up. Packages whose game is already extracted anywhere under the root are left alone.
     private async Task InstallPackagesInFolderAsync(string folder)
     {
         string[] packages;
@@ -168,6 +168,8 @@ public partial class MainWindow
             return;
         }
 
+        var installed = await Task.Run(() => FindInstalledTitles(folder));
+
         // Patches and DLC share the base game's title id and the emulator cannot overlay them, so
         // only base games are installed.
         var installable = new List<(string Path, string TitleId)>();
@@ -184,9 +186,19 @@ public partial class MainWindow
                 continue;
             }
 
+            // The game may already sit elsewhere under the root (next to its package, or from an
+            // earlier manual install): installing it again would show two versions.
+            var key = string.IsNullOrWhiteSpace(titleId) ? Path.GetFileNameWithoutExtension(pkgPath) : titleId;
+            if (installed.TryGetValue(key, out var existing))
+            {
+                AppendConsoleLine(Localization.Instance.Format("Library.Pkg.AlreadyInstalled", Path.GetFileName(pkgPath), existing), DimLineBrush);
+                continue;
+            }
+
             if (!File.Exists(Path.Combine(PackageDestination(pkgPath, folder, titleId), "eboot.bin")))
             {
                 installable.Add((pkgPath, titleId));
+                installed[key] = PackageDestination(pkgPath, folder, titleId);
             }
         }
 
@@ -230,6 +242,42 @@ public partial class MainWindow
                 return;
             }
         }
+    }
+
+    // Title id -> folder of every game already extracted under `root` (a folder with eboot.bin and
+    // sce_sys/param.sfo), searched as deep as the package scan.
+    private static Dictionary<string, string> FindInstalledTitles(string root)
+    {
+        var titles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            foreach (var eboot in Directory.EnumerateFiles(root, "eboot.bin", new EnumerationOptions
+            {
+                IgnoreInaccessible = true,
+                RecurseSubdirectories = true,
+                MaxRecursionDepth = 8,
+                MatchCasing = MatchCasing.CaseInsensitive,
+            }))
+            {
+                var directory = Path.GetDirectoryName(eboot)!;
+                try
+                {
+                    var sfo = File.ReadAllBytes(Path.Combine(directory, "sce_sys", "param.sfo"));
+                    if (PkgParamSfo.ReadString(sfo, "TITLE_ID") is { Length: > 0 } titleId)
+                    {
+                        titles.TryAdd(titleId, directory);
+                    }
+                }
+                catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+                {
+                }
+            }
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+        }
+
+        return titles;
     }
 
     private void ReportSkippedNotGame(string pkgPath, string? category) =>
