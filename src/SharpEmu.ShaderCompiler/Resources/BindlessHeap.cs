@@ -182,7 +182,8 @@ public readonly record struct BindlessHeapDescriptor(bool Sampler, ulong Base, u
     // read's whole offset picks the descriptor, and at whatever count: a texture heap the guest streams more textures into
     // grows from frame to frame and stays one view (ViewRecords is the count a draw names). A record view is keyed by the
     // descriptor's offset in a record.
-    public BindlessHeapDescriptor ViewKey => Stride > DescriptorBytes
+    // A method, not a property: the record's printed members would print the key, whose own key, and so on.
+    public BindlessHeapDescriptor ViewKey() => Stride > DescriptorBytes
         ? this with { Immediate = Immediate % Stride }
         : this with { Records = 0, Immediate = 0 };
 

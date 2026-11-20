@@ -107,14 +107,9 @@ public sealed partial class GuestImageCache
             });
             foreach (var association in associations)
             {
-                var associated = _slots[association];
-                ReportImageLifetime(associated, "delete-depth-association", deletion: true);
-                if (associated.IsGpuModified)
-                {
-                    associated.ClearGpuModified();
-                }
-
-                DeleteImage(association);
+                ReportImageLifetime(_slots[association], "delete-depth-association", deletion: true);
+                // Saves the plane when the caller prepared its buffer; otherwise its bytes are lost like an evicted image's.
+                ReleaseStencilProxy(association, StencilProxyFate.Delete);
             }
         }
 
@@ -174,6 +169,7 @@ public sealed partial class GuestImageCache
     {
         var image = _slots[imageIdentifier];
         TraceVolumeState("release", image, ImageRequest.Refresh(image.Description, ImageRole.Texture));
+        KeepStencilPlanesInProxies(imageIdentifier);
         if (image.IsGpuModified)
         {
             image.ClearGpuModified();

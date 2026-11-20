@@ -79,7 +79,7 @@ public sealed class Gen5DataShareWrite64Tests
         var offsetStride = largeStride ? 512u : 8u;
         var firstByteOffset = firstOffset * offsetStride;
         var secondByteOffset = secondOffset * offsetStride;
-        return Program(
+        var program = Program(
             MoveVector(0, 3, 8), MoveVector(4, 30, InitialLowerWord), MoveVector(8, 31, InitialUpperWord),
             DataShare(12, "DsWriteB64", global, [Gen5Operand.Vector(3), Gen5Operand.Vector(30), Gen5Operand.Vector(31)], [],
                 firstByteOffset & 0xFF, firstByteOffset >> 8),
@@ -91,6 +91,7 @@ public sealed class Gen5DataShareWrite64Tests
             DataShare(64, "DsReadB64", global, [Gen5Operand.Vector(3)], [4, 5], firstByteOffset & 0xFF, firstByteOffset >> 8),
             DataShare(72, "DsReadB64", global, [Gen5Operand.Vector(3)], [6, 7], secondByteOffset & 0xFF, secondByteOffset >> 8),
             BufferAccess(80, "BufferStoreDwordx4", 4, dwords: 4, vectorData: 4), EndProgram(88));
+        return global ? WithWholeGdsWindow(program) : program;
     }
 
     private sealed class InstructionMemory(byte[] bytes) : ICpuMemory

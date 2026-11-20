@@ -87,7 +87,7 @@ public sealed class Gen5DataShareRead64Tests
 
         var firstByteOffset = firstOffset * sizeof(ulong);
         var secondByteOffset = secondOffset * sizeof(ulong);
-        return Program(
+        var program = Program(
             MoveVector(0, 3, SourceAddress), MoveVector(4, 4, UnchangedUpperWord),
             MoveVector(8, 5, 0x11112222), MoveVector(12, 6, 0x33334444),
             MoveVector(16, 10, LowerWord ^ firstOffset), MoveVector(20, 11, UpperWord ^ firstOffset),
@@ -98,6 +98,7 @@ public sealed class Gen5DataShareRead64Tests
                 secondByteOffset & 0xFF, secondByteOffset >> 8),
             MoveScalar(48, 126, readEnabled ? 1u : 0u), decoded.Instructions[0] with { Pc = 52 },
             MoveScalar(60, 126, 1), BufferAccess(64, "BufferStoreDwordx4", 4, dwords: 4, vectorData: 3), EndProgram(72));
+        return global ? WithWholeGdsWindow(program) : program;
     }
 
     [Theory]
@@ -132,7 +133,7 @@ public sealed class Gen5DataShareRead64Tests
         Assert.True(Gen5ShaderTranslator.TryDecodeProgram(new CpuContext(memory, Generation.Gen5), shaderAddress,
             out var decoded, out var error), error);
 
-        return Program(
+        var program = Program(
             MoveVector(0, 3, SourceAddress),
             MoveVector(4, 4, UnchangedUpperWord),
             MoveVector(8, 5, LowerWord),
@@ -144,6 +145,7 @@ public sealed class Gen5DataShareRead64Tests
             MoveScalar(36, 126, 1),
             BufferAccess(40, "BufferStoreDwordx2", 4, dwords: 2, vectorData: 3),
             EndProgram(48));
+        return global ? WithWholeGdsWindow(program) : program;
     }
 
     private sealed class ShaderMemory : ICpuMemory

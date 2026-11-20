@@ -780,6 +780,19 @@ public sealed partial class GuestImageCache
     public void ApplySliceUse(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageAcquire);
+        _preparedStencilBuffers = request.Role == ImageRole.DepthTarget ? PrepareStencilBuffers(imageIdentifier, in request) : null;
+        try
+        {
+            ApplySliceUseLocked(imageIdentifier, in request);
+        }
+        finally
+        {
+            _preparedStencilBuffers = null;
+        }
+    }
+
+    private void ApplySliceUseLocked(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
+    {
         using var held = _lock.Hold();
         var image = _slots.TryGet(imageIdentifier);
         if (image is null)
