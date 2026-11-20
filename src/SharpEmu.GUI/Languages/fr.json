@@ -63,7 +63,6 @@
   "Library.Pkg.Preparing": "Lecture du paquet…",
   "Library.Pkg.Progress": "{0} / {1} Go ({2} %)",
   "Library.Pkg.Cancelling": "Annulation…",
-  "Library.Pkg.Done": "Terminé. Le jeu a été ajouté à la bibliothèque.",
   "Library.Pkg.Failed": "Échec de l’installation : {0}",
   "Library.Pkg.SkippedNotGame": "{0} ignoré : les paquets de correctif et de DLC ne sont pas encore pris en charge ({1}).",
   "Library.Pkg.AlreadyInstalled": "{0} ignoré : déjà installé dans {1}.",

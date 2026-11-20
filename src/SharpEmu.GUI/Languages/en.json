@@ -62,7 +62,6 @@
   "Library.Pkg.Preparing": "Reading the package…",
   "Library.Pkg.Progress": "{0} / {1} GB ({2}%)",
   "Library.Pkg.Cancelling": "Cancelling…",
-  "Library.Pkg.Done": "Done. The game was added to the library.",
   "Library.Pkg.Failed": "Installing failed: {0}",
   "Library.Pkg.SkippedNotGame": "Skipped {0}: patches and DLC packages are not supported yet ({1}).",
   "Library.Pkg.AlreadyInstalled": "Skipped {0}: already installed in {1}.",
