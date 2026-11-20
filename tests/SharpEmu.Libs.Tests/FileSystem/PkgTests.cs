@@ -410,6 +410,71 @@ public sealed class PkgTests
     }
 
     [Fact]
+    public void ExtractReportsProgressInsideALargeFile()
+    {
+        var eboot = new byte[PfscImage.BlockSize * 4];
+        System.Random.Shared.NextBytes(eboot);
+        WithSyntheticPackage(BuildSyntheticPkg(BuildSyntheticImage(eboot)), (package, destination) =>
+        {
+            var reports = new List<PkgExtractProgress>();
+            package.Extract(destination, new CollectingProgress<PkgExtractProgress>(reports.Add), default, PfscImage.BlockSize, null);
+
+            var midFile = reports.Where(report => report.BytesDone > 0 && report.BytesDone < eboot.Length).Select(report => report.BytesDone).Distinct().ToList();
+            Assert.True(midFile.Count >= 3, $"expected mid-file reports, got {midFile.Count}");
+            Assert.Equal(eboot, File.ReadAllBytes(Path.Combine(destination, "eboot.bin")));
+        });
+    }
+
+    [Fact]
+    public void ExtractThrottlesProgressWithTheDefaultStep()
+    {
+        var eboot = new byte[PfscImage.BlockSize * 4];
+        WithSyntheticPackage(BuildSyntheticPkg(BuildSyntheticImage(eboot)), (package, destination) =>
+        {
+            var reports = new List<PkgExtractProgress>();
+            package.Extract(destination, new CollectingProgress<PkgExtractProgress>(reports.Add));
+            Assert.DoesNotContain(reports, report => report.BytesDone > 0 && report.BytesDone < eboot.Length);
+        });
+    }
+
+    [Fact]
+    public void ExtractRefusesWhenTheDriveIsTooSmallAndWritesNothing()
+    {
+        var pkg = BuildSyntheticPkg(BuildSyntheticImage(new byte[1000]), (0x1000, Encoding.ASCII.GetBytes("PARAM")));
+        WithSyntheticPackage(pkg, (package, destination) =>
+        {
+            Assert.Equal(1005, package.GetInstalledSize());
+            var exception = Assert.Throws<IOException>(() =>
+                package.Extract(destination, null, default, PkgPackage.ProgressStepBytes, availableBytes: 1004));
+            Assert.Contains("Not enough free disk space", exception.Message);
+            Assert.False(Directory.Exists(destination));
+
+            package.Extract(destination, null, default, PkgPackage.ProgressStepBytes, availableBytes: 1005);
+            Assert.True(File.Exists(Path.Combine(destination, "eboot.bin")));
+        });
+    }
+
+    private static void WithSyntheticPackage(byte[] pkg, Action<PkgPackage, string> body)
+    {
+        var packagePath = Path.Combine(Path.GetTempPath(), $"sharpemu-pkg-{Guid.NewGuid():N}.pkg");
+        var destination = Path.Combine(Path.GetTempPath(), $"sharpemu-pkg-out-{Guid.NewGuid():N}");
+        try
+        {
+            File.WriteAllBytes(packagePath, pkg);
+            using var package = PkgPackage.Open(packagePath);
+            body(package, destination);
+        }
+        finally
+        {
+            File.Delete(packagePath);
+            if (Directory.Exists(destination))
+            {
+                Directory.Delete(destination, recursive: true);
+            }
+        }
+    }
+
+    [Fact]
     public void ExtractRefusesAnEntryLargerThanThePackage()
     {
         var pkg = BuildSyntheticPkg(

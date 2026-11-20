@@ -134,10 +134,78 @@ public sealed class PkgPackage : IDisposable
         return null;
     }
 
-    // Writes sce_sys metadata and the whole PFS tree into `destination`, which then is a game
-    // folder (eboot.bin at its root).
-    public void Extract(string destination, IProgress<PkgExtractProgress>? progress = null, CancellationToken cancellation = default)
+    // Bytes between progress reports while one large file is being written.
+    internal const long ProgressStepBytes = 16L * 1024 * 1024;
+
+    // Size on disk of everything Extract writes (sce_sys metadata plus the PFS files), computed
+    // without extracting. It opens the PFS image to walk its tree.
+    public long GetInstalledSize()
     {
+        using var image = OpenPfsImageStream();
+        var pfs = new PfsImage(new PfscImage(image, PfscImage.FindOffset(image)));
+        var files = new List<(string Path, PfsInode Inode)>();
+        long total = 0;
+        CollectTree(pfs, pfs.GetUserRoot(), string.Empty, files, ref total, new HashSet<int>(), 0);
+        return total + MetadataSize();
+    }
+
+    private long MetadataSize()
+    {
+        long size = 0;
+        foreach (var entry in Entries)
+        {
+            if (entry.Name is not null)
+            {
+                size += entry.Size;
+            }
+        }
+
+        return size;
+    }
+
+    // Free bytes on the drive that will hold `destination`, or null when it cannot be told.
+    internal static long? GetAvailableSpace(string destination)
+    {
+        try
+        {
+            var root = Path.GetPathRoot(Path.GetFullPath(destination));
+            return string.IsNullOrEmpty(root) ? null : new DriveInfo(root).AvailableFreeSpace;
+        }
+        catch (Exception exception) when (exception is ArgumentException or IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            return null;
+        }
+    }
+
+    // Writes sce_sys metadata and the whole PFS tree into `destination`, which then is a game
+    // folder (eboot.bin at its root). Throws IOException before writing anything when the drive
+    // is known to be too small.
+    public void Extract(string destination, IProgress<PkgExtractProgress>? progress = null, CancellationToken cancellation = default) =>
+        Extract(destination, progress, cancellation, ProgressStepBytes, GetAvailableSpace(destination));
+
+    internal void Extract(
+        string destination,
+        IProgress<PkgExtractProgress>? progress,
+        CancellationToken cancellation,
+        long progressStepBytes,
+        long? availableBytes)
+    {
+        using var image = OpenPfsImageStream();
+        var pfsc = new PfscImage(image, PfscImage.FindOffset(image));
+        var pfs = new PfsImage(pfsc);
+
+        var files = new List<(string Path, PfsInode Inode)>();
+        long total = 0;
+        CollectTree(pfs, pfs.GetUserRoot(), destination, files, ref total, new HashSet<int>(), 0);
+
+        var needed = total + MetadataSize();
+        if (availableBytes is { } available && available < needed)
+        {
+            throw new IOException(string.Create(
+                System.Globalization.CultureInfo.InvariantCulture,
+                $"Not enough free disk space: need {needed / (1024.0 * 1024 * 1024):0.00} GB, {available / (1024.0 * 1024 * 1024):0.00} GB free."));
+        }
+
         Directory.CreateDirectory(destination);
         foreach (var entry in Entries)
         {
@@ -149,14 +217,6 @@ public sealed class PkgPackage : IDisposable
             }
         }
 
-        using var image = OpenPfsImageStream();
-        var pfsc = new PfscImage(image, PfscImage.FindOffset(image));
-        var pfs = new PfsImage(pfsc);
-
-        var files = new List<(string Path, PfsInode Inode)>();
-        long total = 0;
-        CollectTree(pfs, pfs.GetUserRoot(), destination, files, ref total, new HashSet<int>(), 0);
-
         long done = 0;
         foreach (var (path, inode) in files)
         {
@@ -164,11 +224,18 @@ public sealed class PkgPackage : IDisposable
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             var relative = Path.GetRelativePath(destination, path);
             progress?.Report(new PkgExtractProgress(done, total, relative));
+            var sinceReport = 0L;
             using var output = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read, 1 << 20, FileOptions.SequentialScan);
             pfs.CopyFile(inode, output, bytes =>
             {
                 done += bytes;
+                sinceReport += bytes;
                 cancellation.ThrowIfCancellationRequested();
+                if (sinceReport >= progressStepBytes)
+                {
+                    sinceReport = 0;
+                    progress?.Report(new PkgExtractProgress(done, total, relative));
+                }
             });
             progress?.Report(new PkgExtractProgress(done, total, relative));
         }
