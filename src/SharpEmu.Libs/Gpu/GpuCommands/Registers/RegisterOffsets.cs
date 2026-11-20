@@ -220,7 +220,11 @@ public static class ShaderRegisterOffset
     public const uint ComputePgmRsrc1 = 0x212;
     public const uint ComputePgmRsrc2 = 0x213;
     public const uint ComputeResourceLimits = 0x215;
+    public const uint ComputeStaticThreadMgmtSe0 = 0x216;
+    public const uint ComputeStaticThreadMgmtSe1 = 0x217;
     public const uint ComputeTmpringSize = 0x218;
+    public const uint ComputeStaticThreadMgmtSe2 = 0x219;
+    public const uint ComputeStaticThreadMgmtSe3 = 0x21A;
     public const uint ComputeUserAccum0 = 0x224;
     public const uint ComputePgmRsrc3 = 0x228;
     public const uint ComputeShaderChecksum = 0x22A;

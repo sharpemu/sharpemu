@@ -17,6 +17,7 @@ internal static partial class RegisterWriters
     [
         ComputePgmLo, ComputePgmHi, ComputePgmRsrc1, ComputePgmRsrc2, ComputeStartX, ComputeStartY, ComputeStartZ, ComputeNumThreadX,
         ComputeNumThreadY, ComputeNumThreadZ, ComputeResourceLimits, ComputeTmpringSize, ComputePgmRsrc3, ComputeShaderChecksum,
+        ComputeStaticThreadMgmtSe0, ComputeStaticThreadMgmtSe1, ComputeStaticThreadMgmtSe2, ComputeStaticThreadMgmtSe3,
     ];
 
     private static readonly uint[] IgnoredShaderOffsets =
@@ -233,6 +234,11 @@ internal static partial class RegisterWriters
             case ComputeStartZ:
             case ComputeResourceLimits:
             case ComputeTmpringSize:
+            // The CU masks of each shader engine: the host GPU schedules compute work.
+            case ComputeStaticThreadMgmtSe0:
+            case ComputeStaticThreadMgmtSe1:
+            case ComputeStaticThreadMgmtSe2:
+            case ComputeStaticThreadMgmtSe3:
                 break;
             default:
                 throw banks.Fatal($"The compute shader register is not supported: offset=0x{offset:X4} value=0x{value:X8}.");
