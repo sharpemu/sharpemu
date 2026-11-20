@@ -95,6 +95,22 @@ public sealed class GpuCommandInterpreterLabelTests
         Assert.Contains($"type=0x{eventType:X2}", fatal.Message);
     }
 
+    // A PS4 Unity title (Signalis) emits a 32-bit cache-flush timestamp with a full cache write-back.
+    [Theory]
+    [InlineData(0x04u, 0x00u, EndOfPipeWriteKind.Write32)]
+    [InlineData(0x04u, 0x38u, EndOfPipeWriteKind.WriteBack32)]
+    [InlineData(0x28u, 0x38u, EndOfPipeWriteKind.WriteBack32)]
+    public void EndOfPipeLowDword_TimestampWritesThirtyTwoBits(uint eventType, uint cacheAction, EndOfPipeWriteKind expected)
+    {
+        var runner = new StreamRunner();
+        runner.Host.WriteQword(Label, 0xFFFF_FFFF_FFFF_FFFF);
+
+        runner.Run(EventWriteEop(eventType, 5, cacheAction, 1, 0, Label, 0x1122_3344_5566_7788, 0));
+
+        Assert.Equal(expected, Assert.Single(runner.Host.EndOfPipeWrites).Kind);
+        Assert.Equal(0xFFFF_FFFF_5566_7788UL, runner.Host.ReadQword(Label));
+    }
+
     [Fact]
     public void InterruptSelectorOne_OnGraphicsQueuesTheInterruptWithoutAWrite()
     {
