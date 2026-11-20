@@ -140,10 +140,45 @@ public sealed partial class GnmSelfLoader : ISelfLoader
     private static bool IsLoad(ProgramHeader header) =>
         header.HeaderType is ProgramHeaderType.Load or ProgramHeaderType.SceRelro;
 
+    // Module arena reserved below 2 GiB right after the main image (0 when none).
+    private static ulong _moduleArenaStart;
+    private static ulong _moduleArenaEnd;
+
+    // Presenter and driver host allocations race module loading for the low 2 GiB that PS4
+    // module relocations need, so hold a block of it now and commit module images inside it.
+    private static void ReserveModuleArena(PhysicalVirtualMemory physical, ulong mainImageBase, ulong mainImageSize)
+    {
+        _moduleArenaStart = 0;
+        _moduleArenaEnd = 0;
+        const ulong limit = 0x80000000;
+        var start = checked(((Align(mainImageBase + mainImageSize) + 0x1FFFFF) & ~0x1FFFFFUL) + 0x200000);
+        foreach (var wanted in new[] { 0x40000000UL, 0x20000000UL, 0x10000000UL, 0x8000000UL })
+        {
+            if (start >= limit)
+                break;
+            var arenaSize = Math.Min(wanted, limit - start);
+            if (!physical.TryReserveOwnedRange(start, arenaSize))
+                continue;
+            _moduleArenaStart = start;
+            _moduleArenaEnd = start + arenaSize;
+            Console.Error.WriteLine($"[GNM][LOADER] Module arena reserved at 0x{start:X}-0x{_moduleArenaEnd:X}.");
+            return;
+        }
+
+        Console.Error.WriteLine("[GNM][LOADER] Warning: could not reserve a module arena below 2 GiB.");
+    }
+
     private static ulong AllocateImage(IVirtualMemory memory, ulong size, bool main)
     {
-        var address = main ? 0x400000UL : Math.Max(0x2000000UL,
-            memory.SnapshotRegions().Where(region => region.VirtualAddress < 0x40000000)
+        if (main)
+        {
+            _moduleArenaStart = 0;
+            _moduleArenaEnd = 0;
+        }
+
+        var regionLimit = _moduleArenaEnd != 0 ? _moduleArenaEnd : 0x40000000UL;
+        var address = main ? 0x400000UL : Math.Max(Math.Max(0x2000000UL, _moduleArenaStart),
+            memory.SnapshotRegions().Where(region => region.VirtualAddress < regionLimit)
                 .Select(region => Align(checked(region.VirtualAddress + region.MemorySize + 0x200000))).DefaultIfEmpty().Max());
         if (memory is not PhysicalVirtualMemory physical || size == 0)
             return address;
@@ -151,7 +186,10 @@ public sealed partial class GnmSelfLoader : ISelfLoader
         if (main)
         {
             if (physical.TryAllocateAtExact(address, size, true, out var allocated))
+            {
+                ReserveModuleArena(physical, allocated, size);
                 return allocated;
+            }
 
             // The Windows host can occupy 0x400000 before the PS4 image loads.
             // Keep the image below 2 GiB for relocations with 32-bit targets.
@@ -160,14 +198,15 @@ public sealed partial class GnmSelfLoader : ISelfLoader
                 if (!physical.TryAllocateAtExact(candidate, size, true, out allocated))
                     continue;
                 Console.Error.WriteLine($"[GNM][LOADER] Main image relocated to free host address 0x{allocated:X}.");
+                ReserveModuleArena(physical, allocated, size);
                 return allocated;
             }
         }
         else
         {
-            for (var attempt = 0; attempt < 256; attempt++, address += 0x200000)
+            for (var attempt = 0; attempt < 512; attempt++, address += 0x200000)
             {
-                if (address >= 0x40000000 || size > 0x40000000 - address)
+                if (address >= regionLimit || size > regionLimit - address)
                     break;
                 if (physical.TryAllocateAtExact(address, size, true, out var allocated))
                     return allocated;

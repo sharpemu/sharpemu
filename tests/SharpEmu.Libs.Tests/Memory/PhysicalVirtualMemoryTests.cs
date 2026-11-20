@@ -35,6 +35,27 @@ public sealed class PhysicalVirtualMemoryTests
         Assert.Empty(memory.EnumerateFreeHostRanges(0x72000, 0x91000, 0x2000, 0x10000));
     }
 
+    [Fact]
+    public void ExactAllocationCommitsInsideAnOwnedReservedRange()
+    {
+        if (!OperatingSystem.IsWindows())
+            return;
+
+        using var memory = new PhysicalVirtualMemory();
+        const ulong arenaSize = 0x800000;
+        var arena = memory.EnumerateFreeHostRanges(0x10000000, 0x7F000000, arenaSize, 0x200000)
+            .First(candidate => memory.TryReserveOwnedRange(candidate, arenaSize));
+
+        var module = arena + 0x200000;
+        Assert.True(memory.TryAllocateAtExact(module, 0x3000, true, out var actual));
+        Assert.Equal(module, actual);
+        Assert.True(memory.TryWrite(module, new byte[] { 1, 2, 3 }));
+
+        // The rest of the arena stays reserved, so an unrelated host allocation cannot take it.
+        Assert.DoesNotContain(arena + 0x400000, memory.EnumerateFreeHostRanges(arena, arena + arenaSize, 0x1000, 0x10000));
+        memory.Clear();
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

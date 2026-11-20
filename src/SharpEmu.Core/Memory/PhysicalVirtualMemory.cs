@@ -394,6 +394,46 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         return true;
     }
 
+    // Reserves [address, address + size) on the host without committing it and marks the
+    // reservation as ours, so later fixed allocations can commit sub-ranges inside it while
+    // unrelated host allocations cannot take the space. Clear() releases it with the other
+    // granule reservations. Windows only; false when the range is not free at exactly address.
+    public bool TryReserveOwnedRange(ulong address, ulong size)
+    {
+        if (!OperatingSystem.IsWindows() || address == 0 || size == 0 ||
+            (address & (HostAllocationGranularity - 1)) != 0)
+        {
+            return false;
+        }
+
+        var alignedSize = AlignUp(size, HostAllocationGranularity);
+        _gate.EnterReadLock();
+        try
+        {
+            lock (_fixedAllocationGate)
+            {
+                var reserved = _hostMemory.Reserve(address, alignedSize, HostPageProtection.ReadWrite);
+                if (reserved == 0)
+                {
+                    return false;
+                }
+
+                if (reserved != address)
+                {
+                    _hostMemory.Free(reserved);
+                    return false;
+                }
+
+                _fixedGranuleReservationBases.Add(address);
+                return true;
+            }
+        }
+        finally
+        {
+            _gate.ExitReadLock();
+        }
+    }
+
     // Aligned starts of the free host ranges in [low, highExclusive) that can hold size
     // bytes, from the host's own region map. The ranges are free when listed; another
     // thread may take one before the caller allocates it.
