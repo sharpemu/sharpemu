@@ -98,7 +98,11 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
                 SType = StructureType.PipelineShaderStageRequiredSubgroupSizeCreateInfo,
                 RequiredSubgroupSize = 32,
             };
-            var pinSubgroup32 = !IsMesh && request.HostComputeSubgroup32 && harness.Vulkan.CanRequireComputeSubgroup32;
+            // Mirror the runtime: wave32 compute is always pinned to 32-lane subgroups, because a
+            // 64-lane host subgroup (AMD's default) leaves the upper half of the guest wave unmasked.
+            var pinSubgroup32 = !IsMesh &&
+                (request.HostComputeSubgroup32 || request.WaveSize == 32) &&
+                harness.Vulkan.CanRequireComputeSubgroup32;
             var stage = new PipelineShaderStageCreateInfo
             {
                 SType = StructureType.PipelineShaderStageCreateInfo,
