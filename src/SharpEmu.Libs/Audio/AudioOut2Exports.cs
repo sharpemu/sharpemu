@@ -79,6 +79,15 @@ public static class AudioOut2Exports
     internal const uint PassthroughLeft = 1;
     internal const uint PassthroughRight = 2;
     private const float HalfPower = 0.70710677f;
+    // A first-order scene is decoded for stereo by two virtual microphones facing about 74 degrees
+    // left and right (ACN channels are SN3D; FuMa channels are MaxN, W at sqrt(0.5)): a source ahead
+    // plays at full level on both sides (W + X = 1), one behind at -3 dB, one at the side with the
+    // power it has ahead. Microphones facing 90 degrees (W and Y alone) played sources ahead 3 dB
+    // below those at the sides, and the room's diffuse sound louder than the direct sound.
+    private const float AmbisonicsW = 0.85355339f;
+    private const float AmbisonicsX = 0.14644661f;
+    private const float AmbisonicsY = 0.52100538f;
+    private const float FumaW = AmbisonicsW * 1.41421356f;
     private const ushort PortStateOutputConnectedPrimary = 0x01;
 
     // A host device that already holds this much audio is pacing the context; anything beyond the
@@ -1567,19 +1576,28 @@ public static class AudioOut2Exports
             return true;
         }
 
+        // ACN orders the first order W, Y, Z, X; FuMa orders it W, X, Y, Z. Z and the higher orders
+        // add nothing to a horizontal pair.
         var acn = ambisonics >= AmbisonicsAcnBase;
         var component = acn ? ambisonics - AmbisonicsAcnBase : ambisonics;
         if (component == 0)
         {
-            left = acn ? gain * HalfPower : gain;
+            left = gain * (acn ? AmbisonicsW : FumaW);
             right = left;
             return true;
         }
 
         if (component == (acn ? 1u : 2u))
         {
-            left = gain * HalfPower;
+            left = gain * AmbisonicsY;
             right = -left;
+            return true;
+        }
+
+        if (component == (acn ? 3u : 1u))
+        {
+            left = gain * AmbisonicsX;
+            right = left;
             return true;
         }
 

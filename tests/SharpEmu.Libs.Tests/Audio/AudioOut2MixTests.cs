@@ -30,11 +30,13 @@ public sealed class AudioOut2MixTests
     }
 
     [Theory]
-    [InlineData(64u, HalfPower, HalfPower)]
-    [InlineData(65u, HalfPower, -HalfPower)]
-    [InlineData(0u, 1f, 1f)]
-    [InlineData(2u, HalfPower, -HalfPower)]
-    public void FirstOrderAmbisonicsDecodeToStereoCardioids(uint ambisonics, float left, float right)
+    [InlineData(64u, 0.85355339f, 0.85355339f)]
+    [InlineData(65u, 0.52100538f, -0.52100538f)]
+    [InlineData(67u, 0.14644661f, 0.14644661f)]
+    [InlineData(0u, 1.20710678f, 1.20710678f)]
+    [InlineData(2u, 0.52100538f, -0.52100538f)]
+    [InlineData(1u, 0.14644661f, 0.14644661f)]
+    public void FirstOrderAmbisonicsDecodeToTwoVirtualMicrophones(uint ambisonics, float left, float right)
     {
         Assert.True(AudioOut2Exports.TryGetStereoGains(ObjectMain, 1, 0.5f, ambisonics, 0, out var leftGain, out var rightGain));
         Assert.Equal(left * 0.5f, leftGain, 5);
@@ -43,10 +45,10 @@ public sealed class AudioOut2MixTests
 
     [Theory]
     [InlineData(66u)]
-    [InlineData(67u)]
+    [InlineData(68u)]
     [InlineData(99u)]
-    [InlineData(1u)]
     [InlineData(3u)]
+    [InlineData(4u)]
     [InlineData(15u)]
     public void HigherAmbisonicComponentsDoNotFeedStereo(uint ambisonics)
     {
@@ -67,16 +69,19 @@ public sealed class AudioOut2MixTests
     }
 
     [Fact]
-    public void FifthOrderSceneDecodesASourceToItsSide()
+    public void FifthOrderSceneKeepsASourceAheadAtFullLevelAndOneAtTheSideOnItsSide()
     {
         const int frames = 4;
-        var leftSource = DecodeScene(frames, azimuthSine: 1f);
-        var centreSource = DecodeScene(frames, azimuthSine: 0f);
+        var ahead = DecodeScene(frames, azimuthSine: 0f, azimuthCosine: 1f);
+        var left = DecodeScene(frames, azimuthSine: 1f, azimuthCosine: 0f);
+        var behind = DecodeScene(frames, azimuthSine: 0f, azimuthCosine: -1f);
 
-        Assert.Equal(2f * HalfPower, leftSource[0], 4);
-        Assert.Equal(0f, leftSource[1], 4);
-        Assert.Equal(HalfPower, centreSource[0], 4);
-        Assert.Equal(HalfPower, centreSource[1], 4);
+        Assert.Equal((1f, 1f), (MathF.Round(ahead[0], 4), MathF.Round(ahead[1], 4)));
+        Assert.Equal(1.3746f, left[0], 4);
+        Assert.Equal(0.3325f, left[1], 4);
+        Assert.Equal(2f, (left[0] * left[0]) + (left[1] * left[1]), 4);
+        Assert.Equal(HalfPower, behind[0], 4);
+        Assert.Equal(HalfPower, behind[1], 4);
     }
 
     [Fact]
@@ -115,7 +120,9 @@ public sealed class AudioOut2MixTests
         AudioOut2Exports.AudioOut2PortDestroy(ctx);
     }
 
-    private static float[] DecodeScene(int frames, float azimuthSine)
+    // A horizontal source in an SN3D scene: W = 1, Y = sin(azimuth), Z = 0, X = cos(azimuth); the higher orders carry
+    // values the stereo decode must ignore.
+    private static float[] DecodeScene(int frames, float azimuthSine, float azimuthCosine)
     {
         var mix = new float[frames * 2];
         var source = new byte[frames * sizeof(float)];
@@ -125,6 +132,8 @@ public sealed class AudioOut2MixTests
             {
                 0 => 1f,
                 1 => azimuthSine,
+                2 => 0f,
+                3 => azimuthCosine,
                 _ => 0.6f,
             };
             for (var frame = 0; frame < frames; frame++)
