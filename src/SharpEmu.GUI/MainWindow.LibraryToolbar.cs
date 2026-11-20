@@ -95,7 +95,7 @@ public partial class MainWindow
         UpdateSearchExpanded();
     }
 
-    // Unpacks a fake .pkg into <chosen folder>/<game title>, then adds the chosen folder to the library.
+    // Unpacks a fake .pkg into <chosen folder>/<game title>, then adds that game folder to the library.
     private async Task InstallPkgAsync()
     {
         var loc = Localization.Instance;
@@ -311,24 +311,46 @@ public partial class MainWindow
     private async Task<bool> InstallPackageIntoAsync(string pkgPath, string parent, string folderName)
     {
         var destination = Path.Combine(parent, folderName);
-        if (File.Exists(Path.Combine(destination, "eboot.bin")))
+        if (!File.Exists(Path.Combine(destination, "eboot.bin")))
         {
-            return true; // Already installed; the folder scan will pick it up.
+            var dialog = new PkgInstallDialog(Path.GetFileName(pkgPath), pkgPath, destination);
+            if (await Sheets.ShowAsync(dialog) is not true)
+            {
+                return false;
+            }
         }
 
-        var dialog = new PkgInstallDialog(Path.GetFileName(pkgPath), pkgPath, destination);
-        if (await Sheets.ShowAsync(dialog) is not true)
-        {
-            return false;
-        }
-
-        if (!_settings.GameFolders.Contains(parent, GameLibraryPath.Comparer))
-        {
-            _settings.GameFolders.Add(parent);
-            _settings.Save();
-        }
-
+        AddInstalledGameToLibrary(destination);
         return true;
+    }
+
+    // Adds only the installed game's folder, not its parent: the parent may hold other games the
+    // user never added. Nothing changes when a library folder already covers the game.
+    private void AddInstalledGameToLibrary(string gameFolder)
+    {
+        if (IsUnderLibraryFolder(_settings.GameFolders, gameFolder))
+        {
+            return;
+        }
+
+        _settings.GameFolders.Add(Path.TrimEndingDirectorySeparator(Path.GetFullPath(gameFolder)));
+        _settings.Save();
+    }
+
+    internal static bool IsUnderLibraryFolder(IEnumerable<string> libraryFolders, string path)
+    {
+        var target = Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+        foreach (var folder in libraryFolders)
+        {
+            var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(folder));
+            if (string.Equals(target, root, GameLibraryPath.Comparison) ||
+                target.StartsWith(root + Path.DirectorySeparatorChar, GameLibraryPath.Comparison))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private void OpenLibraryMenu()
