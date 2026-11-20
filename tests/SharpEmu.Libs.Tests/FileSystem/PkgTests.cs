@@ -219,6 +219,18 @@ public sealed class PkgTests
         Assert.Equal(0, header.SuperrootInode);
     }
 
+    [Theory]
+    [InlineData("SIGNALIS", "SIGNALIS")]
+    [InlineData("The Last of Us Part I: Remastered", "The Last of Us Part I Remastered")]
+    [InlineData("OMORI\nDeluxe ", "OMORI Deluxe")]
+    [InlineData("A/B\\C?*", "A B C")]
+    [InlineData("Trailing...", "Trailing")]
+    [InlineData("  ", null)]
+    [InlineData("..", null)]
+    [InlineData(null, null)]
+    public void TitlesBecomeSafeFolderNames(string? title, string? expected) =>
+        Assert.Equal(expected, PkgPackage.ToFolderName(title));
+
     [Fact]
     public void InodeFieldsAreDecoded()
     {

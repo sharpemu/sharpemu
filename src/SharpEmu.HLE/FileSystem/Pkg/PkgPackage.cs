@@ -48,6 +48,33 @@ public sealed class PkgPackage : IDisposable
         }
     }
 
+    // param.sfo TITLE (the game's name), or null when absent.
+    public string? Title => ReadParamSfo() is { } sfo ? PkgParamSfo.ReadString(sfo, "TITLE") : null;
+
+    // Folder name for an install: the game's title made safe for a file name, else its title id,
+    // else `fallback` (usually the package file name).
+    public string GetFolderName(string fallback) =>
+        ToFolderName(Title) ?? ToFolderName(TitleId) ?? fallback;
+
+    internal static string? ToFolderName(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return null;
+        }
+
+        var invalid = Path.GetInvalidFileNameChars();
+        var builder = new System.Text.StringBuilder(name.Length);
+        foreach (var c in name)
+        {
+            // Titles may hold line breaks or characters Windows refuses (':' in "Part I: ...").
+            builder.Append(char.IsControl(c) || Array.IndexOf(invalid, c) >= 0 ? ' ' : c);
+        }
+
+        var cleaned = string.Join(' ', builder.ToString().Split(' ', StringSplitOptions.RemoveEmptyEntries)).TrimEnd('.', ' ');
+        return cleaned.Length == 0 || cleaned is "." or ".." ? null : cleaned;
+    }
+
     // Base games are "gd" (and variants such as "gde"). Packages without a category are treated as
     // games; patches ("gp") and DLC ("ac") are not.
     public bool IsGameApplication => Category is null || Category.StartsWith("gd", StringComparison.OrdinalIgnoreCase);

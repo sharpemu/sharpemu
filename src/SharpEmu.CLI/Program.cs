@@ -995,7 +995,7 @@ internal static partial class Program
     }
 
     // --install-pkg <file.pkg> [destination]: unpacks a fake PS4 package into a game folder (by
-    // default <pkg folder>/<title id>) that can then be launched through its eboot.bin.
+    // default <pkg folder>/<game title>) that can then be launched through its eboot.bin.
     private static int InstallPkg(string[] args)
     {
         if (args.Length is < 2 or > 3)
@@ -1024,7 +1024,7 @@ internal static partial class Program
                 ? Path.GetFullPath(args[2])
                 : Path.Combine(
                     Path.GetDirectoryName(pkgPath)!,
-                    string.IsNullOrWhiteSpace(package.TitleId) ? Path.GetFileNameWithoutExtension(pkgPath) : package.TitleId);
+                    package.GetFolderName(Path.GetFileNameWithoutExtension(pkgPath)));
             Log.Info($"Installing {Path.GetFileName(pkgPath)} ({package.Header.ContentId}) into {destination}");
 
             var lastPercent = -1;

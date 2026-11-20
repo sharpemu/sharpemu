@@ -95,7 +95,7 @@ public partial class MainWindow
         UpdateSearchExpanded();
     }
 
-    // Unpacks a fake .pkg into <chosen folder>/<title id>, then adds the chosen folder to the library.
+    // Unpacks a fake .pkg into <chosen folder>/<game title>, then adds the chosen folder to the library.
     private async Task InstallPkgAsync()
     {
         var loc = Localization.Instance;
@@ -115,7 +115,7 @@ public partial class MainWindow
             return;
         }
 
-        if (!TryReadPackageInfo(pkgPath, out var titleId, out var isGame, out var category))
+        if (!TryReadPackageInfo(pkgPath, out var titleId, out var folderName, out var isGame, out var category))
         {
             return;
         }
@@ -137,7 +137,7 @@ public partial class MainWindow
             return;
         }
 
-        if (!await InstallPackageIntoAsync(pkgPath, parent, titleId))
+        if (!await InstallPackageIntoAsync(pkgPath, parent, folderName))
         {
             return;
         }
@@ -147,7 +147,7 @@ public partial class MainWindow
 
     // A folder picked by "Add folder" may hold downloaded .pkg files instead of extracted games.
     // Walk it recursively with the same depth limit as the library scan, install every package
-    // under the chosen root (named after its title id) and let the caller's rescan pick them all
+    // under the chosen root (named after the game's title) and let the caller's rescan pick them all
     // up. Packages whose game is already extracted anywhere under the root are left alone.
     private async Task InstallPackagesInFolderAsync(string folder)
     {
@@ -172,10 +172,10 @@ public partial class MainWindow
 
         // Patches and DLC share the base game's title id and the emulator cannot overlay them, so
         // only base games are installed.
-        var installable = new List<(string Path, string TitleId)>();
+        var installable = new List<(string Path, string FolderName)>();
         foreach (var pkgPath in packages)
         {
-            if (!TryReadPackageInfo(pkgPath, out var titleId, out var isGame, out var category))
+            if (!TryReadPackageInfo(pkgPath, out var titleId, out var folderName, out var isGame, out var category))
             {
                 continue;
             }
@@ -195,10 +195,10 @@ public partial class MainWindow
                 continue;
             }
 
-            if (!File.Exists(Path.Combine(PackageDestination(pkgPath, folder, titleId), "eboot.bin")))
+            if (!File.Exists(Path.Combine(Path.Combine(folder, folderName), "eboot.bin")))
             {
-                installable.Add((pkgPath, titleId));
-                installed[key] = PackageDestination(pkgPath, folder, titleId);
+                installable.Add((pkgPath, folderName));
+                installed[key] = Path.Combine(folder, folderName);
             }
         }
 
@@ -234,10 +234,10 @@ public partial class MainWindow
             return;
         }
 
-        foreach (var (pkgPath, titleId) in installable)
+        foreach (var (pkgPath, folderName) in installable)
         {
             // Cancelling one package stops the batch; later packages stay untouched.
-            if (!await InstallPackageIntoAsync(pkgPath, folder, titleId))
+            if (!await InstallPackageIntoAsync(pkgPath, folder, folderName))
             {
                 return;
             }
@@ -285,12 +285,13 @@ public partial class MainWindow
             Localization.Instance.Format("Library.Pkg.SkippedNotGame", Path.GetFileName(pkgPath), category ?? string.Empty),
             ErrorLineBrush);
 
-    private bool TryReadPackageInfo(string pkgPath, out string titleId, out bool isGame, out string? category)
+    private bool TryReadPackageInfo(string pkgPath, out string titleId, out string folderName, out bool isGame, out string? category)
     {
         try
         {
             using var package = PkgPackage.Open(pkgPath);
             titleId = package.TitleId;
+            folderName = package.GetFolderName(Path.GetFileNameWithoutExtension(pkgPath));
             category = package.Category;
             isGame = package.IsGameApplication;
             return true;
@@ -299,19 +300,17 @@ public partial class MainWindow
         {
             AppendConsoleLine(Localization.Instance.Format("Library.Pkg.Failed", exception.Message), ErrorLineBrush);
             titleId = string.Empty;
+            folderName = string.Empty;
             category = null;
             isGame = false;
             return false;
         }
     }
 
-    private static string PackageDestination(string pkgPath, string parent, string titleId) =>
-        Path.Combine(parent, string.IsNullOrWhiteSpace(titleId) ? Path.GetFileNameWithoutExtension(pkgPath) : titleId);
-
     // Shows the install sheet for one package. The caller owns the library rescan.
-    private async Task<bool> InstallPackageIntoAsync(string pkgPath, string parent, string titleId)
+    private async Task<bool> InstallPackageIntoAsync(string pkgPath, string parent, string folderName)
     {
-        var destination = PackageDestination(pkgPath, parent, titleId);
+        var destination = Path.Combine(parent, folderName);
         if (File.Exists(Path.Combine(destination, "eboot.bin")))
         {
             return true; // Already installed; the folder scan will pick it up.
