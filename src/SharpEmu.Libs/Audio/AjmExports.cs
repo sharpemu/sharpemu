@@ -319,7 +319,7 @@ public static class AjmExports
                     Flags = flags,
                     MaxChannels = maxChannels,
                     Encoding = encoding,
-                    Atrac9 = codecType == Atrac9CodecType ? new Atrac9DecodeState() : null,
+                    Atrac9 = codecType == Atrac9CodecType ? new Atrac9DecodeState { ConcealsUndecodableSuperframes = true } : null,
                     Mp3 = codecType == AjmCodecMp3 ? new AjmMp3Decoder() : null,
                     Opus = codecType == OpusCodecType ? new AjmOpusDecoder(maxChannels, encoding) : null,
                 });

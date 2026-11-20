@@ -24,6 +24,9 @@ internal readonly record struct Atrac9Gapless(uint TotalSamples, ushort SkipSamp
 
 internal sealed class Atrac9DecodeState
 {
+    // Set by AJM, whose titles retry a failed job forever: an undecodable superframe plays as silence instead.
+    public bool ConcealsUndecodableSuperframes { get; init; }
+
     internal const int ResultNotInitialized = 0x00000001;
     internal const int ResultInvalidData = 0x00000002;
     internal const int ResultInvalidParameter = 0x00000004;
@@ -285,13 +288,30 @@ internal sealed class Atrac9DecodeState
                         $"config={Convert.ToHexString(_configData ?? [])} " +
                         $"head={Convert.ToHexString(_compressed.AsSpan(0, Math.Min(16, _compressed.Length)))} " +
                         $"error={exception.GetType().Name}: {exception.Message}");
-                    _compressedLength = 0;
-                    return new Atrac9DecodeResult(
-                        status | ResultInvalidData | ResultCodecError,
-                        consumed,
-                        written,
-                        _totalDecodedSamples,
-                        frames);
+
+                    // AJM plays a superframe it cannot decode as silence and goes on: a title that expects its
+                    // stream to decode retries a failed job without advancing, so an error left the voice stuck on
+                    // that superframe for good. Superframes decode independently, so the codec starts fresh for the
+                    // next one. Other users report the error.
+                    if (!ConcealsUndecodableSuperframes)
+                    {
+                        _compressedLength = 0;
+                        return new Atrac9DecodeResult(
+                            status | ResultInvalidData | ResultCodecError,
+                            consumed,
+                            written,
+                            _totalDecodedSamples,
+                            frames);
+                    }
+
+                    foreach (var plane in _planarPcm)
+                    {
+                        Array.Clear(plane);
+                    }
+
+                    var fresh = new Atrac9Decoder();
+                    fresh.Initialize((byte[])_configData!.Clone());
+                    _decoder = fresh;
                 }
 
                 WriteInterleaved(

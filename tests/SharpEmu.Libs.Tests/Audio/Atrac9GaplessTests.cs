@@ -92,6 +92,38 @@ public sealed class Atrac9GaplessTests
     }
 
     [Fact]
+    public void AnAjmDecoderPlaysASuperframeItCannotDecodeAsSilenceAndGoesOn()
+    {
+        var decoder = new Atrac9DecodeState { ConcealsUndecodableSuperframes = true };
+        Assert.True(decoder.TryInitialize(MonoConfig));
+        var input = new byte[SuperframeBytes * 2];
+        Array.Fill(input, (byte)0xFF, 0, SuperframeBytes);
+        SilentFrame.CopyTo(input, SuperframeBytes);
+        var output = new byte[SuperframeSamples * 2 * sizeof(short)];
+        Array.Fill(output, (byte)0x55);
+
+        var result = decoder.Decode(input, output, Atrac9PcmEncoding.Signed16, requestedChannels: 0, multipleFrames: true);
+
+        Assert.Equal(0, result.Status & (Atrac9DecodeState.ResultCodecError | Atrac9DecodeState.ResultInvalidData));
+        Assert.Equal((SuperframeBytes * 2, output.Length), (result.InputConsumed, result.OutputWritten));
+        Assert.All(output.AsSpan(0, SuperframeSamples * sizeof(short)).ToArray(), sample => Assert.Equal(0, sample));
+    }
+
+    [Fact]
+    public void ADecoderThatDoesNotConcealReportsASuperframeItCannotDecode()
+    {
+        var decoder = CreateDecoder();
+        var input = new byte[SuperframeBytes];
+        Array.Fill(input, (byte)0xFF);
+
+        var result = decoder.Decode(input, new byte[SuperframeSamples * sizeof(short)], Atrac9PcmEncoding.Signed16, requestedChannels: 0, multipleFrames: true);
+
+        Assert.Equal(
+            Atrac9DecodeState.ResultCodecError | Atrac9DecodeState.ResultInvalidData,
+            result.Status & (Atrac9DecodeState.ResultCodecError | Atrac9DecodeState.ResultInvalidData));
+    }
+
+    [Fact]
     public void AJobWithoutInputReportsPartialInput()
     {
         var decoder = CreateDecoder();
