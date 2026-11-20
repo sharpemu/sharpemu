@@ -961,12 +961,16 @@ public static class KernelPthreadCompatExports
                 return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK;
             }
 
-            var ownedResult = tryOnly
-                ? (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY
-                : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK;
-            TracePthreadFastPathBusy(tryOnly ? "trylock_self" : "lock_self", mutexAddress, resolvedAddress, state, currentThreadId, ownedResult);
-            TracePthreadMutex(ctx, tryOnly ? "trylock" : "lock", mutexAddress, resolvedAddress, state, currentThreadId, ownedResult);
-            return ownedResult;
+            // The guest re-entered a mutex it already owns. Errorcheck answers
+            // EDEADLK/EAGAIN here, but the only way a guest reaches this point is by
+            // treating the mutex as re-entrant, so honour the duplicate acquisition
+            // as a recursive one (the same shape as the adaptive-NP workaround
+            // below) and let the matching unlock release it. Answering an error
+            // instead wedges a spin-on-trylock loop forever: the loop can never
+            // observe a state in which it both owns the mutex and can acquire it.
+            state.IncrementRecursion();
+            TracePthreadMutex(ctx, tryOnly ? "trylock" : "lock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
         var canCooperativelyBlock = !tryOnly &&
@@ -1023,11 +1027,12 @@ public static class KernelPthreadCompatExports
                 }
                 else
                 {
-                    var ownedResult = tryOnly
-                        ? (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY
-                        : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_DEADLOCK;
-                    TracePthreadMutex(ctx, tryOnly ? "trylock" : "lock", mutexAddress, resolvedAddress, state, currentThreadId, ownedResult);
-                    return ownedResult;
+                    // See the matching comment on the uncontended path above: a
+                    // guest that re-enters its own lock is using it as a recursive
+                    // lock, so grant the duplicate acquisition rather than erroring.
+                    state.RecursionCount++;
+                    TracePthreadMutex(ctx, tryOnly ? "trylock" : "lock", mutexAddress, resolvedAddress, state, currentThreadId, (int)OrbisGen2Result.ORBIS_GEN2_OK);
+                    return (int)OrbisGen2Result.ORBIS_GEN2_OK;
                 }
             }
 
