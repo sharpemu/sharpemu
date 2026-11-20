@@ -52,6 +52,10 @@ internal sealed class Atrac9DecodeState
     private Atrac9Gapless _gaplessInit;
     private Atrac9Gapless _gapless;
 
+    // Samples written and lead-in samples discarded since the last reset: the gapless window counts from there.
+    private uint _producedSinceReset;
+    private uint _skippedSinceReset;
+
     public Atrac9Gapless Gapless
     {
         get
@@ -63,15 +67,24 @@ internal sealed class Atrac9DecodeState
         }
     }
 
+    // The window counts from the last reset. A set without a reset moves its limits and keeps the progress made against
+    // them: a title that sends the same window with every job keeps its place, and one that sends a new window after
+    // initializing the instance for the next sound gets that window.
     public void SetGapless(uint totalSamples, ushort skipSamples, bool reset)
     {
         lock (_gate)
         {
             _gaplessInit = new Atrac9Gapless(totalSamples, skipSamples, 0);
-            if (reset || _gapless == default)
+            if (reset)
             {
-                _gapless = _gaplessInit;
+                _producedSinceReset = 0;
+                _skippedSinceReset = 0;
             }
+
+            _gapless = new Atrac9Gapless(
+                HasSampleLimit ? totalSamples - Math.Min(totalSamples, _producedSinceReset) : totalSamples,
+                (ushort)(skipSamples - Math.Min(skipSamples, _skippedSinceReset)),
+                reset ? (ushort)0 : _gapless.SkippedSamples);
         }
     }
 
@@ -112,6 +125,8 @@ internal sealed class Atrac9DecodeState
                 _totalDecodedSamples = 0;
                 _containerHeaderLength = 0;
                 _gapless = _gaplessInit;
+                _producedSinceReset = 0;
+                _skippedSinceReset = 0;
                 Trace(
                     $"initialized config={Convert.ToHexString(normalizedConfig)} channels={config.ChannelCount} " +
                     $"rate={config.SampleRate} frame_samples={config.FrameSamples} " +
@@ -145,6 +160,8 @@ internal sealed class Atrac9DecodeState
             _totalDecodedSamples = 0;
             _containerHeaderLength = 0;
             _gapless = _gaplessInit;
+            _producedSinceReset = 0;
+            _skippedSinceReset = 0;
             if (_compressed is not null)
             {
                 Array.Clear(_compressed);
@@ -287,6 +304,8 @@ internal sealed class Atrac9DecodeState
                 written += outputBytes;
                 _compressedLength = 0;
                 _totalDecodedSamples += unchecked((uint)samples);
+                _producedSinceReset = unchecked(_producedSinceReset + (uint)samples);
+                _skippedSinceReset = unchecked(_skippedSinceReset + (uint)skip);
                 frames += unchecked((uint)config.FramesPerSuperframe);
 
                 if (!multipleFrames)
@@ -454,5 +473,7 @@ internal sealed class Atrac9DecodeState
         _containerHeaderLength = 0;
         _compressedLength = 0;
         _totalDecodedSamples = 0;
+        _producedSinceReset = 0;
+        _skippedSinceReset = 0;
     }
 }

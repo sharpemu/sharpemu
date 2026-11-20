@@ -110,4 +110,33 @@ public sealed class Atrac9GaplessTests
         decoder.SetGapless(totalSamples: 2000, skipSamples: 10, reset: true);
         Assert.Equal(new Atrac9Gapless(2000, 10, 0), decoder.Gapless);
     }
+
+    [Fact]
+    public void ANewWindowAfterInitializingForTheNextSoundTakesEffectWithoutAReset()
+    {
+        // The next sound on a voice: the instance is initialized again, then its window is sent without a reset.
+        var decoder = CreateDecoder();
+        decoder.SetGapless(totalSamples: 300, skipSamples: 100, reset: false);
+        DecodeSuperframes(decoder, 2, 2 * SuperframeSamples);
+        Assert.Equal(new Atrac9Gapless(0, 0, 212), decoder.Gapless);
+
+        Assert.True(decoder.TryInitialize(MonoConfig));
+        decoder.SetGapless(totalSamples: 1000, skipSamples: 50, reset: false);
+        Assert.Equal(new Atrac9Gapless(1000, 50, 0), decoder.Gapless);
+
+        var result = DecodeSuperframes(decoder, 1, SuperframeSamples);
+        Assert.Equal((SuperframeSamples - 50) * sizeof(short), result.OutputWritten);
+        Assert.Equal((ulong)(SuperframeSamples - 50), result.TotalDecodedSamples);
+    }
+
+    [Fact]
+    public void ASetWithoutResetMovesTheLimitsAndKeepsTheProgress()
+    {
+        var decoder = CreateDecoder();
+        decoder.SetGapless(totalSamples: 500, skipSamples: 100, reset: false);
+        DecodeSuperframes(decoder, 1, SuperframeSamples);
+
+        decoder.SetGapless(totalSamples: 1000, skipSamples: 100, reset: false);
+        Assert.Equal(new Atrac9Gapless(1000 - 156, 0, 100), decoder.Gapless);
+    }
 }
