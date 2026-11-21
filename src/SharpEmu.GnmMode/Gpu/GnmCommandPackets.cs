@@ -353,6 +353,31 @@ internal static class GnmCommandPackets
         var control = payload[0];
         var cachePolicy = (control >> 25) & 3u;
         var dataSource = (payload[2] >> 29) & 7u;
+        // PS4 titles (e.g. Signalis) emit a 32-bit CACHE_FLUSH_TS / BOTTOM_OF_PIPE_TS with a full cache
+        // write-back; it is mapped to the shared 32-bit write-back label here so AGC (PS5) streams keep
+        // their own validation.
+        var eventType = control & 0x3Fu;
+        var interruptSelector = (payload[2] >> 24) & 7u;
+        var eventWriteDestination = ((control >> 23) & 0x10u) | ((payload[2] >> 16) & 1u);
+        if (dataSource == 1 && eventWriteDestination == 0 &&
+            ((control >> 8) & 7u) == 5 && ((control >> 12) & 0x3Fu) == 0x38 &&
+            (eventType == 0x04 || eventType == 0x28 && interruptSelector is 0 or 3))
+        {
+            interpreter.WriteEndOfPipe(
+                is64Bit: false,
+                cachePolicy: cachePolicy is 1 or 2 ? 0u : cachePolicy,
+                eventWriteDestination: 0,
+                eopEventType: 0x2F,
+                cacheAction: 0x38,
+                eventIndex: 6,
+                eventWriteSource: 2,
+                destination: payload[1] | ((ulong)(payload[2] & 0xFFFFu) << 32),
+                value: payload[3],
+                interruptSelector: interruptSelector,
+                interruptContextId: 0);
+            return 5;
+        }
+
         var classicBottomOfPipe = (control & 0x3Fu) == 0x28 &&
             ((control >> 8) & 7u) == 5 &&
             (dataSource is 2 or 4 || dataSource == 1 && ((control >> 12) & 0x3Fu) == 0);
