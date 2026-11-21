@@ -199,6 +199,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         var image = LoadImage(normalizedEbootPath, _executableRelativePath is null ? null : app0Root);
         VideoOutExports.ConfigureApplicationInfo(image.Title, image.TitleId, image.Version);
         KernelMemoryCompatExports.ConfigureApplicationInfo(image.TitleId);
+        AddcontEntitlements.ConfigureConceptId(image.ConceptId);
         SaveDataExports.ConfigureApplicationInfo(image.TitleId);
         SystemServiceExports.ConfigureApplicationInfo(image.TitleId, _systemLanguage);
         VideoOutExports.StartPresenter();

@@ -27,21 +27,21 @@ public sealed record Disc(LocalizedParameters? LocalizedParameters);
 
 public static class Ps5ParamJsonReader
 {
-    public static (string? Title, string? TitleId, string? Version) TryReadPs5Param(IFileSystem fs, string paramJsonPath)
+    public static (string? Title, string? TitleId, string? Version, string? ConceptId) TryReadPs5Param(IFileSystem fs, string paramJsonPath)
     {
         if (!fs.Exists(paramJsonPath))
-            return (null, null, null);
+            return (null, null, null, null);
 
         if (!fs.TryReadAllBytes(paramJsonPath, out var data))
-            return (null, null, null);
+            return (null, null, null, null);
 
         return TryReadPs5Param(data);
     }
 
-    public static (string? Title, string? TitleId, string? Version) TryReadPs5Param(byte[] data)
+    public static (string? Title, string? TitleId, string? Version, string? ConceptId) TryReadPs5Param(byte[] data)
     {
         if (data == null || data.Length == 0)
-            return (null, null, null);
+            return (null, null, null, null);
 
         try
         {
@@ -56,14 +56,14 @@ public static class Ps5ParamJsonReader
         }
         catch (JsonException)
         {
-            return (null, null, null);
+            return (null, null, null, null);
         }
     }
 
-    private static (string? Title, string? TitleId, string? Version) TryReadPs5Param(JsonElement root)
+    private static (string? Title, string? TitleId, string? Version, string? ConceptId) TryReadPs5Param(JsonElement root)
     {
         if (root.ValueKind != JsonValueKind.Object)
-            return (null, null, null);
+            return (null, null, null, null);
 
         var titleId = GetString(root, "titleId");
 
@@ -74,7 +74,10 @@ public static class Ps5ParamJsonReader
 
         string? title = ExtractTitleName(root);
 
-        return (title, titleId, ver);
+        // conceptId is shared by every regional release of one game (param.sfo has none).
+        var conceptId = GetString(root, "conceptId");
+
+        return (title, titleId, ver, conceptId);
     }
 
     private static string? ExtractTitleName(JsonElement root)

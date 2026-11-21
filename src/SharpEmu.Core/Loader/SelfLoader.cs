@@ -383,10 +383,11 @@ public sealed class SelfLoader : ISelfLoader
             tlsModuleId,
             tlsInfo.MemorySize,
             tlsInfo.StaticOffset,
-            importedModuleNames);
+            importedModuleNames,
+            applicationInfo.ConceptId);
     }
 
-    private static (string? Title, string? TitleId, string? Version) TryLoadParamJson(
+    private static (string? Title, string? TitleId, string? Version, string? ConceptId) TryLoadParamJson(
         IFileSystem? fs,
         string? mountRoot)
     {
@@ -421,7 +422,8 @@ public sealed class SelfLoader : ISelfLoader
         Console.WriteLine(
             $"[LOADER] Title: {applicationInfo.Title ?? "(unknown)"}, " +
             $"TitleId: {applicationInfo.TitleId ?? "(unknown)"}, " +
-            $"Version: {applicationInfo.Version ?? "(unknown)"}");
+            $"Version: {applicationInfo.Version ?? "(unknown)"}, " +
+            $"ConceptId: {applicationInfo.ConceptId ?? "(unknown)"}");
         return applicationInfo;
     }
 

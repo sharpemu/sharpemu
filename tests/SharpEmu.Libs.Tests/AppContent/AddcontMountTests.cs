@@ -40,6 +40,7 @@ public sealed class AddcontMountTests : IDisposable
         AddcontEntitlements.DataRootOverride = null;
         AddcontEntitlements.AddcontRootOverride = null;
         KernelMemoryCompatExports.ConfigureApplicationInfo(null);
+        AddcontEntitlements.ConfigureConceptId(null);
         AddcontEntitlements.ResetRuntimeState();
         try
         {
@@ -104,7 +105,7 @@ public sealed class AddcontMountTests : IDisposable
     public void OwnedLabelsComeFromTheTitleDefaultsAndOnlyForThatTitle()
     {
         KernelMemoryCompatExports.ConfigureApplicationInfo("PPSA26344");
-        AddcontEntitlements.ResetRuntimeState();
+        AddcontEntitlements.ConfigureConceptId("10003923");
         Assert.Equal(
             new[] { "GHOST2APP0000000", "GHOST2BASE000000" },
             AddcontEntitlements.Owned().Select(entitlement => entitlement.Label));
@@ -114,8 +115,48 @@ public sealed class AddcontMountTests : IDisposable
         Assert.Same(AddcontEntitlements.Owned(), AddcontEntitlements.Owned());
 
         KernelMemoryCompatExports.ConfigureApplicationInfo("PPSA00000");
+        AddcontEntitlements.ConfigureConceptId(null);
         Assert.Empty(AddcontEntitlements.Owned());
         Assert.False(AddcontEntitlements.Owns("GHOST2APP0000000"));
+    }
+
+    // Every regional release of a game shares one concept id: the EU GTA V dump
+    // (PPSA04263) owns the same labels as the US one.
+    [Fact]
+    public void ARegionalTitleIdMatchesTheDefaultsOfItsConceptId()
+    {
+        KernelMemoryCompatExports.ConfigureApplicationInfo("PPSA04263");
+        AddcontEntitlements.ConfigureConceptId("201930");
+        Assert.Equal(
+            new[] { "85y-je", "5d5c48", "_mtqu6" },
+            AddcontEntitlements.Owned().Select(entitlement => entitlement.Label));
+    }
+
+    // Street Fighter 6 has no default row: an unknown concept id owns nothing.
+    [Fact]
+    public void AnUnknownConceptIdOwnsNothing()
+    {
+        KernelMemoryCompatExports.ConfigureApplicationInfo("PPSA02633");
+        AddcontEntitlements.ConfigureConceptId("10001615");
+        Assert.Empty(AddcontEntitlements.Owned());
+    }
+
+    [Fact]
+    public void ATitleIdEntryInTheConfigurationFileWinsOverAConceptIdEntry()
+    {
+        File.WriteAllText(
+            Path.Combine(_root, "data", "entitlements.json"),
+            "{}");
+        Directory.CreateDirectory(Path.Combine(_root, "data", "user"));
+        File.WriteAllText(
+            Path.Combine(_root, "data", "user", "entitlements.json"),
+            "{ \"10001615\": [\"CONCEPT-1\"], \"PPSA02633\": [\"TITLE-1\"] }");
+        KernelMemoryCompatExports.ConfigureApplicationInfo("PPSA02633");
+        AddcontEntitlements.ConfigureConceptId("10001615");
+        Assert.Equal(new[] { "TITLE-1" }, AddcontEntitlements.Owned().Select(entitlement => entitlement.Label));
+
+        KernelMemoryCompatExports.ConfigureApplicationInfo("PPSA02634");
+        Assert.Equal(new[] { "CONCEPT-1" }, AddcontEntitlements.Owned().Select(entitlement => entitlement.Label));
     }
 
     [Fact]
