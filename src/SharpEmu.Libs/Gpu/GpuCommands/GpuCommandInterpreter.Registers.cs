@@ -13,6 +13,7 @@ public sealed partial class GpuCommandInterpreter
     private const uint RegisterTableSentinel = 0xFFFF_FFFFu;
 
     private static int _contextTableSkipWarnings;
+    private static int _depthCopyTableWarnings;
     private static readonly bool TraceRegisterTables =
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_AGC") == "1";
 
@@ -299,7 +300,8 @@ public sealed partial class GpuCommandInterpreter
             var rawOffset = BinaryPrimitives.ReadUInt32LittleEndian(tableBlock[entryOffset..]);
             var value = BinaryPrimitives.ReadUInt32LittleEndian(tableBlock[(entryOffset + sizeof(uint))..]);
             var offset = RegisterBankLayout.Normalize(rawOffset);
-            if (bank == RegisterBank.Context && offset == 0 && (value & 0xCu) != 0)
+            if (bank == RegisterBank.Context && offset == 0 && (value & 0xCu) != 0 &&
+                Interlocked.Increment(ref _depthCopyTableWarnings) <= 16)
             {
                 var blockStart = index - (uint)blockEntry;
                 var capturedBytes = (int)Math.Min(count - blockStart, 16u) * entryBytes;
