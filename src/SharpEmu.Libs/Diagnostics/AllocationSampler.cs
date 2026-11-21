@@ -25,7 +25,6 @@ internal sealed class AllocationSampler : EventListener
     // Bytes allocated at a few known per-draw call sites, so a large System.Byte[] total can be traced to its source.
     internal enum Site
     {
-        IndexCapture,
         VertexCapture,
         RestartIndexConversion,
         Index8Expansion,

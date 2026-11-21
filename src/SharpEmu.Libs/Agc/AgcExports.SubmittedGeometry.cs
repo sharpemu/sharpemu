@@ -41,7 +41,6 @@ public static partial class AgcExports
         ulong SourceAddress,
         uint IndexCount,
         int IndexStride,
-        byte[] Data,
         GeometryCaptureFingerprint Capture);
 
     private sealed record SubmittedVertexSnapshot(
@@ -382,21 +381,17 @@ public static partial class AgcExports
                         retainedIndexBytes + (long)byteCount64 <=
                             MaximumRetainedIndexBytesPerSubmission)
                     {
+                        // Only the capture fingerprint is used: the draw validates it against the live state.
+                        // The index bytes themselves were copied here for every draw (about 1 GB per 5 s in
+                        // This War of Mine) but nothing read them, so they are no longer retained.
                         using var captureProfile = new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.IndexCapture);
-                        var data = new byte[(int)byteCount64];
-                        SharpEmu.Libs.Diagnostics.AllocationSampler.Note(SharpEmu.Libs.Diagnostics.AllocationSampler.Site.IndexCapture, data.Length);
-                        if (ctx.Memory.TryRead(indexAddress, data) ||
-                            KernelMemoryCompatExports.TryReadTrackedLibcHeap(indexAddress, data))
-                        {
-                            indexSnapshot = new SubmittedIndexSnapshot(
-                                indexAddress,
-                                indexCount,
-                                indexStride,
-                                data,
-                                capture);
-                            indexSnapshots[packetAddress] = indexSnapshot;
-                            retainedIndexBytes += data.Length;
-                        }
+                        indexSnapshot = new SubmittedIndexSnapshot(
+                            indexAddress,
+                            indexCount,
+                            indexStride,
+                            capture);
+                        indexSnapshots[packetAddress] = indexSnapshot;
+                        retainedIndexBytes += (long)byteCount64;
                     }
 
                     captureState.IndexBufferAddress = indexAddress;
