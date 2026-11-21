@@ -15,6 +15,7 @@ public static class AppContentExports
 {
     private const ulong FallbackAvailableSpaceKb = 1024UL * 1024UL; // 1 GiB
     private const int AppContentErrorParameter = unchecked((int)0x80D90002);
+    private const int AppContentErrorDrmNoEntitlement = unchecked((int)0x80D90007);
     private const int MountPointSize = 16;
     private const int EntitlementLabelSize = 17;
     private const ulong BootParamAttrOffset = 4;
@@ -155,11 +156,21 @@ public static class AppContentExports
 
         TraceAppContent($"addcont_mount label='{label}'");
 
-        // Mount the add-on package onto a fresh guest mount point backed by its host
-        // folder (created empty when the dump has no separate package, in which case
-        // the title's pak files carry the content). Refusing the mount only makes
-        // titles retry it forever: the PSN entitlement the real hardware checks cannot
-        // be reproduced offline.
+        // Only an add-on package present on disk is mounted; any other label is refused as
+        // before, so titles without installed add-ons keep their usual behaviour.
+        if (!AddcontEntitlements.TryResolvePackageRoot(label, out var packageRoot))
+        {
+            Span<byte> emptyMountPoint = stackalloc byte[MountPointSize];
+            emptyMountPoint.Clear();
+            if (!ctx.Memory.TryWrite(mountPointAddress, emptyMountPoint))
+            {
+                return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+
+            return ctx.SetReturn(AppContentErrorDrmNoEntitlement);
+        }
+
+        // Each package gets its own guest mount point backed by its host folder.
         if (!AddcontMounts.TryGetValue(label, out var mountPoint))
         {
             lock (AddcontMountGate)
@@ -167,10 +178,7 @@ public static class AppContentExports
                 if (!AddcontMounts.TryGetValue(label, out mountPoint))
                 {
                     mountPoint = $"/addcont{Interlocked.Increment(ref _addcontMountIndex)}";
-                    var hostRoot = AddcontEntitlements.TryResolvePackageRoot(label, out var packageRoot)
-                        ? packageRoot
-                        : Path.Combine(AddcontEntitlements.AddcontRoot(), label);
-                    KernelMemoryCompatExports.RegisterGuestPathMount(mountPoint, hostRoot);
+                    KernelMemoryCompatExports.RegisterGuestPathMount(mountPoint, packageRoot);
                     AddcontMounts[label] = mountPoint;
                 }
             }
