@@ -21,6 +21,7 @@ public sealed class AddcontMountTests : IDisposable
     private const ulong LabelAddress = MemoryBase;
     private const ulong MountPointAddress = MemoryBase + 0x100;
     private const int ErrorParameter = unchecked((int)0x80D90002);
+    private const int ErrorDrmNoEntitlement = unchecked((int)0x80D90007);
 
     private readonly string _root = Path.Combine(Path.GetTempPath(), "sharpemu-addcont-" + Guid.NewGuid().ToString("N"));
 
@@ -76,6 +77,8 @@ public sealed class AddcontMountTests : IDisposable
     [Fact]
     public void MountingTheSameLabelTwiceReturnsTheSameMountPoint()
     {
+        Directory.CreateDirectory(Path.Combine(_root, "addcont", "85y-je"));
+        Directory.CreateDirectory(Path.Combine(_root, "addcont", "5d5c48"));
         var (context, memory) = CreateContext("85y-je");
         Assert.Equal(0, AppContentExports.AppContentAddcontMount(context));
         var first = ReadMountPoint(memory);
@@ -86,6 +89,15 @@ public sealed class AddcontMountTests : IDisposable
         WriteLabel(memory, "5d5c48");
         Assert.Equal(0, AppContentExports.AppContentAddcontMount(context));
         Assert.NotEqual(first, ReadMountPoint(memory));
+    }
+
+    [Fact]
+    public void AMissingPackageIsRefusedWithoutAMountPoint()
+    {
+        var (context, memory) = CreateContext("85y-je");
+        Assert.Equal(ErrorDrmNoEntitlement, AppContentExports.AppContentAddcontMount(context));
+        Assert.Equal(string.Empty, ReadMountPoint(memory));
+        Assert.False(Directory.Exists(Path.Combine(_root, "addcont", "85y-je")));
     }
 
     [Fact]
