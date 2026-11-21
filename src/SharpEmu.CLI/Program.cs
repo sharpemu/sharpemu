@@ -1788,36 +1788,39 @@ internal static partial class Program
 
         public override void Write(char value)
         {
+            // The console writer synchronizes itself. Holding ConsoleMirrorSync
+            // while calling into it can deadlock against a logger that already
+            // owns that console lock and is waiting for the mirror lock.
+            _primary.Write(value);
             lock (ConsoleMirrorSync)
             {
-                _primary.Write(value);
                 _mirror.Write(value);
             }
         }
 
         public override void Write(string? value)
         {
+            _primary.Write(value);
             lock (ConsoleMirrorSync)
             {
-                _primary.Write(value);
                 _mirror.Write(value);
             }
         }
 
         public override void WriteLine(string? value)
         {
+            _primary.WriteLine(value);
             lock (ConsoleMirrorSync)
             {
-                _primary.WriteLine(value);
                 _mirror.WriteLine(value);
             }
         }
 
         public override void Flush()
         {
+            _primary.Flush();
             lock (ConsoleMirrorSync)
             {
-                _primary.Flush();
                 _mirror.Flush();
             }
         }
