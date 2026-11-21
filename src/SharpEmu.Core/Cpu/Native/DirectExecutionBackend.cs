@@ -782,6 +782,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private readonly Dictionary<ulong, GuestThreadState> _guestThreads = new Dictionary<ulong, GuestThreadState>();
 	private readonly Queue<(IVirtualMemory Memory, ulong StackBase, ulong StackSize, ulong TlsBase)> _reusableGuestThreadRegions = new();
 
+	// Opt-in diagnostic: register the primary guest entry as a guest thread so
+	// HLE mutex/cond waits use cooperative blocks. Default off keeps the original
+	// host-wait path untouched.
+	private static readonly bool RegisterMainEntryAsGuestThread =
+		string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_MAIN_ENTRY_GUEST_THREAD"), "1", StringComparison.Ordinal);
+	private const ulong MainGuestThreadHandle = 1;
+
 	private readonly Dictionary<ulong, ExternalGuestThreadState> _externalGuestThreads = new Dictionary<ulong, ExternalGuestThreadState>();
 
 	[ThreadStatic]
@@ -6826,6 +6833,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		var previousYieldRequested = _activeGuestThreadYieldRequested;
 		var previousYieldReason = _activeGuestThreadYieldReason;
 		nint previousHostRspSlotValue = TlsGetValue(_hostRspSlotTlsIndex);
+		var registerMainEntry = RegisterMainEntryAsGuestThread;
+		var previousMainEntryThread = registerMainEntry
+			? GuestThreadExecution.EnterGuestThread(MainGuestThreadHandle)
+			: 0UL;
 		try
 		{
 			_activeExecutionBackend = this;
@@ -7028,6 +7039,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 		finally
 		{
+			if (registerMainEntry) GuestThreadExecution.RestoreGuestThread(previousMainEntryThread);
 			Interlocked.Exchange(ref _mainExecutionThreadHandle, null)?.Dispose();
 			StopReadyThreadDispatcher();
 			StopStallWatchdog();

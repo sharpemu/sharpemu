@@ -599,6 +599,7 @@ The emulator sets these variables for its own processes. Do not set them manuall
 | Variable | Value | Function | Code that reads it |
 | --- | --- | --- | --- |
 | `SHARPEMU_MITIGATED_CHILD` | `1` | The Windows launcher sets this variable to 1 when it starts the child process with CFG and CET mitigations off. The child accepts the `--sharpemu-mitigated-child` argument only when the value is 1. Do not set it manually. | `Program.cs`, `EmulatorProcess.cs` |
+| `SHARPEMU_MAIN_ENTRY_GUEST_THREAD` | `1` | Registers the primary guest entry as a guest thread with a stable handle for the duration of `ExecuteEntry`. This makes HLE mutex and condition waits use cooperative blocks instead of an unrecoverable host wait. Default off keeps the original host-wait path. This is a diagnostic for guest synchronization stalls. | `DirectExecutionBackend.cs` |
 
 ## Tests and tools
 
