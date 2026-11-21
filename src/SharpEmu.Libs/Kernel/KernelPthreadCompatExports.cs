@@ -194,12 +194,12 @@ public static class KernelPthreadCompatExports
         }
 
         var released = 0;
-        var wakeKeys = new List<string>();
+        var wakeStates = new List<PthreadMutexState>();
         foreach (var pair in _mutexStates)
         {
             var state = pair.Value;
-            string? wakeKey = null;
-            lock (state)
+            var waiterCount = 0;
+            lock (state.SyncRoot)
             {
                 if (state.OwnerThreadId != threadId || state.RecursionCount <= 0)
                 {
@@ -208,26 +208,20 @@ public static class KernelPthreadCompatExports
 
                 state.OwnerThreadId = 0;
                 state.RecursionCount = 0;
-                wakeKey = state.Waiters.First?.Value.Cooperative == true
-                    ? state.Waiters.First.Value.WakeKey
-                    : null;
-                Monitor.PulseAll(state);
+                waiterCount = state.Waiters.Count;
                 released++;
-                Console.Error.WriteLine(
-                    $"[LOADER][WARN] pthread_mutex_abandon mutex=0x{pair.Key:X16} " +
-                    $"owner={KernelPthreadState.DescribeThreadHandle(threadId)} " +
-                    $"reason={reason} waiters={state.Waiters.Count}");
+                wakeStates.Add(state);
             }
 
-            if (wakeKey is not null)
-            {
-                wakeKeys.Add(wakeKey);
-            }
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] pthread_mutex_abandon mutex=0x{pair.Key:X16} " +
+                $"owner={KernelPthreadState.DescribeThreadHandle(threadId)} " +
+                $"reason={reason} waiters={waiterCount}");
         }
 
-        foreach (var wakeKey in wakeKeys)
+        foreach (var state in wakeStates)
         {
-            _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(wakeKey, 1);
+            WakeFirstMutexWaiter(state);
         }
 
         if (released > 0)
