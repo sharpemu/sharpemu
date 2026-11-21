@@ -141,7 +141,8 @@ public static partial class AgcExports
             return false;
         }
 
-        var live = RecordShaderRegisters(state.ShRegisters);
+        Span<KeyValuePair<uint, uint>> live = stackalloc KeyValuePair<uint, uint>[MaximumRecordedShaderRegisters];
+        live = live[..CollectShaderRegisters(state.ShRegisters, live)];
         if (live.Length != capture.ShaderRegisters.Length)
         {
             DcbSubmissionProfile.RecordCaptureRejection("register_count", (ulong)capture.ShaderRegisters.Length, (ulong)live.Length);

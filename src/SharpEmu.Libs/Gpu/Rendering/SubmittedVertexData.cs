@@ -56,6 +56,7 @@ internal sealed class SubmittedVertexData
             if (bytes.Length == 0 && buffer.Size != 0)
             {
                 bytes = new byte[(int)buffer.Size];
+                SharpEmu.Libs.Diagnostics.AllocationSampler.Note(SharpEmu.Libs.Diagnostics.AllocationSampler.Site.VertexCapture, bytes.Length);
                 if (!memory.TryRead(buffer.Address, bytes)) return false;
                 uniqueRanges[key] = bytes;
             }

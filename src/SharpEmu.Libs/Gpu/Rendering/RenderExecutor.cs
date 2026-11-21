@@ -654,6 +654,7 @@ public sealed partial class RenderExecutor
 
         // Widen 16-bit indices so their maximum value remains an ordinary vertex.
         var converted = new byte[checked((int)indexCount * sizeof(uint))];
+        SharpEmu.Libs.Diagnostics.AllocationSampler.Note(SharpEmu.Libs.Diagnostics.AllocationSampler.Site.RestartIndexConversion, source.Length + converted.Length);
         for (var index = 0; index < (int)indexCount; index++)
         {
             var value = sourceStride == sizeof(ushort)
@@ -685,6 +686,7 @@ public sealed partial class RenderExecutor
         }
 
         var expanded = new byte[indexCount * 2];
+        SharpEmu.Libs.Diagnostics.AllocationSampler.Note(SharpEmu.Libs.Diagnostics.AllocationSampler.Site.Index8Expansion, source.Length + expanded.Length);
         for (var i = 0; i < indexCount; i++)
         {
             var value = source[i];

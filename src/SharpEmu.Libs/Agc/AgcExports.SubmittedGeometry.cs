@@ -52,27 +52,60 @@ public static partial class AgcExports
     private const uint ShaderRegisterWindowLength = 8;
     private const uint UserDataRegisterWindowLength = 32;
 
+    internal const int MaximumRecordedShaderRegisters = (int)(3 * ShaderRegisterWindowLength + UserDataRegisterWindowLength);
+
     // The shader registers the vertex fetch resolution can read: the stage program windows and its user data.
     private static KeyValuePair<uint, uint>[] RecordShaderRegisters(IReadOnlyDictionary<uint, uint> registers)
     {
-        // The windows can overlap; each offset is recorded once, in offset order.
-        var recorded = new SortedDictionary<uint, uint>();
-        void RecordRegisterWindow(uint start, uint length)
+        Span<KeyValuePair<uint, uint>> recorded = stackalloc KeyValuePair<uint, uint>[MaximumRecordedShaderRegisters];
+        var count = CollectShaderRegisters(registers, recorded);
+        return count == 0 ? [] : recorded[..count].ToArray();
+    }
+
+    // Fills the destination with the recorded registers in offset order and returns how many there are.
+    // The windows can overlap; each offset is recorded once. This runs for every captured and every
+    // validated draw, so it works in a caller-provided buffer: the sorted map it used before allocated a
+    // tree node per register and was one of the largest sources of GC pauses in gameplay.
+    private static int CollectShaderRegisters(IReadOnlyDictionary<uint, uint> registers, Span<KeyValuePair<uint, uint>> recorded)
+    {
+        var count = 0;
+        RecordRegisterWindow(registers, SpiShaderPgmLoVs, ShaderRegisterWindowLength, recorded, ref count);
+        RecordRegisterWindow(registers, SpiShaderPgmLoGs, ShaderRegisterWindowLength, recorded, ref count);
+        RecordRegisterWindow(registers, SpiShaderPgmLoEs, ShaderRegisterWindowLength, recorded, ref count);
+        RecordRegisterWindow(registers, SelectExportUserDataRegister(registers), UserDataRegisterWindowLength, recorded, ref count);
+        recorded[..count].Sort(static (left, right) => left.Key.CompareTo(right.Key));
+        return count;
+
+        static void RecordRegisterWindow(
+            IReadOnlyDictionary<uint, uint> registers,
+            uint start,
+            uint length,
+            Span<KeyValuePair<uint, uint>> recorded,
+            ref int count)
         {
             for (var offset = start; offset < start + length; offset++)
             {
-                if (registers.TryGetValue(offset, out var value))
+                if (!registers.TryGetValue(offset, out var value) || Contains(recorded[..count], offset))
                 {
-                    recorded[offset] = value;
+                    continue;
                 }
+
+                recorded[count++] = new(offset, value);
             }
         }
 
-        RecordRegisterWindow(SpiShaderPgmLoVs, ShaderRegisterWindowLength);
-        RecordRegisterWindow(SpiShaderPgmLoGs, ShaderRegisterWindowLength);
-        RecordRegisterWindow(SpiShaderPgmLoEs, ShaderRegisterWindowLength);
-        RecordRegisterWindow(SelectExportUserDataRegister(registers), UserDataRegisterWindowLength);
-        return recorded.ToArray();
+        static bool Contains(ReadOnlySpan<KeyValuePair<uint, uint>> recorded, uint offset)
+        {
+            foreach (var pair in recorded)
+            {
+                if (pair.Key == offset)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
     }
 
     private static GeometryCaptureFingerprint CreateCaptureFingerprint(
@@ -351,6 +384,7 @@ public static partial class AgcExports
                     {
                         using var captureProfile = new DcbSubmissionProfile.SnapshotScope(DcbSubmissionProfile.SnapshotPhase.IndexCapture);
                         var data = new byte[(int)byteCount64];
+                        SharpEmu.Libs.Diagnostics.AllocationSampler.Note(SharpEmu.Libs.Diagnostics.AllocationSampler.Site.IndexCapture, data.Length);
                         if (ctx.Memory.TryRead(indexAddress, data) ||
                             KernelMemoryCompatExports.TryReadTrackedLibcHeap(indexAddress, data))
                         {

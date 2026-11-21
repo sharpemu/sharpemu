@@ -526,6 +526,12 @@ internal static class RenderPhaseProfile
         }
 
         _windowStart = now;
+        SharpEmu.Libs.Diagnostics.AllocationSampler.EnsureStarted();
+        if (SharpEmu.Libs.Diagnostics.AllocationSampler.TakeReport() is { } allocationReport)
+        {
+            Console.Error.WriteLine(allocationReport);
+        }
+
         var seconds = elapsedTicks / (double)Stopwatch.Frequency;
         var frames = _frames;
         _frames = 0;
