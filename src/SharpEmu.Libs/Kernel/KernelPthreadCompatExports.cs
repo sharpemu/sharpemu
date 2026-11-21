@@ -1121,6 +1121,7 @@ public static class KernelPthreadCompatExports
         }
 
         PthreadMutexWaiter? nextWaiter = null;
+        var wakeNextWaiter = false;
         lock (state.SyncRoot)
         {
             if (state.RecursionCount <= 0)
@@ -1158,7 +1159,19 @@ public static class KernelPthreadCompatExports
                         nextWaiter.HostSignal!.Set();
                     }
                 }
+                else if (state.Waiters.Count != 0)
+                {
+                    // An expired head was dropped by TryGrantMutexWaiterLocked.
+                    // Its own wait loop may not get to drain the new head, so
+                    // wake it here instead of letting it wait for a poll.
+                    wakeNextWaiter = true;
+                }
             }
+        }
+
+        if (wakeNextWaiter)
+        {
+            WakeFirstMutexWaiter(state);
         }
 
         if (nextWaiter is { Cooperative: true })
