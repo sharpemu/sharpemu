@@ -621,8 +621,6 @@ public sealed class RenderExecutorStateTests : IDisposable
         { "user vectors", banks => banks.UserConfig.GeometryEngineUserVectorEnable = new GeometryEngineUserVectorEnableRegisters { VectorRegister2 = true }, "v1=False v2=True v3=False" },
         { "line stipple", banks => banks.Context.ScanMode = new ScanModeRegisters { LineStippleEnable = true }, "Line stipple" },
         { "clip planes", banks => banks.Context.Clip = new ClipControlRegisters { UserClipPlanes = 3 }, "planes=3" },
-        { "copy centroid", banks => banks.Context.DepthTarget = banks.Context.DepthTarget with { RenderControl = 1u << 7 }, "renderControl=0x00000080" },
-        { "copy sample", banks => banks.Context.DepthTarget = banks.Context.DepthTarget with { RenderControl = 2u << 8 }, "copySample=2" },
         { "front polygon type", banks => banks.Context.RasterMode = new RasterModeRegisters { FrontPolygonType = 1 }, "type=1" },
         { "back polygon type", banks => banks.Context.RasterMode = new RasterModeRegisters { BackPolygonType = 3 }, "type=3" },
         { "provoking vertex", banks => banks.Context.RasterMode = new RasterModeRegisters { ProvokingVertexLast = true }, "provoking vertex" },
@@ -644,6 +642,18 @@ public sealed class RenderExecutorStateTests : IDisposable
         var fatal = Assert.Throws<RenderExecutorFatalException>(() => _executor.DrawIndexed(1, banks, Indexed(3)));
         Assert.True(fatal.Message.Contains(expected, StringComparison.Ordinal), $"{state}: {fatal.Message}");
         Assert.DoesNotContain(_host.Calls, c => c.StartsWith("find_image", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(1u << 2)]              // CopyDepthToColor
+    [InlineData(1u << 7)]              // CopyCentroid
+    [InlineData(2u << 8)]              // CopySample
+    public void StaleDepthCopyBitsAreAcceptedOnRegularDraws(uint renderControl)
+    {
+        var banks = Banks();
+        banks.Context.DepthTarget = banks.Context.DepthTarget with { RenderControl = renderControl };
+        _executor.DrawIndexed(1, banks, Indexed(3));
+        Assert.Contains(_host.Calls, c => c.StartsWith("draw", StringComparison.Ordinal));
     }
 
     [Fact]

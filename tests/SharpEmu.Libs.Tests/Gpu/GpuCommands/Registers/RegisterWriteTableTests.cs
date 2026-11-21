@@ -312,13 +312,16 @@ public sealed class RegisterWriteTableTests
     }
 
     [Fact]
-    public void RenderControl_CopyToColor_IsFatal()
+    public void RenderControl_CopyToColorBitsAreAccepted()
     {
         var banks = NewBanks();
 
         Assert.Equal(1u, WriteContext(banks, DbRenderControl, 0x3));
         Assert.True(banks.Context.DepthTarget.DepthClearEnabled);
-        Assert.Contains("copy to color", Assert.Throws<InvalidOperationException>(() => WriteContext(banks, DbRenderControl, 1u << 2)).Message);
+        // Titles can carry stale copy bits in DB_RENDER_CONTROL; they are
+        // rejected only when the depth target is used as a copy source.
+        Assert.Equal(1u, WriteContext(banks, DbRenderControl, 1u << 2));
+        Assert.True(banks.Context.DepthTarget.CopyDepthToColor);
     }
 
     [Fact]
