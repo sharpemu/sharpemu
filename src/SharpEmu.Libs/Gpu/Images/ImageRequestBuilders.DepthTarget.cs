@@ -144,7 +144,13 @@ public static partial class ImageRequestBuilders
 
         // EXPCLEAR only changes how the hardware reads the state of a tile in HTILE; the image cache keeps a clear flag per
         // slice and no per-tile HTILE state, so the bits do not change what is rendered.
-        if (depthWords.CopyDepthToColor || depthWords.CopyStencilToColor || depthWords.CopyCentroid || depthWords.CopySample != 0 ||
+        // CopyDepthToColor/CopyStencilToColor/CopyCentroid describe a DB_RENDER_CONTROL
+        // depth-to-color copy, which only matters when the depth target is being used
+        // as a copy source. Titles can leave these bits set on a normal depth buffer;
+        // ignore them for regular attachments rather than rejecting the draw.
+        var copyBits = depthWords.CopyDepthToColor || depthWords.CopyStencilToColor ||
+            depthWords.CopyCentroid || depthWords.CopySample != 0;
+        if ((copyMode && copyBits) ||
             depthWords.MaxMip != 0 || depthWords.ViewMipLevel != 0 || unsupportedShadingRate ||
             depthAddress == 0 || (!copyMode && !depthWords.DepthWriteDisabled && depthWords.ZWriteBase != depthWords.ZReadBase) || (depthAddress & 0xFFFF) != 0 || depthWords.DepthCompare > 7)
         {

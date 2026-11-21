@@ -38,16 +38,9 @@ public sealed partial class RenderExecutor
                 $"negateY={clip.UserClipPlaneNegateY} cullOnly={clip.UserClipPlaneCullOnly} cullOnError={clip.CullOnClippingErrorDisable} viewportIndex={clip.ForceViewportIndexFromVertexShader}.");
         }
 
-        var depth = context.DepthTarget;
-        if (depth.CopyCentroid)
-        {
-            throw _host.Fatal($"Depth copy centroid is not supported: renderControl=0x{depth.RenderControl:X8}.");
-        }
-
-        if (depth.CopySample != 0)
-        {
-            throw _host.Fatal($"Depth copy sample is not supported: copySample={depth.CopySample} renderControl=0x{depth.RenderControl:X8}.");
-        }
+        // CopyCentroid/CopySample only affect a DB_RENDER_CONTROL depth-to-color
+        // copy; ignore them for ordinary depth attachments where titles may leave
+        // these bits set from earlier state.
 
         var mode = context.RasterMode;
         if (mode.FrontPolygonType is not (0 or 2))

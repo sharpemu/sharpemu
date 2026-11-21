@@ -514,11 +514,9 @@ internal static partial class RegisterWriters
 
     private static void RenderControlEntry(RegisterBanks banks, uint offset, uint value)
     {
-        if (RegisterField.Bit(value, 2) || RegisterField.Bit(value, 3))
-        {
-            throw banks.Fatal($"The depth or stencil copy to color is not supported: renderControl=0x{value:X8}.");
-        }
-
+        // Depth-to-color copy bits are rejected when a draw actually needs the
+        // depth target, not at register-write time. Titles can carry stale bits
+        // in DB_RENDER_CONTROL without ever performing such a copy.
         banks.Context.DepthTarget = banks.Context.DepthTarget with { RenderControl = value };
     }
 
