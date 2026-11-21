@@ -85,10 +85,9 @@ public sealed partial class GpuCommandInterpreter
                         return;
                     }
                 }
-                else if ((eopEventType == 0x04 && cacheAction is 0x00 or 0x38 ||
-                          eopEventType == 0x28 && cacheAction == 0x38 && !withInterrupt) && eventIndex == 0x05)
+                else if (eopEventType == 0x04 && cacheAction == 0x00 && eventIndex == 0x05)
                 {
-                    Write32(destination, (uint)value, withWriteBack: cacheAction == 0x38, withInterrupt, eventId, interruptContextId);
+                    Write32(destination, (uint)value, withWriteBack: false, withInterrupt, eventId, interruptContextId);
                     return;
                 }
 
