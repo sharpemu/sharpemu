@@ -2182,9 +2182,27 @@ public static class KernelPthreadCompatExports
                 var next = node.Next;
                 if (node.Value.ThreadId == threadId)
                 {
+                    var stale = node.Value;
                     state.Waiters.Remove(node);
                     state.WaiterRemovedLocked();
-                    node.Value.Node = null;
+                    stale.Node = null;
+
+                    // The removed waiter may already be parked in a host wait or a
+                    // cooperative block. Without a queue node no unlock hand-off
+                    // can ever grant or wake it, so complete it here instead of
+                    // leaving the caller waiting forever for a stale acquisition.
+                    if (Volatile.Read(ref stale.Granted) == 0)
+                    {
+                        stale.TimedOut = true;
+                        if (stale.Cooperative)
+                        {
+                            WakeProfiledMutexWaiter(state, stale);
+                        }
+                        else
+                        {
+                            stale.HostSignal?.Set();
+                        }
+                    }
                 }
 
                 node = next;
@@ -2445,6 +2463,11 @@ public static class KernelPthreadCompatExports
                 waiter.ThreadId,
                 waiter.Cooperative,
                 waiter.WakeKey);
+
+            // A signaled or timed-out wait may find the mutex already free.
+            // Grant it now instead of leaving the reacquisition at the back
+            // of a queue whose head nobody is waiting on any more.
+            _ = TryGrantMutexWaiterLocked(waiter.MutexState, waiter.MutexWaiter);
         }
 
         Monitor.PulseAll(state.SyncRoot);
