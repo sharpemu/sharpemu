@@ -1703,6 +1703,12 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             }
             else
             {
+                if (TraceBufferCreate && Interlocked.Increment(ref _bufferCreateTraceCount) <= BufferCreateTraceLimit)
+                {
+                    Console.Error.WriteLine(FormattableString.Invariant(
+                        $"[GPU][BUFFER_RETIRE] t_ms={Environment.TickCount64} buffer=0x{buffer.CpuAddress:X}+0x{buffer.Size:X} mapped={IsPromoted(buffer)} used_bytes={_registry.RegisteredBytes}"));
+                }
+
                 _tracker.UntrackMemory(buffer.CpuAddress, buffer.Size);
                 DeleteBuffer(bufferIdentifier);
             }
@@ -3265,9 +3271,10 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         var bufferIdentifier = _registry.AllocateBuffer(new GpuBuffer(
             _device, _scheduler, mapped ? GpuBufferUsage.MappedDeviceLocal : GpuBufferUsage.DeviceLocal, overlap.Begin,
             GpuBuffer.AllFlags | BufferUsageFlags.ShaderDeviceAddressBit, mergedSize, allowSlab: !mapped || AllocatesMappedBuffers), overlap.Begin, mergedSize);
+        // The stream score carries across a leap too, so the next step past the leapt range leaps again at once.
         foreach (var oldId in overlapping)
         {
-            MergeOverlappingBuffer(bufferIdentifier, oldId, !overlap.HasStreamLeap);
+            MergeOverlappingBuffer(bufferIdentifier, oldId, accumulateStreamScore: true);
         }
 
         Register(bufferIdentifier);
@@ -3276,8 +3283,20 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             NotePromotion(_registry.GetBuffer(bufferIdentifier), mappedAtCreation);
         }
 
+        if (TraceBufferCreate && Interlocked.Increment(ref _bufferCreateTraceCount) <= BufferCreateTraceLimit)
+        {
+            Console.Error.WriteLine(FormattableString.Invariant(
+                $"[GPU][BUFFER_CREATE] t_ms={Environment.TickCount64} req=0x{guestAddress:X}+0x{size:X} merged=0x{overlap.Begin:X}+0x{mergedSize:X} overlapping={overlapping.Count} promoted_overlap=0x{promotedOverlap:X} keeps_promotion={keepsPromotion} mapped_at_creation={mappedAtCreation} stream_leap={overlap.HasStreamLeap} stream_score={_registry.GetBuffer(bufferIdentifier).StreamScore} registered={_registry.RegisteredCount}"));
+        }
+
         return bufferIdentifier;
     }
+
+    // SHARPEMU_TRACE_BUFFER_CREATE=1: one line per buffer creation and per buffer retired by the collector (first 20000).
+    private static readonly bool TraceBufferCreate =
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_TRACE_BUFFER_CREATE"), "1", StringComparison.Ordinal);
+    private const long BufferCreateTraceLimit = 20000;
+    private static long _bufferCreateTraceCount;
 
     private bool SynchronizeBuffer(GpuBuffer buffer, ulong guestAddress, ulong size, bool isWritten, bool isTexelBuffer,
         bool preserveCpuWriteHotPages = true)
