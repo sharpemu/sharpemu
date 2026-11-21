@@ -8,13 +8,18 @@ using SharpEmu.Libs.Kernel;
 namespace SharpEmu.Libs.Np;
 
 // The add-on (DLC) entitlements a title owns offline. Real hardware reads them from
-// the signed-in PSN account; offline the emulator derives them from editable data
-// instead of hard-coding a global list:
+// the signed-in PSN account. No file in a game dump lists them: Ghost of Yotei's labels
+// only exist inside its eboot, and GTA V and Street Fighter 6 enumerate them at run time
+// through sceNpEntitlementAccessGetAddcontEntitlementInfoList. Offline the emulator
+// therefore derives them from editable data instead of hard-coding a global list:
 //
-// - user/entitlements.json maps a title id to its owned labels, for example
-//   { "PPSA04264": ["85y-je", "5d5c48", "_mtqu6"] }. The built-in defaults below
-//   only serve as the fallback for a missing file, so they can be changed per
-//   machine without rebuilding.
+// - user/entitlements.json maps a title id (or a concept id) to its owned labels, for
+//   example { "PPSA04264": ["85y-je", "5d5c48", "_mtqu6"] }. A title id entry wins over a
+//   concept id entry. The built-in defaults below only serve as the fallback for a
+//   missing entry, so they can be changed per machine without rebuilding.
+// - The built-in defaults are keyed by the PS5 concept id from param.json, not by title
+//   id: a title id is per region, while every regional release of a game (for example
+//   PPSA04264 and PPSA04263 for GTA V) shares one concept id and so matches the same row.
 // - An addcont directory (SHARPEMU_ADDCONT_DIR, else <app0>/../addcont): every
 //   subfolder is one installed add-on package and its folder name is its label.
 public static class AddcontEntitlements
@@ -27,21 +32,25 @@ public static class AddcontEntitlements
     private const int EntitlementLabelLength = 16;
     private const string EntitlementsFileName = "entitlements.json";
 
-    // Built-in defaults for the titles the emulator was tested with: GTA V Enhanced
-    // gates Story Mode on its three labels and Ghost of Yotei checks its application
-    // and base game entitlements before it creates the frontend. A user/entitlements.json
-    // entry overrides them.
+    // Built-in defaults for the games the emulator was tested with, keyed by concept id:
+    // GTA V Enhanced (201930) gates Story Mode on its three labels and Ghost of Yotei
+    // (10003923) checks its application and base game entitlements before it creates the
+    // frontend. A user/entitlements.json entry overrides them.
     private static readonly Dictionary<string, string[]> DefaultLabels = new()
     {
-        ["PPSA04264"] = ["85y-je", "5d5c48", "_mtqu6"],
-        ["PPSA26344"] = ["GHOST2APP0000000", "GHOST2BASE000000"],
+        ["201930"] = ["85y-je", "5d5c48", "_mtqu6"],
+        ["10003923"] = ["GHOST2APP0000000", "GHOST2BASE000000"],
     };
 
-    // One immutable snapshot per title, swapped as a whole so a racing reader never
-    // pairs a title with another title's labels.
-    private sealed class Snapshot(string title, Entitlement[] owned)
+    // The concept id of the running title (null for a PS4 title or a missing param.json).
+    private static string? _conceptId;
+
+    // One immutable snapshot per (title, concept id), swapped as a whole so a racing
+    // reader never pairs a title with another title's labels.
+    private sealed class Snapshot(string title, string? conceptId, Entitlement[] owned)
     {
         public string Title { get; } = title;
+        public string? ConceptId { get; } = conceptId;
         public Entitlement[] Owned { get; } = owned;
         public FrozenDictionary<string, Entitlement> ByLabel { get; } =
             owned.ToFrozenDictionary(entitlement => entitlement.Label, StringComparer.Ordinal);
@@ -53,7 +62,15 @@ public static class AddcontEntitlements
     internal static string? DataRootOverride { get; set; }
     internal static string? AddcontRootOverride { get; set; }
 
-    internal static void ResetRuntimeState() => Volatile.Write(ref _snapshot, null);
+    internal static void ResetRuntimeState()
+    {
+        Volatile.Write(ref _conceptId, null);
+        Volatile.Write(ref _snapshot, null);
+    }
+
+    // Records the concept id of the loaded title; the cached snapshot rebuilds when it changes.
+    public static void ConfigureConceptId(string? conceptId) =>
+        Volatile.Write(ref _conceptId, string.IsNullOrWhiteSpace(conceptId) ? null : conceptId);
 
     // Entitlement labels are at most 16 characters of letters, digits, '-' and '_'. The
     // guest chooses the label passed to the mount call, so nothing else may reach a path.
@@ -76,7 +93,7 @@ public static class AddcontEntitlements
     }
 
     // The labels the running title owns, merged from the configuration file, the
-    // built-in defaults and the installed addcont packages. Cached per title.
+    // built-in defaults and the installed addcont packages. Cached per title and concept id.
     public static IReadOnlyList<Entitlement> Owned() => GetSnapshot().Owned;
 
     public static bool Owns(string label) => GetSnapshot().ByLabel.ContainsKey(label);
@@ -87,18 +104,21 @@ public static class AddcontEntitlements
     private static Snapshot GetSnapshot()
     {
         var title = KernelMemoryCompatExports.ApplicationTitleId;
+        var conceptId = Volatile.Read(ref _conceptId);
         var current = Volatile.Read(ref _snapshot);
-        if (current is not null && string.Equals(current.Title, title, StringComparison.Ordinal))
+        if (current is not null &&
+            string.Equals(current.Title, title, StringComparison.Ordinal) &&
+            string.Equals(current.ConceptId, conceptId, StringComparison.Ordinal))
         {
             return current;
         }
 
         var labels = new List<string>();
-        if (TryLoadConfiguredLabels(title, out var configured))
+        if (TryLoadConfiguredLabels(title, conceptId, out var configured))
         {
             labels.AddRange(configured);
         }
-        else if (DefaultLabels.TryGetValue(title, out var defaults))
+        else if (conceptId is not null && DefaultLabels.TryGetValue(conceptId, out var defaults))
         {
             labels.AddRange(defaults);
         }
@@ -112,7 +132,7 @@ public static class AddcontEntitlements
             .Select(label => new Entitlement(label, PackageTypePsal, DownloadStatusInstalled))
             .ToArray();
 
-        var snapshot = new Snapshot(title, owned);
+        var snapshot = new Snapshot(title, conceptId, owned);
         Volatile.Write(ref _snapshot, snapshot);
         return snapshot;
     }
@@ -173,7 +193,7 @@ public static class AddcontEntitlements
         }
     }
 
-    private static bool TryLoadConfiguredLabels(string title, out string[] labels)
+    private static bool TryLoadConfiguredLabels(string title, string? conceptId, out string[] labels)
     {
         labels = [];
         var path = Path.Combine(DataRootOverride ?? SharpEmuPaths.DataRoot, "user", EntitlementsFileName);
@@ -186,8 +206,16 @@ public static class AddcontEntitlements
         {
             using var stream = File.OpenRead(path);
             using var document = JsonDocument.Parse(stream);
-            if (!document.RootElement.TryGetProperty(title, out var element) ||
-                element.ValueKind != JsonValueKind.Array)
+            var root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+
+            // The title id entry wins over the concept id entry.
+            if (!(root.TryGetProperty(title, out var element) && element.ValueKind == JsonValueKind.Array) &&
+                !(conceptId is not null && root.TryGetProperty(conceptId, out element) &&
+                  element.ValueKind == JsonValueKind.Array))
             {
                 return false;
             }

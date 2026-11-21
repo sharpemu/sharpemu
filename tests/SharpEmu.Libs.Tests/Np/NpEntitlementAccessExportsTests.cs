@@ -9,9 +9,17 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Np;
 
-public sealed class NpEntitlementAccessExportsTests
+[Collection(nameof(SharpEmu.Libs.Tests.AppContent.AddcontStateCollection))]
+public sealed class NpEntitlementAccessExportsTests : IDisposable
 {
     private const ulong MemoryBase = 0x1_0000_0000;
+
+    public void Dispose()
+    {
+        KernelMemoryCompatExports.ConfigureApplicationInfo(null);
+        AddcontEntitlements.ConfigureConceptId(null);
+        AddcontEntitlements.ResetRuntimeState();
+    }
 
     [Fact]
     public void GetGameTrialsFlagReportsAFullGameAndOnlyWritesOneWord()
@@ -81,6 +89,7 @@ public sealed class NpEntitlementAccessExportsTests
     public void GhostOfYoteiMainEntitlement_IsReportedAsInstalled(string label)
     {
         KernelMemoryCompatExports.ConfigureApplicationInfo("PPSA26344");
+        AddcontEntitlements.ConfigureConceptId("10003923");
         var memory = new FakeCpuMemory(MemoryBase, 0x1_000);
         var context = new CpuContext(memory, Generation.Gen5);
         var labelAddress = MemoryBase + 0x100;
@@ -102,6 +111,7 @@ public sealed class NpEntitlementAccessExportsTests
     public void GhostOfYoteiOptionalEntitlement_RemainsUnowned()
     {
         KernelMemoryCompatExports.ConfigureApplicationInfo("PPSA26344");
+        AddcontEntitlements.ConfigureConceptId("10003923");
         var memory = new FakeCpuMemory(MemoryBase, 0x1_000);
         var context = new CpuContext(memory, Generation.Gen5);
         var labelAddress = MemoryBase + 0x100;
@@ -119,6 +129,7 @@ public sealed class NpEntitlementAccessExportsTests
     public void OtherTitlesOwnNoAddcontEntitlements()
     {
         KernelMemoryCompatExports.ConfigureApplicationInfo("PPSA02633");
+        AddcontEntitlements.ConfigureConceptId("10001615");
         var memory = new FakeCpuMemory(MemoryBase, 0x1_000);
         var context = new CpuContext(memory, Generation.Gen5);
         var labelAddress = MemoryBase + 0x100;
