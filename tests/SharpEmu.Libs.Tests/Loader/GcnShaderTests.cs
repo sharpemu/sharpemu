@@ -162,6 +162,15 @@ public sealed class GcnShaderTests
         Assert.Equal("SEndpgm", program.Instructions[1].Opcode);
     }
 
+    // Shipped PS4 pixel shaders (Signalis) keep s_ttracedata; the hardware treats it as a no-op.
+    [Fact]
+    public void ThreadTraceDataDecodesAsASingleWordScalarControl()
+    {
+        var program = Decode(0xBF960000, 0xBF810000);
+        Assert.Equal("STtraceData", program.Instructions[0].Opcode);
+        Assert.Equal(4u, program.Instructions[1].Pc);
+    }
+
     [Fact]
     public void ScalarAndVectorLiteralWidthsPreserveTheOriginalProgramCounters()
     {

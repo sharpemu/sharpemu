@@ -1950,6 +1950,30 @@ public static partial class VideoOutExports
 
     private static int RegisterBufferRange(VideoOutPortState port, int startIndex, ReadOnlySpan<ulong> addresses, BufferAttribute attribute, int requestedGroupIndex = -1)
     {
+        var groupIndex = RegisterBufferRangeLocked(port, startIndex, addresses, attribute, requestedGroupIndex);
+        if (groupIndex < 0)
+        {
+            return groupIndex;
+        }
+
+        // Outside _stateGate: the presenter takes its own gate before asking VideoOut whether a
+        // flip is pending, so starting it under _stateGate deadlocks a title that registers a
+        // new buffer group (e.g. on a scene change) while frames are being presented.
+        GuestGpu.Current.EnsureStarted(attribute.Width, attribute.Height);
+        var guestFormat = MapPixelFormatToGuestTextureFormat(attribute.PixelFormat);
+        if (guestFormat != 0)
+        {
+            foreach (var address in addresses)
+            {
+                GuestGpu.Current.RegisterKnownDisplayBuffer(address, guestFormat);
+            }
+        }
+
+        return groupIndex;
+    }
+
+    private static int RegisterBufferRangeLocked(VideoOutPortState port, int startIndex, ReadOnlySpan<ulong> addresses, BufferAttribute attribute, int requestedGroupIndex)
+    {
         lock (_stateGate)
         {
             var groupIndex = requestedGroupIndex >= 0 ? requestedGroupIndex : FindFreeGroupIndex(port);
@@ -1991,17 +2015,6 @@ public static partial class VideoOutExports
                 $"videoout.register_buffers handle={port.Handle} group={groupIndex} start={startIndex} count={addresses.Length} " +
                 $"addresses=[{string.Join(',', addresses.ToArray().Select(static address => $"0x{address:X16}"))}] " +
                 $"fmt=0x{attribute.PixelFormat:X} tile={attribute.TilingMode} {attribute.Width}x{attribute.Height} pitch={attribute.PitchInPixel}");
-            GuestGpu.Current.EnsureStarted(attribute.Width, attribute.Height);
-
-            var guestFormat = MapPixelFormatToGuestTextureFormat(attribute.PixelFormat);
-            if (guestFormat != 0)
-            {
-                foreach (var address in addresses)
-                {
-                    GuestGpu.Current.RegisterKnownDisplayBuffer(address, guestFormat);
-                }
-            }
-
             return groupIndex;
         }
     }

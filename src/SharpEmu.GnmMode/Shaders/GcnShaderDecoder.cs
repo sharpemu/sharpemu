@@ -616,7 +616,7 @@ public static partial class GcnShaderDecoder
         {
             0 => "SNop", 1 => "SEndpgm", 2 => "SBranch", 4 => "SCbranchScc0", 5 => "SCbranchScc1",
             6 => "SCbranchVccz", 7 => "SCbranchVccnz", 8 => "SCbranchExecz", 9 => "SCbranchExecnz",
-            10 => "SBarrier", 12 => "SWaitcnt", 15 => "SSetprio", _ => "",
+            10 => "SBarrier", 12 => "SWaitcnt", 15 => "SSetprio", 22 => "STtraceData", _ => "",
         },
     };
 
