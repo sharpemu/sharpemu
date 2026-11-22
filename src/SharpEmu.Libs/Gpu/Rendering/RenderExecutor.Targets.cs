@@ -262,6 +262,12 @@ public sealed partial class RenderExecutor
     // another slot (MRT1 to target 7, say) is found through the export that feeds the slot.
     internal static bool IsUnwrittenColorTarget(ContextRegisters context, uint slot, ColorComponentMap exportMapping, uint pixelColorExportMasks)
     {
+        // The ObjPrimID write reaches its slot without an export.
+        if (Pipelines.ObjectIdOutput.SlotFor(context) == (int)slot)
+        {
+            return false;
+        }
+
         if (exportMapping.ApplyMask(context.RenderTargetMaskForSlot(slot)) == 0)
         {
             return true;

@@ -1495,6 +1495,7 @@ internal sealed partial class ShaderProgramCache
                     state.Add(output.ExportTarget);
                     state.Add(output.Index);
                     state.Add(output.DualSourceAlpha ? 1u : 0u);
+                    state.Add((uint)output.ObjectId);
                 }
                 break;
             case ShaderStage.Mesh:
@@ -1894,7 +1895,8 @@ internal sealed partial class ShaderProgramCache
                     usesMeshDrawParameters: source.Stage == ShaderStage.Mesh, pushDataAtTop: PushDataAtTop(source.Stage),
                     tableBlocks: UsesTableBlocks(source.Stage),
                     usesBufferLengths: source.Registered.Frontend?.RequiresExplicitBufferLengths ?? false,
-                    usesTessellationData: options.Tessellation is not null || options.TessellationHull is not null);
+                    usesTessellationData: options.Tessellation is not null || options.TessellationHull is not null,
+                    usesObjectId: source.Stage == ShaderStage.Pixel && options.PixelOutputs.Any(static output => output.ObjectId != Gen5PixelObjectId.None));
             }
             catch (ResourcePlanException exception)
             {
@@ -2276,7 +2278,8 @@ internal sealed partial class ShaderProgramCache
 
     private static BindingLayout AllocateLayout(Gen5ShaderProgram program, ShaderResourcePlan plan, SpecializedResourceInfo resources,
         uint userDataBase, uint userDataCount, uint pushDataCursor, bool usesDispatchThreadLimits, bool usesMeshDrawParameters = false,
-        bool pushDataAtTop = false, bool usesBufferLengths = false, bool usesTessellationData = false, bool tableBlocks = false) =>
+        bool pushDataAtTop = false, bool usesBufferLengths = false, bool usesTessellationData = false, bool tableBlocks = false,
+        bool usesObjectId = false) =>
         BindingLayout.Allocate(
             resources.Info,
             BindingLayout.CollectUserDataRegisters(program, userDataBase, userDataCount, plan.Graph.ExcludedUserDataRegisters),
@@ -2290,7 +2293,7 @@ internal sealed partial class ShaderProgramCache
             callTargetCount: BindingLayout.CountCallTargets(program),
             pushDataAtTop: pushDataAtTop,
             usesBufferLengths: usesBufferLengths,
-            usesTessellationData: usesTessellationData, tableBlock: tableBlocks);
+            usesTessellationData: usesTessellationData, tableBlock: tableBlocks, usesObjectId: usesObjectId);
 
     private static ShaderCompileRequest BuildComputeRequest(ShaderResourcePlan plan, SpecializedResourceInfo resources, BindingLayout layout,
         ComputeInputInfo info, Gen5ComputeSystemRegisters? systemRegisters, bool sharedInt64Atomics, bool execGuardElision,
@@ -2425,7 +2428,8 @@ internal sealed partial class ShaderProgramCache
             var specialization = RuntimeImageSwizzle.Canonical(plan, record.Specialization);
             var resources = ResourceMaterializer.ApplyTo(plan, specialization);
             layout = AllocateLayout(program, plan, resources, record.UserDataBase, record.UserDataCount, record.PushDataCursor, false,
-                tableBlocks: UsesTableBlocks(host, ShaderStage.Pixel));
+                tableBlocks: UsesTableBlocks(host, ShaderStage.Pixel),
+                usesObjectId: record.Outputs.Any(static output => output.ObjectId != Gen5PixelObjectId.None));
             var options = new StageCompileOptions
             {
                 PixelInfo = record.Info,

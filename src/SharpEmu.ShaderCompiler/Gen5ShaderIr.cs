@@ -129,6 +129,15 @@ public enum Gen5PixelExportFormat : byte
     Sint16 = 8,
 }
 
+// What the hardware writes to a color target the pixel program does not export to (VGT_DRAW_PAYLOAD_CNTL.OBJPRIM_ID_EN):
+// the draw's VGT_OBJECT_ID, plus the primitive index with PA_CL_OBJPRIM_ID_CNTL.ADD_PIPED_PRIM_ID.
+public enum Gen5PixelObjectId : byte
+{
+    None,
+    ObjectId,
+    ObjectIdAndPrimitiveId,
+}
+
 public readonly record struct Gen5PixelOutputBinding(
     uint GuestSlot,
     uint HostLocation,
@@ -160,6 +169,9 @@ public readonly record struct Gen5PixelOutputBinding(
     // The fragment output index: 1 is the second source of dual-source blending, which
     // shares its location with the first and is not a render target.
     public uint Index { get; init; }
+
+    // The binding is the ObjPrimID output: the program stores it at entry and no export feeds it.
+    public Gen5PixelObjectId ObjectId { get; init; }
 
     // The format of the export that feeds this slot.
     public Gen5PixelExportFormat ExportFormat { get; init; } = Gen5PixelExportFormat.Float16;

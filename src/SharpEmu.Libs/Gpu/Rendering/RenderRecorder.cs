@@ -608,6 +608,14 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
             vertexInput.Stage = meshStage;
         }
 
+        // The kept programs serve other draws: this draw's object id goes on a copy of the stage.
+        if (state.PixelActive && pixelInput.Stage.Program?.Bindings is { UsesObjectId: true })
+        {
+            var objectStage = pixelInput.Stage with { ObjectId = record.ObjectId };
+            pixelInput = pixelInput.WithoutStage();
+            pixelInput.Stage = objectStage;
+        }
+
         IPreparedBindings vertexBindings;
         IPreparedBindings? pixelBindings;
         try
@@ -824,6 +832,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
             : program.UsesDeviceAddresses ? "device_addresses"
             : program.CallRecordCallees.Count != 0 || layout.CallTargetCount != 0 || layout.CallArgumentCount != 0 ? "calls"
             : layout.UsesTessellationData ? "tessellation"
+            : layout.UsesObjectId ? "object_id"
             : program.Frontend is { RequiresOrderedImagePreparation: true } ? "frontend"
             : layout.Find(ShaderCompiler.Resources.DescriptorBindingKind.ShaderData) is not null ? "shader_data"
             : layout.Find(ShaderCompiler.Resources.DescriptorBindingKind.FlattenedResourceTable) is not null ? "flattened_table"
@@ -872,7 +881,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
             return 0;
         }
 
-        if ((compareThreadLimits && current.ThreadLimits != kept.ThreadLimits) || current.MeshDraw != kept.MeshDraw || current.TessellationData is { Length: > 0 } ||
+        if ((compareThreadLimits && current.ThreadLimits != kept.ThreadLimits) || current.MeshDraw != kept.MeshDraw || current.ObjectId != kept.ObjectId || current.TessellationData is { Length: > 0 } ||
             kept.TessellationData is { Length: > 0 } ||
             !(current.CallArguments ?? []).AsSpan().SequenceEqual(kept.CallArguments ?? []))
         {

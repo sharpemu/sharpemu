@@ -181,6 +181,9 @@ public static partial class Gen5SpirvTranslator
         private uint _exec;
         private uint _reachedPixelExport;
         private uint _pixelDepthOutput;
+        // The ObjPrimID output and the fragment primitive index it adds (0 when unused).
+        private SpirvPixelOutput? _objectIdOutput;
+        private uint _objectIdPrimitiveInput;
         private uint _pixelValidMaskActive;
         private uint _programCounter;
         private uint _programActive;
@@ -1189,6 +1192,20 @@ public static partial class Gen5SpirvTranslator
                             alphaVariable,
                             binding.ExportFormat));
                     _interfaces.Add(variable);
+                    if (binding.ObjectId != Gen5PixelObjectId.None)
+                    {
+                        _objectIdOutput = _pixelOutputs[binding.ExportTarget];
+                        if (binding.ObjectId == Gen5PixelObjectId.ObjectIdAndPrimitiveId)
+                        {
+                            // A fragment PrimitiveId needs the Geometry or Tessellation capability; the device enables tessellation.
+                            _module.AddCapability(SpirvCapability.Tessellation);
+                            _objectIdPrimitiveInput = _module.AddGlobalVariable(
+                                _module.TypePointer(SpirvStorageClass.Input, _intType), SpirvStorageClass.Input);
+                            _module.AddDecoration(_objectIdPrimitiveInput, SpirvDecoration.BuiltIn, (uint)SpirvBuiltIn.PrimitiveId);
+                            _module.AddDecoration(_objectIdPrimitiveInput, SpirvDecoration.Flat);
+                            _interfaces.Add(_objectIdPrimitiveInput);
+                        }
+                    }
                 }
             }
             else
@@ -1396,6 +1413,7 @@ public static partial class Gen5SpirvTranslator
                 {
                     Store(output.Variable, _module.ConstantNull(output.Type));
                 }
+                EmitObjectIdOutput();
             }
             else if (_pairedLanes)
             {
@@ -9200,6 +9218,32 @@ public static partial class Gen5SpirvTranslator
                        System.Globalization.CultureInfo.InvariantCulture,
                        out var address) &&
                    _request.Program.Address == address;
+        }
+
+        // The ObjPrimID write: VGT_OBJECT_ID (shader data) plus the primitive index when asked. It is stored at entry,
+        // so a fragment the program discards writes nothing, like any color output.
+        private void EmitObjectIdOutput()
+        {
+            if (_objectIdOutput is not { } output)
+            {
+                return;
+            }
+
+            var value = LoadShaderDataDword(UInt(_request.Bindings.ObjectIdDword));
+            if (_objectIdPrimitiveInput != 0)
+            {
+                value = IAdd(value, Bitcast(_uintType, Load(_intType, _objectIdPrimitiveInput)));
+            }
+
+            var vector = output.Kind switch
+            {
+                Gen5PixelOutputKind.Float => _module.AddInstruction(SpirvOp.CompositeConstruct, output.Type,
+                    Bitcast(_floatType, value), Float(0f), Float(0f), Float(0f)),
+                Gen5PixelOutputKind.Sint => _module.AddInstruction(SpirvOp.CompositeConstruct, output.Type,
+                    Bitcast(_intType, value), Bitcast(_intType, UInt(0)), Bitcast(_intType, UInt(0)), Bitcast(_intType, UInt(0))),
+                _ => _module.AddInstruction(SpirvOp.CompositeConstruct, output.Type, value, UInt(0), UInt(0), UInt(0)),
+            };
+            Store(output.Variable, vector);
         }
 
         private uint GetPixelOutputType(Gen5PixelOutputKind kind) =>

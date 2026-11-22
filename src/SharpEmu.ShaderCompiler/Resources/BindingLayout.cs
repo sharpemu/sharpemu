@@ -371,6 +371,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
     public bool UsesDispatchThreadLimits { get; init; }
     public bool UsesTessellationData { get; init; }
     public bool UsesMeshDrawParameters { get; init; }
+    public bool UsesObjectId { get; init; }
     public bool UsesTableBlock { get; init; }
     public bool UsesFlattenedTable { get; init; }
     public uint BufferCount { get; init; }
@@ -425,7 +426,10 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
 
     public uint HeapViewsDword => StorageImageSwizzlesDword + (StorageImageSwizzleCount + 1) / 2;
 
-    public uint ShaderDataDwordCount => HeapViewsDword + HeapViewCount * HeapView.DwordCount;
+    // The draw's VGT_OBJECT_ID of a pixel program that writes the ObjPrimID output, last in the shader data.
+    public uint ObjectIdDword => HeapViewsDword + HeapViewCount * HeapView.DwordCount;
+
+    public uint ShaderDataDwordCount => ObjectIdDword + (UsesObjectId ? 1u : 0u);
 
     public bool UsesPushData => PushDataStartDword != PushData.NoStart;
 
@@ -682,7 +686,8 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         bool pushDataAtTop = false,
         bool tableBlock = false,
         bool usesBufferLengths = false,
-        bool usesTessellationData = false)
+        bool usesTessellationData = false,
+        bool usesObjectId = false)
     {
         var flattened = usesFlattenedTable || info.Images.Any(image => image.IndirectSearchIterations != 0);
         var usesTableBlock = tableBlock && (info.Buffers.Count != 0 || flattened);
@@ -696,7 +701,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         var shaderDataDwords = memoryOffsetDword + (usesTableBlock ? 2u : (memoryOffsetCount + 3) / 4) + (usesBufferLengths ? memoryOffsetCount : 0) +
             (usesDispatchThreadLimits ? 3u : 0u) + mipStatisticsCount + (usesMeshDrawParameters ? 6u : 0u) +
             (usesTessellationData ? Gen5TessellationData.DwordCount : 0u) + callArgumentCount * 2 + callTargetCount * 2 +
-            (bufferStrideCount + 1) / 2 + (storageImageSwizzleCount + 1) / 2 + info.HeapViewCount * HeapView.DwordCount;
+            (bufferStrideCount + 1) / 2 + (storageImageSwizzleCount + 1) / 2 + info.HeapViewCount * HeapView.DwordCount + (usesObjectId ? 1u : 0u);
         var pushStart = usesTessellationData ? PushData.NoStart
             : pushDataAtTop ? PushData.TopFor(pushDataStartDword, shaderDataDwords)
             : PushData.StartFor(pushDataStartDword, shaderDataDwords);
@@ -805,6 +810,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             BufferCount = (uint)info.Buffers.Count,
             MipStatisticsCount = mipStatisticsCount,
             UsesMeshDrawParameters = usesMeshDrawParameters,
+            UsesObjectId = usesObjectId,
             CallArgumentCount = callArgumentCount,
             CallTargetCount = callTargetCount,
             BufferStrideCount = bufferStrideCount,
@@ -832,6 +838,7 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
         BufferCount == other.BufferCount &&
         MipStatisticsCount == other.MipStatisticsCount &&
         UsesMeshDrawParameters == other.UsesMeshDrawParameters &&
+        UsesObjectId == other.UsesObjectId &&
         CallArgumentCount == other.CallArgumentCount &&
         CallTargetCount == other.CallTargetCount &&
         BufferStrideCount == other.BufferStrideCount &&
@@ -867,6 +874,11 @@ public static class BindingLayoutValidator
             throw new ResourcePlanException("Only a compute shader can use dispatch thread limits.");
         }
 
+        if (layout.UsesObjectId && stage != ShaderStage.Pixel)
+        {
+            throw new ResourcePlanException("Only a pixel shader can use the object id.");
+        }
+
         if (layout.UsesMeshDrawParameters && stage != ShaderStage.Mesh)
         {
             throw new ResourcePlanException("Only a mesh shader can use mesh draw parameters.");
@@ -876,7 +888,7 @@ public static class BindingLayoutValidator
             usesFlattenedTable, usesShaderBase, layout.AllocationCursor,
             layout.UsesDispatchThreadLimits, layout.UsesMeshDrawParameters, layout.CallArgumentCount, layout.CallTargetCount,
             layout.PushDataAtTop, tableBlock: layout.UsesTableBlock, usesBufferLengths: layout.UsesBufferLengths,
-            usesTessellationData: layout.UsesTessellationData);
+            usesTessellationData: layout.UsesTessellationData, usesObjectId: layout.UsesObjectId);
         if (!expected.Equals(layout))
         {
             throw new ResourcePlanException(

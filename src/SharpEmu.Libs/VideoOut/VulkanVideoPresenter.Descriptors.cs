@@ -486,6 +486,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             stage.WriteDispatchThreadLimits(shaderData);
             stage.WriteMeshDrawParameters(shaderData);
+            stage.WriteObjectId(shaderData);
             stage.WriteTessellationData(shaderData);
             stage.WriteCallData(shaderData);
             return shaderData;

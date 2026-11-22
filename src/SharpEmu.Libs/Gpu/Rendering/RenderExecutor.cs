@@ -629,6 +629,7 @@ public sealed partial class RenderExecutor
         record.Topology = topology;
         record.PrimitiveRestart = primitiveRestart;
         record.PrimitiveType = (GuestPrimitiveType)banks.UserConfig.PrimitiveType;
+        record.ObjectId = banks.UserConfig.ObjectId;
         record.Emission = emission;
         record.Index = indexSource;
         record.Context = context;
@@ -858,7 +859,7 @@ public sealed partial class RenderExecutor
     {
         var context = banks.Context;
         var shaderInterface = context.ShaderInterface;
-        var hasColorOutput = (context.RenderTargetMask & shaderInterface.ColorShaderMask) != 0;
+        var hasColorOutput = (context.RenderTargetMask & shaderInterface.ColorShaderMask) != 0 || Pipelines.ObjectIdOutput.SlotFor(context) != Pipelines.ObjectIdOutput.NoSlot;
         return banks.Shader.Pixel.Address != 0 && (hasColorOutput || PixelShaderHasDepthOrCoverageSideEffects(shaderInterface));
     }
 

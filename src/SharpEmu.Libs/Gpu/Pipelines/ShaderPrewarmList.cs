@@ -1572,6 +1572,7 @@ internal sealed partial class ShaderPrewarmList : IDisposable
             writer.Write(output.ExportTarget);
             writer.Write(output.Index);
             writer.Write((int)output.ExportFormat);
+            writer.Write((byte)output.ObjectId);
         }
 
         writer.Write(record.InputEnable);
@@ -1648,12 +1649,14 @@ internal sealed partial class ShaderPrewarmList : IDisposable
                 var exportTarget = reader.ReadUInt32();
                 var outputIndex = reader.ReadUInt32();
                 var exportFormat = (Gen5PixelExportFormat)reader.ReadInt32();
+                var objectId = (Gen5PixelObjectId)reader.ReadByte();
                 outputs[index] = new Gen5PixelOutputBinding(guestSlot, hostLocation, kind, mapping)
                 {
                     DualSourceAlpha = dualSourceAlpha,
                     ExportTarget = exportTarget,
                     Index = outputIndex,
                     ExportFormat = exportFormat,
+                    ObjectId = objectId,
                 };
             }
 
@@ -1755,6 +1758,7 @@ internal sealed partial class ShaderPrewarmList : IDisposable
             writer.Write(output.ExportTarget);
             writer.Write(output.Index);
             writer.Write((byte)output.ExportFormat);
+            writer.Write((byte)output.ObjectId);
         }
 
         writer.Write(options.PixelInputEnable);
@@ -1811,6 +1815,7 @@ internal sealed partial class ShaderPrewarmList : IDisposable
                 ExportTarget = reader.ReadUInt32(),
                 Index = reader.ReadUInt32(),
                 ExportFormat = (Gen5PixelExportFormat)reader.ReadByte(),
+                ObjectId = (Gen5PixelObjectId)reader.ReadByte(),
             };
         }
 

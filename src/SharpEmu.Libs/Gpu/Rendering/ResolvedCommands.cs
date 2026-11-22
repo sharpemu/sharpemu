@@ -86,6 +86,7 @@ internal sealed class ResolvedDraw
     public PrimitiveTopology Topology;
     public bool PrimitiveRestart;
     public GuestPrimitiveType PrimitiveType;
+    public uint ObjectId;
     public DrawEmission Emission;
     public IndexSource Index;
     public ulong TessellationIndexAddress;
@@ -127,6 +128,7 @@ internal sealed class ResolvedDraw
         Topology = default;
         PrimitiveRestart = false;
         PrimitiveType = default;
+        ObjectId = 0;
         Emission = default;
         Index = default;
         TessellationIndexAddress = 0;

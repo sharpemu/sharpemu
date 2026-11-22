@@ -94,6 +94,11 @@ public static partial class Gen5SpirvTranslator
                 error = "pixel outputs must contain at most eight guest slots in the 0..7 range";
                 return false;
             }
+            if (request.PixelOutputs.Any(output => output.ObjectId != Gen5PixelObjectId.None) != request.Bindings.UsesObjectId)
+            {
+                error = "the object id output and the layout's object id dword must come together";
+                return false;
+            }
 
             // A dual-source second output shares location 0 with index 1; every other output
             // has index 0 and its own location.

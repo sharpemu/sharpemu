@@ -21,8 +21,8 @@ internal static partial class RegisterWriters
         foreach (var offset in new[]
                  {
                      DbRenderOverride2, DbDfsmControl, DbRmiL2CacheControl, CbRmiGl2CacheControl,
-                     TaBcBaseAddr, TaBcBaseAddrHi, CbDccControl, PaSuPointSize, PaSuPointMinMax, DbAlphaToMask, VgtDrawPayloadCntl,
-                     VgtPrimitiveIdReset, PaClObjPrimIdCntl, PaSuVtxCntl, PaScFovWindowLr, PaScFovWindowTb, PaScModeCntl1,
+                     TaBcBaseAddr, TaBcBaseAddrHi, CbDccControl, PaSuPointSize, PaSuPointMinMax, DbAlphaToMask,
+                     VgtPrimitiveIdReset, PaSuVtxCntl, PaScFovWindowLr, PaScFovWindowTb, PaScModeCntl1,
                      PaScAaMaskX0Y0X1Y0, PaScAaMaskX0Y1X1Y1, PsShaderSampleExclusionMask, PaScBinnerCntl0, PaScBinnerCntl1,
                      PaScConservativeRasterizationCntl,
                  })
@@ -168,7 +168,7 @@ internal static partial class RegisterWriters
                  {
                      CbDccControl, DbSResultsCompareState0, DbSResultsCompareState1, DbRenderOverride2,
                      DbDfsmControl, DbRmiL2CacheControl, CbRmiGl2CacheControl, TaBcBaseAddr, TaBcBaseAddrHi, PaSuPointSize, PaSuPointMinMax,
-                     SpiTmpringSize, VgtDrawPayloadCntl, VgtPrimitiveIdReset, PaClObjPrimIdCntl, PaScFovWindowLr, PaScFovWindowTb, PaScFsrEnable,
+                     SpiTmpringSize, VgtPrimitiveIdReset, PaScFovWindowLr, PaScFovWindowTb, PaScFsrEnable,
                      FsrRecursions0, FsrRecursions1, PaScModeCntl1, PaScAaMaskX0Y0X1Y0, PaScAaMaskX0Y1X1Y1, PaSuVtxCntl, PsShaderSampleExclusionMask,
                      PaScBinnerCntl0, PaScBinnerCntl1, PaScConservativeRasterizationCntl, DbAlphaToMask,
                  })
@@ -194,6 +194,8 @@ internal static partial class RegisterWriters
         indirect[GeMaxOutputPerSubgroup] = static (banks, _, value) => banks.ShaderInterfaceForWrite.MaxOutputPerSubgroup = value;
         indirect[VgtEsgsRingItemSize] = static (banks, _, value) => banks.ShaderInterfaceForWrite.ExportRingItemSize = value;
         indirect[VgtGsMaxVertOut] = static (banks, _, value) => banks.ShaderInterfaceForWrite.GeometryMaxVerticesOut = value;
+        indirect[VgtDrawPayloadCntl] = static (banks, _, value) => banks.ShaderInterfaceForWrite.DrawPayloadControl = value;
+        indirect[PaClObjPrimIdCntl] = static (banks, _, value) => banks.ShaderInterfaceForWrite.ObjectPrimitiveIdControl = value;
         indirect[VgtPrimitiveIdEn] = static (banks, _, value) => banks.ShaderInterfaceForWrite.PrimitiveIdEnable = value;
         indirect[VgtReuseOff] = static (banks, _, value) => banks.ShaderInterfaceForWrite.VertexReuseOff = value;
         indirect[VgtMultiPrimIbResetIndex] = static (banks, _, value) => banks.Context.PrimitiveResetIndex = value;
