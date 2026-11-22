@@ -1127,6 +1127,32 @@ public sealed partial class SpirvModuleBuilder
         CurrentFunction = 0;
     }
 
+    // A driver may fuse a multiply with an add, or split a fused multiply-add, and decide differently in each pipeline.
+    // A depth prepass and the pass that tests its depth for equality run different programs that compute the same
+    // position, so a vertex that moves by one ulp in only one of them drops the triangle from the second pass. Set for
+    // the stages before rasterization: each such operation keeps its own rounding, as the guest's instructions do.
+    public bool KeepsFloatRounding { get; set; }
+
+    private const uint GlslFma = 50;
+
+    private List<uint> WithNoContraction(List<uint> functions, List<uint> annotations)
+    {
+        var decorated = new List<uint>(annotations);
+        var glsl = _extInstImports.GetValueOrDefault("GLSL.std.450");
+        for (var offset = 0; offset < functions.Count; offset += Math.Max(1, (int)(functions[offset] >> 16)))
+        {
+            var opcode = (SpirvOp)(functions[offset] & 0xFFFF);
+            if ((opcode is SpirvOp.FAdd or SpirvOp.FSub or SpirvOp.FMul ||
+                 opcode == SpirvOp.ExtInst && glsl != 0 && functions[offset + 3] == glsl && functions[offset + 4] == GlslFma) &&
+                !_plainDecorations.Contains((functions[offset + 2], SpirvDecoration.NoContraction)))
+            {
+                Emit(decorated, SpirvOp.Decorate, functions[offset + 2], (uint)SpirvDecoration.NoContraction);
+            }
+        }
+
+        return decorated;
+    }
+
     public byte[] Build()
     {
         if (_memoryModel.Count == 0)
@@ -1139,6 +1165,11 @@ public sealed partial class SpirvModuleBuilder
         var functions = CompactFunctions(removedIds, unreadPointers);
         var debug = WithoutTargets(_debug, removedIds);
         var annotations = WithoutTargets(_annotations, removedIds);
+        if (KeepsFloatRounding)
+        {
+            annotations = WithNoContraction(functions, annotations);
+        }
+
         var entryPoints = WithoutInterfaces(_entryPoints, unreadVariables);
         var globals = WithoutVariables(_typesConstantsGlobals, unreadVariables);
         var wordCount =

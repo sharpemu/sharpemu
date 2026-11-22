@@ -238,6 +238,7 @@ public static partial class Gen5SpirvTranslator
                 ShaderStage.TessellationEvaluation => Gen5SpirvStage.TessellationEvaluation,
                 _ => Gen5SpirvStage.Compute,
             };
+            _module.KeepsFloatRounding = _stage is not (Gen5SpirvStage.Pixel or Gen5SpirvStage.Compute);
             _pixelOutputBindings = request.PixelOutputs;
             _usesPixelValidMask =
                 _stage == Gen5SpirvStage.Pixel &&
