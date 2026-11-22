@@ -55,8 +55,6 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     private readonly AvlSpanSet _gpuModifiedRanges = new();
     private readonly ReaderWriterLockSlim _gpuModifiedGate = new(LockRecursionPolicy.NoRecursion);
 
-    private SpanSnapshot _gpuModifiedSnapshot = SpanSnapshot.Empty;
-
     private GpuModifiedWrite WriteGpuModified()
     {
         _gpuModifiedGate.EnterWriteLock();
@@ -67,7 +65,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     {
         public void Dispose()
         {
-            Volatile.Write(ref cache._gpuModifiedSnapshot, cache._gpuModifiedRanges.Snapshot());
+            cache._gpuModifiedRanges.PublishChanges();
             cache._gpuModifiedGate.ExitWriteLock();
         }
     }
@@ -945,7 +943,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             Environment.FailFast($"The address range is invalid: 0x{guestAddress:X16}, 0x{size:X16}.");
         }
 
-        return Volatile.Read(ref _gpuModifiedSnapshot).Overlaps(guestAddress, size);
+        return _gpuModifiedRanges.PublishedOverlaps(guestAddress, size);
     }
 
     public bool EverGpuWritten(ulong guestAddress, ulong size) => _tracker.MayHaveGpuWrittenPages(guestAddress, size);
