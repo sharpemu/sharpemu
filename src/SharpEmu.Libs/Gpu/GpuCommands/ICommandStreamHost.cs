@@ -126,6 +126,9 @@ public interface ICommandStreamHost
     // Draws resolve ahead of the stream on this many worker threads; zero resolves them on the stream thread.
     int ResolveWorkerCount => 0;
 
+    // Accept the complete run or leave every packet for the normal draw handler.
+    bool TryDrawIndexedRun(ulong submitId, in DrawIndexedArguments first, ReadOnlySpan<uint> offsets) => false;
+
     // Reads on this thread now serve a draw at this stream position: a range earlier work may still
     // write refuses with SerialResolveRequiredException, every other read lands in the log.
     void BeginWorkerResolve(long sequence, ResolveReadLog reads)
