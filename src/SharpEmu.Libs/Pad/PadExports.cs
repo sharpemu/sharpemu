@@ -628,6 +628,19 @@ public static class PadExports
         }
 
         var triggerMask = parameter[0];
+        lock (session.TriggerEffects)
+        {
+            if ((triggerMask & 0x01) != 0)
+            {
+                parameter[8..64].CopyTo(session.TriggerEffects);
+            }
+
+            if ((triggerMask & 0x02) != 0)
+            {
+                parameter[64..120].CopyTo(session.TriggerEffects.AsSpan(56));
+            }
+        }
+
         HostPlatform.Current.Input.SetAdaptiveTriggerEffect(
             (triggerMask & 0x01) != 0 ? DecodeTriggerEffect(parameter[8..64]) : null,
             (triggerMask & 0x02) != 0 ? DecodeTriggerEffect(parameter[64..120]) : null);
@@ -649,7 +662,7 @@ public static class PadExports
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
         var stateAddress = ctx[CpuRegister.Rsi];
-        if (!TryGetSession(ctx, handle, out _))
+        if (!TryGetSession(ctx, handle, out var session))
         {
             return ctx.SetReturn(OrbisPadErrorInvalidHandle);
         }
@@ -659,15 +672,40 @@ public static class PadExports
             return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        // No host pad exposes DualSense adaptive-trigger feedback, so every
-        // trigger reports the neutral "no effect engaged" state. Reporting it
-        // as success is what lets the caller take its normal path instead of
-        // falling back to a cached button bitmask every poll.
+        // A DualSense reports where each trigger is against its running effect, but SDL does not expose that report
+        // and other pads have no trigger motors. The state follows from the game's last effect and the trigger's
+        // travel instead, so a game that waits for a weapon or feedback state before acting on L2 or R2 sees it.
+        var input = ReadHostInputState();
         Span<byte> state = stackalloc byte[TriggerEffectStateSize];
-        state.Clear();
+        lock (session.TriggerEffects)
+        {
+            BinaryPrimitives.WriteInt32LittleEndian(state, TriggerEffectState(session.TriggerEffects.AsSpan(0, 56), input.L2));
+            BinaryPrimitives.WriteInt32LittleEndian(state[4..], TriggerEffectState(session.TriggerEffects.AsSpan(56, 56), input.R2));
+        }
+
         return ctx.Memory.TryWrite(stateAddress, state)
             ? ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_OK)
             : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    // A trigger's state against a trigger effect command: 0 no effect, 1/2 feedback standby/pushing, 3/4/5 weapon
+    // standby/pulling/fired, 6/7 vibration standby/firing. The travel 0..255 maps to the effect's ten positions, and
+    // below 8 the trigger counts as released.
+    internal static int TriggerEffectState(ReadOnlySpan<byte> command, byte travel)
+    {
+        var data = command[8..];
+        var position = travel * 10 / 256;
+        var pressed = travel >= 8;
+        return BinaryPrimitives.ReadUInt32LittleEndian(command) switch
+        {
+            1 => pressed && data[1] != 0 && position >= data[0] ? 2 : 1,
+            2 => position >= data[1] ? 5 : position >= data[0] ? 4 : 3,
+            3 => pressed && data[1] != 0 && data[2] != 0 && position >= data[0] ? 7 : 6,
+            4 => pressed && data[position] != 0 ? 2 : 1,
+            5 => pressed && position >= data[0] ? 2 : 1,
+            6 => pressed && data[0] != 0 && data[1 + position] != 0 ? 7 : 6,
+            _ => 0,
+        };
     }
 
     private static HostAdaptiveTriggerEffect DecodeTriggerEffect(ReadOnlySpan<byte> command)

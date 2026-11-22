@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers.Binary;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Pad;
 using Xunit;
@@ -231,6 +232,55 @@ public sealed class PadExportsTests
         _ctx[CpuRegister.Rdi] = unchecked((ulong)handle);
         _ctx[CpuRegister.Rsi] = Base + 0x100;
         Assert.Equal(InvalidHandle, PadExports.PadGetTriggerEffectState(_ctx));
+    }
+
+    [NativeX64Fact]
+    public void GetTriggerEffectState_ReportsTheEffectTheGameSet()
+    {
+        const ulong parameterAddress = Base + 0x200;
+        const ulong stateAddress = Base + 0x100;
+        var parameter = new byte[120];
+        parameter[0] = 0x02;
+        BinaryPrimitives.WriteUInt32LittleEndian(parameter.AsSpan(64), 2);
+        parameter[72] = 2;
+        parameter[73] = 6;
+        parameter[74] = 8;
+        Assert.True(_memory.TryWrite(parameterAddress, parameter));
+        _ctx[CpuRegister.Rdi] = 1;
+        _ctx[CpuRegister.Rsi] = parameterAddress;
+        Assert.Equal(0, PadExports.PadSetTriggerEffect(_ctx));
+
+        _ctx[CpuRegister.Rdi] = 1;
+        _ctx[CpuRegister.Rsi] = stateAddress;
+        Assert.Equal(0, PadExports.PadGetTriggerEffectState(_ctx));
+        Span<byte> state = stackalloc byte[8];
+        Assert.True(_memory.TryRead(stateAddress, state));
+        Assert.Equal(0, BinaryPrimitives.ReadInt32LittleEndian(state));
+        Assert.Equal(3, BinaryPrimitives.ReadInt32LittleEndian(state[4..]));
+    }
+
+    [NativeX64Theory]
+    [InlineData(0, new byte[0], 255, 0)]
+    [InlineData(1, new byte[] { 3, 5 }, 0, 1)]
+    [InlineData(1, new byte[] { 3, 5 }, 128, 2)]
+    [InlineData(1, new byte[] { 7, 5 }, 128, 1)]
+    [InlineData(2, new byte[] { 2, 6, 8 }, 0, 3)]
+    [InlineData(2, new byte[] { 2, 6, 8 }, 100, 4)]
+    [InlineData(2, new byte[] { 2, 6, 8 }, 255, 5)]
+    [InlineData(3, new byte[] { 0, 4, 40 }, 200, 7)]
+    [InlineData(3, new byte[] { 0, 4, 0 }, 200, 6)]
+    [InlineData(4, new byte[] { 0, 0, 0, 0, 0, 6, 6, 6, 6, 6 }, 140, 2)]
+    [InlineData(4, new byte[] { 0, 0, 0, 0, 0, 6, 6, 6, 6, 6 }, 60, 1)]
+    [InlineData(5, new byte[] { 4, 8, 1, 8 }, 120, 2)]
+    [InlineData(5, new byte[] { 4, 8, 1, 8 }, 4, 1)]
+    [InlineData(6, new byte[] { 30, 0, 0, 0, 5, 5, 5, 5, 5, 5, 5 }, 120, 7)]
+    [InlineData(6, new byte[] { 0, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5 }, 120, 6)]
+    public void TriggerEffectState_FollowsTheEffectAndTheTriggerTravel(int mode, byte[] data, int travel, int expected)
+    {
+        var command = new byte[56];
+        BinaryPrimitives.WriteUInt32LittleEndian(command, (uint)mode);
+        data.CopyTo(command, 8);
+        Assert.Equal(expected, PadExports.TriggerEffectState(command, (byte)travel));
     }
 
     [NativeX64Fact]
