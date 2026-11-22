@@ -39,7 +39,7 @@ public struct DepthConversionLayout
     public ulong TargetSliceStride;
 }
 
-// The 13 dwords every tiler shader reads, as a uniform block or as push constants.
+// The 14 dwords every tiler shader reads, as a uniform block or as push constants.
 [StructLayout(LayoutKind.Sequential, Pack = 4)]
 public struct TileTransferArguments
 {
@@ -56,8 +56,10 @@ public struct TileTransferArguments
     public uint TailX;
     public uint TailY;
     public uint Tail;
+    // Nonzero: a detile reads every 256-byte block of the tiled source as its first element (DCC key 0x10).
+    public uint ExpandBlocks;
 
-    public const uint Size = 52;
+    public const uint Size = 56;
 }
 
 // Runs the tiling, detiling, depth conversion and channel swap compute passes.
@@ -327,8 +329,21 @@ public sealed unsafe class GpuTiler : IDisposable
 
     private static bool IsValidRange(ulong offset, ulong size, ulong capacity) => size != 0 && offset <= capacity && size <= capacity - offset;
 
+    public const uint ExpandBlockBytes = 256;
+
+    // The source byte a block-expanding detile reads for a tiled offset: every element of a 256-byte block
+    // takes the value of the block's first element, byte for byte.
+    public static ulong ExpandedSourceOffset(ulong offset, uint bytesPerElement) =>
+        (offset & ~(ulong)(ExpandBlockBytes - 1)) + offset % bytesPerElement;
+
+    // Block expansion masks the source offset relative to the transfer, so the transfer must start on a block
+    // boundary and cover whole blocks.
+    public static bool CanExpandBlocks(in TileTransfer transfer) =>
+        !transfer.Tail && (transfer.TiledOffset & (ExpandBlockBytes - 1)) == 0 &&
+        transfer.BytesPerElement is 1 or 2 or 4 or 8 or 16;
+
     // Checks every transfer and writes its arguments to the stream ring.
-    private void Prepare(bool tile, ulong tiledCapacity, ulong linearCapacity, ReadOnlySpan<TileTransfer> transfers, ulong sourceBase, ulong targetBase, List<TransferDispatch> dispatches)
+    private void Prepare(bool tile, ulong tiledCapacity, ulong linearCapacity, ReadOnlySpan<TileTransfer> transfers, ulong sourceBase, ulong targetBase, List<TransferDispatch> dispatches, bool expandBlocks = false)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageTiling);
         if (transfers.IsEmpty || tiledCapacity == 0 || linearCapacity == 0)
@@ -421,6 +436,12 @@ public sealed unsafe class GpuTiler : IDisposable
                 }
             }
 
+            if (expandBlocks && (tile || !CanExpandBlocks(transfer)))
+            {
+                throw SubmissionScheduler.Fatal(
+                    $"The block-expanding tile transfer is invalid: tile={tile} tail={transfer.Tail} tiled=0x{transfer.TiledOffset:x} bytes={transfer.BytesPerElement}.");
+            }
+
             var alignment = Math.Min(transfer.BytesPerElement, 4u);
             if (((transfer.LinearOffset | transfer.TiledOffset | pitchBytes | sliceBytes) & (alignment - 1u)) != 0)
             {
@@ -460,6 +481,7 @@ public sealed unsafe class GpuTiler : IDisposable
                     TailX = transfer.TailX,
                     TailY = transfer.TailY,
                     Tail = transfer.Tail ? 1u : 0u,
+                    ExpandBlocks = expandBlocks ? 1u : 0u,
                 },
             });
         }
@@ -612,11 +634,12 @@ public sealed unsafe class GpuTiler : IDisposable
     }
 
     // Detiles into a scratch buffer that lives through the current tick.
-    public TilerBufferSpan Detile(VkBuffer tiled, ulong tiledOffset, ulong tiledCapacity, ulong linearCapacity, ReadOnlySpan<TileTransfer> transfers)
+    // With expandBlocks every 256-byte block of the source reads as its first element (DCC key 0x10).
+    public TilerBufferSpan Detile(VkBuffer tiled, ulong tiledOffset, ulong tiledCapacity, ulong linearCapacity, ReadOnlySpan<TileTransfer> transfers, bool expandBlocks = false)
     {
         var sourceBase = tiledOffset & (StorageAlignment - 1);
         var dispatches = new List<TransferDispatch>();
-        Prepare(false, tiledCapacity, linearCapacity, transfers, sourceBase, 0, dispatches);
+        Prepare(false, tiledCapacity, linearCapacity, transfers, sourceBase, 0, dispatches, expandBlocks);
         var scratch = AllocateScratch((linearCapacity + 3) & ~3UL);
         Record(false, tiled, tiledOffset, tiledCapacity, scratch.Buffer, 0, scratch.Size, dispatches, true);
         return new TilerBufferSpan(scratch.Buffer, 0, linearCapacity);

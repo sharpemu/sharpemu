@@ -26,6 +26,25 @@ internal static class NativeColorClear
             ((height + (ulong)block.Height - 1) / block.Height) * 4096;
     }
 
+    // A DCC key of 0x10 marks a 256-byte block that reads as the element stored at its start.
+    internal const byte DccBlockFirstElementCode = 0x10;
+
+    internal static bool IsBlockFirstElement(byte code, bool cmask) => !cmask && code == DccBlockFirstElementCode;
+
+    // Why the block-expanding fill cannot prove the surface right; null when it can.
+    internal static string? BlockFirstElementRefusal(in ImageRequest request)
+    {
+        var description = request.Description;
+        if (description.IsDepth || description.IsVolume) return "the image is a depth or volume image";
+        if (description.Samples != 1) return "the image is multisampled";
+        if (description.FirstLevel != 0 || description.Resources.Levels != 1 || request.View.BaseLevel != 0)
+            return "the image has more than one mip level";
+        if (!description.IsTiled) return "the image is linear";
+        if (description.BytesPerBlock is not (1 or 2 or 4 or 8 or 16)) return "the element size is unsupported";
+        if ((description.Data.Address & (GpuTiler.ExpandBlockBytes - 1)) != 0) return "the surface is not 256-byte aligned";
+        return null;
+    }
+
     internal static bool TryDecode(byte code, Format format, bool alphaOnLeastSignificantBits, out ClearColorValue color)
     {
         color = default;

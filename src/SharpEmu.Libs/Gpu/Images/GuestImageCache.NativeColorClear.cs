@@ -143,9 +143,12 @@ public sealed unsafe partial class GuestImageCache
         if (!_backing.TryReadBacking(address, bytes[..1]))
             throw SubmissionScheduler.Fatal($"The color metadata is unreadable: address=0x{address:X16}.");
         var code = bytes[0];
-        ClearColorValue color;
+        ClearColorValue color = default;
         var cmask = metadata.Kind == MetadataKind.Cmask;
-        if (code == (cmask ? 0 : 0x20) && request.Role == ImageRole.ColorTarget && metadata.PackedColorClearSupported)
+        var kind = ColorClearKind.Fill;
+        if (NativeColorClear.IsBlockFirstElement(code, cmask))
+            kind = ColorClearKind.BlockFirstElement;
+        else if (code == (cmask ? 0 : 0x20) && request.Role == ImageRole.ColorTarget && metadata.PackedColorClearSupported)
             color = metadata.PackedColorClear;
         else if (cmask || !NativeColorClear.TryDecode(code, view.Format, metadata.ColorAlphaOnLeastSignificantBits, out color))
             return false;
@@ -162,9 +165,30 @@ public sealed unsafe partial class GuestImageCache
             }
         }
         if (!scan.Complete) return false;
+        if (kind == ColorClearKind.BlockFirstElement &&
+            NativeColorClear.BlockFirstElementRefusal(request) is { } refusal)
+        {
+            ReportBlockExpansionRefused(request, address, refusal);
+            return false;
+        }
 
-        operation = new ColorClearOperation(layer, address, sliceSize, code, color);
+        operation = new ColorClearOperation(layer, address, sliceSize, code, color, kind);
         return true;
+    }
+
+    private static readonly HashSet<string> ReportedBlockExpansionRefusals = [];
+
+    // A uniform 0x10 slice the expansion cannot prove right keeps its keys and its image; say why once.
+    private static void ReportBlockExpansionRefused(in ImageRequest request, ulong metadataAddress, string reason)
+    {
+        lock (ReportedBlockExpansionRefusals)
+        {
+            if (!ReportedBlockExpansionRefusals.Add(reason)) return;
+        }
+
+        Console.Error.WriteLine(
+            $"[ImageClear] DCC key 0x10 (block reads as its first element) not applied: {reason}; " +
+            $"image=0x{request.Description.Data.Address:X16} metadata=0x{metadataAddress:X16}.");
     }
 
     private static bool ClearCoversImage(CachedImage image, in ImageRequest request)
@@ -177,6 +201,12 @@ public sealed unsafe partial class GuestImageCache
     private void RecordColorClear(ResourceSlotIdentifier imageIdentifier, in ImageRequest request,
         in ColorClearOperation operation)
     {
+        if (operation.Kind == ColorClearKind.BlockFirstElement)
+        {
+            RecordBlockFirstElementFill(imageIdentifier, request, operation);
+            return;
+        }
+
         var description = request.Description;
         var view = request.View;
         var layer = operation.ImageLayer;
@@ -231,5 +261,84 @@ public sealed unsafe partial class GuestImageCache
 
         if (ImageClearTrace.Enabled)
             ImageClearTrace.Write($"applied image=0x{description.Data.Address:X16} metadata=0x{address:X16} size=0x{sliceSize:X} layer={layer} code=0x{code:X2}");
+    }
+
+    // The tile layout of one layer for a block-expanding detile, or null with the reason it cannot be proven right.
+    private static ColorTransferPlan? PlanBlockExpansion(CachedImage image, uint layer, out string reason)
+    {
+        ref readonly var info = ref image.Description;
+        reason = "";
+        if (image.DepthOwner.IsValid || info.Samples != 1 || image.Backing.Samples != 1 ||
+            info.Resources.Levels != 1 || info.FirstLevel != 0 || info.Resources.Layers == 0 ||
+            info.Data.Size % info.Resources.Layers != 0 || layer >= info.Resources.Layers)
+        {
+            reason = "the image layout is not a single-level color surface";
+            return null;
+        }
+
+        var plan = PlanColorTransfer(image, ImageRole.ColorTarget, TransferDirection.Upload);
+        if (!plan.Valid || !plan.Tiled || plan.Regions.Count != info.Resources.Layers || plan.Tiles.Count != plan.Regions.Count)
+        {
+            reason = "the tile layout does not map one transfer to each layer";
+            return null;
+        }
+
+        var tile = plan.Tiles[(int)layer];
+        if (!GpuTiler.CanExpandBlocks(tile))
+        {
+            reason = "the tile transfer does not start on a 256-byte block";
+            return null;
+        }
+
+        plan.Regions = [plan.Regions[(int)layer]];
+        plan.Tiles = [tile];
+        return plan;
+    }
+
+    // DCC key 0x10: every element of a 256-byte block reads as the block's first element. The keys are consumed
+    // as for any clear code, and the image is filled from the guest's block-first elements on the GPU, so the
+    // image owns the expanded contents afterwards.
+    private void RecordBlockFirstElementFill(ResourceSlotIdentifier imageIdentifier, in ImageRequest request,
+        in ColorClearOperation operation)
+    {
+        var layer = operation.ImageLayer;
+        ColorTransferPlan? plan;
+        string reason;
+        using (var held = _lock.Hold())
+        {
+            plan = PlanBlockExpansion(_slots[imageIdentifier], layer, out reason);
+        }
+
+        if (plan == null)
+        {
+            ReportBlockExpansionRefused(request, operation.MetadataAddress, reason);
+            return;
+        }
+
+        _bufferCache.FillBuffer(operation.MetadataAddress, operation.MetadataSize, uint.MaxValue, false);
+        using (var held = _lock.Hold())
+        {
+            var image = _slots[imageIdentifier];
+            if (!ClearCoversImage(image, request))
+            {
+                RefreshFromGuest(imageIdentifier, request);
+            }
+
+            var info = image.Description;
+            var (source, sourceOffset) = _bufferCache.ObtainBufferForImage(info.Data.Address, info.Data.Size);
+            var linear = _tiler.Detile(source.Handle, sourceOffset, info.Data.Size, plan.LinearSize,
+                System.Runtime.InteropServices.CollectionsMarshal.AsSpan(plan.Tiles), expandBlocks: true);
+            if (plan.SwapBgra16)
+            {
+                linear = _tiler.SwapBgra16(linear);
+            }
+
+            UploadRegions(image, plan.Regions, linear);
+            WatchImage(imageIdentifier);
+            TakeGpuOwnership(image);
+        }
+
+        if (ImageClearTrace.Enabled)
+            ImageClearTrace.Write($"applied image=0x{request.Description.Data.Address:X16} metadata=0x{operation.MetadataAddress:X16} size=0x{operation.MetadataSize:X} layer={layer} code=0x{operation.MetadataCode:X2} block-first-element");
     }
 }

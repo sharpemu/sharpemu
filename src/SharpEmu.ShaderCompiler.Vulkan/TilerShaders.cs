@@ -23,7 +23,10 @@ public enum TilerBlockShape
 // the 16-bit depth conversions and the BGRA16 channel swap.
 public static class TilerShaders
 {
-    public const int ArgumentCount = 13;
+    public const int ArgumentCount = 14;
+
+    // The argument that makes a detile read each 256-byte block of the tiled source as its first element.
+    public const uint ExpandBlocksArgument = 13;
 
     private enum Axis
     {
@@ -448,7 +451,11 @@ public static class TilerShaders
         }
         else
         {
-            CopyElement(shaderModule, shaderModule.Add(sourceBase, tiled), shaderModule.Add(destinationBase, linear), elementBytes);
+            // DCC key 0x10: every element of a 256-byte block reads as the block's first element. The block
+            // start is 256-aligned relative to the surface, and elements never straddle it.
+            var expand = builder.AddInstruction(SpirvOp.INotEqual, shaderModule.BooleanType, shaderModule.LoadArgument(ExpandBlocksArgument), shaderModule.GetUnsignedConstant(0));
+            var expandedTiled = builder.AddInstruction(SpirvOp.Select, shaderModule.UintType, expand, shaderModule.And(tiled, shaderModule.GetUnsignedConstant(~0xffu)), tiled);
+            CopyElement(shaderModule, shaderModule.Add(sourceBase, expandedTiled), shaderModule.Add(destinationBase, linear), elementBytes);
         }
 
         builder.AddStatement(SpirvOp.Return);

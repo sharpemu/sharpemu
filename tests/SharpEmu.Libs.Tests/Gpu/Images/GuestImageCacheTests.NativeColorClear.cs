@@ -56,6 +56,30 @@ public sealed partial class GuestImageCacheTests
         _vulkan.AssertNoValidationMessages();
     }
 
+    // A uniform 0x10 slice on a surface the expansion cannot prove right (here: linear) keeps its keys and its image.
+    [Fact]
+    public void NativeColorClear_DccBlockFirstElementKeyIsRefusedOnALinearSurface()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        var metadataAddress = address + 0x10000;
+        var target = AsColorTarget(LinearRequest(address, 8, Format.R16G16B16A16Sfloat,
+            GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 8, 1));
+        target.Description.Metadata.Kind = MetadataKind.Dcc;
+        target.Description.Metadata.Range = new GuestSpan(metadataAddress, 4096);
+        target.Description.Metadata.NativeColorClear = true;
+        harness.Write(metadataAddress, Enumerable.Repeat((byte)0x10, 4096).ToArray());
+        var identifier = harness.Find(ref target);
+
+        harness.Worker.Run(() => harness.Images.ApplyNativeColorClear(identifier, target));
+        Assert.Equal(0x10101010u, harness.ReadUInt32(metadataAddress));
+        Assert.Equal(new byte[8], harness.ReadImageBytes(harness.Image(identifier)));
+        Assert.True(harness.Images.NativeColorClearSettled(identifier, target));
+        harness.Shutdown();
+        _vulkan.AssertNoValidationMessages();
+    }
+
     [Fact]
     public void RepeatedNativeColorClearRegistrationKeepsTheMetadataGeneration()
     {
