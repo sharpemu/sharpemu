@@ -1544,6 +1544,20 @@ internal static unsafe partial class VulkanVideoPresenter
             CountDraw();
         }
 
+        bool IRenderHost.CanShareIndexedBindings(IPreparedBindings stage, ReadOnlySpan<ColorTargetState> colors, in DepthAttachmentState depth)
+        {
+            if (_preparation?.StencilStorageImages is not null || _preparation?.FeedbackSnapshots is not null || _snapshotPixelHash != 0)
+                return false;
+            foreach (var texture in ((PreparedStageBindings)stage).Textures)
+            {
+                if (texture.IsHostMovie || texture.IsFeedbackSnapshot || texture.IsStorage) return false;
+                if (depth.HasTarget && texture.ImageIdentifier == depth.Image) return false;
+                foreach (ref readonly var color in colors)
+                    if (texture.ImageIdentifier == color.Image) return false;
+            }
+            return true;
+        }
+
         void IRenderHost.DrawIndexedIndirect(BufferBinding arguments)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawRecording);
