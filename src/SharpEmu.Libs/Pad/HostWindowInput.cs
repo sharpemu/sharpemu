@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Numerics;
 using SharpEmu.HLE.Host;
 
 namespace SharpEmu.Libs.Pad;
@@ -16,6 +17,8 @@ public static class HostWindowInput
     private static HostGamepadState _gamepadState;
     private static IHostGamepadOutput? _gamepadOutput;
     private static readonly WindowInputSource Source = new();
+    private static readonly MotionOrientation Orientation = new();
+    private const float StandardGravity = 9.80665f;
 
     public static void Connect(IHostGamepadOutput? gamepadOutput = null)
     {
@@ -40,6 +43,7 @@ public static class HostWindowInput
             _gamepadState = default;
             _gamepadOutput = null;
             PressedKeys.Clear();
+            Orientation.Reset();
         }
 
         HostWindowInputSource.Clear(Source);
@@ -85,6 +89,21 @@ public static class HostWindowInput
         {
             changed = _gamepadConnected != state.Connected || _gamepadState.Buttons != state.Buttons ||
                       !SameContacts(_gamepadState.Touch, state.Touch);
+            if (state.Motion.Available)
+            {
+                var orientation = Orientation.Orientation;
+                state = state with
+                {
+                    Motion = state.Motion with
+                    {
+                        OrientationX = orientation.X,
+                        OrientationY = orientation.Y,
+                        OrientationZ = orientation.Z,
+                        OrientationW = orientation.W,
+                    },
+                };
+            }
+
             _gamepadConnected = state.Connected;
             _gamepadName = name;
             _gamepadState = state;
@@ -119,9 +138,44 @@ public static class HostWindowInput
             _gamepadConnected = false;
             _gamepadName = null;
             _gamepadState = default;
+            Orientation.Reset();
         }
 
         if (changed) Changed?.Invoke();
+    }
+
+    // One sensor reading of the connected gamepad as SDL reports it (acceleration in m/s^2, angular velocity in
+    // radians per second, the sensor's timestamp in nanoseconds). Each gyro reading turns the pad's orientation by its
+    // own interval, which a poll of the latest reading cannot do.
+    public static void ApplyGamepadMotion(bool angularVelocity, float x, float y, float z, ulong timestampNanoseconds)
+    {
+        lock (Gate)
+        {
+            if (angularVelocity)
+            {
+                Orientation.ApplyAngularVelocity(new Vector3(x, y, z), timestampNanoseconds);
+            }
+            else
+            {
+                Orientation.ApplyAcceleration(new Vector3(x, y, z) / StandardGravity);
+            }
+        }
+    }
+
+    internal static void ResetMotionOrientation()
+    {
+        lock (Gate)
+        {
+            Orientation.Reset();
+        }
+    }
+
+    internal static void SetMotionTiltCorrection(bool enabled)
+    {
+        lock (Gate)
+        {
+            Orientation.TiltCorrection = enabled;
+        }
     }
 
     private static bool SameContacts(HostTouchState left, HostTouchState right) =>

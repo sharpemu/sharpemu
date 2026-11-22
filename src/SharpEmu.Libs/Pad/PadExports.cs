@@ -322,9 +322,13 @@ public static class PadExports
     public static int PadSetTiltCorrectionState(CpuContext ctx)
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
-        return TryGetSession(ctx, handle, out _)
-            ? ctx.SetReturn(0)
-            : ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        if (!TryGetSession(ctx, handle, out _))
+        {
+            return ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        }
+
+        HostWindowInput.SetMotionTiltCorrection((byte)ctx[CpuRegister.Rsi] != 0);
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -966,9 +970,13 @@ public static class PadExports
     public static int PadResetOrientation(CpuContext ctx)
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
-        return TryGetSession(ctx, handle, out _)
-            ? ctx.SetReturn(0)
-            : ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        if (!TryGetSession(ctx, handle, out _))
+        {
+            return ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        }
+
+        HostWindowInput.ResetMotionOrientation();
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -1036,6 +1044,10 @@ public static class PadExports
         BinaryPrimitives.WriteSingleLittleEndian(data[0x18..], 1.0f);
         if (Volatile.Read(ref session.MotionSensorEnabled) != 0 && input.Motion.Available)
         {
+            BinaryPrimitives.WriteSingleLittleEndian(data[0x0C..], input.Motion.OrientationX);
+            BinaryPrimitives.WriteSingleLittleEndian(data[0x10..], input.Motion.OrientationY);
+            BinaryPrimitives.WriteSingleLittleEndian(data[0x14..], input.Motion.OrientationZ);
+            BinaryPrimitives.WriteSingleLittleEndian(data[0x18..], input.Motion.OrientationW);
             // Host acceleration is m/s^2 (SDL); ScePadData.acceleration is in G.
             BinaryPrimitives.WriteSingleLittleEndian(data[0x1C..], input.Motion.AccelerationX / StandardGravity);
             BinaryPrimitives.WriteSingleLittleEndian(data[0x20..], input.Motion.AccelerationY / StandardGravity);

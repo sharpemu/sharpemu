@@ -493,7 +493,30 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
                 case SDL_EventType.SDL_EVENT_GAMEPAD_AXIS_MOTION:
                     ApplyGamepadEvent(in windowEvent);
                     break;
+                case SDL_EventType.SDL_EVENT_GAMEPAD_SENSOR_UPDATE:
+                    ApplySensorEvent(in windowEvent);
+                    break;
             }
+        }
+    }
+
+    private void ApplySensorEvent(in SDL_Event windowEvent)
+    {
+        lock (_gamepadGate)
+        {
+            var sensor = (SDL_SensorType)windowEvent.gsensor.sensor;
+            if (_gamepad is null || windowEvent.gsensor.which != SDL_GetGamepadID(_gamepad) ||
+                sensor is not (SDL_SensorType.SDL_SENSOR_GYRO or SDL_SensorType.SDL_SENSOR_ACCEL))
+            {
+                return;
+            }
+
+            HostWindowInput.ApplyGamepadMotion(
+                sensor == SDL_SensorType.SDL_SENSOR_GYRO,
+                windowEvent.gsensor.data[0],
+                windowEvent.gsensor.data[1],
+                windowEvent.gsensor.data[2],
+                windowEvent.gsensor.sensor_timestamp);
         }
     }
 
