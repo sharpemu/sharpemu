@@ -8,6 +8,25 @@ namespace SharpEmu.Libs.Tests.Memory.GpuMemory;
 
 public sealed class AvlSpanSetTests
 {
+    [Fact]
+    public void ReadersSeeThePublishedTreeUntilTheWholeEditIsPublished()
+    {
+        var set = new AvlSpanSet();
+        set.Add(100, 24);
+        set.PublishChanges();
+        set.Remove(102, 16);
+        for (ulong address = 200; address < 600; address += 10) set.Add(address, 4);
+        Assert.True(set.PublishedOverlaps(104, 1));
+        Assert.False(set.PublishedOverlaps(220, 1));
+        set.PublishChanges();
+        Assert.False(set.PublishedOverlaps(104, 1));
+        Assert.True(set.PublishedOverlaps(220, 1));
+        set.Clear();
+        Assert.True(set.PublishedOverlaps(220, 1));
+        set.PublishChanges();
+        Assert.False(set.PublishedOverlaps(220, 1));
+    }
+
     // A snapshot built from the last one's spans outside the changed extent holds exactly the set's spans, after single and
     // batched changes, merges, splits and clears.
     [Theory]

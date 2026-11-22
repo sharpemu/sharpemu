@@ -41,6 +41,26 @@ public sealed class RegisterStampsTests
         : RegisterStamp.PipelineState;
 
     [Fact]
+    public void RepeatedUserDataConsumesTheMarkerAndKeepsTheSnapshotUntilTheKindChanges()
+    {
+        var banks = NewBanks();
+        var packet = Packet(PacketOpcode.SetShaderRegister, 2);
+        const uint offset = SpiShaderUserDataPs0 + 3;
+        banks.UserDataMarker = UserScalarKind.Region;
+        RegisterWriteTable.WriteShaderPacket(banks, packet, offset, [1, 2]);
+        var snapshot = banks.Snapshot();
+        banks.UserDataMarker = UserScalarKind.Region;
+        Assert.Equal(2u, RegisterWriteTable.WriteShaderPacket(banks, packet, offset, [1, 2]));
+        Assert.Same(snapshot.Shader.Pixel, banks.Shader.Pixel);
+        Assert.Equal(UserScalarKind.Unknown, banks.UserDataMarker);
+        RegisterWriteTable.WriteShaderPacket(banks, packet, offset, [1, 2]);
+        Assert.NotSame(snapshot.Shader.Pixel, banks.Shader.Pixel);
+        Assert.NotEqual(snapshot.Stamp(RegisterStamp.PixelUserData), banks.Stamp(RegisterStamp.PixelUserData));
+        Assert.Equal(UserScalarKind.Region, snapshot.Shader.Pixel.UserScalars.Kinds[3]);
+        Assert.Equal(UserScalarKind.Unknown, banks.Shader.Pixel.UserScalars.Kinds[3]);
+    }
+
+    [Fact]
     public void EachContextRegisterFamilyMovesOnlyItsConsumersStamp()
     {
         Assert.Equal(RegisterStamp.DepthTargets, RegisterStamps.ContextStampOf(DbDepthControl));
