@@ -403,6 +403,14 @@ public sealed partial class RenderExecutor
             (GuestPrimitiveType)userConfig.PrimitiveType != GuestPrimitiveType.TriangleStrip &&
             (GuestIndexType)arguments.IndexTypeAndSize is GuestIndexType.Index16 or GuestIndexType.Index32;
         record.RepeatsCpuArguments = record.RepeatableArguments && arguments.IndirectArgumentsAddress == 0;
+        if (offsets is not null && !record.WritesMemory && record.WriteStages == PipelineStageFlags.None && record.State.Programs.MeshInput is null &&
+            SafeForRun(state.Programs.VertexInput.Stage.Program) &&
+            (!state.PixelActive || SafeForRun(state.Programs.PixelInput.Stage.Program)))
+        {
+            record.IndirectOffsets = offsets;
+            foreach (uint offset in offsets)
+                record.IndirectBytes = Math.Max(record.IndirectBytes, offset + (uint)IndexedIndirectArgumentsSize);
+        }
         TraceDisposition("recorded");
         Record(record);
     }
