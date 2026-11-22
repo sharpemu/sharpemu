@@ -87,6 +87,8 @@ internal sealed class ResolvedDraw
     public bool PrimitiveRestart;
     public GuestPrimitiveType PrimitiveType;
     public DrawEmission Emission;
+    public uint[]? IndirectOffsets;
+    public uint IndirectBytes;
     public IndexSource Index;
     public ulong TessellationIndexAddress;
     public uint TessellationIndexSize;
@@ -180,6 +182,8 @@ internal sealed class ResolvedDraw
         PrimitiveRestart = false;
         PrimitiveType = default;
         Emission = default;
+        IndirectOffsets = null;
+        IndirectBytes = 0;
         Index = default;
         TessellationIndexAddress = 0;
         TessellationIndexSize = 0;
