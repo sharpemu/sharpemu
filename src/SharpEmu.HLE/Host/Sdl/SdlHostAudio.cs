@@ -63,7 +63,7 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
     /// else (no pad, two pads, a pad on Bluetooth, two candidate devices) gives no stream rather than a guess. While the
     /// stream is open the pad's speaker plays the front pair; the back pair drives its actuators.
     /// </summary>
-    public IHostAudioStream? TryOpenControllerStream(uint sampleRate, int maxQueuedBytes, out int channels)
+    public IHostAudioStream? TryOpenControllerStream(uint sampleRate, int maxQueuedBytes, out int channels, bool routeSpeaker = true)
     {
         channels = 0;
         EnsureInitialized();
@@ -73,7 +73,7 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
         }
 
         var stream = new AudioStream(device, sampleRate, 4, HostPcmFormat.Float32, maxQueuedBytes, reportsClock: false, dropOldest: true);
-        var routed = SendControllerEffect(pad, ControllerAudioRoute(speaker: true));
+        var routed = routeSpeaker && SendControllerEffect(pad, ControllerAudioRoute(speaker: true));
         channels = 4;
         Console.Error.WriteLine(
             $"[LOADER][INFO] Controller audio: \"{deviceName}\" (speaker {(routed ? "routed" : "not routed")})");

@@ -7,6 +7,7 @@ using System.Buffers;
 using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using System.Runtime.InteropServices;
 
 namespace SharpEmu.Libs.Audio;
 
@@ -25,10 +26,18 @@ public static class AudioOutExports
     internal const int AudioOutErrorPortFull = unchecked((int)0x80260005);
     internal const int AudioOutErrorInvalidSize = unchecked((int)0x80260006);
 
+    // The pad speaker and vibration ports play on the controller's own four channels: the speaker pair, then the
+    // actuators.
+    private const int PortTypePadSpeaker = 4;
+    private const int PortTypeVibration = 10;
+    private const int ControllerChannels = 4;
+    private const int ControllerQueueMilliseconds = 80;
+
     private static readonly ConcurrentDictionary<int, PortState> Ports = new();
     private static readonly ConcurrentDictionary<int, PortState> ShutdownPorts = new();
     private static int _nextPortHandle;
     private static Func<uint, IHostAudioStream?>? _streamFactoryForTests;
+    private static Func<uint, IHostAudioStream?>? _controllerFactoryForTests;
 
     // Diagnostic: confirm sceAudioOutOutput is actually called and whether the
     // guest submits real samples or silence. Gated so it costs nothing when off.
@@ -78,6 +87,8 @@ public static class AudioOutExports
         public bool PreservesGuestFormat { get; }
         public IHostAudioStream? Backend { get; }
         public string BackendName { get; }
+        // The first of the two controller channels this port plays on, or -1 for the speakers.
+        public int ControllerPair { get; init; } = -1;
         public object SubmissionGate { get; } = new();
         public volatile float Volume = 1.0f;
         public int BufferByteLength =>
@@ -153,11 +164,23 @@ public static class AudioOutExports
 
         IHostAudioStream? backend = null;
         var preservesGuestFormat = false;
+        var controllerPair = type switch
+        {
+            PortTypePadSpeaker => 0,
+            PortTypeVibration => 2,
+            _ => -1,
+        };
         string backendName;
         try
         {
             var streamFactory = Volatile.Read(ref _streamFactoryForTests);
-            if (streamFactory is not null)
+            if (controllerPair >= 0)
+            {
+                // A controller port plays on the controller or stays silent, never on the speakers.
+                backend = OpenControllerBackend(frequency, speaker: controllerPair == 0);
+                backendName = backend is null ? "silent" : "controller";
+            }
+            else if (streamFactory is not null)
             {
                 backend = streamFactory(frequency);
                 backendName = "test";
@@ -199,7 +222,10 @@ public static class AudioOutExports
             isFloat,
             preservesGuestFormat,
             backend,
-            backendName);
+            backendName)
+        {
+            ControllerPair = controllerPair,
+        };
         Console.Error.WriteLine(
             $"[LOADER][INFO] AudioOut port {handle}: {frequency} Hz, " +
             $"{channels} ch, {(isFloat ? "float32" : "s16")}, " +
@@ -348,14 +374,14 @@ public static class AudioOutExports
                 return ctx.SetReturn(0);
             }
 
-            var outputLength = port.PreservesGuestFormat
-                ? port.BufferByteLength
-                : checked((int)port.BufferLength * AudioPcmConversion.OutputFrameSize);
+            var outputLength = HostBufferLength(port);
             var output = ArrayPool<byte>.Shared.Rent(outputLength);
             try
             {
                 ConvertForHost(port, source, output.AsSpan(0, outputLength));
-                if (!port.Backend.Submit(output.AsSpan(0, outputLength)))
+                // The controller's stream drops its oldest audio instead of blocking, so a controller port keeps the
+                // real-time pace here.
+                if (!port.Backend.Submit(output.AsSpan(0, outputLength)) || port.ControllerPair >= 0)
                 {
                     port.PaceSilence();
                 }
@@ -476,9 +502,7 @@ public static class AudioOutExports
 
                     TraceOutput(output.Handle, output.Port, source);
 
-                    output.HostBufferLength = output.Port.PreservesGuestFormat
-                        ? output.Port.BufferByteLength
-                        : checked((int)output.Port.BufferLength * AudioPcmConversion.OutputFrameSize);
+                    output.HostBufferLength = HostBufferLength(output.Port);
                     output.HostBuffer = ArrayPool<byte>.Shared.Rent(output.HostBufferLength);
                     ConvertForHost(output.Port, source, output.HostBuffer.AsSpan(0, output.HostBufferLength));
                 }
@@ -495,7 +519,8 @@ public static class AudioOutExports
                 if (output.HostBuffer is null ||
                     output.Port.Backend is null ||
                     !output.Port.Backend.Submit(
-                        output.HostBuffer.AsSpan(0, output.HostBufferLength)))
+                        output.HostBuffer.AsSpan(0, output.HostBufferLength)) ||
+                    output.Port.ControllerPair >= 0)
                 {
                     if (pacingPort is null ||
                         HasLongerBufferDuration(output.Port, pacingPort))
@@ -572,8 +597,53 @@ public static class AudioOutExports
         return 0;
     }
 
+    private static int HostBufferLength(PortState port) =>
+        port.ControllerPair >= 0 ? checked((int)port.BufferLength * ControllerChannels * sizeof(float))
+        : port.PreservesGuestFormat ? port.BufferByteLength
+        : checked((int)port.BufferLength * AudioPcmConversion.OutputFrameSize);
+
+    private static IHostAudioStream? OpenControllerBackend(uint frequency, bool speaker)
+    {
+        if (Volatile.Read(ref _streamFactoryForTests) is not null)
+        {
+            // Tests choose the controller; without one there is none.
+            return Volatile.Read(ref _controllerFactoryForTests)?.Invoke(frequency);
+        }
+
+        if (HostPlatform.Current.Audio is not IHostPcmAudioOutput pcm)
+        {
+            return null;
+        }
+
+        var maxQueuedBytes = (int)(frequency * ControllerChannels * sizeof(float) * (long)ControllerQueueMilliseconds / 1000);
+        var stream = pcm.TryOpenControllerStream(frequency, maxQueuedBytes, out var channels, speaker);
+        if (stream is not null && channels != ControllerChannels)
+        {
+            stream.Dispose();
+            return null;
+        }
+
+        return stream;
+    }
+
     private static void ConvertForHost(PortState port, ReadOnlySpan<byte> source, Span<byte> destination)
     {
+        if (port.ControllerPair >= 0)
+        {
+            var mix = MemoryMarshal.Cast<byte, float>(destination);
+            mix.Clear();
+            AudioOut2Exports.MixPortIntoController(
+                source,
+                mix,
+                checked((int)port.BufferLength),
+                port.Channels,
+                port.BytesPerSample,
+                port.IsFloat,
+                port.Volume,
+                port.ControllerPair);
+            return;
+        }
+
         if (port.PreservesGuestFormat)
         {
             AudioPcmConversion.CopyWithVolume(source, destination, port.IsFloat, port.Volume);
@@ -701,6 +771,9 @@ public static class AudioOutExports
     internal static void SetStreamFactoryForTests(Func<uint, IHostAudioStream?>? streamFactory) =>
         Volatile.Write(ref _streamFactoryForTests, streamFactory);
 
+    internal static void SetControllerFactoryForTests(Func<uint, IHostAudioStream?>? controllerFactory) =>
+        Volatile.Write(ref _controllerFactoryForTests, controllerFactory);
+
     internal static void ResetForTests()
     {
         foreach (var handle in Ports.Keys)
@@ -716,6 +789,7 @@ public static class AudioOutExports
         _outputCount = 0;
         Volatile.Write(ref _shutdown, false);
         Volatile.Write(ref _streamFactoryForTests, null);
+        Volatile.Write(ref _controllerFactoryForTests, null);
     }
 
     private static bool _shutdown;
