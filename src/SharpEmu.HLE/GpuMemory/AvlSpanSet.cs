@@ -24,6 +24,13 @@ public sealed class AvlSpanSet
     private static readonly bool SpliceSnapshots = Environment.GetEnvironmentVariable("SHARPEMU_SPAN_SNAPSHOT_SPLICE") != "0";
 
     private Node? _root;
+    private Node? _published;
+
+    // A GPU write may edit several ranges before other threads are allowed to observe them.
+    public void PublishChanges() => Volatile.Write(ref _published, _root);
+
+    public bool PublishedOverlaps(ulong address, ulong size) => Overlaps(Volatile.Read(ref _published), address, size);
+
     private SpanSnapshot? _snapshot = SpanSnapshot.Empty;
     private SpanSnapshot _built = SpanSnapshot.Empty;
     private ulong _changedStart = ulong.MaxValue;
@@ -94,11 +101,12 @@ public sealed class AvlSpanSet
         return node is not null && node.End >= address + size;
     }
 
-    public bool Overlaps(ulong address, ulong size)
+    public bool Overlaps(ulong address, ulong size) => Overlaps(_root, address, size);
+
+    private static bool Overlaps(Node? node, ulong address, ulong size)
     {
         ValidateRange(address, size);
         var end = address + size;
-        var node = _root;
         while (node is not null)
         {
             if (node.Start >= end) node = node.Left;
