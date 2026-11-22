@@ -239,6 +239,8 @@ public interface IRenderHost
     void DrawIndexed(uint indexCount, uint instanceCount, uint firstIndex, int vertexOffset, uint firstInstance);
 
     // One indexed draw whose counts the GPU reads from the buffer (VkDrawIndexedIndirectCommand layout).
+    bool CanShareIndexedBindings(IPreparedBindings stage, ReadOnlySpan<ColorTargetState> colors, in DepthAttachmentState depth) => false;
+
     void DrawIndexedIndirect(BufferBinding arguments) =>
         throw new NotSupportedException("The render host does not draw from indirect arguments.");
 
