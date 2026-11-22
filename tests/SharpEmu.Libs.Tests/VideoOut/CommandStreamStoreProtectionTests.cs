@@ -46,10 +46,10 @@ public sealed class CommandStreamStoreProtectionTests : IClassFixture<HeadlessVu
         Assert.Equal(1, harness.Read(label, 1)[0]);
     }
 
-    // A shader write keeps its read protection deferred to the submission: applying it before every store stalled guests
-    // that read their GPU output right after a label.
+    // The same holds for a shader write: a guest that sees the label reads the shader's output next, and must not get the
+    // bytes from before the write.
     [Fact]
-    public void ACommandStreamStoreLeavesShaderWriteProtectionToTheSubmission()
+    public void ACommandStreamStoreLandsAfterEarlierShaderWritesBlockCpuReads()
     {
         if (_vulkan is null || !OperatingSystem.IsWindows())
             return;
@@ -64,7 +64,7 @@ public sealed class CommandStreamStoreProtectionTests : IClassFixture<HeadlessVu
         var label = address + 0x8000;
         LandStore(presenter, label);
 
-        Assert.Equal(HostPageProtection.ReadOnly, harness.Protection(address));
+        Assert.Equal(HostPageProtection.NoAccess, harness.Protection(address));
         Assert.Equal(1, harness.Read(label, 1)[0]);
     }
 

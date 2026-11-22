@@ -590,6 +590,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     presenter._commandThread!.PostWrite(virtualAddress, source);
                     return true;
                 }
+                presenter._bufferCache?.ApplyPendingGpuProtections();
                 return inner.TryWrite(virtualAddress, source);
             }
 
