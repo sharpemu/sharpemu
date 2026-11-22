@@ -268,8 +268,10 @@ public static class UserServiceExports
         ExportName = "sceUserServiceGetAccessibilityTriggerEffect",
         Target = Generation.Gen5,
         LibraryName = "libSceUserService")]
+    // 1 is the standard (strongest) intensity a console starts with; 0 would tell the game that the user turned trigger
+    // effects off.
     public static int UserServiceGetAccessibilityTriggerEffect(CpuContext ctx) =>
-        WriteUserSettingInt32(ctx, 0, "get_accessibility_trigger_effect");
+        WriteUserSettingInt32(ctx, 1, "get_accessibility_trigger_effect");
 
     [SysAbiExport(
         Nid = "qWYHOFwqCxY",
