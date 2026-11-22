@@ -675,9 +675,11 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
 
         var vertexBuffers = meshInput is null ? AcquireVertexBuffers(vertexInput) : default;
         var indexBuffer = meshInput is null ? AcquireIndexBuffer(in indexSource) : default;
+        var indirectBytes = record.IndirectOffsets is not null ? record.IndirectBytes :
+            emission.Indexed ? RenderExecutor.IndexedIndirectArgumentsSize : RenderExecutor.AutoIndirectArgumentsSize;
         var indirectArguments = meshInput is null && emission.IndirectArgumentsAddress != 0
             ? _host.ObtainBuffer(emission.IndirectArgumentsAddress,
-                emission.Indexed ? RenderExecutor.IndexedIndirectArgumentsSize : RenderExecutor.AutoIndirectArgumentsSize, isWritten: false)
+                indirectBytes, isWritten: false)
             : default;
         RenderExecutor.DropUnwrittenColorTargets(context, ref state, pixelProgram);
         var reusedAttachments = inPlace && TryRestoreAttachments(ref state);
@@ -718,7 +720,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
                 if (emission.IndirectArgumentsAddress != 0)
                 {
                     indirectArguments = _host.ObtainBuffer(emission.IndirectArgumentsAddress,
-                        emission.Indexed ? RenderExecutor.IndexedIndirectArgumentsSize : RenderExecutor.AutoIndirectArgumentsSize, isWritten: false);
+                        indirectBytes, isWritten: false);
                 }
             }
         }
