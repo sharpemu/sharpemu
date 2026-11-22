@@ -5,6 +5,8 @@ namespace SharpEmu.HLE.Host;
 
 public readonly record struct HostAddressRange(ulong Address, ulong Size);
 
+public readonly record struct HostPageAccess(ulong Address, ulong Size, HostPageProtection Protection);
+
 // The caller must own each range. The host does not check this on all platforms.
 public interface IHostViewMemory
 {
@@ -33,6 +35,11 @@ public interface IHostViewMemory
     bool ReleasePrivate(ulong address, ulong size);
 
     bool ChangeAccess(ulong address, ulong size, HostPageProtection protection);
+
+    // The access of the range's committed pages, one entry per run of equal access, in address order. A page the host cannot
+    // describe (not committed, or an access HostPageProtection has no value for) has no entry. No default: a wrapper that
+    // left it out would silently report nothing.
+    IReadOnlyList<HostPageAccess> QueryAccess(ulong address, ulong size);
 
     // Releases every private commit and placeholder that remains inside an owned range.
     bool FreeOwnedRange(ulong address, ulong size);

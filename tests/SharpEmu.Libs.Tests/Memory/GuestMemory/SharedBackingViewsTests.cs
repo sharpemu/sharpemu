@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE;
 using SharpEmu.HLE.GuestMemory;
 using SharpEmu.HLE.Host;
 using Xunit;
@@ -288,6 +289,60 @@ public sealed class SharedBackingViewsTests
 
         Assert.True(store.Unmap(baseAddress, 3 * Segment, out preserved));
         Assert.True(preserved);
+        Assert.True(host.JoinHoles(baseAddress, hole));
+        Assert.True(host.FreeHole(baseAddress, hole));
+    }
+
+    // A partial unmap maps the rest of the view again. Every page of it keeps the access it had, as the GPU memory page
+    // watches set it: no access while the GPU data is newer, read-only while CPU writes must be seen. A page that comes
+    // back read-write takes guest stores without a fault. Case 0 leaves a right part, 1 a part on each side of the hole,
+    // 2 a left part.
+    [NativePageProtectionTheory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(2)]
+    public void PartialUnmap_KeepsThePageAccessOfTheRestOfTheView(int unmapped)
+    {
+        if (!Supported)
+        {
+            return;
+        }
+
+        var host = HostViewMemory.Create();
+        using var store = new SharedBackingViews(host, BackingSize);
+        var hole = HoleSize(host);
+        var baseAddress = ReserveFreeHole(host, hole);
+        Assert.True(host.SplitHole(baseAddress, 3 * Segment));
+        Assert.True(store.TryMapReservedRange(baseAddress, 3 * Segment, 0, HostPageProtection.ReadWrite, out _));
+        // In each segment: page 0 read-write, page 1 no access (a read watch), page 2 read-only (a write watch), the rest
+        // read-write.
+        for (var segment = 0UL; segment < 3; segment++)
+        {
+            Assert.True(host.ChangeAccess(baseAddress + segment * Segment + 0x1000, 0x1000, HostPageProtection.NoAccess));
+            Assert.True(host.ChangeAccess(baseAddress + segment * Segment + 0x2000, 0x1000, HostPageProtection.ReadOnly));
+        }
+
+        var gone = baseAddress + (ulong)unmapped * Segment;
+        Assert.True(store.Unmap(gone, Segment, out var preserved));
+        Assert.True(preserved);
+
+        for (var segment = 0UL; segment < 3; segment++)
+        {
+            var start = baseAddress + segment * Segment;
+            if (start == gone)
+            {
+                continue;
+            }
+
+            var step = $"segment {segment} after unmapping segment {unmapped}";
+            NativePageProtection.Expect(HostMemory.PAGE_READWRITE, start, step);
+            NativePageProtection.Expect(HostMemory.PAGE_NOACCESS, start + 0x1000, step);
+            NativePageProtection.Expect(HostMemory.PAGE_READONLY, start + 0x2000, step);
+            NativePageProtection.Expect(HostMemory.PAGE_READWRITE, start + Segment - 0x1000, step);
+        }
+
+        Assert.True(store.TryMapReservedRange(gone, Segment, (ulong)unmapped * Segment, HostPageProtection.ReadWrite, out _));
+        Assert.True(store.Unmap(baseAddress, 3 * Segment, out _));
         Assert.True(host.JoinHoles(baseAddress, hole));
         Assert.True(host.FreeHole(baseAddress, hole));
     }

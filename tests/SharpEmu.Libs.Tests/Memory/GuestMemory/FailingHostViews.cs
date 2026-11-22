@@ -117,6 +117,8 @@ internal sealed class FailingHostViews : IHostViewMemory
         return !ShouldFail(Op.ChangeAccess) && _inner.ChangeAccess(address, size, protection);
     }
 
+    public IReadOnlyList<HostPageAccess> QueryAccess(ulong address, ulong size) => _inner.QueryAccess(address, size);
+
     public bool FreeOwnedRange(ulong address, ulong size) =>
         !ShouldFail(Op.FreeOwnedRange) && _inner.FreeOwnedRange(address, size);
 
