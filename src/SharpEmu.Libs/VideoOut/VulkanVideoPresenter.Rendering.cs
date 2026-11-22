@@ -453,6 +453,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw SubmissionScheduler.Fatal($"The HTile clear state could not be consumed: htile=0x{resolution.HtileAddress:X16} layer={layer}.");
             }
 
+            if (resolution.HasHtile)
+            {
+                _imageCache.NoteDepthClearValue(resolution.HtileAddress, depth.Target.State.DepthClearValue);
+            }
+
             var image = _imageCache.GetImage(depth.Image);
             return new DepthAttachmentAcquisition(view, image.Backing.Samples, metadataClear);
         }

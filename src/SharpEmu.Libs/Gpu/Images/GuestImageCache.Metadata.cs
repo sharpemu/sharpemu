@@ -782,4 +782,57 @@ public sealed partial class GuestImageCache
 
         return true;
     }
+
+    // The depth clear value of a depth-target bind: what a pending HTile clear loads at the next bind, and what a sample
+    // reads before that bind (SampleClearsDepth).
+    public void NoteDepthClearValue(ulong htileAddress, float value)
+    {
+        if (SubmissionScheduler.ReadOnlyThread)
+        {
+            throw SubmissionScheduler.ReadOnlyViolation("depth clear value");
+        }
+
+        using var held = _lock.Hold();
+        if (_surfaceMetadata.TryGetValue(htileAddress, out var found) && found.Kind == SurfaceMetadataKind.HTile)
+        {
+            found.DepthClearValue = value;
+            found.HasDepthClearValue = true;
+        }
+    }
+
+    // A depth surface the guest cleared through its HTile and then samples before binding it again: the texture unit reads
+    // the cleared value through the HTile, so the clear the next depth-target bind would load is made before the sample.
+    // One layer and one level only: a layered surface's clear bits are not exact per slice.
+    private bool SampleClearsDepth(CachedImage image)
+    {
+        ref readonly var description = ref image.Description;
+        return description.IsDepth && description.Resources.Levels == 1 && description.Resources.Layers == 1 &&
+               image.MetadataRegistration is { Kind: SurfaceMetadataKind.HTile, Invalidated: false, HasDepthClearValue: true } metadata &&
+               metadata.IsSliceClear(0) &&
+               _surfaceMetadata.TryGetValue(description.Metadata.Range.Address, out var registered) && ReferenceEquals(registered, metadata);
+    }
+
+    private unsafe void ClearDepthBeforeSample(CachedImage image)
+    {
+        var command = _scheduler.Current;
+        if (command.IsInvalid)
+        {
+            throw SubmissionScheduler.Fatal($"A sampled depth clear needs a command buffer that is recording: address=0x{image.Description.Data.Address:X16}.");
+        }
+
+        var metadata = image.MetadataRegistration!;
+        command.EndRendering();
+        var native = new CommandBuffer(command.Handle);
+        image.Transition(AccessFlags.TransferWriteBit, null, native);
+        var range = new ImageSubresourceRange(ImageAspectFlags.DepthBit, 0, 1, 0, 1);
+        var clear = new ClearDepthStencilValue(metadata.DepthClearValue, 0);
+        using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+        {
+            _device.Vk.CmdClearDepthStencilImage(native, image.Backing.Handle, ImageLayout.General, &clear, 1, &range);
+        }
+
+        TakeGpuOwnership(image);
+        NoteMetadataChange(image.Description.Metadata.Range.Address, clearOnly: true);
+        metadata.SetSliceClear(0, false);
+    }
 }

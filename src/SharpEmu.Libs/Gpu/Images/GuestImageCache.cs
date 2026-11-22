@@ -539,6 +539,11 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         switch (request.Role)
         {
             case ImageRole.Texture:
+                if (hasData && SampleClearsDepth(image))
+                {
+                    ClearDepthBeforeSample(image);
+                }
+
                 break;
             case ImageRole.StorageImage:
                 if (hasData)
