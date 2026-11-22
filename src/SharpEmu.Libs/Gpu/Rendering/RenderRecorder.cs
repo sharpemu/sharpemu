@@ -1061,7 +1061,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
     private bool TryReplayDraw(ResolvedDraw record, ref DrawState state, bool inPlace, VertexInputInfo vertexInput, PixelInputInfo pixelInput,
         in IndexSource indexSource, in DrawEmission emission, in DrawCall draw)
     {
-        if (!DrawReplayEnabled || !_replayValid || !inPlace || record.Kind != ResolvedDrawKind.Draw || record.WritesMemory ||
+        if (record.IndirectOffsets is not null || !DrawReplayEnabled || !_replayValid || !inPlace || record.Kind != ResolvedDrawKind.Draw || record.WritesMemory ||
             record.WriteStages != PipelineStageFlags.None || record.IndexedTrace is not null || MeshDrawTrace.Active)
         {
             return false;
