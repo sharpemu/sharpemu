@@ -1320,9 +1320,14 @@ public static partial class Gen5SpirvTranslator
                 else
                 {
                     var lanes = BooleanToWaveMask(_module.ConstantBool(true));
-                    laneCount = IAdd(
-                        _module.AddInstruction(SpirvOp.BitCount, _uintType, Narrow(lanes)),
-                        _module.AddInstruction(SpirvOp.BitCount, _uintType, Narrow(ShiftRightLogical64(lanes, _module.Constant64(_ulongType, 32)))));
+                    var lowLanes = Narrow(lanes);
+                    var highLanes = Narrow(ShiftRightLogical64(lanes, _module.Constant64(_ulongType, 32)));
+                    laneCount = _module.AddInstruction(
+                        SpirvOp.Select,
+                        _uintType,
+                        IsNotZero(highLanes),
+                        IAdd(Ext(75, _uintType, highLanes), UInt(33)),
+                        IAdd(Ext(75, _uintType, lowLanes), UInt(1)));
                 }
 
                 StoreS(3, BitwiseOr(laneCount, ShiftLeftLogical(laneCount, UInt(8))));
