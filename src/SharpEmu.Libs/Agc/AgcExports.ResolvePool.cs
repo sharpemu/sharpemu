@@ -230,7 +230,8 @@ public static partial class AgcExports
                 throw new InvalidOperationException("A resolve worker failed.", failure);
             }
 
-            return deferred.SerialReason is null && deferred.Record is not null && ValidateDeferredReads(deferred);
+            return deferred.SerialReason is null && deferred.Record is not null &&
+                (deferred.IndirectOffsets is null || deferred.Record.IndirectOffsets is not null) && ValidateDeferredReads(deferred);
         }
 
         // At the stream position of a slice segment: whether a worker-resolved draw or dispatch it recorded still holds.
@@ -285,12 +286,24 @@ public static partial class AgcExports
                 Interlocked.Increment(ref _deferredValid);
             }
 
+            bool expand = deferred.IndirectOffsets is not null && record.IndirectOffsets is null;
             _recorder!.Record(record);
+            if (expand)
+            {
+                var first = deferred.IndexedArguments;
+                var offsets = deferred.IndirectOffsets!;
+                for (int i = 1; i < offsets.Length; i++)
+                {
+                    var next = first with { PacketAddress = first.PacketAddress + (uint)i * 20,
+                        IndirectArgumentsAddress = first.IndirectArgumentsAddress + offsets[i] };
+                    _recorder.Record(ResolveOnThisThread(deferred, next));
+                }
+            }
             deferred.Reset();
             _spareDeferred.Enqueue(deferred);
         }
 
-        private ResolvedDraw ResolveOnThisThread(DeferredDraw deferred)
+        private ResolvedDraw ResolveOnThisThread(DeferredDraw deferred, DrawIndexedArguments? next = null)
         {
             var started = Stopwatch.GetTimestamp();
             var sink = _joinSink ??= new CapturingSink();
@@ -299,7 +312,11 @@ public static partial class AgcExports
             sink.Draw = null;
             if (deferred.Indexed)
             {
-                executor.DrawIndexed(deferred.SubmitId, deferred.Banks, in deferred.IndexedArguments);
+                var args = next ?? deferred.IndexedArguments;
+                if (next is null && deferred.IndirectOffsets is { } offsets)
+                    executor.DrawIndexedCore(deferred.SubmitId, deferred.Banks, in args, offsets);
+                else
+                    executor.DrawIndexed(deferred.SubmitId, deferred.Banks, in args);
             }
             else
             {
