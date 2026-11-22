@@ -114,6 +114,31 @@ internal static partial class RegisterWriters
         indirect[SpiShaderPgmRsrc2Vs] = static (banks, _, value) => banks.Shader.Vertex.LegacyVertexResource2 = value;
     }
 
+    // A repeated user-data packet still consumes its marker, but leaves shared register snapshots valid.
+    internal static bool SameUserScalarPacket(RegisterBanks banks, uint offset, ReadOnlySpan<uint> values)
+    {
+        if (values.IsEmpty) return false;
+        if (offset - SpiShaderUserDataPs0 < GraphicsUserScalarCount)
+            return Matches(banks.Shader.Pixel.UserScalars, offset - SpiShaderUserDataPs0, values, banks.UserDataMarker);
+        if (offset - SpiShaderUserDataGs0 < GraphicsUserScalarCount)
+            return Matches(banks.Shader.Vertex.GeometryUserScalars, offset - SpiShaderUserDataGs0, values, banks.UserDataMarker);
+        if (offset - SpiShaderUserDataHs0 < GraphicsUserScalarCount)
+            return Matches(banks.Shader.Vertex.HullUserScalars, offset - SpiShaderUserDataHs0, values, banks.UserDataMarker);
+        if (offset - ComputeUserData0 < ComputeUserScalarCount && values.Length <= ComputeUserScalarCount - (offset - ComputeUserData0))
+            return Matches(banks.Shader.Compute.UserScalars, offset - ComputeUserData0, values, banks.UserDataMarker);
+        return false;
+    }
+
+    private static bool Matches(UserScalarRegisters target, uint slot, ReadOnlySpan<uint> values, UserScalarKind marker)
+    {
+        var end = (int)slot + values.Length;
+        if (end > target.Count || end > UserScalarRegisters.Capacity ||
+            !target.ValueSpan(end)[(int)slot..].SequenceEqual(values)) return false;
+        foreach (var kind in target.KindSpan(end)[(int)slot..])
+            if (kind != marker) return false;
+        return true;
+    }
+
     private static uint PixelUserScalarsPacket(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values) =>
         UserScalarsPacket(banks, in packet, offset, values, banks.Shader.Pixel.UserScalars, SpiShaderUserDataPs0, GraphicsUserScalarCount);
 
