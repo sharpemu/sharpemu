@@ -485,7 +485,11 @@ public sealed partial class GpuCommandInterpreter
             var waitedBefore = SharpEmu.Libs.Diagnostics.PacketHandlerTally.WaitedTicks;
             using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandPacketHandler))
             {
-                consumed = handler(this, in packet, payload) + 1;
+                var run = header == PacketHeader.Make(5, PacketOpcode.DrawIndexIndirect) && window is not null
+                    ? TryDrawIndexedRun(in packet, window) : 0;
+                consumed = run == 0 ? handler(this, in packet, payload) + 1 : (uint)run * 5;
+                if (run > 1)
+                    _packetSerial += (uint)run - 1;
             }
 
             if (handlerStarted != 0)
