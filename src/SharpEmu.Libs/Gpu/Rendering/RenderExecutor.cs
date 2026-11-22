@@ -215,7 +215,16 @@ public sealed partial class RenderExecutor
         return true;
     }
 
-    private void DrawIndexedCore(ulong submitId, RegisterBanks banks, in DrawIndexedArguments arguments)
+    internal bool CanGroupIndexed(RegisterBanks banks, in DrawIndexedArguments first) =>
+        CanDrawIndirectOnGpu(banks, in first) && DrawHasTargets(banks) && !MeshDrawTrace.Active;
+
+    internal static bool SafeForRun(ShaderProgramInfo? program) =>
+        program is { UsesDeviceAddresses: false, CallRecordCallees.Count: 0 } && program.Frontend?.RequiresOrderedImagePreparation != true &&
+        !Array.Exists(program.Buffers, static buffer => buffer.Written) && !WritesStorageImage(program) &&
+        program.Bindings?.UsesBindlessHeap != true &&
+        program.Bindings?.Find(SharpEmu.ShaderCompiler.Resources.DescriptorBindingKind.GlobalDataShare) is null;
+
+    internal void DrawIndexedCore(ulong submitId, RegisterBanks banks, in DrawIndexedArguments arguments, uint[]? offsets = null)
     {
         if (MeshDrawTrace.Active) MeshDrawTrace.Write("selection", $"indexed=true count={arguments.IndexCount}");
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawExecutor);
