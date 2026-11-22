@@ -333,6 +333,30 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
 
     private void RecordDraw(ResolvedDraw record)
     {
+        var offsets = record.IndirectOffsets;
+        RecordDraw(record, out var issuedRun);
+        if (issuedRun || offsets is null) return;
+
+        var first = record.Emission;
+        try
+        {
+            record.IndirectOffsets = null;
+            foreach (var offset in offsets.AsSpan(1))
+            {
+                record.Emission = first with { IndirectArgumentsAddress = first.IndirectArgumentsAddress + offset };
+                RecordDraw(record, out _);
+            }
+        }
+        finally
+        {
+            record.IndirectOffsets = offsets;
+            record.Emission = first;
+        }
+    }
+
+    private void RecordDraw(ResolvedDraw record, out bool issuedRun)
+    {
+        issuedRun = false;
         if (record.Announce)
         {
             if (!_host.IsRecording)
@@ -390,7 +414,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
                     NoteFoundTargets(ref state);
                 }
 
-                RecordDrawCommands(record, ref state, inPlace);
+                RecordDrawCommands(record, ref state, inPlace, out issuedRun);
                 break;
             }
         }
@@ -505,8 +529,9 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         }
     }
 
-    private void RecordDrawCommands(ResolvedDraw record, ref DrawState state, bool inPlace)
+    private void RecordDrawCommands(ResolvedDraw record, ref DrawState state, bool inPlace, out bool issuedRun)
     {
+        issuedRun = false;
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawResourcePreparation);
         var submitId = record.SubmitId;
         ref readonly var draw = ref record.Draw;
