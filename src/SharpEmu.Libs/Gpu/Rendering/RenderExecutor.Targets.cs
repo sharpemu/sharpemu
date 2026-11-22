@@ -258,7 +258,16 @@ public sealed partial class RenderExecutor
         return written;
     }
 
-    internal static bool IsUnwrittenColorTarget(ContextRegisters context, uint slot, ColorComponentMap exportMapping, uint pixelColorExportMasks) =>
-        exportMapping.ApplyMask(context.RenderTargetMaskForSlot(slot)) == 0 ||
-        ((pixelColorExportMasks >> (int)(slot * 4)) & 0xFu) == 0;
+    // The pixel program's export masks are numbered by export, not by slot: an export compacted to
+    // another slot (MRT1 to target 7, say) is found through the export that feeds the slot.
+    internal static bool IsUnwrittenColorTarget(ContextRegisters context, uint slot, ColorComponentMap exportMapping, uint pixelColorExportMasks)
+    {
+        if (exportMapping.ApplyMask(context.RenderTargetMaskForSlot(slot)) == 0)
+        {
+            return true;
+        }
+
+        var export = Pipelines.PixelExportRouting.ExportForSlot(context.ShaderInterface, slot);
+        return export < 0 || ((pixelColorExportMasks >> (export * 4)) & 0xFu) == 0;
+    }
 }
