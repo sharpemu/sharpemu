@@ -96,7 +96,7 @@ public static partial class AgcExports
         private CapturingSink? _joinSink;
         private readonly ConcurrentQueue<DeferredDraw> _spareDeferred = new();
 
-        private readonly Dictionary<(ulong Vertex, ulong Pixel), (bool Writes, long Registrations)> _drawWrites = new();
+        private readonly Dictionary<(ulong Vertex, ulong Pixel), (bool Writes, long Registrations, bool Group)> _drawWrites = new();
         private (ulong Vertex, ulong Pixel) _learningKey;
 
         // Only a draw whose shaders are known not to write memory resolves ahead of the stream: its
@@ -117,11 +117,13 @@ public static partial class AgcExports
         {
             if (record.Kind == ResolvedDrawKind.Draw && _learningKey != default)
             {
-                _drawWrites[_learningKey] = (record.WritesMemory, ShaderHeaderRegistry.Registrations);
+                _drawWrites[_learningKey] = (record.WritesMemory, ShaderHeaderRegistry.Registrations,
+                    !record.WritesMemory && RenderExecutor.SafeForRun(record.State.Programs.VertexInput.Stage.Program) &&
+                    (!record.State.PixelActive || RenderExecutor.SafeForRun(record.State.Programs.PixelInput.Stage.Program)));
             }
         }
 
-        private void DeferDraw(ResolvePool pool, ulong submitId, RegisterBanks banks, bool indexed, in DrawIndexedArguments indexedArguments, in DrawAutoArguments autoArguments)
+        private void DeferDraw(ResolvePool pool, ulong submitId, RegisterBanks banks, bool indexed, in DrawIndexedArguments indexedArguments, in DrawAutoArguments autoArguments, uint[]? offsets = null)
         {
             var work = _spareDeferred.TryDequeue(out var spare) ? spare : new DeferredDraw();
             work.Banks = banks.Snapshot(work.Banks);
