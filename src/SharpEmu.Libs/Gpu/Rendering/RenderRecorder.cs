@@ -790,7 +790,18 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         }
         else if (emission.IndirectArgumentsAddress != 0 && emission.Indexed)
         {
-            _host.DrawIndexedIndirect(indirectArguments);
+            var targets = DrawState.BoundColors(ref state);
+            issuedRun = imageSnapshot == 0 && record.IndirectOffsets is not null && _host.CanShareIndexedBindings(vertexBindings, targets, in state.Depth) &&
+                (pixelBindings is null || _host.CanShareIndexedBindings(pixelBindings, targets, in state.Depth));
+            if (issuedRun)
+            {
+                foreach (var offset in record.IndirectOffsets!)
+                    _host.DrawIndexedIndirect(indirectArguments with { Offset = indirectArguments.Offset + offset });
+            }
+            else
+            {
+                _host.DrawIndexedIndirect(indirectArguments);
+            }
         }
         else if (emission.IndirectArgumentsAddress != 0)
         {
