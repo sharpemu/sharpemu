@@ -23,6 +23,7 @@ public static partial class AgcExports
         public bool Indexed;
         public DrawIndexedArguments IndexedArguments;
         public DrawAutoArguments AutoArguments;
+        public uint[]? IndirectOffsets;
         public long Sequence;
         public long FrontendImageVersion;
         public ResolvedDraw? Record;
@@ -44,6 +45,7 @@ public static partial class AgcExports
             RepeatOf = 0;
             SerialReason = null;
             Failure = null;
+            IndirectOffsets = null;
             FrontendImageVersion = 0;
             Reads.Clear();
             Done.Reset();
@@ -131,6 +133,7 @@ public static partial class AgcExports
             work.Indexed = indexed;
             work.IndexedArguments = indexedArguments;
             work.AutoArguments = autoArguments;
+            work.IndirectOffsets = offsets;
             work.Sequence = Sink!.EnqueueDeferred(work, isDraw: true);
             Interlocked.Increment(ref _deferredDraws);
             var repeatable = indexed && indexedArguments.OffsetSource == DrawOffsetSource.IndirectArguments;
@@ -508,7 +511,10 @@ public static partial class AgcExports
                     worker.Sink.Draw = null;
                     if (work.Indexed)
                     {
-                        worker.Executor.DrawIndexed(work.SubmitId, work.Banks, in work.IndexedArguments);
+                        if (work.IndirectOffsets is { } offsets)
+                            worker.Executor.DrawIndexedCore(work.SubmitId, work.Banks, in work.IndexedArguments, offsets);
+                        else
+                            worker.Executor.DrawIndexed(work.SubmitId, work.Banks, in work.IndexedArguments);
                     }
                     else
                     {
