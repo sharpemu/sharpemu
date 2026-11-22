@@ -539,6 +539,8 @@ public static class AudioOut2Exports
             Producers[producer] = context;
         }
 
+        _lastPushTimestamp = Stopwatch.GetTimestamp();
+
         // Host Submit already blocks on the output queue; software pacing covers grains with nothing
         // queued, once per grain whichever of Advance and Push comes first.
         var submitted = TrySubmitContextAudio(ctx, context);
@@ -1344,6 +1346,45 @@ public static class AudioOut2Exports
 
     internal static double DeviceSlotFreeThreshold(uint grainSamples, uint frequency, uint queueDepth) =>
         DeviceCushionMilliseconds + (grainSamples * 1000.0 / frequency * Math.Max((long)queueDepth - 1, 0));
+
+    // The guest thread's last push: a thread that pushed within the last ActiveProducerMilliseconds feeds a context now.
+    [ThreadStatic]
+    private static long _lastPushTimestamp;
+
+    private const double ActiveProducerMilliseconds = 20;
+
+    // A nap at most this long is the one an idle job worker takes between jobs.
+    internal const ulong PreciseNapLimitMicroseconds = 1000;
+
+    /// <summary>
+    /// True when a short usleep on this thread must take only the time it asks for: the thread pushed into an AudioOut2
+    /// context within the last 20 ms and the device holds less than its cushion. A host timer wait rounds a nap of
+    /// 51 us up to about 0.5 ms, so a producer that naps between the jobs of each grain falls behind the device.
+    /// </summary>
+    public static bool ProducerNeedsPreciseNap(ulong microseconds)
+    {
+        if (microseconds > PreciseNapLimitMicroseconds ||
+            _lastPushTimestamp == 0 ||
+            !Producers.TryGetValue(GuestThreadExecution.CurrentGuestThreadHandle, out var context) ||
+            !context.DevicePaced ||
+            context.DeviceBackend is not { } backend)
+        {
+            return false;
+        }
+
+        var sincePush = (Stopwatch.GetTimestamp() - _lastPushTimestamp) * 1000.0 / Stopwatch.Frequency;
+        return PreciseProducerNap(microseconds, sincePush, backend.QueuedMilliseconds, context.GrainSamples, context.Frequency);
+    }
+
+    // A nap of at most PreciseNapLimitMicroseconds by a thread that pushed within the last ActiveProducerMilliseconds, while
+    // the device reports less than its cushion less one grain (-1: it cannot report).
+    internal static bool PreciseProducerNap(ulong microseconds, double millisecondsSincePush, int queuedMilliseconds,
+        uint grainSamples, uint frequency) =>
+        microseconds <= PreciseNapLimitMicroseconds &&
+        millisecondsSincePush >= 0 &&
+        millisecondsSincePush < ActiveProducerMilliseconds &&
+        queuedMilliseconds >= 0 &&
+        queuedMilliseconds < DeviceCushionMilliseconds - (grainSamples * 1000.0 / frequency);
 
     /// <summary>
     /// Halves a usleep taken by a thread that feeds an AudioOut2 context while the device runs short,

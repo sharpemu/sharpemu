@@ -27,6 +27,18 @@ internal static unsafe partial class HostHighResolutionSleep
 
     private static int _posixClockState;
 
+    // Spins for the time asked, with pause hints: for a short wait the host timer would round up to its period.
+    public static void SpinMicroseconds(ulong microseconds)
+    {
+        var ticks = (long)Math.Min(microseconds, 1_000_000UL) * Stopwatch.Frequency / 1_000_000;
+        var deadline = Stopwatch.GetTimestamp() + Math.Max(ticks, 1);
+        do
+        {
+            Thread.SpinWait(8);
+        }
+        while (Stopwatch.GetTimestamp() < deadline);
+    }
+
     public static void SleepMicroseconds(ulong microseconds) =>
         Sleep100ns(microseconds > long.MaxValue / 10 ? long.MaxValue : (long)microseconds * 10, allowSpinning: true);
 
