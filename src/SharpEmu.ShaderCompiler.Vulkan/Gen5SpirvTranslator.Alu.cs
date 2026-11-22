@@ -6212,12 +6212,21 @@ public static partial class Gen5SpirvTranslator
             return value;
         }
 
+        // V_CVT_PKRTZ_F16_F32 rounds toward zero. Clearing the 13 mantissa bits a half cannot hold makes the
+        // round-to-nearest pack exact inside the half range, but a finite value of 65536 or more would still round
+        // to infinity, where rounding toward zero gives the largest finite half, 65504. A NaN keeps its bits, so a
+        // payload held only in the cleared bits does not become infinity either.
         private uint TruncateFloat32ForPack(uint value)
         {
-            var raw = BitwiseAnd(
-                Bitcast(_uintType, value),
-                UInt(0xFFFF_E000));
-            return Bitcast(_floatType, raw);
+            var bits = Bitcast(_uintType, value);
+            var raw = BitwiseAnd(bits, UInt(0xFFFF_E000));
+            var magnitude = BitwiseAnd(bits, UInt(0x7FFF_FFFF));
+            var overflow = LogicalAnd(
+                UCmp(SpirvOp.UGreaterThanEqual, magnitude, UInt(0x4780_0000)),
+                UCmp(SpirvOp.ULessThan, magnitude, UInt(0x7F80_0000)));
+            var largest = BitwiseOr(BitwiseAnd(bits, UInt(0x8000_0000)), UInt(0x477F_E000));
+            var nan = UCmp(SpirvOp.UGreaterThan, magnitude, UInt(0x7F80_0000));
+            return Bitcast(_floatType, SelectU(nan, bits, SelectU(overflow, largest, raw)));
         }
 
         private uint Ext(uint operation, uint resultType, params uint[] operands)
