@@ -686,10 +686,13 @@ internal static unsafe partial class VulkanVideoPresenter
             return MayBeCleanReadPage(page);
         }
 
+        // A queued fill or copy that has not landed changes the page for every item after it in the stream, so the page reads
+        // through the ordered path, which refuses the bytes or waits for the range, as it does for a queued store.
         private bool MayBeCleanReadPage(ulong page)
         {
             var thread = _commandThread!;
             return !_bufferCache.MayHaveGpuDirtyPages(page, CleanReadPageBytes) && !thread.HasPendingStores(page, CleanReadPageBytes) &&
+                !thread.HasPendingRange(page, CleanReadPageBytes) &&
                 (_translation.PendingWrites is not { } pending || !pending.MayHavePending(page, CleanReadPageBytes)) &&
                 !thread.HasShadow(page, CleanReadPageBytes);
         }
