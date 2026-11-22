@@ -21,6 +21,59 @@ public sealed partial class GpuCommandInterpreter
     private const uint DrawIndirectArgumentsSize = 16;
     private const uint DrawIndexedIndirectArgumentsSize = 20;
 
+    private int TryDrawIndexedRun(in PacketContext packet, PacketWindow window)
+    {
+        if (!_host.ResolvesIndirectDrawOnGpu || packet.Remaining < 10 || !window.Holds(packet.PacketAddress, 10) ||
+            IndexTypeAndSize > 1 || IndexBaseAddress == 0 || DrawIndirectArgumentsBase == 0 ||
+            IndexedDrawTrace.Enabled || Rendering.RenderTrace.Enabled || Rendering.ScissorTrace.Instance is { Active: true } ||
+            !Rendering.RenderExecutor.RunsPlainVertexProgram(TypedRegisters.Context.ShaderStages) ||
+            TypedRegisters.UserConfig.PrimitiveType != (uint)Rendering.GuestPrimitiveType.TriangleList)
+            return 0;
+
+        int start = window.IndexOf(packet.PacketAddress);
+        var words = window.Words.AsSpan(start, (int)Math.Min(window.DwordCount - (uint)start, packet.Remaining));
+        if (words[5] != packet.Header || (words[4] & ~0x20u) != 2u) return 0;
+        var locations = DrawRegisterLocations.FromPacket(words[2], words[3]);
+        int vertex = VertexUserDataIndex(locations.BaseVertex);
+        int instance = VertexUserDataIndex(locations.StartInstance);
+        if (DrawRegisterLocations.Names(locations.DrawIndex) ||
+            (DrawRegisterLocations.Names(locations.BaseVertex) && vertex < 0) ||
+            (DrawRegisterLocations.Names(locations.StartInstance) && instance < 0)) return 0;
+
+        int limit = Math.Min(32, words.Length / 5);
+        var indexCount = IndexBufferSize;
+        if (indexCount == 0)
+        {
+            // Leave the periodic CPU sample to TryGetGpuIndexRange.
+            limit = Math.Min(limit, 1023 - (int)(_indexExtentDraws & 1023));
+            if (!_indexExtents.TryGetValue(IndexBaseAddress, out var extent)) return 0;
+            indexCount = (uint)(extent / IndexElementSize);
+        }
+        if (indexCount == 0 || (ulong)indexCount * IndexElementSize > 64ul << 20) return 0;
+
+        Span<uint> offsets = stackalloc uint[32];
+        ulong first = DrawIndirectArgumentsBase + words[1];
+        if (first < DrawIndirectArgumentsBase) return 0;
+        int count = 0;
+        for (; count < limit; count++)
+        {
+            var next = words.Slice(count * 5, 5);
+            ulong address = DrawIndirectArgumentsBase + next[1];
+            if (next[0] != packet.Header || !next[2..].SequenceEqual(words[2..5]) ||
+                (address & 3) != 0 || address < first || address > ulong.MaxValue - DrawIndexedIndirectArgumentsSize ||
+                (address + DrawIndexedIndirectArgumentsSize - 1) >> 12 != first >> 12) break;
+            offsets[count] = (uint)(address - first);
+        }
+        if (count < 2) return 0;
+        var args = new DrawIndexedArguments(packet.PacketAddress, packet.Opcode, indexCount, IndexBaseAddress,
+            IndexTypeAndSize, 1, 0, 0, DrawOffsetSource.IndirectArguments, first, IndexBufferSize == 0, instance, BaseVertexUserData: vertex);
+        if (!_host.TryDrawIndexedRun(SubmitId, in args, offsets[..count])) return 0;
+        if (IndexBufferSize == 0) _indexExtentDraws += (uint)count;
+        if (IndirectInstanceInherit == IndirectInstanceInheritance.All)
+            _deferredInstanceCountAddress = first + offsets[count - 1] + 4;
+        return count;
+    }
+
     internal void SetIndexType(uint indexTypeAndSize) => IndexTypeAndSize = indexTypeAndSize & 0x3u;
 
     internal void SetIndexBaseAddress(ulong address) => IndexBaseAddress = address;
