@@ -7,6 +7,7 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Pad;
 
+[Collection(HostWindowInputCollection.Name)]
 public sealed class HostWindowInputTests
 {
     [Theory]

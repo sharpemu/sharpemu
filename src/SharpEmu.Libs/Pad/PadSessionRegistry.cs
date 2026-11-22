@@ -132,4 +132,6 @@ internal sealed class PadSession(int userId, int portType, int portIndex, bool c
     public int PortIndex { get; } = portIndex;
     public bool Connected { get; } = connected;
     public int MotionSensorEnabled = 1;
+    // The next pad history state this session reads, -1 before its first read (PadExports.HistoryGate).
+    public long ReadSequence = -1;
 }

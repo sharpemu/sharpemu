@@ -27,6 +27,7 @@ public static class HostWindowInput
         }
 
         HostWindowInputSource.Set(Source);
+        Changed?.Invoke();
     }
 
     public static void Disconnect()
@@ -42,54 +43,90 @@ public static class HostWindowInput
         }
 
         HostWindowInputSource.Clear(Source);
+        Changed?.Invoke();
     }
+
+    // Called after each change of the window, a key, the focus, or a gamepad's buttons or touch contacts, as it
+    // happens: the pad keeps the states between two reads of the game (PadExports.RecordInputChange), so a press and
+    // its release in between both reach it.
+    internal static Action? Changed;
 
     public static void SetFocused(bool focused)
     {
+        bool changed;
         lock (Gate)
         {
+            changed = _focused != focused || (!focused && PressedKeys.Count != 0);
             _focused = focused;
             if (!focused)
             {
                 PressedKeys.Clear();
             }
         }
+
+        if (changed) Changed?.Invoke();
     }
 
     public static void SetKey(int virtualKey, bool down)
     {
+        bool changed;
         lock (Gate)
         {
-            if (down)
-            {
-                PressedKeys.Add(virtualKey);
-            }
-            else
-            {
-                PressedKeys.Remove(virtualKey);
-            }
+            changed = down ? PressedKeys.Add(virtualKey) : PressedKeys.Remove(virtualKey);
         }
+
+        if (changed) Changed?.Invoke();
     }
 
     public static void SetGamepad(string? name, HostGamepadState state)
     {
+        bool changed;
         lock (Gate)
         {
+            changed = _gamepadConnected != state.Connected || _gamepadState.Buttons != state.Buttons ||
+                      !SameContacts(_gamepadState.Touch, state.Touch);
             _gamepadConnected = state.Connected;
             _gamepadName = name;
             _gamepadState = state;
         }
+
+        if (changed) Changed?.Invoke();
+    }
+
+    // One button event of the connected gamepad, applied as it comes: a poll sees only where the buttons ended up.
+    public static void SetGamepadButton(HostGamepadButtons button, bool down)
+    {
+        bool changed;
+        lock (Gate)
+        {
+            var buttons = down ? _gamepadState.Buttons | button : _gamepadState.Buttons & ~button;
+            changed = _gamepadConnected && buttons != _gamepadState.Buttons;
+            if (changed)
+            {
+                _gamepadState = _gamepadState with { Buttons = buttons };
+            }
+        }
+
+        if (changed) Changed?.Invoke();
     }
 
     public static void ClearGamepad()
     {
+        bool changed;
         lock (Gate)
         {
+            changed = _gamepadConnected;
             _gamepadConnected = false;
             _gamepadName = null;
             _gamepadState = default;
         }
+
+        if (changed) Changed?.Invoke();
     }
+
+    private static bool SameContacts(HostTouchState left, HostTouchState right) =>
+        left.First.Active == right.First.Active && left.First.Id == right.First.Id &&
+        left.Second.Active == right.Second.Active && left.Second.Id == right.Second.Id;
 
     internal static byte ToStickByte(short value)
     {

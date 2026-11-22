@@ -488,6 +488,46 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
                         OpenFirstGamepad();
                     }
                     break;
+                case SDL_EventType.SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+                case SDL_EventType.SDL_EVENT_GAMEPAD_BUTTON_UP:
+                case SDL_EventType.SDL_EVENT_GAMEPAD_AXIS_MOTION:
+                    ApplyGamepadEvent(in windowEvent);
+                    break;
+            }
+        }
+    }
+
+    // A button event of the open gamepad, or a trigger crossing its button threshold, applied in the order SDL queued
+    // it: the poll after the events sees only where the buttons ended up, so a press and its release between two polls
+    // would never reach the pad.
+    private void ApplyGamepadEvent(in SDL_Event windowEvent)
+    {
+        lock (_gamepadGate)
+        {
+            if (_gamepad is null)
+            {
+                return;
+            }
+
+            var gamepad = SDL_GetGamepadID(_gamepad);
+            if (windowEvent.Type != SDL_EventType.SDL_EVENT_GAMEPAD_AXIS_MOTION)
+            {
+                var button = SdlGamepadStateReader.MapButton(windowEvent.gbutton.button);
+                if (windowEvent.gbutton.which == gamepad && button != HostGamepadButtons.None)
+                {
+                    HostWindowInput.SetGamepadButton(button, windowEvent.gbutton.down);
+                }
+
+                return;
+            }
+
+            var axis = (SDL_GamepadAxis)windowEvent.gaxis.axis;
+            if (windowEvent.gaxis.which == gamepad &&
+                axis is SDL_GamepadAxis.SDL_GAMEPAD_AXIS_LEFT_TRIGGER or SDL_GamepadAxis.SDL_GAMEPAD_AXIS_RIGHT_TRIGGER)
+            {
+                HostWindowInput.SetGamepadButton(
+                    axis == SDL_GamepadAxis.SDL_GAMEPAD_AXIS_LEFT_TRIGGER ? HostGamepadButtons.L2 : HostGamepadButtons.R2,
+                    SdlGamepadStateReader.IsTriggerPressed(HostWindowInput.ToTriggerByte(windowEvent.gaxis.value)));
             }
         }
     }

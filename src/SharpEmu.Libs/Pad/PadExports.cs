@@ -38,6 +38,18 @@ public static class PadExports
     [ThreadStatic]
     private static PadState _cachedInputState;
 
+    [ThreadStatic]
+    private static long _cachedInputHistory;
+
+    // The history scePadRead returns (64 states, as the console keeps): the pad's state after each change of a button
+    // or a touch contact, in order, taken as the window's input events come (RecordInputChange). Each session reads
+    // the states it has not read yet, so a press and its release between two reads reach the game as two states
+    // instead of none.
+    private const int HistoryCapacity = 64;
+    private static readonly object HistoryGate = new();
+    private static readonly (PadState State, ulong Timestamp)[] History = new (PadState, ulong)[HistoryCapacity];
+    private static long _historyNext;
+
     private static int _controlsAnnouncementLogged;
     private static readonly bool LogPadState =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_PAD_STATE"), "1", StringComparison.Ordinal);
@@ -65,8 +77,59 @@ public static class PadExports
     public static int PadInit(CpuContext ctx)
     {
         GetSessions(ctx).Initialize();
+        HostWindowInput.Changed = RecordInputChange;
         HostPlatform.Current.Input.EnsureStarted();
         return ctx.SetReturn(0);
+    }
+
+    private static void RecordInputChange()
+    {
+        var state = ReadHostInputState(fresh: true);
+        var timestamp = TimestampMicroseconds();
+        lock (HistoryGate)
+        {
+            if (_historyNext != 0 && SameButtonsAndContacts(History[(int)((_historyNext - 1) % HistoryCapacity)].State, state))
+            {
+                return;
+            }
+
+            History[(int)(_historyNext % HistoryCapacity)] = (state, timestamp);
+            _historyNext++;
+        }
+    }
+
+    private static bool SameButtonsAndContacts(in PadState left, in PadState right) =>
+        left.Buttons == right.Buttons &&
+        left.Touch.First.Active == right.Touch.First.Active && left.Touch.First.Id == right.Touch.First.Id &&
+        left.Touch.Second.Active == right.Touch.Second.Active && left.Touch.Second.Id == right.Touch.Second.Id;
+
+    // The states the session has not read, oldest first, at most count; a session reads from its first read on.
+    private static (PadState State, ulong Timestamp)[] TakeUnreadStates(PadSession session, int count, out bool more)
+    {
+        lock (HistoryGate)
+        {
+            if (session.ReadSequence < 0)
+            {
+                session.ReadSequence = _historyNext;
+            }
+
+            var first = Math.Max(session.ReadSequence, _historyNext - HistoryCapacity);
+            var take = (int)Math.Min(_historyNext - first, count);
+            more = _historyNext - first > take;
+            if (take == 0)
+            {
+                return [];
+            }
+
+            var states = new (PadState State, ulong Timestamp)[take];
+            for (var index = 0; index < take; index++)
+            {
+                states[index] = History[(int)((first + index) % HistoryCapacity)];
+            }
+
+            session.ReadSequence = first + take;
+            return states;
+        }
     }
 
     #pragma warning disable SHEM006
@@ -478,14 +541,44 @@ public static class PadExports
             return ctx.SetReturn(OrbisPadErrorInvalidHandle);
         }
 
-        if (dataAddress == 0 || count < 1 || count > 64)
+        if (dataAddress == 0 || count < 1 || count > HistoryCapacity)
         {
             return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        return WritePadData(ctx, dataAddress, handle, session, "scePadRead")
-            ? ctx.SetReturn(1)
-            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        if (!session.Connected)
+        {
+            return WritePadData(ctx, dataAddress, handle, session, "scePadRead")
+                ? ctx.SetReturn(1)
+                : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        // The unread states, then the state now when room is left and none waits: a connected pad keeps reporting, so
+        // the last state a read returns is the current one (the sticks and sensors since the last change).
+        var states = TakeUnreadStates(session, count, out var more);
+        var written = 0;
+        foreach (var (state, timestamp) in states)
+        {
+            if (!WritePadState(ctx, dataAddress + (ulong)(written * PadDataSize), handle, session, state, timestamp, "scePadRead"))
+            {
+                return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+
+            written++;
+        }
+
+        if (!more && written < count)
+        {
+            if (!WritePadState(ctx, dataAddress + (ulong)(written * PadDataSize), handle, session,
+                    ReadHostInputState(fresh: written != 0), TimestampMicroseconds(), "scePadRead"))
+            {
+                return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+
+            written++;
+        }
+
+        return ctx.SetReturn(written);
     }
 
     [SysAbiExport(
@@ -867,19 +960,26 @@ public static class PadExports
 
     private static bool WritePadData(CpuContext ctx, ulong dataAddress, int handle, PadSession session, string exportName)
     {
-        Span<byte> data = stackalloc byte[PadDataSize];
-        data.Clear();
-        if (!session.Connected)
+        if (session.Connected)
         {
-            data[0x04] = 128;
-            data[0x05] = 128;
-            data[0x06] = 128;
-            data[0x07] = 128;
-            BinaryPrimitives.WriteSingleLittleEndian(data[0x18..], 1.0f);
-            return ctx.Memory.TryWrite(dataAddress, data);
+            return WritePadState(ctx, dataAddress, handle, session, ReadHostInputState(), TimestampMicroseconds(), exportName);
         }
 
-        var input = ReadHostInputState();
+        Span<byte> data = stackalloc byte[PadDataSize];
+        data.Clear();
+        data[0x04] = 128;
+        data[0x05] = 128;
+        data[0x06] = 128;
+        data[0x07] = 128;
+        BinaryPrimitives.WriteSingleLittleEndian(data[0x18..], 1.0f);
+        return ctx.Memory.TryWrite(dataAddress, data);
+    }
+
+    private static bool WritePadState(CpuContext ctx, ulong dataAddress, int handle, PadSession session, in PadState input,
+        ulong timestampMicroseconds, string exportName)
+    {
+        Span<byte> data = stackalloc byte[PadDataSize];
+        data.Clear();
         var buttons = input.Buttons;
         var leftX = input.LeftX;
         var leftY = input.LeftY;
@@ -909,10 +1009,6 @@ public static class PadExports
 
         WriteTouchData(data, input.Touch);
         data[0x4C] = 1;
-        var timestampTicks = Stopwatch.GetTimestamp();
-        var timestampMicroseconds =
-            ((ulong)(timestampTicks / Stopwatch.Frequency) * 1_000_000UL) +
-            ((ulong)(timestampTicks % Stopwatch.Frequency) * 1_000_000UL / (ulong)Stopwatch.Frequency);
         BinaryPrimitives.WriteUInt64LittleEndian(
             data[0x50..],
             timestampMicroseconds);
@@ -923,10 +1019,20 @@ public static class PadExports
         return guestWriteSucceeded;
     }
 
-    private static PadState ReadHostInputState()
+    private static ulong TimestampMicroseconds()
+    {
+        var ticks = Stopwatch.GetTimestamp();
+        return ((ulong)(ticks / Stopwatch.Frequency) * 1_000_000UL) +
+               ((ulong)(ticks % Stopwatch.Frequency) * 1_000_000UL / (ulong)Stopwatch.Frequency);
+    }
+
+    // A cached state serves only while no input change was recorded since; fresh: never the cached state.
+    private static PadState ReadHostInputState(bool fresh = false)
     {
         var now = Stopwatch.GetTimestamp();
-        if (_lastInputSampleTicks != 0 && now - _lastInputSampleTicks < InputSampleIntervalTicks)
+        var history = Volatile.Read(ref _historyNext);
+        if (!fresh && _lastInputSampleTicks != 0 && now - _lastInputSampleTicks < InputSampleIntervalTicks &&
+            history == _cachedInputHistory)
         {
             return _cachedInputState;
         }
@@ -1012,6 +1118,7 @@ public static class PadExports
             ControllerButtons = controllerButtons,
         };
         _lastInputSampleTicks = now;
+        _cachedInputHistory = history;
         return _cachedInputState;
     }
 
