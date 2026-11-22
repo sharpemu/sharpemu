@@ -173,4 +173,80 @@ public sealed partial class GuestImageCacheTests
         Assert.True(harness.Image(sampledId).Description.IsBlock);
         Assert.True(harness.Image(sampledId).IsGpuModified);
     }
+
+    // 64x64 BC1 with its 32x32 level first, as tiled chains place the smaller levels: level 0 starts after it. Linear rows are
+    // 256 bytes (32 blocks, 16 used): level 0 takes 16 of them, level 1 8.
+    private const ulong PaddedLevelBytes = 0x1000;
+    private const ulong PaddedMipBytes = 0x800;
+
+    private static ImageRequest MippedCompressedTexture(ulong address)
+    {
+        var request = LinearRequest(address, PaddedMipBytes + PaddedLevelBytes, Format.BC1RgbaSrgbBlock, GuestPixelFormat.Bc1Srgb,
+            GuestImageType.Color2D, new Extent3D(64, 64, 1), 1, 8, 1);
+        request.Description.Resources = new SubresourceCount(2, 1);
+        request.Description.MipLayout[0] = new MipLevelLayout { Offset = PaddedMipBytes, Size = PaddedLevelBytes, Pitch = 64, Height = 64 };
+        request.Description.MipLayout[1] = new MipLevelLayout { Offset = 0, Size = PaddedMipBytes, Pitch = 32, Height = 32 };
+        request.View = request.View with { LevelCount = 2 };
+        return request;
+    }
+
+    // The memory of a texture the guest gave up now holds a one-level image whose texels are as large as the texture's blocks
+    // (a 16x16 R32G32 state where a 64x64 BC1 chain was). Its bytes start where the chain's smaller level was, not where the
+    // chain's level 0 is, so the texture is no view of it: the image is its own, made from guest memory.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void FindImage_AnImageOfTheOtherBlockClassWithItsLevelsElsewhereIsItsOwn(bool aged)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        var texture = MippedCompressedTexture(address);
+        var textureId = harness.Acquire(ref texture);
+        harness.MarkGpuWritten(textureId);
+        if (aged)
+        {
+            AgeBeyondTheRemovalWindow(harness, textureId);
+        }
+
+        var state = Enumerable.Range(0, (int)BlockImageBytes).Select(index => (byte)(index * 13 + 5)).ToArray();
+        Assert.True(harness.WriteFault(address));
+        harness.Write(address, state);
+        var image = LinearRequest(address, BlockImageBytes, Format.R32G32Uint, GuestPixelFormat.Bits32_32UInt, GuestImageType.Color2D,
+            new Extent3D(16, 16, 1), 1, 8, 1);
+        var imageId = harness.Acquire(ref image);
+
+        Assert.NotEqual(textureId, imageId);
+        Assert.False(harness.Image(imageId).Description.IsBlock);
+        Assert.Equal(state, harness.ReadImageBytes(harness.Image(imageId)));
+        var owners = harness.Images.FindImagesInRangeForTest(address, BlockImageBytes, pageOverlap: false);
+        Assert.Contains(imageId, owners);
+        Assert.Equal(!aged, owners.Contains(textureId));
+        harness.Shutdown();
+    }
+
+    // The other way: a compressed chain requested where a one-level image of its block size lies. The chain's level 0 holds the
+    // guest bytes after its smaller level, not the image's texels.
+    [Fact]
+    public void FindImage_ACompressedChainOverAnImageWithItsLevelsElsewhereIsMadeFromGuestMemory()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        var image = LinearRequest(address, BlockImageBytes, Format.R32G32Uint, GuestPixelFormat.Bits32_32UInt, GuestImageType.Color2D,
+            new Extent3D(16, 16, 1), 1, 8, 1);
+        var imageId = harness.Acquire(ref image);
+
+        var blocks = Enumerable.Range(0, (int)(PaddedMipBytes + PaddedLevelBytes)).Select(index => (byte)(index * 7 + 3)).ToArray();
+        Assert.True(harness.WriteFault(address));
+        harness.Write(address, blocks);
+        var texture = MippedCompressedTexture(address);
+        var textureId = harness.Acquire(ref texture);
+
+        Assert.NotEqual(imageId, textureId);
+        Assert.True(harness.Image(textureId).Description.IsBlock);
+        var rows = Enumerable.Range(0, 16).SelectMany(row => blocks.Skip((int)PaddedMipBytes + row * 256).Take(16 * 8)).ToArray();
+        Assert.Equal(rows, harness.ReadImageBytes(harness.Image(textureId))[..(int)BlockImageBytes]);
+        harness.Shutdown();
+    }
 }
