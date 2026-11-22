@@ -27,6 +27,55 @@ public sealed partial class GpuCommandInterpreter
         return true;
     }
 
+    // Set by the command stream queue for each slice: the queue table and the admission order of the submission.
+    internal CommandStreamQueue? Queues { get; set; }
+
+    internal ulong AdmissionOrdinal { get; set; }
+
+    // A release lands after this many checks at the same packet even if older work still looks runnable: work that keeps
+    // being unblocked by other completions must not hold a release for ever.
+    private const int MaxReleaseYields = 256;
+
+    private PacketCursorStack? _yieldedExecution;
+    private ulong _yieldedPacket;
+    private int _yieldChecks;
+    private bool _suspendedForYield;
+
+    // Whether the last slice suspended at a release waiting for older work, taken by the command stream queue.
+    internal bool TakeReleaseYield()
+    {
+        var yielded = _suspendedForYield;
+        _suspendedForYield = false;
+        return yielded;
+    }
+
+    // The GPU runs every queue at once, so by the time a release lands, the compute work submitted before it has run as far
+    // as its own waits let it, and the CPU may reuse that work's memory as soon as it sees the label. The command stream
+    // runs one queue at a time and can reach the release first. A release the CPU can observe therefore lets the older
+    // submissions of the compute queues run first, without soft waits, and lands once none of them can.
+    private bool YieldsToOlderWork()
+    {
+        if (Queues is not { } queues || _execution is not { } execution)
+        {
+            return false;
+        }
+
+        var again = ReferenceEquals(_yieldedExecution, execution) && _yieldedPacket == _packetAddress;
+        _yieldChecks = again ? _yieldChecks + 1 : 0;
+        if (_yieldChecks >= MaxReleaseYields || !queues.YieldToOlderWork(QueueId, AdmissionOrdinal, runnableOnly: again))
+        {
+            _yieldedExecution = null;
+            _yieldChecks = 0;
+            return false;
+        }
+
+        _yieldedExecution = execution;
+        _yieldedPacket = _packetAddress;
+        _suspendedForYield = true;
+        Suspend();
+        return true;
+    }
+
     // Labels stay immediate unless an earlier result must be published first.
     internal void WriteEndOfPipe(
         bool is64Bit,
@@ -344,6 +393,11 @@ public sealed partial class GpuCommandInterpreter
         if (dataSelection is not (0 or 1 or 2 or 3 or 5))
         {
             throw _host.Fatal($"The release-memory data selection is not supported: selection={dataSelection} address=0x{destination:X16}.");
+        }
+
+        if ((interruptSelector != 0 || (dataSelection != 0 && destination != 0)) && YieldsToOlderWork())
+        {
+            return;
         }
 
         WarnUnknownReleaseMemGcr(gcrControl);
