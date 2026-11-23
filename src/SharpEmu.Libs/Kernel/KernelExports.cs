@@ -11,8 +11,8 @@ public static class KernelExports
     private static readonly object _cxaGate = new();
     private static readonly List<CxaDestructorEntry> _cxaDestructors = new();
     private static readonly object _coredumpGate = new();
-    private const string RepeatedGuestAssertion = "Assertion failed: 0";
-    private static int _repeatedGuestAssertionCount;
+    private const int GuestAssertionReportInterval = 1000;
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> GuestAssertionCounts = new();
     private static ulong _coredumpHandler;
     private static ulong _coredumpHandlerContext;
 
@@ -442,19 +442,28 @@ public static class KernelExports
     // but printf must still report its original byte count to the guest.
     private static bool ShouldWriteGuestPrintf(string text)
     {
-        if (!string.Equals(text.TrimEnd('\r', '\n'), RepeatedGuestAssertion, StringComparison.Ordinal))
+        var line = text.TrimEnd('\r', '\n');
+        if (!IsGuestAssertion(line))
         {
             return true;
         }
 
-        var count = Interlocked.Increment(ref _repeatedGuestAssertionCount);
+        var count = GuestAssertionCounts.AddOrUpdate(line, 1, static (_, value) => value + 1);
         if (count == 2)
         {
-            Console.WriteLine("[DEBUG][PRINF] Further repeated 'Assertion failed: 0' messages are suppressed.");
+            Console.WriteLine($"[DEBUG][PRINF] Further repeats of '{line}' are suppressed.");
+        }
+        else if (count % GuestAssertionReportInterval == 0)
+        {
+            Console.WriteLine($"[DEBUG][PRINF] '{line}' repeated {count} times.");
         }
 
         return count == 1;
     }
+
+    private static bool IsGuestAssertion(string line) =>
+        line.StartsWith("Assertion failed", StringComparison.Ordinal) ||
+        line.StartsWith("An assertion fired in:", StringComparison.Ordinal);
 
     [SysAbiExport(
         Nid = "EMutwaQ34Jo",
