@@ -6041,7 +6041,7 @@ public static partial class Gen5SpirvTranslator
             var value = GetRawSource(instruction, 0);
             var selectorLow = GetRawSource(instruction, 1);
             var selectorHigh = GetRawSource(instruction, 2);
-            var lane = GuestWaveLane();
+            var lane = WaveMaskLane();
             var localLane = BitwiseAnd(lane, UInt(15));
             var lowHalf = _module.AddInstruction(
                 SpirvOp.ULessThan,
