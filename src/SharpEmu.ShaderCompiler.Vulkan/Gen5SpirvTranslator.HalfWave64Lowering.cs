@@ -114,7 +114,7 @@ public static partial class Gen5SpirvTranslator
 
                 return context.ShiftLeftLogical64(
                     context._module.Constant64(context._ulongType, 1),
-                    context._module.AddInstruction(SpirvOp.UConvert, context._ulongType, context.GuestWaveLane()));
+                    context._module.AddInstruction(SpirvOp.UConvert, context._ulongType, context.WaveMaskLane()));
             }
 
             public uint BroadcastFirstActive(uint value)
