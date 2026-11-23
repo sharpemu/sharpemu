@@ -407,7 +407,7 @@ public static partial class GnmAjmExports
         call[CpuRegister.R8] = 0;
         call[CpuRegister.R9] = 0;
         scratch.WriteStackArgs(0, scratch.Address(ScratchQuery), (ulong)query.End);
-        if (scratch.Call(AjmExports.AjmBatchJobRunBufferRa, ScratchQuery) != 0 ||
+        if ((scratch.Call(AjmExports.AjmBatchJobRunBufferRa, ScratchQuery) & ~Atrac9DecodeState.ResultPartialInput) != 0 ||
             scratch.ReadUInt32(ScratchQuery + query.Gapless) != 0)
             return;
 
