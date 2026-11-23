@@ -178,13 +178,30 @@ public static class AudioOut2Exports
         }
 
         public double DeviceSlotFreeMilliseconds =>
-            DeviceSlotFreeThreshold(GrainSamples, Frequency, QueueDepth);
+            DeviceSlotFreeThreshold(GrainSamples, Frequency, QueueDepth, CushionMilliseconds);
+
+        public long ReserveMicroseconds;
+
+        public int CushionMilliseconds =>
+            (int)Math.Max(DeviceCushionMilliseconds, Volatile.Read(ref ReserveMicroseconds) / 1000);
+
+        public long CalmSince;
+        public long LastOutputTimestamp;
+        public float[] Recent = [];
+        public int RecentFrames;
+        public long StatsWindowStart;
+        public long StatsGrains;
+        public long StatsDropouts;
+        public long StatsStretches;
+        public long StatsStretchedFrames;
+        public long StatsSilentFills;
+        public long StatsTrims;
 
         // Grains the device holds beyond the cushion, at most QueueDepth.
         public uint DeviceQueuedGrains(int queuedMilliseconds)
         {
             var grainMilliseconds = GrainSamples * 1000.0 / Frequency;
-            var beyondCushion = queuedMilliseconds - DeviceCushionMilliseconds;
+            var beyondCushion = queuedMilliseconds - CushionMilliseconds;
             return beyondCushion <= 0
                 ? 0
                 : (uint)Math.Min(Math.Ceiling(beyondCushion / grainMilliseconds), QueueDepth);
@@ -1376,7 +1393,13 @@ public static class AudioOut2Exports
         }
 
         var sincePush = (Stopwatch.GetTimestamp() - _lastPushTimestamp) * 1000.0 / Stopwatch.Frequency;
-        return PreciseProducerNap(microseconds, sincePush, backend.QueuedMilliseconds, context.GrainSamples, context.Frequency);
+        return PreciseProducerNap(
+            microseconds,
+            sincePush,
+            backend.QueuedMilliseconds,
+            context.GrainSamples,
+            context.Frequency,
+            context.CushionMilliseconds);
     }
 
     // A nap of at most PreciseNapLimitMicroseconds by a thread that pushed within the last ActiveProducerMilliseconds, while
