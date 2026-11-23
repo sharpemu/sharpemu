@@ -409,6 +409,7 @@ public sealed partial class SpirvModuleBuilder
 {
     private const uint Magic = 0x07230203;
     private const uint Version15 = 0x00010500;
+    private const uint Version16 = 0x00010600;
     private const uint Generator = 0x53504500; // "SPE"
 
     private readonly List<uint> _capabilities = [];
@@ -1153,7 +1154,9 @@ public sealed partial class SpirvModuleBuilder
         return decorated;
     }
 
-    public byte[] Build()
+    public byte[] Build() => Build(spirv16: false);
+
+    internal byte[] Build(bool spirv16)
     {
         if (_memoryModel.Count == 0)
         {
@@ -1187,7 +1190,7 @@ public sealed partial class SpirvModuleBuilder
         var words = new uint[wordCount];
         var offset = 0;
         WriteWord(Magic);
-        WriteWord(Version15);
+        WriteWord(spirv16 ? Version16 : Version15);
         WriteWord(Generator);
         WriteWord(_nextId);
         WriteWord(0);

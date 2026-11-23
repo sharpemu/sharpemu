@@ -1160,7 +1160,7 @@ public static partial class Gen5SpirvTranslator
                     break;
                 case "VMbcntHiU32B32":
                 {
-                    var guestLane = WaveMaskLane();
+                    var guestLane = GuestWaveLane();
                     var lane = BitwiseAnd(guestLane, UInt(31));
                     var partialMask = _module.AddInstruction(
                         SpirvOp.ISub,
@@ -1188,7 +1188,7 @@ public static partial class Gen5SpirvTranslator
                 }
                 case "VMbcntLoU32B32":
                 {
-                    var guestLane = WaveMaskLane();
+                    var guestLane = GuestWaveLane();
                     var lane = BitwiseAnd(guestLane, UInt(31));
                     var partialMask = _module.AddInstruction(
                         SpirvOp.ISub,
@@ -4734,7 +4734,7 @@ public static partial class Gen5SpirvTranslator
 
         private uint ApplyDpp8Source(Gen5Dpp8Control control, uint value)
         {
-            var lane = WaveMaskLane();
+            var lane = GuestWaveLane();
             var laneInGroup = BitwiseAnd(lane, UInt(7));
             var selector = UInt(control.LaneSelectors & 7);
             for (var index = 1u; index < 8; index++)
@@ -4792,7 +4792,7 @@ public static partial class Gen5SpirvTranslator
             {
                 GetDppSourceLane(control, out var targetLane, out var inRange);
                 var graphicsTarget = BitwiseAnd(
-                    _module.AddInstruction(SpirvOp.Select, _uintType, inRange, targetLane, WaveMaskLane()),
+                    _module.AddInstruction(SpirvOp.Select, _uintType, inRange, targetLane, GuestWaveLane()),
                     UInt(NativeLaneMask));
                 if (control.FetchInactive)
                 {
@@ -4844,7 +4844,7 @@ public static partial class Gen5SpirvTranslator
                     inRange,
                     _module.AddInstruction(SpirvOp.GroupNonUniformBallotBitExtract, _boolType, UInt(3), readable, target));
                 safeTarget = BitwiseAnd(
-                    _module.AddInstruction(SpirvOp.Select, _uintType, valid, target, WaveMaskLane()),
+                    _module.AddInstruction(SpirvOp.Select, _uintType, valid, target, GuestWaveLane()),
                     UInt(NativeLaneMask));
                 return;
             }
@@ -4854,7 +4854,7 @@ public static partial class Gen5SpirvTranslator
                 _uintType,
                 inRange,
                 targetLane,
-                WaveMaskLane());
+                GuestWaveLane());
             if (!_pairedMeshLanes)
             {
                 safeTarget = BitwiseAnd(safeTarget, UInt(NativeLaneMask));
@@ -4941,7 +4941,7 @@ public static partial class Gen5SpirvTranslator
             out uint targetLane,
             out uint inRange)
         {
-            var lane = WaveMaskLane();
+            var lane = GuestWaveLane();
             var rowBase = BitwiseAnd(lane, UInt(0xFFFF_FFF0));
             var rowLane = BitwiseAnd(lane, UInt(15));
             var dpp = control.Control;
@@ -5033,7 +5033,7 @@ public static partial class Gen5SpirvTranslator
 
         private uint IsDppWriteEnabled(Gen5DppControl control)
         {
-            var lane = WaveMaskLane();
+            var lane = GuestWaveLane();
             var row = ShiftRightLogical(lane, UInt(4));
             // A bank is four consecutive lanes of each row (RDNA2 ISA, table 90).
             var bank = BitwiseAnd(ShiftRightLogical(lane, UInt(2)), UInt(3));
@@ -6041,7 +6041,7 @@ public static partial class Gen5SpirvTranslator
             var value = GetRawSource(instruction, 0);
             var selectorLow = GetRawSource(instruction, 1);
             var selectorHigh = GetRawSource(instruction, 2);
-            var lane = WaveMaskLane();
+            var lane = GuestWaveLane();
             var localLane = BitwiseAnd(lane, UInt(15));
             var lowHalf = _module.AddInstruction(
                 SpirvOp.ULessThan,

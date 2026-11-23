@@ -128,7 +128,7 @@ public sealed class Wave64Subgroup32DeviceTests(HeadlessVulkanFixture fixture) :
         Add(Vop3(0, "VCndmaskB32", 4, Operand(0), Operand(2000), Gen5Operand.Scalar(10)));
         Add(Vop2(0, "VAddU32", 4, Gen5Operand.Vector(2), Gen5Operand.Vector(4)));
 
-        var lanes = Run(sizeX: 16, sizeY: 5, laneLocal: true);
+        var lanes = Run(sizeX: 16, sizeY: 5, laneLocal: true, needsHalfWaveSubgroups: true);
         for (uint index = 0; index < 80; index++)
         {
             Assert.Equal(index >= 40 ? 2000 + index : index, lanes[index]);

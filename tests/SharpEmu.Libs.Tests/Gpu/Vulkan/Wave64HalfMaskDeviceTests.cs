@@ -52,7 +52,7 @@ public class Wave64HalfMaskDeviceTests(HeadlessVulkanFixture fixture) : IClassFi
     // fixedThreadsX and fixedThreadsY put a thread count that can end inside the group in the module. With
     // dispatchLimits the thread count comes with each dispatch instead, and the pipeline runs once per entry.
     protected uint[] Run(uint localDataShareDwords = 0, uint sizeX = 8, uint sizeY = 8, bool? laneLocal = null,
-        uint? fixedThreadsX = null, uint? fixedThreadsY = null, (uint X, uint Y)[]? dispatchLimits = null)
+        uint? fixedThreadsX = null, uint? fixedThreadsY = null, (uint X, uint Y)[]? dispatchLimits = null, bool needsHalfWaveSubgroups = false)
     {
         var threads = sizeX * sizeY;
         Add(Vop2(0, "VLshlrevB32", 5, Operand(2), Gen5Operand.Vector(2)));
@@ -76,7 +76,16 @@ public class Wave64HalfMaskDeviceTests(HeadlessVulkanFixture fixture) : IClassFi
         {
             var halfWavesEnabled = Environment.GetEnvironmentVariable("SHARPEMU_WAVE64_LANE_LOCAL") != "0";
             var paired = Gen5SpirvTranslator.PairsWave64Lanes(Environment.GetEnvironmentVariable("SHARPEMU_WAVE64_PAIRED"), threads);
-            Assert.Equal((oneLanePerInvocation && halfWavesEnabled) || !paired ? sizeX : (threads + 63) / 64 * 32, LocalSizeX(shader.Spirv));
+            var fullSubgroups = BinaryPrimitives.ReadUInt32LittleEndian(shader.Spirv.AsSpan(sizeof(uint))) == 0x00010600;
+            if (needsHalfWaveSubgroups)
+            {
+                Assert.Equal(halfWavesEnabled, fullSubgroups);
+            }
+
+            var expectedSize = fullSubgroups && sizeX % 32 != 0 ? (32u, (threads + 31) / 32, 1u)
+                : (oneLanePerInvocation && halfWavesEnabled) || !paired ? (sizeX, sizeY, 1u)
+                : ((threads + 63) / 64 * 32, 1u, 1u);
+            Assert.Equal(expectedSize, LocalSize(shader.Spirv));
         }
 
         Assert.NotNull(fixture.Vulkan);
@@ -147,7 +156,7 @@ public class Wave64HalfMaskDeviceTests(HeadlessVulkanFixture fixture) : IClassFi
         Assert.All(Run(), x => Assert.Equal(uint.MaxValue, x));
     }
 
-    private static uint LocalSizeX(byte[] spirv)
+    private static (uint X, uint Y, uint Z) LocalSize(byte[] spirv)
     {
         const uint ExecutionMode = 16;
         const uint LocalSize = 17;
@@ -158,7 +167,9 @@ public class Wave64HalfMaskDeviceTests(HeadlessVulkanFixture fixture) : IClassFi
             if ((word & 0xFFFF) == ExecutionMode &&
                 BinaryPrimitives.ReadUInt32LittleEndian(spirv.AsSpan(offset + 2 * sizeof(uint))) == LocalSize)
             {
-                return BinaryPrimitives.ReadUInt32LittleEndian(spirv.AsSpan(offset + 3 * sizeof(uint)));
+                return (BinaryPrimitives.ReadUInt32LittleEndian(spirv.AsSpan(offset + 3 * sizeof(uint))),
+                    BinaryPrimitives.ReadUInt32LittleEndian(spirv.AsSpan(offset + 4 * sizeof(uint))),
+                    BinaryPrimitives.ReadUInt32LittleEndian(spirv.AsSpan(offset + 5 * sizeof(uint))));
             }
 
             offset += Math.Max(count, 1) * sizeof(uint);
