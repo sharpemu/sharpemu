@@ -41,7 +41,13 @@ public sealed class CpuContext(ICpuMemory memory, Generation generation)
     public ushort FpuControlWord { get; set; } = 0x037F;
 
     /// <summary>MXCSR observed at the current guest boundary.</summary>
-    public uint Mxcsr { get; set; } = 0x1F80;
+    public uint Mxcsr { get; set; } = InitialMxcsr;
+
+    /// <summary>
+    /// The MXCSR a guest thread starts with on the console, as its libc's default environment holds it: every
+    /// exception masked, round to nearest, flush-to-zero and denormals-are-zero.
+    /// </summary>
+    public const uint InitialMxcsr = 0x9FC0;
 
     public ulong this[CpuRegister register]
     {

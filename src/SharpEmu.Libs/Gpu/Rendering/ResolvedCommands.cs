@@ -87,6 +87,8 @@ internal sealed class ResolvedDraw
     public bool PrimitiveRestart;
     public GuestPrimitiveType PrimitiveType;
     public DrawEmission Emission;
+    public uint[]? IndirectOffsets;
+    public uint IndirectBytes;
     public IndexSource Index;
     public ulong TessellationIndexAddress;
     public uint TessellationIndexSize;
@@ -112,9 +114,61 @@ internal sealed class ResolvedDraw
     public Extent3D CopyExtent;
     public ImageAspectFlags CopyAspects;
 
+    // An indexed indirect draw resolved on the plain path (no host index data, no strip, mesh or tessellation): the next draw
+    // under the same registers can take this record with only its own arguments (RenderExecutor.TryRepeatIndexed).
+    public bool RepeatableArguments;
+
+    // The arguments were read on the CPU (DrawIndexedWithCpuArguments); a repeat reads its own the same way.
+    public bool RepeatsCpuArguments;
+
+    public void CopyFrom(ResolvedDraw source)
+    {
+        Sequence = source.Sequence;
+        Kind = source.Kind;
+        Announce = source.Announce;
+        Debug = source.Debug;
+        ResetBindings = source.ResetBindings;
+        TargetsResolved = source.TargetsResolved;
+        SubmitId = source.SubmitId;
+        Draw = source.Draw;
+        State = source.State;
+        Topology = source.Topology;
+        PrimitiveRestart = source.PrimitiveRestart;
+        PrimitiveType = source.PrimitiveType;
+        Emission = source.Emission;
+        Index = source.Index;
+        TessellationIndexAddress = source.TessellationIndexAddress;
+        TessellationIndexSize = source.TessellationIndexSize;
+        TessellationVertexOffset = source.TessellationVertexOffset;
+        Context = source.Context;
+        ContextStamp = source.ContextStamp;
+        DynamicStamp = source.DynamicStamp;
+        TargetVersion = source.TargetVersion;
+        Dynamic = source.Dynamic;
+        WritesMemory = source.WritesMemory;
+        WriteStages = source.WriteStages;
+        SetBindDebug = source.SetBindDebug;
+        SetAutoDebug = source.SetAutoDebug;
+        IndexedTrace = source.IndexedTrace;
+        PacketAddress = source.PacketAddress;
+        Clear = source.Clear;
+        ResolveSource = source.ResolveSource;
+        ResolveDestination = source.ResolveDestination;
+        CopyRead = source.CopyRead;
+        CopyWrite = source.CopyWrite;
+        CopyReadFormat = source.CopyReadFormat;
+        CopyWriteFormat = source.CopyWriteFormat;
+        CopyExtent = source.CopyExtent;
+        CopyAspects = source.CopyAspects;
+        RepeatableArguments = source.RepeatableArguments;
+        RepeatsCpuArguments = source.RepeatsCpuArguments;
+    }
+
     public void Reset()
     {
         var previous = Kind;
+        RepeatableArguments = false;
+        RepeatsCpuArguments = false;
         Sequence = 0;
         Kind = ResolvedDrawKind.Skipped;
         Announce = false;
@@ -128,6 +182,8 @@ internal sealed class ResolvedDraw
         PrimitiveRestart = false;
         PrimitiveType = default;
         Emission = default;
+        IndirectOffsets = null;
+        IndirectBytes = 0;
         Index = default;
         TessellationIndexAddress = 0;
         TessellationIndexSize = 0;

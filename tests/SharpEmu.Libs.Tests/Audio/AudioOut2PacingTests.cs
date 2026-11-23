@@ -34,6 +34,32 @@ public sealed class AudioOut2PacingTests
         Assert.Equal(expected, AudioOut2Exports.ShortenedProducerSleep(microseconds, 256, 48000, queuedMilliseconds));
     }
 
+    [Theory]
+    [InlineData(51ul, 3.0, 20, true)]
+    [InlineData(51ul, 3.0, 34, true)]
+    [InlineData(51ul, 3.0, 35, false)]
+    [InlineData(51ul, 3.0, -1, false)]
+    [InlineData(51ul, 19.9, 0, true)]
+    [InlineData(51ul, 20.0, 0, false)]
+    [InlineData(51ul, -1.0, 0, false)]
+    [InlineData(1000ul, 3.0, 0, true)]
+    [InlineData(1001ul, 3.0, 0, false)]
+    [InlineData(5000ul, 3.0, 0, false)]
+    public void AShortNapIsPreciseOnlyForARecentProducerWhileTheDeviceRunsShort(
+        ulong microseconds, double millisecondsSincePush, int queuedMilliseconds, bool expected)
+    {
+        Assert.Equal(expected, AudioOut2Exports.PreciseProducerNap(microseconds, millisecondsSincePush, queuedMilliseconds, 256, 48000));
+    }
+
+    [Fact]
+    public void APreciseSpinTakesAboutTheTimeAsked()
+    {
+        var started = System.Diagnostics.Stopwatch.GetTimestamp();
+        SharpEmu.Libs.HostHighResolutionSleep.SpinMicroseconds(200);
+        var elapsed = System.Diagnostics.Stopwatch.GetElapsedTime(started);
+        Assert.InRange(elapsed.TotalMicroseconds, 200, 100_000);
+    }
+
     [Fact]
     public void TheThresholdStaysFarBelowTheHostQueueCap()
     {

@@ -98,6 +98,60 @@ public sealed class AudioOut2PcmSnapshotTests : IDisposable
     }
 
     [Fact]
+    public void ContextPush_PlaysPadSpeakerAndVibrationPortsOnTheControllerOnly()
+    {
+        var main = new RecordingAudioStream();
+        var controller = new RecordingAudioStream();
+        AudioOut2Exports.SetStreamFactoryForTests(_ => main);
+        AudioOut2Exports.SetControllerFactoryForTests(_ => controller);
+
+        var context = CreateContext(grainSamples: 64);
+        var mainPort = CreateSigned16StereoPort(context, FirstPortOutAddress);
+        var padSpeaker = CreateSigned16StereoPort(context, SecondPortOutAddress, portType: 3);
+        var vibration = CreateSigned16StereoPort(context, SecondPortOutAddress + 8, portType: 6);
+        WritePcmAttribute();
+        Assert.True(_memory.TryWrite(SharedPcmAddress, new byte[64 * 2 * sizeof(short)]));
+        SetPcmAttribute(mainPort);
+        Assert.True(_memory.TryWrite(SharedPcmAddress, StereoPcm(16384, 16384)));
+        SetPcmAttribute(padSpeaker);
+        Assert.True(_memory.TryWrite(SharedPcmAddress, StereoPcm(8192, -24576)));
+        SetPcmAttribute(vibration);
+
+        _ctx[CpuRegister.Rdi] = context;
+        _ctx[CpuRegister.Rsi] = 1;
+        Assert.Equal(0, AudioOut2Exports.AudioOut2ContextPush(_ctx));
+
+        Assert.All(Assert.Single(main.Submissions), value => Assert.Equal(0, value));
+        var pad = Assert.Single(controller.Submissions);
+        Assert.Equal(64 * 4 * sizeof(float), pad.Length);
+        for (var frame = 0; frame < 64; frame++)
+        {
+            var samples = Enumerable.Range(0, 4)
+                .Select(channel => BinaryPrimitives.ReadSingleLittleEndian(pad.AsSpan(((frame * 4) + channel) * sizeof(float))))
+                .ToArray();
+            Assert.Equal([0.5f, 0.5f, 0.25f, -0.75f], samples);
+        }
+    }
+
+    [Fact]
+    public void PortGetState_ReportsTheControllerSpeakerForAPadSpeakerPortItPlays()
+    {
+        AudioOut2Exports.SetStreamFactoryForTests(_ => new RecordingAudioStream());
+        var context = CreateContext(grainSamples: 64);
+        var padSpeaker = CreateSigned16StereoPort(context, FirstPortOutAddress, portType: 3);
+        Assert.Equal(1, ReadPortStateOutput(padSpeaker));
+
+        AudioOut2Exports.ResetForTests();
+        AudioOut2Exports.SetStreamFactoryForTests(_ => new RecordingAudioStream());
+        AudioOut2Exports.SetControllerFactoryForTests(_ => new RecordingAudioStream());
+        context = CreateContext(grainSamples: 64);
+        var mainPort = CreateSigned16StereoPort(context, FirstPortOutAddress);
+        padSpeaker = CreateSigned16StereoPort(context, SecondPortOutAddress, portType: 3);
+        Assert.Equal(1, ReadPortStateOutput(mainPort));
+        Assert.Equal(4, ReadPortStateOutput(padSpeaker));
+    }
+
+    [Fact]
     public void ContextPush_SubmitsDevicePortSnapshotOnlyOnce()
     {
         var stream = new RecordingAudioStream();
@@ -229,6 +283,29 @@ public sealed class AudioOut2PcmSnapshotTests : IDisposable
         _ctx[CpuRegister.Rsi] = AttributeAddress;
         _ctx[CpuRegister.Rdx] = 1;
         Assert.Equal(0, AudioOut2Exports.AudioOut2PortSetAttributes(_ctx));
+    }
+
+    private static byte[] StereoPcm(short left, short right)
+    {
+        var pcm = new byte[64 * 2 * sizeof(short)];
+        for (var frame = 0; frame < 64; frame++)
+        {
+            BinaryPrimitives.WriteInt16LittleEndian(pcm.AsSpan(frame * 4), left);
+            BinaryPrimitives.WriteInt16LittleEndian(pcm.AsSpan((frame * 4) + 2), right);
+        }
+
+        return pcm;
+    }
+
+    private ushort ReadPortStateOutput(ulong port)
+    {
+        const ulong stateAddress = MemoryBase + 0x700;
+        _ctx[CpuRegister.Rdi] = port;
+        _ctx[CpuRegister.Rsi] = stateAddress;
+        Assert.Equal(0, AudioOut2Exports.AudioOut2PortGetState(_ctx));
+        Span<byte> state = stackalloc byte[2];
+        Assert.True(_memory.TryRead(stateAddress, state));
+        return BinaryPrimitives.ReadUInt16LittleEndian(state);
     }
 
     private ulong ReadUInt64(ulong address)

@@ -636,6 +636,8 @@ public static class Gen5WaveLaneLocalAnalysis
         var opcode = instruction.Opcode;
         switch (opcode)
         {
+            case "SBarrier":
+                return "a barrier";
             case "VReadlaneB32":
                 return "V_READLANE";
             case "VWritelaneB32":

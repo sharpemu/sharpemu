@@ -501,6 +501,26 @@ public static partial class AgcExports
             SelectSnapshots(state, arguments.PacketAddress, indexed: true, arguments.IndexAddress, arguments.IndexCount);
         }
 
+        internal bool TryDrawIndexedRun(ulong submitId, in DrawIndexedArguments first, ReadOnlySpan<uint> offsets)
+        {
+            var state = RequireCurrent();
+            var banks = RequireTypedRegisters(state);
+            if (_resolvePool is not { } pool || _executor is null || !Producing ||
+                state.ActiveVertexSnapshots is { Count: > 0 } || state.ActiveIndexSnapshots is { Count: > 0 } ||
+                !_drawWrites.TryGetValue((banks.Shader.Vertex.ExportAddress, banks.Shader.Pixel.Address), out var known) ||
+                !known.Group || known.Registrations != ShaderHeaderRegistry.Registrations || !_executor.CanGroupIndexed(banks, in first)) return false;
+            Diagnostics.DispatchRunTally.NoteDraw();
+            RecordIndexedDrawState(in first);
+            RecordKnownColorTargets(state, banks);
+            var run = offsets.ToArray();
+            DeferDraw(pool, submitId, banks, true, in first, default, run);
+            state.FrameDrawCount += (uint)run.Length;
+            state.SawIndexedDraw = true;
+            state.CurrentIndexSnapshot = null;
+            state.CurrentVertexSnapshot = null;
+            return true;
+        }
+
         public void DrawAuto(ulong submitId, in DrawAutoArguments arguments)
         {
             RecordAutoDrawState(in arguments);

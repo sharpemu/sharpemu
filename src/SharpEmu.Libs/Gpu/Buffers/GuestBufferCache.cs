@@ -55,8 +55,6 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     private readonly AvlSpanSet _gpuModifiedRanges = new();
     private readonly ReaderWriterLockSlim _gpuModifiedGate = new(LockRecursionPolicy.NoRecursion);
 
-    private SpanSnapshot _gpuModifiedSnapshot = SpanSnapshot.Empty;
-
     private GpuModifiedWrite WriteGpuModified()
     {
         _gpuModifiedGate.EnterWriteLock();
@@ -67,7 +65,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     {
         public void Dispose()
         {
-            Volatile.Write(ref cache._gpuModifiedSnapshot, cache._gpuModifiedRanges.Snapshot());
+            cache._gpuModifiedRanges.PublishChanges();
             cache._gpuModifiedGate.ExitWriteLock();
         }
     }
@@ -142,17 +140,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         set => _tracker.DefersGpuWriteProtection = value;
     }
 
-    public void ApplyPendingGpuProtections()
-    {
-        Volatile.Write(ref _copyWritesPending, 0);
-        _tracker.ApplyPendingGpuProtections();
-    }
-
-    private int _copyWritesPending;
-
-    public bool CopyWritesPending => Volatile.Read(ref _copyWritesPending) != 0;
-
-    public void NoteCopyWrite() => Volatile.Write(ref _copyWritesPending, 1);
+    public void ApplyPendingGpuProtections() => _tracker.ApplyPendingGpuProtections();
 
     public GpuBuffer GdsBuffer => _gds;
 
@@ -462,7 +450,6 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             return null;
         }
 
-        NoteCopyWrite();
         return ObtainBuffer(guestAddress, size, isWritten: true).Buffer;
     }
 
@@ -607,12 +594,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
     private void FillBuffer(ulong guestAddress, ulong size, uint value, bool isGds, bool publishFill)
     {
-        if (!isGds)
-        {
-            CompleteGuestPublications?.Invoke(guestAddress, size, PublicationAccess.Write);
-            NoteCopyWrite();
-        }
-
+        if (!isGds) CompleteGuestPublications?.Invoke(guestAddress, size, PublicationAccess.Write);
         if ((guestAddress & 3) != 0 || size == 0 || (size & 3) != 0 || size > ulong.MaxValue - guestAddress)
         {
             throw SubmissionScheduler.Fatal("The fill range must be aligned to four bytes.");
@@ -863,12 +845,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
     public void CopyBuffer(ulong dstVaddr, ulong srcVaddr, ulong size, bool dstGds, bool srcGds)
     {
-        if (!dstGds)
-        {
-            CompleteGuestPublications?.Invoke(dstVaddr, size, PublicationAccess.Write);
-            NoteCopyWrite();
-        }
-
+        if (!dstGds) CompleteGuestPublications?.Invoke(dstVaddr, size, PublicationAccess.Write);
         if (!srcGds) CompleteGuestPublications?.Invoke(srcVaddr, size, PublicationAccess.Read);
         var dstMemory = !dstGds;
         var srcMemory = !srcGds;
@@ -966,7 +943,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             Environment.FailFast($"The address range is invalid: 0x{guestAddress:X16}, 0x{size:X16}.");
         }
 
-        return Volatile.Read(ref _gpuModifiedSnapshot).Overlaps(guestAddress, size);
+        return _gpuModifiedRanges.PublishedOverlaps(guestAddress, size);
     }
 
     public bool EverGpuWritten(ulong guestAddress, ulong size) => _tracker.MayHaveGpuWrittenPages(guestAddress, size);

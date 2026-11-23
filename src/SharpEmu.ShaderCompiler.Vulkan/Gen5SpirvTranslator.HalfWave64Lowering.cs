@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Numerics;
 using SharpEmu.ShaderCompiler.Resources;
 
 namespace SharpEmu.ShaderCompiler.Vulkan;
@@ -28,6 +29,38 @@ public static partial class Gen5SpirvTranslator
                 .Select(static memory => memory.Pc)
                 .ToHashSet();
             return Ir.Gen5WaveLaneLocalAnalysis.IsLaneLocal(request.Program, sharedFlatPcs, out _);
+        }
+
+        private bool UsesHalfWaveSubgroups => _waveLowering is HalfWave64Lowering && UsesSubgroupOperations();
+
+        private uint HalfWaveThreadCount => checked(_localSizeX * _localSizeY * _localSizeZ);
+
+        private uint HalfWaveLocalIndex() =>
+            IAdd(ShiftLeftLogical(Load(_uintType, _subgroupIdInput), UInt(5)), Load(_uintType, _subgroupInvocationIdInput));
+
+        private uint HalfWaveLocalCoordinates(uint index)
+        {
+            if (_localSizeY == 1 && _localSizeZ == 1)
+            {
+                return _module.AddInstruction(SpirvOp.CompositeConstruct, _uvec3Type, index, UInt(0), UInt(0));
+            }
+
+            var (x, row) = SplitHalfWaveIndex(index, _localSizeX);
+            var (y, z) = _localSizeZ == 1 ? (row, UInt(0)) : SplitHalfWaveIndex(row, _localSizeY);
+            return _module.AddInstruction(SpirvOp.CompositeConstruct, _uvec3Type, x, y, z);
+        }
+
+        private (uint Component, uint Remaining) SplitHalfWaveIndex(uint index, uint size)
+        {
+            if (size == 1)
+            {
+                return (UInt(0), index);
+            }
+
+            return BitOperations.IsPow2(size)
+                ? (BitwiseAnd(index, UInt(size - 1)), ShiftRightLogical(index, UInt((uint)BitOperations.Log2(size))))
+                : (_module.AddInstruction(SpirvOp.UMod, _uintType, index, UInt(size)),
+                    _module.AddInstruction(SpirvOp.UDiv, _uintType, index, UInt(size)));
         }
 
         private sealed class HalfWave64Lowering : IWaveLowering
@@ -87,10 +120,10 @@ public static partial class Gen5SpirvTranslator
                     SpirvOp.Select,
                     context._ulongType,
                     context._module.AddInstruction(
-                        SpirvOp.UGreaterThanEqual,
+                        SpirvOp.INotEqual,
                         context._boolType,
-                        context.GuestWaveLane(),
-                        context.UInt(32)),
+                        context.BitwiseAnd(context.Load(context._uintType, context._subgroupIdInput), context.UInt(1)),
+                        context.UInt(0)),
                     context.ShiftLeftLogical64(widened, context._module.Constant64(context._ulongType, 32)),
                     widened);
             }

@@ -304,11 +304,11 @@ public sealed partial class GuestImageCache
 
     // A block-compressed image states its pitch and height in texels, and the uncompressed view of its blocks states them in blocks,
     // so a side that is compressed is compared in blocks.
-    private static bool SameMipLayout(in ImageDescription left, in ImageDescription right)
+    private static bool SameMipLayout(in ImageDescription left, in ImageDescription right, int levels = ImageDescription.MaxLevels)
     {
         var leftShift = left.IsBlock ? 2 : 0;
         var rightShift = right.IsBlock ? 2 : 0;
-        for (var level = 0; level < ImageDescription.MaxLevels; level++)
+        for (var level = 0; level < levels; level++)
         {
             var a = left.MipLayout[level];
             var b = right.MipLayout[level];
@@ -514,6 +514,22 @@ public sealed partial class GuestImageCache
             if (depthImageIdentifier.IsValid)
             {
                 return new OverlapResolution(depthImageIdentifier);
+            }
+
+            // An image of the other block class holds the requested image's blocks (or texels) only in the same tiling with
+            // every level both hold in the same place, as a compressor's view of a texture's blocks is. Otherwise the memory
+            // now holds another resource: a texture's level 0 lies after its smaller levels, where a one-level image has its
+            // own bytes. The image is neither viewed in the other format nor copied across, as a layout mismatch is not.
+            if (requested.IsBlock != cachedInfo.IsBlock &&
+                (requested.TileMode != cachedInfo.TileMode ||
+                 !SameMipLayout(requested, cachedInfo, (int)Math.Min(requested.Resources.Levels, cachedInfo.Resources.Levels))))
+            {
+                if (safeToDelete)
+                {
+                    ParkOrReleaseImage(cachedImageIdentifier);
+                }
+
+                return new OverlapResolution(mergedImageIdentifier);
             }
 
             if (requested.IsBlock && !cachedInfo.IsBlock)

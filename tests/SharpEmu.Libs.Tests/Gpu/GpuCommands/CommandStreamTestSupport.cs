@@ -268,6 +268,14 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
     public bool ResolvesIndirectThreadDispatchOnGpu { get; set; }
 
     public bool ResolvesIndirectDrawOnGpu { get; set; }
+    public List<uint[]>? IndexedRuns { get; set; }
+
+    public bool TryDrawIndexedRun(ulong submitId, in DrawIndexedArguments first, ReadOnlySpan<uint> offsets)
+    {
+        if (IndexedRuns is null) return false;
+        IndexedRuns.Add(offsets.ToArray());
+        return true;
+    }
 
     public void OnQueueReset(int queueId) => Calls.Add($"queue_reset {queueId}");
 

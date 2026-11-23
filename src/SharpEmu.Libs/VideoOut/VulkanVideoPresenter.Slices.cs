@@ -1603,6 +1603,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             foreach (var entry in clears)
             {
+                _imageCache.NoteDepthClearValue(entry.Htile, BitConverter.UInt32BitsToSingle(entry.ClearWord));
                 if (!_imageCache.IsMetadataCleared(entry.Htile, entry.BaseLayer))
                 {
                     continue;

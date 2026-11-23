@@ -130,13 +130,13 @@ internal static unsafe partial class VulkanVideoPresenter
         bool IShaderPipelineHost.ComputeWave64Supported => Volatile.Read(ref _nativeSubgroupSize) >= 64;
 
         bool IShaderPipelineHost.ComputeRunsOn32LaneSubgroups(ComputeInputInfo input) =>
-            RequiresComputeSubgroup32(input) ||
-            (Volatile.Read(ref _nativeSubgroupSize) == RdnaSubgroupSize && !RequiresComputeSubgroup64(input));
+            _fixedComputeSubgroup32 || RequiresComputeSubgroup32(input);
 
         // Wave32 compute maps a guest wave to 32-lane host subgroups, and a 64-lane host subgroup
         // (AMD's default) left lanes 32..63 inactive, so those pipelines are pinned to 32. Wave64
         // compute is pinned to 64 instead when the host runs it natively.
         private const uint RdnaSubgroupSize = 32;
+        private bool _fixedComputeSubgroup32;
         private bool _canRequireComputeSubgroup32;
         private uint _maxComputeWorkgroupSubgroups;
 
@@ -686,10 +686,13 @@ internal static unsafe partial class VulkanVideoPresenter
             return MayBeCleanReadPage(page);
         }
 
+        // A queued fill or copy that has not landed changes the page for every item after it in the stream, so the page reads
+        // through the ordered path, which refuses the bytes or waits for the range, as it does for a queued store.
         private bool MayBeCleanReadPage(ulong page)
         {
             var thread = _commandThread!;
             return !_bufferCache.MayHaveGpuDirtyPages(page, CleanReadPageBytes) && !thread.HasPendingStores(page, CleanReadPageBytes) &&
+                !thread.HasPendingRange(page, CleanReadPageBytes) &&
                 (_translation.PendingWrites is not { } pending || !pending.MayHavePending(page, CleanReadPageBytes)) &&
                 !thread.HasShadow(page, CleanReadPageBytes);
         }

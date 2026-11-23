@@ -333,6 +333,30 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
 
     private void RecordDraw(ResolvedDraw record)
     {
+        var offsets = record.IndirectOffsets;
+        RecordDraw(record, out var issuedRun);
+        if (issuedRun || offsets is null) return;
+
+        var first = record.Emission;
+        try
+        {
+            record.IndirectOffsets = null;
+            foreach (var offset in offsets.AsSpan(1))
+            {
+                record.Emission = first with { IndirectArgumentsAddress = first.IndirectArgumentsAddress + offset };
+                RecordDraw(record, out _);
+            }
+        }
+        finally
+        {
+            record.IndirectOffsets = offsets;
+            record.Emission = first;
+        }
+    }
+
+    private void RecordDraw(ResolvedDraw record, out bool issuedRun)
+    {
+        issuedRun = false;
         if (record.Announce)
         {
             if (!_host.IsRecording)
@@ -390,7 +414,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
                     NoteFoundTargets(ref state);
                 }
 
-                RecordDrawCommands(record, ref state, inPlace);
+                RecordDrawCommands(record, ref state, inPlace, out issuedRun);
                 break;
             }
         }
@@ -505,8 +529,9 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         }
     }
 
-    private void RecordDrawCommands(ResolvedDraw record, ref DrawState state, bool inPlace)
+    private void RecordDrawCommands(ResolvedDraw record, ref DrawState state, bool inPlace, out bool issuedRun)
     {
+        issuedRun = false;
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawResourcePreparation);
         var submitId = record.SubmitId;
         ref readonly var draw = ref record.Draw;
@@ -650,9 +675,11 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
 
         var vertexBuffers = meshInput is null ? AcquireVertexBuffers(vertexInput) : default;
         var indexBuffer = meshInput is null ? AcquireIndexBuffer(in indexSource) : default;
+        var indirectBytes = record.IndirectOffsets is not null ? record.IndirectBytes :
+            emission.Indexed ? RenderExecutor.IndexedIndirectArgumentsSize : RenderExecutor.AutoIndirectArgumentsSize;
         var indirectArguments = meshInput is null && emission.IndirectArgumentsAddress != 0
             ? _host.ObtainBuffer(emission.IndirectArgumentsAddress,
-                emission.Indexed ? RenderExecutor.IndexedIndirectArgumentsSize : RenderExecutor.AutoIndirectArgumentsSize, isWritten: false)
+                indirectBytes, isWritten: false)
             : default;
         RenderExecutor.DropUnwrittenColorTargets(context, ref state, pixelProgram);
         var reusedAttachments = inPlace && TryRestoreAttachments(ref state);
@@ -693,7 +720,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
                 if (emission.IndirectArgumentsAddress != 0)
                 {
                     indirectArguments = _host.ObtainBuffer(emission.IndirectArgumentsAddress,
-                        emission.Indexed ? RenderExecutor.IndexedIndirectArgumentsSize : RenderExecutor.AutoIndirectArgumentsSize, isWritten: false);
+                        indirectBytes, isWritten: false);
                 }
             }
         }
@@ -763,7 +790,18 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         }
         else if (emission.IndirectArgumentsAddress != 0 && emission.Indexed)
         {
-            _host.DrawIndexedIndirect(indirectArguments);
+            var targets = DrawState.BoundColors(ref state);
+            issuedRun = imageSnapshot == 0 && record.IndirectOffsets is not null && _host.CanShareIndexedBindings(vertexBindings, targets, in state.Depth) &&
+                (pixelBindings is null || _host.CanShareIndexedBindings(pixelBindings, targets, in state.Depth));
+            if (issuedRun)
+            {
+                foreach (var offset in record.IndirectOffsets!)
+                    _host.DrawIndexedIndirect(indirectArguments with { Offset = indirectArguments.Offset + offset });
+            }
+            else
+            {
+                _host.DrawIndexedIndirect(indirectArguments);
+            }
         }
         else if (emission.IndirectArgumentsAddress != 0)
         {
@@ -1023,7 +1061,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
     private bool TryReplayDraw(ResolvedDraw record, ref DrawState state, bool inPlace, VertexInputInfo vertexInput, PixelInputInfo pixelInput,
         in IndexSource indexSource, in DrawEmission emission, in DrawCall draw)
     {
-        if (!DrawReplayEnabled || !_replayValid || !inPlace || record.Kind != ResolvedDrawKind.Draw || record.WritesMemory ||
+        if (record.IndirectOffsets is not null || !DrawReplayEnabled || !_replayValid || !inPlace || record.Kind != ResolvedDrawKind.Draw || record.WritesMemory ||
             record.WriteStages != PipelineStageFlags.None || record.IndexedTrace is not null || MeshDrawTrace.Active)
         {
             return false;

@@ -483,6 +483,7 @@ internal sealed partial class ShaderProgramCache
                 FrontendDomain = external?.CacheDomain ?? 0,
                 FrontendUserData = external is null ? [] : source.Registered.FrontendUserData.ToArray(),
                 FrontendContinuationOffset = external is null ? 0 : source.ContinuationAddressOffset,
+                FrontendEntryCodeSize = external is not null && source.Registered.IsFused ? source.Registered.CodeSizeBytes : 0,
             };
         }
 
@@ -2434,16 +2435,65 @@ internal sealed partial class ShaderProgramCache
         }
     }
 
+    private static bool TryDecodeGraphicsPrewarm(ShaderCodeCapture code, ShaderStage stage, Func<ulong, IShaderFrontend?>? frontendOf,
+        out Gen5ShaderProgram program, out IShaderFrontend? frontend, out string error)
+    {
+        frontend = null;
+        if (code.FrontendDomain == 0)
+        {
+            return Gen5ShaderTranslator.TryDecodeProgram(code.CreateContext(), code.Address, out program, out error);
+        }
+
+        frontend = frontendOf?.Invoke(code.FrontendDomain);
+        if (frontend is null)
+        {
+            program = default!;
+            error = $"The shader frontend 0x{code.FrontendDomain:X16} is not registered.";
+            return false;
+        }
+
+        var continuation = code.FrontendContinuationOffset == 0 ? 0 : unchecked(code.Address + code.FrontendContinuationOffset);
+        var entrySize = code.FrontendEntryCodeSize;
+        if (entrySize == 0)
+        {
+            entrySize = code.CodeSize;
+            if (continuation != 0)
+            {
+                foreach (var range in code.Ranges)
+                {
+                    if (code.Address >= range.Address && code.Address - range.Address < (ulong)range.Bytes.Length)
+                    {
+                        entrySize = Math.Min(entrySize, (uint)((ulong)range.Bytes.Length - (code.Address - range.Address)));
+                        break;
+                    }
+                }
+
+                if (continuation > code.Address)
+                {
+                    entrySize = (uint)Math.Min(entrySize, continuation - code.Address);
+                }
+            }
+        }
+
+        var shader = new RegisteredShader(code.Address, 0, entrySize, 0, 0, 0, 0, continuation, checked(code.CodeSize - entrySize))
+        {
+            Frontend = frontend,
+            FrontendUserData = code.FrontendUserData,
+        };
+        return frontend.TryDecode(code.CreateContext(), shader, stage, out program, out error);
+    }
+
     // A recorded pixel program translated again as its session translated it (CreateEntry, then the specialized
     // translation through the translation cache); the caller compiles its pixel library.
     internal static bool TryCompilePixelPrewarm(PixelPrewarmRecord record, ShaderCodeCapture code, IGuestGpuBackend compiler,
-        IShaderPipelineHost host, out IGuestCompiledShader? compiled, out BindingLayout? layout, out string error)
+        IShaderPipelineHost host, out IGuestCompiledShader? compiled, out BindingLayout? layout, out string error,
+        Func<ulong, IShaderFrontend?>? frontendOf = null)
     {
         compiled = null;
         layout = null;
         try
         {
-            if (!Gen5ShaderTranslator.TryDecodeProgram(code.CreateContext(), code.Address, out var program, out error))
+            if (!TryDecodeGraphicsPrewarm(code, ShaderStage.Pixel, frontendOf, out var program, out var frontend, out error))
             {
                 return false;
             }
@@ -2458,11 +2508,15 @@ internal sealed partial class ShaderProgramCache
                 waveSize: 32, bindlessNullDescriptors: BindlessNullDescriptors, bindlessHeap: host.SupportsBindlessHeap,
                 stableImageLimits: host.GraphicsImageDescriptorLimits,
                 deviceRecordCounts: DeviceRecordCountPlan.Enabled && record.DeviceRecordCounts,
+                normalizeBufferDescriptor: frontend?.NormalizeBufferDescriptor,
+                normalizeImageDescriptor: frontend?.NormalizeImageDescriptor,
+                imageNormalizationVersion: frontend?.ImageNormalizationVersion,
                 preferHeapRecords: record.PreferHeapRecords);
             // A record's storage image selects as the session keeps them (RuntimeImageSwizzle.Canonical).
             var specialization = RuntimeImageSwizzle.Canonical(plan, record.Specialization);
             var resources = ResourceMaterializer.ApplyTo(plan, specialization);
             layout = AllocateLayout(program, plan, resources, record.UserDataBase, record.UserDataCount, record.PushDataCursor, false,
+                usesBufferLengths: frontend?.RequiresExplicitBufferLengths ?? false,
                 tableBlocks: UsesTableBlocks(host, ShaderStage.Pixel));
             var options = new StageCompileOptions
             {
@@ -2492,14 +2546,15 @@ internal sealed partial class ShaderProgramCache
     // its pre-rasterization libraries.
     internal static bool TryCompileVertexPrewarm(VertexPrewarmRecord record, ShaderCodeCapture code, IGuestGpuBackend compiler,
         IShaderPipelineHost host, out IGuestCompiledShader? compiled, out BindingLayout? layout, out MeshTaskLaunchInfo? task,
-        out string error)
+        out string error, Func<ulong, IShaderFrontend?>? frontendOf = null)
     {
         compiled = null;
         layout = null;
         task = null;
         try
         {
-            if (!Gen5ShaderTranslator.TryDecodeProgram(code.CreateContext(), code.Address, out var program, out error))
+            var stage = record.Mesh ? ShaderStage.Mesh : ShaderStage.Vertex;
+            if (!TryDecodeGraphicsPrewarm(code, stage, frontendOf, out var program, out var frontend, out error))
             {
                 return false;
             }
@@ -2510,7 +2565,6 @@ internal sealed partial class ShaderProgramCache
                 return false;
             }
 
-            var stage = record.Mesh ? ShaderStage.Mesh : ShaderStage.Vertex;
             var options = new StageCompileOptions
             {
                 VertexInfo = record.VertexInfo,
@@ -2532,12 +2586,16 @@ internal sealed partial class ShaderProgramCache
                 bindlessNullDescriptors: BindlessNullDescriptors, bindlessHeap: host.SupportsBindlessHeap,
                 stableImageLimits: host.GraphicsImageDescriptorLimits,
                 deviceRecordCounts: DeviceRecordCountPlan.Enabled && record.DeviceRecordCounts,
+                normalizeBufferDescriptor: frontend?.NormalizeBufferDescriptor,
+                normalizeImageDescriptor: frontend?.NormalizeImageDescriptor,
+                imageNormalizationVersion: frontend?.ImageNormalizationVersion,
                 preferHeapRecords: record.PreferHeapRecords);
             // A record's storage image selects as the session keeps them (RuntimeImageSwizzle.Canonical).
             var specialization = RuntimeImageSwizzle.Canonical(plan, record.Specialization);
             var resources = ResourceMaterializer.ApplyTo(plan, specialization);
             layout = AllocateLayout(program, plan, resources, record.UserDataBase, record.UserDataCount, record.PushDataCursor, false,
-                usesMeshDrawParameters: record.Mesh, pushDataAtTop: PushDataAtTop(stage), tableBlocks: UsesTableBlocks(host, stage));
+                usesMeshDrawParameters: record.Mesh, pushDataAtTop: PushDataAtTop(stage), tableBlocks: UsesTableBlocks(host, stage),
+                usesBufferLengths: frontend?.RequiresExplicitBufferLengths ?? false);
             var request = record.Mesh
                 ? BuildMeshRequest(host, plan, resources, layout, options)
                 : BuildVertexRequest(host, plan, resources, layout, options, vertexInputs);

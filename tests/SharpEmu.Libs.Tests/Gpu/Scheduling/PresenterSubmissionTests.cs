@@ -590,6 +590,7 @@ public sealed class PresenterSubmissionTests
     [InlineData("shutdown")]
     [InlineData("wait")]
     [InlineData("flush")]
+    [InlineData("slice")]
     public void EverySubmissionRoutePublishesAndRetiresTheExactBatch(string route)
     {
         // Use the presenter bookkeeping without creating a window or Vulkan resources.
@@ -635,6 +636,11 @@ public sealed class PresenterSubmissionTests
             case "shutdown": scheduler.Shutdown(); break;
             case "wait": scheduler.Wait(scheduler.CurrentTick); break;
             case "flush": Invoke(presenter, "FlushBatchedGuestCommands"); break;
+            case "slice":
+                ((ICommandStreamHost)presenter).FlushSlice();
+                Assert.Empty(device.Submits);
+                scheduler.Wait(1);
+                break;
         }
 
         Assert.Equal(1UL, Assert.Single(device.Submits).Tick);

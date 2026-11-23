@@ -590,6 +590,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     presenter._commandThread!.PostWrite(virtualAddress, source);
                     return true;
                 }
+                presenter._bufferCache?.ApplyPendingGpuProtections();
                 return inner.TryWrite(virtualAddress, source);
             }
 
@@ -835,6 +836,18 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             using var flushScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.Flush);
             FlushBatchedGuestCommands();
+        }
+
+        public void FlushSlice()
+        {
+            if (OnCommandThread)
+            {
+                _commandThread!.Post(FlushSlice);
+                return;
+            }
+
+            using var flushScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.Flush);
+            FlushGuestBatch(deferSubmit: true);
         }
 
         // The guest reuses the frame's memory (descriptor tables, rings) once the boundary returns,
@@ -1198,6 +1211,9 @@ internal static unsafe partial class VulkanVideoPresenter
         // RenderExecutor records indexed indirect draws with vkCmdDrawIndexedIndirect.
         // SHARPEMU_CPU_INDIRECT_DRAW=1 reads the arguments back on the CPU as before.
         public bool ResolvesIndirectDrawOnGpu => !_cpuIndirectDraw;
+
+        bool ICommandStreamHost.TryDrawIndexedRun(ulong submitId, in DrawIndexedArguments first, ReadOnlySpan<uint> offsets) =>
+            OnCommandThread && _translation.TryDrawIndexedRun(submitId, in first, offsets);
 
         private static readonly bool _cpuIndirectDraw = string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_CPU_INDIRECT_DRAW"), "1", StringComparison.Ordinal);

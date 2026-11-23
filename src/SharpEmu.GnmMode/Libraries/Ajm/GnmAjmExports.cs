@@ -308,6 +308,8 @@ public static partial class GnmAjmExports
             AjmExports.AjmBatchJobRunBufferRa(call);
         }
         Trace($"run instance=0x{instance:X} flags=0x{flags:X} buffers={inputs.Count}/{outputs.Count} result=0x{call[CpuRegister.Rax]:X}");
+        if (inputs.TrueForAll(static input => input.Size == 0))
+            ClearPartialInput(ctx, controlOutput);
         if (state is not null)
             FinishRun(ctx, scratch, state, instance, flags, inputs, controlOutput);
         return true;
@@ -407,7 +409,7 @@ public static partial class GnmAjmExports
         call[CpuRegister.R8] = 0;
         call[CpuRegister.R9] = 0;
         scratch.WriteStackArgs(0, scratch.Address(ScratchQuery), (ulong)query.End);
-        if (scratch.Call(AjmExports.AjmBatchJobRunBufferRa, ScratchQuery) != 0 ||
+        if ((scratch.Call(AjmExports.AjmBatchJobRunBufferRa, ScratchQuery) & ~Atrac9DecodeState.ResultPartialInput) != 0 ||
             scratch.ReadUInt32(ScratchQuery + query.Gapless) != 0)
             return;
 
@@ -423,6 +425,14 @@ public static partial class GnmAjmExports
         if (stream != 0)
             ctx.TryWriteUInt32(stream, unchecked((uint)Math.Min(consumed, int.MaxValue)));
         Trace($"gapless_loop instance=0x{instance:X} decoded={decoded} base={state.DecodedBase} consumed=0x{consumed:X}");
+    }
+
+    private static void ClearPartialInput(CpuContext ctx, Buffer sideband)
+    {
+        if (sideband.Address == 0 || sideband.Size < AjmExports.AjmSidebandResultBytes ||
+            !ctx.TryReadUInt32(sideband.Address, out var status) || (status & Atrac9DecodeState.ResultPartialInput) == 0)
+            return;
+        ctx.TryWriteUInt32(sideband.Address, status & ~(uint)Atrac9DecodeState.ResultPartialInput);
     }
 
     private static Atrac9Config? ReadAtrac9Config(CpuContext ctx, InstanceState state, Buffer parameters)

@@ -7,6 +7,7 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Pad;
 
+[Collection(HostWindowInputCollection.Name)]
 public sealed class HostWindowInputTests
 {
     [Theory]
@@ -60,6 +61,49 @@ public sealed class HostWindowInputTests
             Assert.Equal(1, source.GetGamepadStates(states));
             Assert.Equal(expected, states[0]);
             Assert.Equal("SDL test pad", source.DescribeConnectedGamepad());
+        }
+        finally
+        {
+            HostWindowInput.Disconnect();
+        }
+    }
+
+    [Fact]
+    public void GyroReadingsTurnTheReportedOrientationUntilReset()
+    {
+        var state = new HostGamepadState(
+            true,
+            HostGamepadButtons.None,
+            128,
+            128,
+            128,
+            128,
+            0,
+            0,
+            Motion: new HostMotionState(true, 0, 9.80665f, 0, 0, 0, 0));
+        HostWindowInput.Connect();
+        try
+        {
+            HostWindowInput.ResetMotionOrientation();
+            ulong timestamp = 0;
+            for (var reading = 0; reading <= 100; reading++)
+            {
+                timestamp += 10_000_000;
+                HostWindowInput.ApplyGamepadMotion(true, 0, MathF.PI / 2, 0, timestamp);
+            }
+
+            HostWindowInput.SetGamepad("SDL test pad", state);
+            Span<HostGamepadState> states = stackalloc HostGamepadState[1];
+            var source = Assert.IsAssignableFrom<IHostWindowInputSource>(HostWindowInputSource.Current);
+            Assert.Equal(1, source.GetGamepadStates(states));
+            Assert.Equal(MathF.Sqrt(0.5f), states[0].Motion.OrientationY, 3);
+            Assert.Equal(MathF.Sqrt(0.5f), states[0].Motion.OrientationW, 3);
+
+            HostWindowInput.ResetMotionOrientation();
+            HostWindowInput.SetGamepad("SDL test pad", state);
+            Assert.Equal(1, source.GetGamepadStates(states));
+            Assert.Equal(0f, states[0].Motion.OrientationY, 5);
+            Assert.Equal(1f, states[0].Motion.OrientationW, 5);
         }
         finally
         {

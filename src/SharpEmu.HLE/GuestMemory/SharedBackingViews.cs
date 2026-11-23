@@ -427,6 +427,11 @@ public sealed unsafe partial class SharedBackingViews : IDisposable
             return false;
         }
 
+        // The rest of a partly unmapped view is mapped again, which would drop every access change made on its pages since
+        // the view was mapped (the GPU memory page watches, a guest mprotect): a write to a page whose GPU data is newer
+        // would then land without a fault, and the GPU bytes would later overwrite it. The access is read before the view
+        // goes and put back on each part right after it is mapped again (RestoreAccess).
+        var access = address != old.Address || size != old.Size ? _host.QueryAccess(old.Address, old.Size) : [];
         bool unmapped;
         GuestMemoryProfile.RecordUnmapSizes(size, old.Size, address - old.Address,
             old.Address + old.Size - address - size);
@@ -463,12 +468,24 @@ public sealed unsafe partial class SharedBackingViews : IDisposable
 
         if (leftSize != 0)
         {
-            ok = TryMapReservedRange(old.Address, leftSize, old.Offset, old.Protection, true, out _) && ok;
+            var mapped = TryMapReservedRange(old.Address, leftSize, old.Offset, old.Protection, true, out _);
+            if (mapped)
+            {
+                RestoreAccess(access, old.Address, leftSize, old.Protection);
+            }
+
+            ok = mapped && ok;
         }
 
         if (rightSize != 0)
         {
-            ok = TryMapReservedRange(rightAddress, rightSize, old.Offset + (rightAddress - old.Address), old.Protection, true, out _) && ok;
+            var mapped = TryMapReservedRange(rightAddress, rightSize, old.Offset + (rightAddress - old.Address), old.Protection, true, out _);
+            if (mapped)
+            {
+                RestoreAccess(access, rightAddress, rightSize, old.Protection);
+            }
+
+            ok = mapped && ok;
         }
 
         if (ok)
@@ -493,7 +510,74 @@ public sealed unsafe partial class SharedBackingViews : IDisposable
         }
 
         RestoreViewMapping(old);
+        RestoreAccess(access, old.Address, old.Size, old.Protection);
         return false;
+    }
+
+    // A view's protection without write.
+    private static HostPageProtection WithoutWrite(HostPageProtection protection) => protection switch
+    {
+        HostPageProtection.ReadWrite => HostPageProtection.ReadOnly,
+        HostPageProtection.ReadWriteExecute or HostPageProtection.ExecuteWriteCopy => HostPageProtection.ReadExecute,
+        _ => protection,
+    };
+
+    // Gives each page of a part of a view just mapped again with the view's protection the access it had before: the access
+    // the host reported for it, or the view's protection where it reported none. The part first loses write in one change
+    // (a view mapped without write cannot gain it back), so no store lands unseen while the pages get their access one run
+    // at a time; only a read can see the bytes in that window. Nothing changes when every page already has the view's
+    // protection or the host reported nothing.
+    private void RestoreAccess(IReadOnlyList<HostPageAccess> access, ulong address, ulong size, HostPageProtection mapped)
+    {
+        var end = address + size;
+        var differs = false;
+        foreach (var run in access)
+        {
+            if (run.Address < end && address < run.Address + run.Size && run.Protection != mapped)
+            {
+                differs = true;
+                break;
+            }
+        }
+
+        if (!differs)
+        {
+            return;
+        }
+
+        var held = WithoutWrite(mapped);
+        Apply(address, size, held, mapped);
+        var cursor = address;
+        foreach (var run in access)
+        {
+            var start = Math.Max(run.Address, address);
+            var stop = Math.Min(run.Address + run.Size, end);
+            if (start >= stop)
+            {
+                continue;
+            }
+
+            if (cursor < start)
+            {
+                Apply(cursor, start - cursor, mapped, held);
+            }
+
+            Apply(start, stop - start, run.Protection, held);
+            cursor = stop;
+        }
+
+        if (cursor < end)
+        {
+            Apply(cursor, end - cursor, mapped, held);
+        }
+
+        void Apply(ulong start, ulong bytes, HostPageProtection protection, HostPageProtection current)
+        {
+            if (protection != current && !_host.ChangeAccess(start, bytes, protection))
+            {
+                OnFatal($"Could not restore the page access at 0x{start:X16} after a partial unmap.");
+            }
+        }
     }
 
     internal bool IsRestoredView(ulong address)

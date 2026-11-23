@@ -520,6 +520,12 @@ public sealed partial class GuestImageCache
             return false;
         }
 
+        // A sample that would record the pending HTile clear first is the render thread's (AcquireTextureCore).
+        if (hasData && request.Role == ImageRole.Texture && SampleClearsDepth(image))
+        {
+            return false;
+        }
+
         view = image.GetOrCreateView(request.View);
         return true;
     }

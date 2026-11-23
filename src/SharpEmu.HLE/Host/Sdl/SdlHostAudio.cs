@@ -54,6 +54,164 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
         return OpenStream(sampleRate, channels, format, cap);
     }
 
+    public IHostAudioStream OpenPcmStream(uint sampleRate, int channels, HostPcmFormat format, int maxQueuedBytes) =>
+        maxQueuedBytes > 0 ? OpenStream(sampleRate, channels, format, maxQueuedBytes) : OpenPcmStream(sampleRate, channels, format);
+
+    /// <summary>
+    /// The controller's output device: exactly one wired DualSense and exactly one four-channel playback device named for
+    /// it ("DualSense", or "Wireless Controller" as Linux lists it). SDL ties no gamepad to its audio device, so anything
+    /// else (no pad, two pads, two candidate devices) gives no stream rather than a guess. While the
+    /// stream is open the pad's speaker plays the front pair; the back pair drives its actuators.
+    /// </summary>
+    public IHostAudioStream? TryOpenControllerStream(uint sampleRate, int maxQueuedBytes, out int channels, bool routeSpeaker = true)
+    {
+        channels = 0;
+        EnsureInitialized();
+        IHostAudioStream stream;
+        string outputName;
+        if (TryFindDualSense(SDL_JoystickConnectionState.SDL_JOYSTICK_CONNECTION_WIRED, out var pad) &&
+            TryFindControllerDevice(out var device, out var deviceName))
+        {
+            stream = new AudioStream(device, sampleRate, 4, HostPcmFormat.Float32, maxQueuedBytes, reportsClock: false, dropOldest: true);
+            outputName = $"\"{deviceName}\"";
+        }
+        else if (TryFindDualSense(SDL_JoystickConnectionState.SDL_JOYSTICK_CONNECTION_WIRELESS, out pad) &&
+                 SdlDualSenseBluetooth.TryOpen(pad, sampleRate, maxQueuedBytes, routeSpeaker) is { } bluetooth)
+        {
+            stream = bluetooth;
+            outputName = "DualSense over Bluetooth";
+        }
+        else
+        {
+            return null;
+        }
+
+        var routed = routeSpeaker && SendControllerEffect(pad, ControllerAudioRoute(speaker: true));
+        channels = 4;
+        Console.Error.WriteLine(
+            $"[LOADER][INFO] Controller audio: {outputName} (speaker {(routed ? "routed" : "not routed")})");
+        return new ControllerAudioStream(stream, pad, routed);
+    }
+
+    private static bool TryFindDualSense(SDL_JoystickConnectionState connection, out SDL_JoystickID pad)
+    {
+        pad = default;
+        var found = 0;
+        SDL_LockJoysticks();
+        try
+        {
+            using var gamepads = SDL_GetGamepads();
+            for (var index = 0; gamepads is not null && index < gamepads.Count; index++)
+            {
+                var id = gamepads[index];
+                var gamepad = SDL_GetGamepadFromID(id);
+                if (gamepad is not null &&
+                    SDL_GetGamepadTypeForID(id) == SDL_GamepadType.SDL_GAMEPAD_TYPE_PS5 &&
+                    SDL_GetGamepadConnectionState(gamepad) == connection)
+                {
+                    pad = id;
+                    found++;
+                }
+            }
+        }
+        finally
+        {
+            SDL_UnlockJoysticks();
+        }
+
+        return found == 1;
+    }
+
+    private static bool TryFindControllerDevice(out SDL_AudioDeviceID device, out string? deviceName)
+    {
+        device = default;
+        deviceName = null;
+        var found = 0;
+        using var devices = SDL_GetAudioPlaybackDevices();
+        for (var index = 0; devices is not null && index < devices.Count; index++)
+        {
+            var name = SDL_GetAudioDeviceName(devices[index]);
+            SDL_AudioSpec spec;
+            int frames;
+            if (name is not null &&
+                (name.Contains("DualSense", StringComparison.OrdinalIgnoreCase) ||
+                 name.Contains("Wireless Controller", StringComparison.OrdinalIgnoreCase)) &&
+                SDL_GetAudioDeviceFormat(devices[index], &spec, &frames) &&
+                spec.channels == 4)
+            {
+                (device, deviceName) = (devices[index], name);
+                found++;
+            }
+        }
+
+        return found == 1;
+    }
+
+    // The pad's audio routing, in its output report: with the speaker, the right channel of the front pair plays on the
+    // speaker and the headphone jack is muted (audio control and speaker volume valid, speaker volume 0x64, output path
+    // 0x30, speaker preamp +6 dB: the values Linux's driver uses without headphones); without it, the front pair goes
+    // back to the headphone jack. Plugged-in headphones are not detected.
+    private static byte[] ControllerAudioRoute(bool speaker)
+    {
+        var report = new byte[38];
+        report[0] = 0x80;
+        if (speaker)
+        {
+            report[0] |= 0x20;
+            report[1] = 0x80;
+            report[5] = 0x64;
+            report[7] = 0x30;
+            report[37] = 0x02;
+        }
+
+        return report;
+    }
+
+    private static bool SendControllerEffect(SDL_JoystickID pad, byte[] report)
+    {
+        SDL_LockJoysticks();
+        try
+        {
+            var gamepad = SDL_GetGamepadFromID(pad);
+            if (gamepad is null)
+            {
+                return false;
+            }
+
+            fixed (byte* data = report)
+            {
+                return SDL_SendGamepadEffect(gamepad, (nint)data, report.Length);
+            }
+        }
+        finally
+        {
+            SDL_UnlockJoysticks();
+        }
+    }
+
+    private sealed class ControllerAudioStream(IHostAudioStream inner, SDL_JoystickID pad, bool speakerRouted) : IHostAudioStream
+    {
+        private int _disposed;
+
+        public int QueuedMilliseconds => inner.QueuedMilliseconds;
+
+        public bool Submit(ReadOnlySpan<byte> pcm) => inner.Submit(pcm);
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
+            inner.Dispose();
+            if (speakerRouted)
+            {
+                SendControllerEffect(pad, ControllerAudioRoute(speaker: false));
+            }
+        }
+    }
+
     private static IHostAudioStream OpenStream(
         uint sampleRate,
         int channels,
@@ -67,7 +225,7 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
         }
 
         EnsureInitialized();
-        return new AudioStream(sampleRate, channels, format, maximumQueuedBytes);
+        return new AudioStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, sampleRate, channels, format, maximumQueuedBytes, reportsClock: true, dropOldest: false);
     }
 
     private static void EnsureInitialized()
@@ -109,6 +267,8 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
         private readonly int _bytesPerFrame;
         private readonly uint _sampleRate;
         private readonly int _streamId = Interlocked.Increment(ref _nextStreamId);
+        private readonly bool _reportsClock;
+        private readonly bool _dropOldest;
         private SDL_AudioStream* _stream;
         private bool _disposed;
         private long _totalSubmittedBytes;
@@ -125,14 +285,19 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
         private long _queuedByteSum;
 
         public AudioStream(
+            SDL_AudioDeviceID device,
             uint sampleRate,
             int channels,
             HostPcmFormat format,
-            int maximumQueuedBytes)
+            int maximumQueuedBytes,
+            bool reportsClock,
+            bool dropOldest)
         {
             var bytesPerSample = format == HostPcmFormat.Float32 ? sizeof(float) : sizeof(short);
             _bytesPerFrame = channels * bytesPerSample;
             _sampleRate = sampleRate;
+            _reportsClock = reportsClock;
+            _dropOldest = dropOldest;
             var spec = new SDL_AudioSpec
             {
                 format = format == HostPcmFormat.Float32
@@ -143,7 +308,7 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
             };
 
             _stream = SDL_OpenAudioDeviceStream(
-                SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK,
+                device,
                 &spec,
                 null,
                 IntPtr.Zero);
@@ -203,9 +368,9 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                 var blockStart = Stopwatch.GetTimestamp();
                 var deadline = blockStart +
                                (Stopwatch.Frequency * MaximumWaitMilliseconds / 1_000);
-                int queued;
                 var overrun = false;
-                while ((queued = SDL_GetAudioStreamQueued(_stream)) > _maximumQueuedBytes)
+                var queued = _dropOldest ? DropOldest(pcm.Length, out overrun) : 0;
+                while (!_dropOldest && (queued = SDL_GetAudioStreamQueued(_stream)) > _maximumQueuedBytes)
                 {
                     if (Stopwatch.GetTimestamp() >= deadline)
                     {
@@ -241,7 +406,7 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
                     // what the player has actually heard.
                     _totalSubmittedBytes += pcm.Length;
                     var bytesPerSecond = (double)_bytesPerFrame * _sampleRate;
-                    if (bytesPerSecond > 0)
+                    if (_reportsClock && bytesPerSecond > 0)
                     {
                         GuestAudioClock.Report(
                             Math.Max(0, _totalSubmittedBytes - queued - pcm.Length) / bytesPerSecond);
@@ -250,6 +415,43 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
 
                 return submitted;
             }
+        }
+
+        /// <summary>
+        /// For a stream the guest is not paced by: when the new audio would take the queue past its cap, the oldest
+        /// queued audio goes, a chunk at a time, so the gap after a device stall stays near one block (clearing the
+        /// whole queue leaves a long one) and the caller never waits. Caller holds <see cref="_gate"/>.
+        /// </summary>
+        private int DropOldest(int incomingBytes, out bool dropped)
+        {
+            var queued = Math.Max(0, SDL_GetAudioStreamQueued(_stream));
+            dropped = queued + incomingBytes > _maximumQueuedBytes;
+            if (!dropped)
+            {
+                return queued;
+            }
+
+            Span<byte> discard = stackalloc byte[4096];
+            fixed (byte* buffer = discard)
+            {
+                for (var chunk = 0; chunk < 64 && queued + incomingBytes > _maximumQueuedBytes; chunk++)
+                {
+                    if (SDL_GetAudioStreamData(_stream, (nint)buffer, discard.Length) <= 0)
+                    {
+                        break;
+                    }
+
+                    queued = Math.Max(0, SDL_GetAudioStreamQueued(_stream));
+                }
+            }
+
+            if (queued + incomingBytes > _maximumQueuedBytes)
+            {
+                SDL_ClearAudioStream(_stream);
+                queued = 0;
+            }
+
+            return queued;
         }
 
         /// <summary>

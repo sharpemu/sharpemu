@@ -132,7 +132,7 @@ internal sealed partial class RenderRecorder
                 }
                 state.Programs.VertexInput.Stage = originalDomainStage with { TessellationData = data };
                 record.Draw = draw with { Count = batchPatches * layout.InputControlPoints, InstanceCount = 1 };
-                RecordDrawCommands(record, ref state, inPlace: false);
+                RecordDrawCommands(record, ref state, inPlace: false, out _);
                 _host.EndRendering();
                 // The next batch reuses relative patch IDs in the guest rings.
                 _host.ShaderWriteHazardBarrier();

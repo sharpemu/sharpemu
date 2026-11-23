@@ -54,7 +54,11 @@ public readonly record struct HostMotionState(
     float AccelerationZ,
     float AngularVelocityX,
     float AngularVelocityY,
-    float AngularVelocityZ);
+    float AngularVelocityZ,
+    float OrientationX = 0,
+    float OrientationY = 0,
+    float OrientationZ = 0,
+    float OrientationW = 1);
 
 public readonly record struct HostTouchPoint(
     bool Active,

@@ -206,6 +206,14 @@ public sealed class Gen5WaveLaneLocalAnalysisTests
     }
 
     [Fact]
+    public void AWorkgroupBarrier_IsRefusedEvenOutsideAnExecSkip()
+    {
+        Add(new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Sopp, "SBarrier", [0u], [], [], null));
+
+        AssertRefused("a barrier");
+    }
+
+    [Fact]
     public void ReadFirstLaneOfAUniformValue_IsLaneLocal()
     {
         Lane();

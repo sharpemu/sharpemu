@@ -453,6 +453,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw SubmissionScheduler.Fatal($"The HTile clear state could not be consumed: htile=0x{resolution.HtileAddress:X16} layer={layer}.");
             }
 
+            if (resolution.HasHtile)
+            {
+                _imageCache.NoteDepthClearValue(resolution.HtileAddress, depth.Target.State.DepthClearValue);
+            }
+
             var image = _imageCache.GetImage(depth.Image);
             return new DepthAttachmentAcquisition(view, image.Backing.Samples, metadataClear);
         }
@@ -1537,6 +1542,20 @@ internal static unsafe partial class VulkanVideoPresenter
             _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.DrawIndexed,
                 _boundGraphicsPipeline?.Id ?? 0, indexCount, instanceCount);
             CountDraw();
+        }
+
+        bool IRenderHost.CanShareIndexedBindings(IPreparedBindings stage, ReadOnlySpan<ColorTargetState> colors, in DepthAttachmentState depth)
+        {
+            if (_preparation?.StencilStorageImages is not null || _preparation?.FeedbackSnapshots is not null || _snapshotPixelHash != 0)
+                return false;
+            foreach (var texture in ((PreparedStageBindings)stage).Textures)
+            {
+                if (texture.IsHostMovie || texture.IsFeedbackSnapshot || texture.IsStorage) return false;
+                if (depth.HasTarget && texture.ImageIdentifier == depth.Image) return false;
+                foreach (ref readonly var color in colors)
+                    if (texture.ImageIdentifier == color.Image) return false;
+            }
+            return true;
         }
 
         void IRenderHost.DrawIndexedIndirect(BufferBinding arguments)

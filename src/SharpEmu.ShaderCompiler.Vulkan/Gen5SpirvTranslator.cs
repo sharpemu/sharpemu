@@ -562,6 +562,10 @@ public static partial class Gen5SpirvTranslator
                     {
                         _module.AddExecutionMode(main, SpirvExecutionMode.LocalSize, PairedHostThreadCount(), 1, 1);
                     }
+                    else if (UsesHalfWaveSubgroups && physicalSizes[0] % 32 != 0)
+                    {
+                        _module.AddExecutionMode(main, SpirvExecutionMode.LocalSize, 32, (HalfWaveThreadCount + 31) / 32, 1);
+                    }
                     else
                     {
                         _module.AddExecutionMode(
@@ -587,7 +591,7 @@ public static partial class Gen5SpirvTranslator
                     ? (uint)_vertexOutputs.Count
                     : (uint)_pixelInputs.Count;
                 profile.Switch(ShaderTranslationProfile.Part.Serialization);
-                shader = new Gen5SpirvShader(_module.Build(), attributeCount)
+                shader = new Gen5SpirvShader(_module.Build(spirv16: UsesHalfWaveSubgroups), attributeCount)
                 {
                     InputLocationMask = _stage == Gen5SpirvStage.Pixel ? _pixelInputLocationMask : null,
                 };
@@ -902,7 +906,7 @@ public static partial class Gen5SpirvTranslator
                 // LocalInvocationIndex is a compute-stage built-in. Graphics
                 // stages can still use native subgroup operations, but they
                 // cannot combine two subgroup32 halves through a workgroup.
-                if ((_stage is Gen5SpirvStage.Compute or Gen5SpirvStage.Mesh) && _waveLaneCount == 64)
+                if ((_stage is Gen5SpirvStage.Compute or Gen5SpirvStage.Mesh) && _waveLaneCount == 64 && !UsesHalfWaveSubgroups)
                 {
                     _localInvocationIndexInput = _module.AddGlobalVariable(
                         subgroupPointer,
@@ -914,7 +918,7 @@ public static partial class Gen5SpirvTranslator
                     _interfaces.Add(_localInvocationIndexInput);
                 }
 
-                DeclarePairedLaneInputs();
+                DeclareComputeSubgroupId();
             }
 
             if (HasVertexOutputs)
@@ -1195,13 +1199,12 @@ public static partial class Gen5SpirvTranslator
             {
                 var inputPointer =
                     _module.TypePointer(SpirvStorageClass.Input, _uvec3Type);
-                _localInvocationIdInput = _module.AddGlobalVariable(
-                    inputPointer,
-                    SpirvStorageClass.Input);
-                _module.AddDecoration(
-                    _localInvocationIdInput,
-                    SpirvDecoration.BuiltIn,
-                    (uint)SpirvBuiltIn.LocalInvocationId);
+                if (!UsesHalfWaveSubgroups)
+                {
+                    _localInvocationIdInput = _module.AddGlobalVariable(inputPointer, SpirvStorageClass.Input);
+                    _module.AddDecoration(_localInvocationIdInput, SpirvDecoration.BuiltIn, (uint)SpirvBuiltIn.LocalInvocationId);
+                    _interfaces.Add(_localInvocationIdInput);
+                }
                 _workGroupIdInput = _module.AddGlobalVariable(
                     inputPointer,
                     SpirvStorageClass.Input);
@@ -1209,7 +1212,6 @@ public static partial class Gen5SpirvTranslator
                     _workGroupIdInput,
                     SpirvDecoration.BuiltIn,
                     (uint)SpirvBuiltIn.WorkgroupId);
-                _interfaces.Add(_localInvocationIdInput);
                 _interfaces.Add(_workGroupIdInput);
                 if (_stage == Gen5SpirvStage.Mesh)
                 {
@@ -1320,9 +1322,14 @@ public static partial class Gen5SpirvTranslator
                 else
                 {
                     var lanes = BooleanToWaveMask(_module.ConstantBool(true));
-                    laneCount = IAdd(
-                        _module.AddInstruction(SpirvOp.BitCount, _uintType, Narrow(lanes)),
-                        _module.AddInstruction(SpirvOp.BitCount, _uintType, Narrow(ShiftRightLogical64(lanes, _module.Constant64(_ulongType, 32)))));
+                    var lowLanes = Narrow(lanes);
+                    var highLanes = Narrow(ShiftRightLogical64(lanes, _module.Constant64(_ulongType, 32)));
+                    laneCount = _module.AddInstruction(
+                        SpirvOp.Select,
+                        _uintType,
+                        IsNotZero(highLanes),
+                        IAdd(Ext(75, _uintType, highLanes), UInt(33)),
+                        IAdd(Ext(75, _uintType, lowLanes), UInt(1)));
                 }
 
                 StoreS(3, BitwiseOr(laneCount, ShiftLeftLogical(laneCount, UInt(8))));
@@ -1403,9 +1410,12 @@ public static partial class Gen5SpirvTranslator
             }
             else
             {
-                var localId = Load(_uvec3Type, _localInvocationIdInput);
+                var halfWaveIndex = UsesHalfWaveSubgroups ? HalfWaveLocalIndex() : 0;
+                var localId = halfWaveIndex != 0 ? HalfWaveLocalCoordinates(halfWaveIndex) : Load(_uvec3Type, _localInvocationIdInput);
                 var workGroupId = Load(_uvec3Type, _workGroupIdInput);
-                var invocationInBounds = _module.ConstantBool(true);
+                var invocationInBounds = halfWaveIndex != 0 && HalfWaveThreadCount % 32 != 0
+                    ? _module.AddInstruction(SpirvOp.ULessThan, _boolType, halfWaveIndex, UInt(HalfWaveThreadCount))
+                    : _module.ConstantBool(true);
                 for (uint component = 0; component < 3; component++)
                 {
                     // gl_LocalInvocationId/gl_WorkGroupId are indexed by the physical SPIR-V
@@ -9999,6 +10009,10 @@ public static partial class Gen5SpirvTranslator
             if (_pairedLanes)
             {
                 return PairedGuestLane();
+            }
+            if (_waveLowering is HalfWave64Lowering && _subgroupIdInput != 0)
+            {
+                return BitwiseAnd(HalfWaveLocalIndex(), UInt(63));
             }
 
             // A native wave64 is one host subgroup: its lane is the subgroup lane, the same one

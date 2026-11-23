@@ -245,6 +245,23 @@ internal sealed unsafe partial class WindowsHostViews : IHostViewMemory
     public bool ChangeAccess(ulong address, ulong size, HostPageProtection protection) =>
         VirtualProtect((void*)address, (nuint)size, GetNativeProtection(protection), out _);
 
+    public IReadOnlyList<HostPageAccess> QueryAccess(ulong address, ulong size) =>
+        HostViewMemory.CollectAccess(address, size, static current =>
+        {
+            if (VirtualQuery((void*)current, out var info, (nuint)sizeof(MemoryBasicInformation)) == 0)
+            {
+                return (false, default);
+            }
+
+            return (true, new HostMemory.BasicInfo
+            {
+                BaseAddress = info.BaseAddress,
+                RegionSize = info.RegionSize,
+                State = info.State,
+                Protect = info.Protect,
+            });
+        });
+
     public bool FreeOwnedRange(ulong address, ulong size)
     {
         var end = address + size;
