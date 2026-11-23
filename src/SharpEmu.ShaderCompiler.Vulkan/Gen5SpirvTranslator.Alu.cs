@@ -1160,7 +1160,7 @@ public static partial class Gen5SpirvTranslator
                     break;
                 case "VMbcntHiU32B32":
                 {
-                    var guestLane = GuestWaveLane();
+                    var guestLane = WaveMaskLane();
                     var lane = BitwiseAnd(guestLane, UInt(31));
                     var partialMask = _module.AddInstruction(
                         SpirvOp.ISub,
@@ -1188,7 +1188,7 @@ public static partial class Gen5SpirvTranslator
                 }
                 case "VMbcntLoU32B32":
                 {
-                    var guestLane = GuestWaveLane();
+                    var guestLane = WaveMaskLane();
                     var lane = BitwiseAnd(guestLane, UInt(31));
                     var partialMask = _module.AddInstruction(
                         SpirvOp.ISub,
