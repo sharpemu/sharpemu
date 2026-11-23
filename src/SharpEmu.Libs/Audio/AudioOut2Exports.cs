@@ -1630,6 +1630,9 @@ public static class AudioOut2Exports
             ? Math.Clamp(reserveMilliseconds, 0, 200) * 1000L
             : 20_000L;
 
+    private static readonly bool GrainStretchEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_AUDIO_STRETCH") != "0";
+
     private static readonly bool LogReserveStats = string.Equals(
         Environment.GetEnvironmentVariable("SHARPEMU_LOG_AUDIO_OUT2"),
         "1",
@@ -1644,6 +1647,9 @@ public static class AudioOut2Exports
     private const int MixChannels = 2;
 
     private static byte[] _silence = [];
+    private static byte[] _stretchedOutput = [];
+    private static float[] _stretchedMix = [];
+    private static float[] _stretchMono = [];
 
     private static long TicksToMicroseconds(long ticks) => ticks * 1_000_000L / Stopwatch.Frequency;
 
@@ -1693,6 +1699,7 @@ public static class AudioOut2Exports
         {
             var silentGrains = (reserve + grainMicroseconds - 1) / grainMicroseconds;
             SubmitSilence(backend, checked((int)(output.Length * silentGrains)));
+            context.RecentFrames = 0;
         }
         else
         {
@@ -1706,13 +1713,40 @@ public static class AudioOut2Exports
                 return true;
             }
 
-            if (queuedMicroseconds * 2 < reserve && quiet)
+            if (queuedMicroseconds * 2 < reserve)
             {
-                SubmitSilence(backend, output.Length);
-                context.StatsSilentFills++;
+                if (quiet)
+                {
+                    SubmitSilence(backend, output.Length);
+                    context.StatsSilentFills++;
+                }
+                else if (GrainStretchEnabled)
+                {
+                    var added = StretchMixGrain(
+                        context.Recent.AsSpan(0, context.RecentFrames * MixChannels),
+                        grain,
+                        (int)context.Frequency,
+                        ref _stretchedMix);
+                    if (added > 0)
+                    {
+                        var stretchedSamples = (frames + added) * MixChannels;
+                        var bytesPerSample = isFloat ? sizeof(float) : sizeof(short);
+                        if (_stretchedOutput.Length < stretchedSamples * bytesPerSample)
+                        {
+                            _stretchedOutput = new byte[stretchedSamples * bytesPerSample];
+                        }
+
+                        payload = isFloat
+                            ? WriteFloatOutput(_stretchedMix.AsSpan(0, stretchedSamples), _stretchedOutput, out _)
+                            : WritePcm16Output(_stretchedMix.AsSpan(0, stretchedSamples), _stretchedOutput, out _);
+                        context.StatsStretches++;
+                        context.StatsStretchedFrames += added;
+                    }
+                }
             }
         }
 
+        RememberRecentGrain(context, grain);
         RecordReserveStats(context, queuedMilliseconds);
         return backend.Submit(payload);
     }
@@ -1744,6 +1778,126 @@ public static class AudioOut2Exports
 
         return true;
     }
+
+    private static void RememberRecentGrain(ContextState context, ReadOnlySpan<float> grain)
+    {
+        var keepFrames = (int)(context.Frequency / 50);
+        var keep = keepFrames * MixChannels;
+        if (context.Recent.Length < keep)
+        {
+            var grown = new float[keep];
+            context.Recent.AsSpan(0, context.RecentFrames * MixChannels).CopyTo(grown);
+            context.Recent = grown;
+        }
+
+        if (grain.Length >= keep)
+        {
+            grain[^keep..].CopyTo(context.Recent);
+            context.RecentFrames = keepFrames;
+            return;
+        }
+
+        var held = context.RecentFrames * MixChannels;
+        var overflow = held + grain.Length - keep;
+        if (overflow > 0)
+        {
+            context.Recent.AsSpan(overflow, held - overflow).CopyTo(context.Recent);
+            held -= overflow;
+        }
+
+        grain.CopyTo(context.Recent.AsSpan(held));
+        context.RecentFrames = (held + grain.Length) / MixChannels;
+    }
+
+    internal static int StretchMixGrain(ReadOnlySpan<float> history, ReadOnlySpan<float> grain, int frequency, ref float[] output)
+    {
+        var historyFrames = history.Length / MixChannels;
+        var grainFrames = grain.Length / MixChannels;
+        var total = historyFrames + grainFrames;
+        var window = Math.Min(grainFrames, frequency / 200);
+        var fade = Math.Min(grainFrames, frequency * 3 / 1000);
+        var shortest = frequency / 400;
+        var longest = Math.Min(frequency * 15 / 1000, total > window ? total - window : 0);
+        if (window == 0 || fade == 0 || shortest == 0 || longest < shortest)
+        {
+            return 0;
+        }
+
+        if (_stretchMono.Length < total)
+        {
+            _stretchMono = new float[total];
+        }
+
+        var mono = _stretchMono;
+        for (var frame = 0; frame < total; frame++)
+        {
+            mono[frame] = MixSample(history, grain, historyFrames, frame, 0) +
+                          MixSample(history, grain, historyFrames, frame, 1);
+        }
+
+        var end = total - window;
+        var endEnergy = 0f;
+        for (var k = 0; k < window; k++)
+        {
+            endEnergy += mono[end + k] * mono[end + k];
+        }
+
+        var lag = shortest;
+        var best = -2f;
+        for (var period = shortest; period <= longest; period++)
+        {
+            var earlier = end - period;
+            var dot = 0f;
+            var energy = 0f;
+            for (var k = 0; k < window; k++)
+            {
+                dot += mono[end + k] * mono[earlier + k];
+                energy += mono[earlier + k] * mono[earlier + k];
+            }
+
+            var score = dot / MathF.Sqrt((energy * endEnergy) + 1e-20f);
+            if (score > best)
+            {
+                best = score;
+                lag = period;
+            }
+        }
+
+        var outputSamples = (grainFrames + lag) * MixChannels;
+        if (output.Length < outputSamples)
+        {
+            output = new float[outputSamples];
+        }
+
+        grain[..((grainFrames - fade) * MixChannels)].CopyTo(output);
+        for (var frame = grainFrames - fade; frame < grainFrames; frame++)
+        {
+            var x = (frame - (grainFrames - fade) + 0.5f) / fade;
+            var weight = 0.5f - (0.5f * MathF.Cos(MathF.PI * x));
+            for (var channel = 0; channel < MixChannels; channel++)
+            {
+                output[(frame * MixChannels) + channel] =
+                    ((1f - weight) * MixSample(history, grain, historyFrames, historyFrames + frame, channel)) +
+                    (weight * MixSample(history, grain, historyFrames, historyFrames + frame - lag, channel));
+            }
+        }
+
+        for (var frame = grainFrames; frame < grainFrames + lag; frame++)
+        {
+            for (var channel = 0; channel < MixChannels; channel++)
+            {
+                output[(frame * MixChannels) + channel] =
+                    MixSample(history, grain, historyFrames, historyFrames + frame - lag, channel);
+            }
+        }
+
+        return lag;
+    }
+
+    private static float MixSample(ReadOnlySpan<float> history, ReadOnlySpan<float> grain, int historyFrames, int frame, int channel) =>
+        frame < historyFrames
+            ? history[(frame * MixChannels) + channel]
+            : grain[((frame - historyFrames) * MixChannels) + channel];
 
     private static void RecordReserveStats(ContextState context, int queuedMilliseconds)
     {
