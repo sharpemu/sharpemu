@@ -492,7 +492,7 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         private PreparedStageBindings ReuseStagePreparation(RenderPreparation preparation, ShaderStageResources stage, ShaderProgramInfo program,
-            StagePreparationMemo memo)
+            StagePreparationMemo memo, ReadOnlySpan<uint> heapViews)
         {
             var prepared = RentStage(stage, program);
             prepared.Memoized = true;
@@ -515,6 +515,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             var layout = program.Bindings!;
             prepared.ShaderData = AssembleShaderData(stage, program, layout);
+            heapViews.CopyTo(prepared.ShaderData.AsSpan((int)layout.HeapViewsDword));
             if (layout.Find(DescriptorBindingKind.GlobalDataShare) is not null)
             {
                 descriptors.GlobalDataShare = new BufferView(_bufferCache.GdsBuffer.Handle, 0, Vk.WholeSize);
@@ -1008,7 +1009,7 @@ internal static unsafe partial class VulkanVideoPresenter
             if (frontendReady && !movieActive && !Gpu.Images.ImageClearTrace.Enabled && !MeshDrawTrace.Active &&
                 TryFindStagePreparation(preparations, snapshot, stage.ShaderBase, out var memo))
             {
-                return ReuseStagePreparation(preparation, stage, program, memo);
+                return ReuseStagePreparation(preparation, stage, program, memo, heapViews);
             }
 
             Interlocked.Increment(ref _stageMemoMisses);
@@ -1070,7 +1071,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 FindBuffers(prepared);
             using (DescriptorStallProfile.Measure(DescriptorStallProfile.Operation.ValidateImages, program.Hash, info.Buffers.Count, info.Images.Count, info.Samplers.Count))
                 ValidateDrawImageTypes(prepared);
-            if (!movieActive && layout.CallTargetCount == 0 && layout.CallArgumentCount == 0 && !layout.UsesBindlessHeap)
+            // A stage that reads the bindless heap is kept like any other: the heap and its views were prepared above, before
+            // the memo is looked up, and a reuse writes this draw's views. Call records are made per draw, so their stages are not.
+            if (!movieActive && layout.CallTargetCount == 0 && layout.CallArgumentCount == 0 &&
+                (!layout.UsesBindlessHeap || program.CallRecordCallees.Count == 0))
             {
                 if (frontendReady)
                     NoteStagePreparation(preparations, prepared, snapshot, stage.ShaderBase);
