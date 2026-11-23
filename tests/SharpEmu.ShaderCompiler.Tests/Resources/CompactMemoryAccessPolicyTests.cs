@@ -107,7 +107,9 @@ public sealed class CompactMemoryAccessPolicyTests
         var compact = Opcodes(shader.Spirv);
         var standard = Opcodes(Compile(program, compact: false));
         // The invocation reports its first and last missing pages when it ends, not one per dword; a load no longer branches.
-        Assert.True(compact.Count(op => op == SpirvOp.AtomicOr) <= 2);
+        // A store marks its page in the store bitmap where it is made (the host learns of it in no other way): one atomic
+        // per store, half the dwords of this copy.
+        Assert.True(compact.Count(op => op == SpirvOp.AtomicOr) <= 2 + count / 2);
         Assert.True(standard.Count(op => op == SpirvOp.AtomicOr) >= count);
         var compactBranches = compact.Count(op => op == SpirvOp.BranchConditional);
         var standardBranches = standard.Count(op => op == SpirvOp.BranchConditional);

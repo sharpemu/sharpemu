@@ -4465,6 +4465,8 @@ public static partial class Gen5SpirvTranslator
                             var bothMapped = LogicalAnd(firstMapped, secondMapped);
                             EmitBufferAtomicInRange(bothMapped, control.Glc, control.VectorData, 2, () =>
                             {
+                                MarkDeviceStore(firstAddress);
+                                MarkDeviceStore(secondAddress);
                                 var originalLow = EmitAtomic(
                                     atomicOp, _uintType, DeviceWordPointer(firstPointer), 1, 0x48,
                                     () => LoadV(control.VectorData), () => UInt(0));
@@ -4496,6 +4498,7 @@ public static partial class Gen5SpirvTranslator
                             var (pointer, mapped) = ResolveDeviceAddress(firstAddress);
                             EmitBufferAtomicInRange(mapped, control.Glc, control.VectorData, 2, () =>
                             {
+                                MarkDeviceStore(firstAddress);
                                 EmitQwordAtomic(
                                     atomicOp,
                                     _module.AddInstruction(
@@ -4521,6 +4524,7 @@ public static partial class Gen5SpirvTranslator
                         var (pointer, mapped) = ResolveDeviceAddress(address);
                         EmitBufferAtomicInRange(mapped, control.Glc, control.VectorData, 1, () =>
                         {
+                            MarkDeviceStore(address);
                             var original = EmitBufferFloatAtomic(
                                 DeviceWordPointer(pointer),
                                 LoadV(control.VectorData),
@@ -4550,6 +4554,7 @@ public static partial class Gen5SpirvTranslator
                     var (pointer, mapped) = ResolveDeviceAddress(address);
                     EmitBufferAtomicInRange(mapped, control.Glc, control.VectorData, 1, () =>
                     {
+                        MarkDeviceStore(address);
                         var original = EmitAtomic(
                             atomicOperation,
                             _uintType,

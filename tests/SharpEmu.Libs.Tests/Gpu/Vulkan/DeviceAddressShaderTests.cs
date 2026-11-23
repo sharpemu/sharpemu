@@ -381,7 +381,9 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
         var expected = segment == 0 ? 0x12345678u : 0u;
         Assert.Equal(expected, run.PageWord(GuestBase, 0));
         Assert.Equal(expected, run.ResultWord(0));
-        Assert.All(run.FaultWords(), word => Assert.Equal(0u, word));
+        // Nothing faults; the store of segment 0 goes through the page table, which reports its page.
+        Assert.Equal(0u, run.FaultWord(GuestBase));
+        Assert.Equal(segment == 0 ? 1u << (int)((GuestBase >> Gen5SpirvTranslator.DeviceAddressPageBits) & 31) : 0u, run.StoreWord(GuestBase));
         run.Finish(output, nameof(FlatSegments_DoNotAliasGlobalMemory));
     }
 
@@ -730,6 +732,63 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
         run.Finish(output, nameof(GlobalStoreThroughThePageTable_Lands));
     }
 
+    // A store through a mapped entry changes the cache buffer behind it and leaves guest memory stale, so it marks its
+    // page in the store bitmap; the host learns of it in no other way. A load, or a store to a missing page, marks nothing.
+    [Theory]
+    [InlineData("GlobalStoreDword", true)]
+    [InlineData("GlobalLoadDword", false)]
+    public void StoreThroughAMappedEntry_MarksItsPageInTheStoreBitmapAndALoadDoesNot(string opcode, bool store)
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true))
+        {
+            return;
+        }
+
+        var run = new Run(vulkan, store ? StoreProgram(opcode, offset: 8, value: 0xCAFE_F00D) : LoadProgram(opcode, offset: 8));
+        run.MapPage(GuestBase, new byte[64]);
+        run.Dispatch(GuestBase, writtenRange: store ? (GuestBase, 64) : null);
+        var bit = 1u << (int)((GuestBase >> Gen5SpirvTranslator.DeviceAddressPageBits) & 31);
+        if (store) Assert.Equal(0xCAFE_F00Du, run.PageWord(GuestBase, 8));
+        Assert.Equal(store ? bit : 0u, run.StoreWord(GuestBase));
+        Assert.Equal(0u, run.FaultWord(GuestBase));
+        run.Finish(output, nameof(StoreThroughAMappedEntry_MarksItsPageInTheStoreBitmapAndALoadDoesNot));
+    }
+
+    [Fact]
+    public void AtomicThroughAMappedEntry_MarksItsPageInTheStoreBitmap()
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true))
+        {
+            return;
+        }
+
+        var run = new Run(vulkan, AtomicProgram(offset: 4, value: 5));
+        run.MapPage(GuestBase, new byte[64]);
+        run.Dispatch(GuestBase, writtenRange: (GuestBase, 64));
+        Assert.Equal(5u, run.PageWord(GuestBase, 4));
+        Assert.Equal(1u << (int)((GuestBase >> Gen5SpirvTranslator.DeviceAddressPageBits) & 31), run.StoreWord(GuestBase));
+        run.Finish(output, nameof(AtomicThroughAMappedEntry_MarksItsPageInTheStoreBitmap));
+    }
+
+    // A store to a page the table does not map faults and marks no store: the fault bitmap alone reports it.
+    [Fact]
+    public void StoreToAMissingPage_FaultsAndMarksNoStore()
+    {
+        var vulkan = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vulkan, shaderInt64: true))
+        {
+            return;
+        }
+
+        var run = new Run(vulkan, StoreProgram("GlobalStoreDword", offset: 8, value: 0xCAFE_F00D));
+        run.Dispatch(GuestBase, writtenRange: (GuestBase, 64));
+        Assert.NotEqual(0u, run.FaultWord(GuestBase));
+        Assert.Equal(0u, run.StoreWord(GuestBase));
+        run.Finish(output, nameof(StoreToAMissingPage_FaultsAndMarksNoStore));
+    }
+
     [Fact]
     public void AtomicThroughThePageTable_ReturnsTheOldValue()
     {
@@ -1067,7 +1126,8 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
             _harness = new ImageTestHarness(vulkan);
             _runner = new LayoutComputeRunner(_harness, Request, shader.Spirv);
             _result = _runner.CreateBuffer(ResultBytes);
-            _fault = _runner.CreateBuffer(tableEntries / 8 + 64);
+            // The fault and store bitmaps, then the trace record, as the host lays them out.
+            _fault = _runner.CreateBuffer(tableEntries * DeviceAddressPaging.FaultBitmaps / 8 + 64);
             _tableEntries = tableEntries;
             _callArguments = Gen5ShaderCallLinker.CallEntryArguments(program);
             _callTargets = Gen5ShaderCallLinker.CallTargets(program);
@@ -1123,6 +1183,12 @@ public sealed class DeviceAddressShaderTests(HeadlessVulkanFixture fixture, ITes
         {
             var pageIndex = guestAddress >> Gen5SpirvTranslator.DeviceAddressPageBits;
             return ReadWord(_runner.ReadBack(_fault, 0, _fault.Size), (int)(pageIndex / 32) * 4);
+        }
+
+        public uint StoreWord(ulong guestAddress)
+        {
+            var pageIndex = guestAddress >> Gen5SpirvTranslator.DeviceAddressPageBits;
+            return ReadWord(_runner.ReadBack(_fault, 0, _fault.Size), (int)(_tableEntries / 32 * DeviceAddressPaging.StoreBitmap + pageIndex / 32) * 4);
         }
 
         public uint[] FaultWords()

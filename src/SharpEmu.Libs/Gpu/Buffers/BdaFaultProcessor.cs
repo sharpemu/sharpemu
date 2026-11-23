@@ -5,6 +5,7 @@ using SharpEmu.Libs.VideoOut;
 using System.Runtime.InteropServices;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using SharpEmu.Libs.Gpu.Vulkan;
 using Silk.NET.Vulkan;
@@ -40,6 +41,13 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
     private readonly Pipeline _pipeline;
     private readonly DescriptorPool _pool;
     private uint _currentArea;
+    private readonly List<ulong> _storedPages = new();
+
+    // The fault bitmap, then the store bitmap (one bit per page each, see DeviceAddressPaging), then the trace record.
+    private ulong RecordOffset => DeviceAddressPaging.FaultBitmaps * _faultBufferSize;
+
+    // The scan reports a page of the store bitmap past every guest address: the page count plus its page.
+    private ulong StoreBitmapBase => DeviceAddressPaging.StoreBitmap * _pageCount * _pageSize;
 
     public BdaFaultProcessor(GpuDeviceInfo device, SubmissionScheduler scheduler, GuestBufferCache cache, int pageBits, ulong pageCount)
     {
@@ -50,7 +58,7 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
         _pageCount = pageCount;
         _faultBufferSize = pageCount / 8;
         _faultBuffer = new GpuBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AllFlags,
-            _faultBufferSize + 64UL);
+            DeviceAddressPaging.FaultBitmaps * _faultBufferSize + 64UL);
         _traceDownloadBuffer = new GpuBuffer(device, scheduler, GpuBufferUsage.Download, 0, GpuBuffer.AllFlags, MaxPendingFaults * 256);
         _downloadBuffer = new GpuBuffer(device, scheduler, GpuBufferUsage.Download, 0, GpuBuffer.AllFlags, MaxPendingFaults * PageFaultAreaSize);
 
@@ -151,7 +159,7 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
         var writes = stackalloc WriteDescriptorSet[2 * MaxPendingFaults];
         for (var area = 0; area < MaxPendingFaults; area++)
         {
-            infos[2 * area] = new DescriptorBufferInfo(_faultBuffer.Handle, 0, _faultBufferSize);
+            infos[2 * area] = new DescriptorBufferInfo(_faultBuffer.Handle, 0, DeviceAddressPaging.FaultBitmaps * _faultBufferSize);
             infos[2 * area + 1] = new DescriptorBufferInfo(_downloadBuffer.Handle, (ulong)area * PageFaultAreaSize, PageFaultAreaSize);
             for (uint binding = 0; binding < 2; binding++)
             {
@@ -176,7 +184,7 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
         {
             if (_traceDownloadBuffer is not null && !_traceInitialized)
             {
-                _faultBuffer.Fill(_faultBufferSize, 64, 0);
+                _faultBuffer.Fill(RecordOffset, 64, 0);
                 _traceInitialized = true;
             }
             return _faultBuffer;
@@ -205,7 +213,7 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
             DstQueueFamilyIndex = Vk.QueueFamilyIgnored,
             Buffer = _faultBuffer.Handle,
             Offset = 0,
-            Size = _faultBufferSize,
+            Size = DeviceAddressPaging.FaultBitmaps * _faultBufferSize,
         };
         var postBarrier = preBarrier;
         postBarrier.DstAccessMask = AccessFlags2.ShaderWriteBit;
@@ -226,7 +234,7 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
             vk.CmdBindDescriptorSets(command, PipelineBindPoint.Compute, _pipelineLayout, 0, 1, &set, 0, null);
         }
         NativeBindingEpoch.Advance();
-        var threads = _pageCount / 32;
+        var threads = DeviceAddressPaging.FaultBitmaps * _pageCount / 32;
         using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
         {
             vk.CmdDispatch(command, (uint)((threads + 63) / 64), 1, 1);
@@ -237,11 +245,12 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
 
         var area = _currentArea;
         var scanTick = _scheduler.CurrentTick;
+        // The storing work was recorded after the previous scan and at or before this one.
         if (_traceDownloadBuffer is not null)
         {
-            _traceDownloadBuffer.CopyFrom(_scheduler.Current, _faultBuffer, _faultBufferSize, area * 256UL, 64,
+            _traceDownloadBuffer.CopyFrom(_scheduler.Current, _faultBuffer, RecordOffset, area * 256UL, 64,
                 destinationAfter: AccessFlags.HostReadBit);
-            _faultBuffer.Fill(_faultBufferSize, 64, 0);
+            _faultBuffer.Fill(RecordOffset, 64, 0);
         }
         _scheduler.QueueCompletionAction(() =>
         {
@@ -267,8 +276,16 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
             _faultWindows.Clear();
             var faults = MemoryMarshal.Cast<byte, ulong>(_downloadBuffer.Mapped.Slice((int)offset, (int)PageFaultAreaSize));
             var count = Math.Min((uint)faults[0], MaxPageFaults - 1);
+            // Pages past the retained ones are never seen; the count shows whether the scan area is too small.
+            _storedPages.Clear();
             for (var index = 1; index <= count; index++)
             {
+                if (faults[index] >= StoreBitmapBase)
+                {
+                    _storedPages.Add(faults[index] - StoreBitmapBase);
+                    continue;
+                }
+
                 var range = _cache.DeviceAddressFaultRange(faults[index], _pageSize);
                 _faultRanges.Add(range.Address, range.Size);
                 _faultWindows.Add(range);
@@ -310,6 +327,8 @@ public sealed unsafe class BdaFaultProcessor : IDisposable
                     SharpEmu.HLE.GpuMemory.GuestGpuMemoryHook.Trace(start, size,
                         $"device-address-fault-prepared scan_tick={scanTick} submission_tick={_scheduler.CurrentTick} registered={_cache.IsRegionRegistered(start, size)}");
             });
+            // After the fault pages: their buffers exist by now, so a stored page of one is not counted lost.
+            _cache.NoteBufferStores(_storedPages, _pageSize);
             _faultAreas[area] = 0;
         });
 

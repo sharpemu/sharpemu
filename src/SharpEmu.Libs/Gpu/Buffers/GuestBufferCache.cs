@@ -46,6 +46,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     private readonly GuestBufferUploader _uploader;
     private readonly IGuestBackedSpace _backing;
     private readonly ICpuMemory _guest;
+    private readonly StoreDiffUploads _storeDiff;
     private readonly BdaFaultProcessor _faults;
     private readonly GpuBuffer _gds;
     private readonly GpuBuffer _bdaPageTable;
@@ -100,6 +101,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         _relay = relay;
         _backing = backing;
         _guest = guest;
+        _storeDiff = new StoreDiffUploads(guest);
         _faults = new BdaFaultProcessor(device, scheduler, this, CachingPageBits, CachingPageCount);
         _gds = new GpuBuffer(device, scheduler, GpuBufferUsage.Stream, 0, GpuBuffer.AllFlags, GdsBufferSize);
         _bdaPageTable = new GpuBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AllFlags, BdaPageTableSize);
@@ -998,6 +1000,112 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         buffer.GpuWrites != mark.Writes && buffer.LastGpuWriteTickIn(buffer.Offset(guestAddress), size) >= mark.Tick;
 
     public void ProcessFaultBuffer() => _faults.ProcessFaultBuffer();
+
+    // Differential uploads of reported pages (see StoreDiffUploads).
+    public long DiffPages => _storeDiff.DiffPages;
+    public long DiffBytes => _storeDiff.DiffBytes;
+    public long DiffEmpty => _storeDiff.DiffEmpty;
+    public long ShadowPages => _storeDiff.ShadowPages;
+    public long ShadowCapped => _storeDiff.ShadowCapped;
+    public long TrackedPages => _storeDiff.TrackedPages;
+
+    private long _storedBufferPages;
+    private long _storedPagesOwned;
+    private long _storedPagesShared;
+    private long _storedPagesLost;
+
+    // Cache-buffer pages that shaders stored to through a run-time device address, as the fault scan reported them.
+    public long StoredBufferPages => Volatile.Read(ref _storedBufferPages);
+
+    // Tracker pages of those that turned GPU-owned, so the guest CPU reads the stored bytes.
+    public long StoredPagesOwned => Volatile.Read(ref _storedPagesOwned);
+
+    // Tracker pages of those the guest CPU had written since their last upload; they keep the CPU's bytes.
+    public long StoredPagesShared => Volatile.Read(ref _storedPagesShared);
+
+    // Reported pages whose buffer had retired by the time of the report, or that no guest backing can receive.
+    public long StoredPagesLost => Volatile.Read(ref _storedPagesLost);
+
+    // Pages a shader stored to through the page table, reported by the fault scan after the work completed (on the
+    // thread that records, like the fault pages it handles). A store through an address the shader computes at run
+    // time changes the cache buffer alone: a store the shader's plan declares reaches its buffer through
+    // ObtainBuffer(isWritten) before the work is recorded, this one is known only from its report. Guest memory is
+    // then the stale copy, and the next upload of a page the guest CPU writes would put its bytes back over the
+    // shader's, while a CPU read would see them.
+    internal void NoteBufferStores(List<ulong> pages, ulong pageSize)
+    {
+        if (pages.Count == 0)
+        {
+            return;
+        }
+
+        pages.Sort();
+        Interlocked.Add(ref _storedBufferPages, pages.Count);
+        ulong runStart = 0;
+        ulong runSize = 0;
+        foreach (var page in pages)
+        {
+            // The buffer retired since the store. Its bytes were not known to differ from guest memory, so
+            // nothing downloaded them; the count shows whether a title loses stores this way. A page the guest
+            // backing cannot receive could never download either, and a planned write into it is fatal.
+            if (!_registry.FindContainingBuffer(page, pageSize).IsValid || !_backing.IsBackedRange(page, pageSize))
+            {
+                Interlocked.Increment(ref _storedPagesLost);
+                continue;
+            }
+
+            // Whatever its ownership turns out to be, later uploads of these pages send only the CPU's changes.
+            _storeDiff.Track(page, pageSize);
+            for (var address = page; address < page + pageSize; address += TrackerLayout.PageBytes)
+            {
+                // A page a planned write or an earlier report already gave to the GPU needs nothing.
+                if (_tracker.IsGpuOwned(address, TrackerLayout.PageBytes))
+                {
+                    continue;
+                }
+
+                // The guest CPU wrote the page after its last upload: guest memory and the buffer each hold bytes
+                // the other lacks. The page stays with the CPU, and its next upload sends only the CPU's changes
+                // once the page has a shadow (see StoreDiffUploads); the count shows how often a title shares a page.
+                if (_tracker.HasCpuDirtyPages(address, TrackerLayout.PageBytes))
+                {
+                    Interlocked.Increment(ref _storedPagesShared);
+                    continue;
+                }
+
+                // One buffer per run: a run that crossed two buffers would merge them.
+                if (runSize != 0 && address == runStart + runSize &&
+                    _registry.FindContainingBuffer(runStart, runSize + TrackerLayout.PageBytes).IsValid)
+                {
+                    runSize += TrackerLayout.PageBytes;
+                    continue;
+                }
+
+                TakeStoredPages(runStart, runSize);
+                runStart = address;
+                runSize = TrackerLayout.PageBytes;
+            }
+        }
+
+        TakeStoredPages(runStart, runSize);
+    }
+
+    // The buffer holds bytes guest memory lacks, exactly as after a planned shader write: the pages turn
+    // GPU-owned, so a guest CPU read downloads them, a guest CPU write flushes them first, and no upload
+    // replaces them with the older guest bytes. Memory copies of images over the bytes go stale.
+    private void TakeStoredPages(ulong address, ulong size)
+    {
+        if (size == 0)
+        {
+            return;
+        }
+
+        if (GuestGpuMemoryHook.Traces(address, size))
+            GuestGpuMemoryHook.Trace(address, size, "device-address-buffer-write");
+        ImageCache?.InvalidateMemoryCopiesFromGpu(address, size);
+        _ = ObtainBuffer(address, size, isWritten: true);
+        Interlocked.Add(ref _storedPagesOwned, (long)(size / TrackerLayout.PageBytes));
+    }
 
     // The registered guest memory; a device-address fault inside it brings in the window around the page.
     internal GuestGpuMemory? GpuMemory { get; set; }
@@ -2260,6 +2368,8 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                 {
                     throw SubmissionScheduler.Fatal($"Could not write the required direct backing: addr=0x{copies[index].Address:X16} size=0x{(ulong)bytes.Length:X16}");
                 }
+
+                _storeDiff.NoteDownloaded(copies[index].Address, bytes);
             });
             for (var index = 0; index < copies.Count; index++)
             {
@@ -2932,6 +3042,8 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             {
                 throw SubmissionScheduler.Fatal($"Could not write the required direct backing: addr=0x{copies[index].Address:X16} size=0x{(ulong)bytes.Length:X16}");
             }
+
+            _storeDiff.NoteDownloaded(copies[index].Address, bytes);
         });
         return true;
     }
@@ -2967,6 +3079,8 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             {
                 throw SubmissionScheduler.Fatal($"Could not write the required direct backing: addr=0x{copy.Address:X16} size=0x{placement.DataSize:X16}");
             }
+
+            _storeDiff.NoteDownloaded(copy.Address, _download.Mapped.Slice((int)offset, (int)placement.DataSize));
             if (MeshDrawTrace.Enabled) MeshDrawTrace.Range("buffer-published", copy.Address, placement.DataSize, $"tick={completionTick}");
         }
 
@@ -3148,6 +3262,8 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             // A sweep takes the copies to stage with its other buffers; Source then stays null.
             Upload = () =>
             {
+                // The tracker cleared the pages' dirty state already; this only narrows the bytes of reported pages.
+                _cache._storeDiff.Apply(_buffer.CpuAddress, Copies, ref TotalSize);
                 if (_defer)
                     _cache.DeferSweepUpload(_buffer, _guestAddress, _size, Copies, TotalSize);
                 else

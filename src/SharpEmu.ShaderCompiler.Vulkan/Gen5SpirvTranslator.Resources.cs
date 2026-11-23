@@ -1207,11 +1207,31 @@ public static partial class Gen5SpirvTranslator
             return LoadMappedDeviceDword(pointer, LogicalAnd(allowed, valid));
         }
 
+        // A store through the page table changes the cache buffer behind the entry and leaves guest memory stale; the
+        // host learns of it only from the page's bit in the store bitmap, which follows the fault bitmap (see
+        // DeviceAddressPaging). Call it where the store is made, so a lane that does not store marks nothing.
+        // The trace record holds the buffer's last 16 dwords; a buffer without room for the bitmap gets no mark.
+        private void MarkDeviceStore(uint address64)
+        {
+            var masked = And64(address64, ULong(DeviceAddressMask));
+            var pageIndex = Narrow(_module.AddInstruction(SpirvOp.ShiftRightLogical, _ulongType, masked, ULong(DeviceAddressPageBits)));
+            var tableLength = _module.AddInstruction(SpirvOp.ArrayLength, _uintType, _pageTable, 0);
+            var word = IAdd(
+                _module.AddInstruction(SpirvOp.IMul, _uintType, ShiftRightLogical(tableLength, UInt(5)), UInt(DeviceAddressPaging.StoreBitmap)),
+                ShiftRightLogical(pageIndex, UInt(5)));
+            var bit = ShiftLeftLogical(UInt(1), BitwiseAnd(pageIndex, UInt(31)));
+            var inBitmap = _module.AddInstruction(SpirvOp.ULessThan, _boolType, word,
+                _module.AddInstruction(SpirvOp.ISub, _uintType, StorageBlockLength(_faultBuffer), UInt(16)));
+            EmitConditional(inBitmap, () =>
+                _module.AddInstruction(SpirvOp.AtomicOr, _uintType, BlockWordPointer(_faultBuffer, word), UInt(1), UInt(0), bit));
+        }
+
         private void StoreDeviceDword(uint address64, uint value, uint allowed)
         {
             var (pointer, valid) = ResolveDeviceAddress(address64);
             EmitConditional(LogicalAnd(allowed, valid), () =>
             {
+                MarkDeviceStore(address64);
                 _module.AddStatement(SpirvOp.Store, DeviceWordPointer(pointer), value, 2u, 4u);
             });
         }
@@ -1224,6 +1244,7 @@ public static partial class Gen5SpirvTranslator
                 var (pointer, valid) = ResolveDeviceAddress(address64);
                 EmitConditional(valid, () =>
                 {
+                    MarkDeviceStore(address64);
                     var wordPointer = DeviceWordPointer(pointer);
                     var full = _module.AddInstruction(SpirvOp.IEqual, _boolType, mask, UInt(uint.MaxValue));
                     EmitConditional(
@@ -1780,6 +1801,7 @@ public static partial class Gen5SpirvTranslator
                         var (pointer, valid) = ResolveDeviceAddress(address);
                         EmitConditional(valid, () =>
                         {
+                            MarkDeviceStore(address);
                             var original = EmitAtomic(
                                 atomicOp,
                                 _uintType,

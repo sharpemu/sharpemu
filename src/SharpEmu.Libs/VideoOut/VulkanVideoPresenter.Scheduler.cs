@@ -155,6 +155,12 @@ internal static unsafe partial class VulkanVideoPresenter
                     $"outcome={outcome} fatal=0");
                 SharpEmu.Libs.Gpu.Pipelines.ImageDescriptorTrace.WriteHistory();
                 Console.Error.WriteLine($"[LOADER][PERF] {ShaderCacheCounters.Summary()}");
+                Console.Error.WriteLine(
+                    $"[LOADER][PERF] bda_store stored_buffer_pages={_bufferCache.StoredBufferPages} stored_owned={_bufferCache.StoredPagesOwned} " +
+                    $"stored_shared={_bufferCache.StoredPagesShared} stored_lost={_bufferCache.StoredPagesLost} " +
+                    $"diff_pages={_bufferCache.DiffPages} " +
+                    $"diff_bytes={_bufferCache.DiffBytes} diff_empty={_bufferCache.DiffEmpty} shadow_pages={_bufferCache.ShadowPages} " +
+                    $"shadow_capped={_bufferCache.ShadowCapped} tracked_pages={_bufferCache.TrackedPages}");
                 _relay.StopAcceptingWork();
                 _relay.RunPendingCommands();
                 try
