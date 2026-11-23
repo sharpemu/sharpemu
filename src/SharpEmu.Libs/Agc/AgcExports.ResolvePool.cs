@@ -136,7 +136,7 @@ public static partial class AgcExports
             work.IndirectOffsets = offsets;
             work.Sequence = Sink!.EnqueueDeferred(work, isDraw: true);
             Interlocked.Increment(ref _deferredDraws);
-            var repeatable = indexed && indexedArguments.OffsetSource == DrawOffsetSource.IndirectArguments;
+            var repeatable = indexed && offsets is null && indexedArguments.OffsetSource == DrawOffsetSource.IndirectArguments;
             var route = -1;
             if (repeatable && _repeatPrevious && work.Sequence == _repeatSequence + 1 && submitId == _repeatSubmit &&
                 SameRegistersAsRepeatPrevious(work.Banks))
