@@ -4792,7 +4792,7 @@ public static partial class Gen5SpirvTranslator
             {
                 GetDppSourceLane(control, out var targetLane, out var inRange);
                 var graphicsTarget = BitwiseAnd(
-                    _module.AddInstruction(SpirvOp.Select, _uintType, inRange, targetLane, GuestWaveLane()),
+                    _module.AddInstruction(SpirvOp.Select, _uintType, inRange, targetLane, WaveMaskLane()),
                     UInt(NativeLaneMask));
                 if (control.FetchInactive)
                 {
@@ -4844,7 +4844,7 @@ public static partial class Gen5SpirvTranslator
                     inRange,
                     _module.AddInstruction(SpirvOp.GroupNonUniformBallotBitExtract, _boolType, UInt(3), readable, target));
                 safeTarget = BitwiseAnd(
-                    _module.AddInstruction(SpirvOp.Select, _uintType, valid, target, GuestWaveLane()),
+                    _module.AddInstruction(SpirvOp.Select, _uintType, valid, target, WaveMaskLane()),
                     UInt(NativeLaneMask));
                 return;
             }
@@ -4854,7 +4854,7 @@ public static partial class Gen5SpirvTranslator
                 _uintType,
                 inRange,
                 targetLane,
-                GuestWaveLane());
+                WaveMaskLane());
             if (!_pairedMeshLanes)
             {
                 safeTarget = BitwiseAnd(safeTarget, UInt(NativeLaneMask));
@@ -4941,7 +4941,7 @@ public static partial class Gen5SpirvTranslator
             out uint targetLane,
             out uint inRange)
         {
-            var lane = GuestWaveLane();
+            var lane = WaveMaskLane();
             var rowBase = BitwiseAnd(lane, UInt(0xFFFF_FFF0));
             var rowLane = BitwiseAnd(lane, UInt(15));
             var dpp = control.Control;
@@ -5033,7 +5033,7 @@ public static partial class Gen5SpirvTranslator
 
         private uint IsDppWriteEnabled(Gen5DppControl control)
         {
-            var lane = GuestWaveLane();
+            var lane = WaveMaskLane();
             var row = ShiftRightLogical(lane, UInt(4));
             // A bank is four consecutive lanes of each row (RDNA2 ISA, table 90).
             var bank = BitwiseAnd(ShiftRightLogical(lane, UInt(2)), UInt(3));
