@@ -3356,7 +3356,7 @@ public static partial class Gen5SpirvTranslator
                 IsNotZero(activeLow),
                 Ext(73, _uintType, activeLow),
                 IAdd(Ext(73, _uintType, activeHigh), UInt(32)));
-            var isFirstActive = LogicalAnd(inBounds, LogicalAnd(active, _module.AddInstruction(SpirvOp.IEqual, _boolType, GuestWaveLane(), firstLane)));
+            var isFirstActive = LogicalAnd(inBounds, LogicalAnd(active, _module.AddInstruction(SpirvOp.IEqual, _boolType, WaveMaskLane(), firstLane)));
             EmitConditional(isFirstActive, () =>
             {
                 var original = EmitAtomic(

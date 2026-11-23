@@ -3138,7 +3138,7 @@ public static partial class Gen5SpirvTranslator
                     _module.AddInstruction(
                         SpirvOp.IEqual,
                         _boolType,
-                        GuestWaveLane(),
+                        WaveMaskLane(),
                         firstLane)));
 
             EmitConditional(isFirstActive, () =>
