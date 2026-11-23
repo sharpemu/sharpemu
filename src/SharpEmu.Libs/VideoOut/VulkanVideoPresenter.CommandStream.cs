@@ -838,6 +838,18 @@ internal static unsafe partial class VulkanVideoPresenter
             FlushBatchedGuestCommands();
         }
 
+        public void FlushSlice()
+        {
+            if (OnCommandThread)
+            {
+                _commandThread!.Post(FlushSlice);
+                return;
+            }
+
+            using var flushScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.Flush);
+            FlushGuestBatch(deferSubmit: true);
+        }
+
         // The guest reuses the frame's memory (descriptor tables, rings) once the boundary returns,
         // so the draws queued before it are recorded first.
         public void FlushFrame()

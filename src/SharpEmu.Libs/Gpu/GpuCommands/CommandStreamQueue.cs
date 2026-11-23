@@ -684,7 +684,7 @@ public sealed class CommandStreamQueue
                 _host.RunGarbageCollector();
             }
 
-            _host.Flush();
+            _host.FlushSlice();
         }
         else if (complete)
         {
