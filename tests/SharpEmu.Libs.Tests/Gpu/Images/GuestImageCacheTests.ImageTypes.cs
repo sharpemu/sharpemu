@@ -215,6 +215,37 @@ public sealed partial class GuestImageCacheTests
         harness.Shutdown();
     }
 
+    // A program can read a two-dimensional texture as a volume. Its image is not 3D, and an image made from the texture's
+    // description would not be either: the lookup finds the same image again instead of making a new one each time.
+    [Fact]
+    public void TwoDimensionalTextureReadAsVolumeIsFoundAgain()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var request = VolumeViewOfTexture(address);
+        var imageIdentifier = harness.Find(ref request);
+        var images = harness.Images.ImageCount;
+
+        for (var lookup = 0; lookup < 3; lookup++)
+        {
+            var again = VolumeViewOfTexture(address);
+            Assert.Equal(imageIdentifier, harness.Find(ref again));
+        }
+
+        Assert.Equal(images, harness.Images.ImageCount);
+        Assert.False(harness.Image(imageIdentifier).SupportsViewType(request.View));
+        harness.Shutdown();
+    }
+
+    private static ImageRequest VolumeViewOfTexture(ulong address)
+    {
+        var request = LinearRequest(address, 64 * 64 * sizeof(uint), Format.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D,
+            new Extent3D(64, 64, 1), 1, sizeof(uint), 1);
+        request.View = request.View with { Type = ImageViewType.Type3D };
+        return request;
+    }
+
     private static ImageRequest SingletonRequest(ulong address, uint layers, bool twoDimensions)
     {
         var request = LinearRequest(address, layers * 256ul, Format.R32Uint, GuestPixelFormat.Bits32UInt,
