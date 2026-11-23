@@ -38,6 +38,7 @@ public enum HostGamepadType : byte
     Generic,
     DualShock4,
     DualSense,
+    Xbox,
 }
 
 public enum HostGamepadConnection : byte

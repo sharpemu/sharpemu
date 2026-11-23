@@ -1,9 +1,11 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Globalization;
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Media;
+using SharpEmu.HLE.Host;
 
 namespace SharpEmu.GUI.Controls;
 
@@ -16,20 +18,22 @@ internal enum PadSymbol
 }
 
 /// <summary>
-/// A monochrome PlayStation face-button glyph (cross, circle, triangle, square) drawn as
-/// shapes inside a thin ring, so it needs no font and stays crisp at any scale.
+/// A monochrome face-button glyph inside a thin ring, using the connected pad's layout.
 /// </summary>
 internal sealed class PadGlyph : Control
 {
     public static readonly StyledProperty<PadSymbol> SymbolProperty =
         AvaloniaProperty.Register<PadGlyph, PadSymbol>(nameof(Symbol));
 
+    public static readonly StyledProperty<HostGamepadType> GamepadTypeProperty =
+        AvaloniaProperty.Register<PadGlyph, HostGamepadType>(nameof(GamepadType));
+
     public static readonly StyledProperty<IBrush?> ForegroundProperty =
         AvaloniaProperty.Register<PadGlyph, IBrush?>(nameof(Foreground), Brushes.White);
 
     static PadGlyph()
     {
-        AffectsRender<PadGlyph>(SymbolProperty, ForegroundProperty);
+        AffectsRender<PadGlyph>(SymbolProperty, GamepadTypeProperty, ForegroundProperty);
         AffectsMeasure<PadGlyph>(WidthProperty, HeightProperty);
         WidthProperty.OverrideDefaultValue<PadGlyph>(28);
         HeightProperty.OverrideDefaultValue<PadGlyph>(28);
@@ -48,6 +52,22 @@ internal sealed class PadGlyph : Control
         set => SetValue(ForegroundProperty, value);
     }
 
+    public HostGamepadType GamepadType
+    {
+        get => GetValue(GamepadTypeProperty);
+        set => SetValue(GamepadTypeProperty, value);
+    }
+
+    internal static string? GetButtonLetter(PadSymbol symbol, HostGamepadType type) =>
+        type == HostGamepadType.Xbox ? symbol switch
+        {
+            PadSymbol.Cross => "A",
+            PadSymbol.Circle => "B",
+            PadSymbol.Square => "X",
+            PadSymbol.Triangle => "Y",
+            _ => null,
+        } : null;
+
     public override void Render(DrawingContext context)
     {
         var size = Math.Min(Bounds.Width, Bounds.Height);
@@ -59,6 +79,14 @@ internal sealed class PadGlyph : Control
         var centre = new Point(Bounds.Width / 2, Bounds.Height / 2);
         var ring = new Pen(brush, 1.5) { LineCap = PenLineCap.Round };
         context.DrawEllipse(null, ring, centre, size / 2 - 1, size / 2 - 1);
+
+        if (GetButtonLetter(Symbol, GamepadType) is { } letter)
+        {
+            var text = new FormattedText(letter, CultureInfo.InvariantCulture, FlowDirection.LeftToRight,
+                new Typeface(FontFamily.Default, weight: FontWeight.SemiBold), size * 0.6, brush);
+            context.DrawText(text, new Point(centre.X - text.Width / 2, centre.Y - text.Height / 2));
+            return;
+        }
 
         // Symbols sit in a box 0.34 of the ring size either side of the centre.
         var r = size * 0.19;

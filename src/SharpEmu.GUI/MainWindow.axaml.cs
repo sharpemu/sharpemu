@@ -939,7 +939,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        SetGamepadConnected(true);
+        SetGamepadConnected(true, pad.Type);
         RefreshControllerHints();
         if ((pad.Buttons & ~_previousPadButtons) != HostGamepadButtons.None)
         {

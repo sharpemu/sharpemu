@@ -121,6 +121,7 @@ internal static unsafe class SdlGamepadStateReader
     {
         SDL_GamepadType.SDL_GAMEPAD_TYPE_PS4 => HostGamepadType.DualShock4,
         SDL_GamepadType.SDL_GAMEPAD_TYPE_PS5 => HostGamepadType.DualSense,
+        SDL_GamepadType.SDL_GAMEPAD_TYPE_XBOX360 or SDL_GamepadType.SDL_GAMEPAD_TYPE_XBOXONE => HostGamepadType.Xbox,
         _ => HostGamepadType.Generic,
     };
 
