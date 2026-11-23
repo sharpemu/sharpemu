@@ -9997,6 +9997,19 @@ public static partial class Gen5SpirvTranslator
         private uint SubgroupAny(uint condition) =>
             _waveLowering.SubgroupAny(condition);
 
+        private uint WaveMaskLane()
+        {
+            if (_waveLowering is not HalfWave64Lowering || _subgroupInvocationIdInput == 0)
+            {
+                return GuestWaveLane();
+            }
+
+            var upperHalf = _module.AddInstruction(SpirvOp.UGreaterThanEqual, _boolType, GuestWaveLane(), UInt(32));
+            return IAdd(
+                BitwiseAnd(Load(_uintType, _subgroupInvocationIdInput), UInt(31)),
+                _module.AddInstruction(SpirvOp.Select, _uintType, upperHalf, UInt(32), UInt(0)));
+        }
+
         private uint GuestWaveLane()
         {
             if (_stage == Gen5SpirvStage.Mesh && _meshSubgroupInput != 0)
