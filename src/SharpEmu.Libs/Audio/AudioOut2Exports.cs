@@ -1601,7 +1601,8 @@ public static class AudioOut2Exports
                 }
 
                 float peak;
-                var outputSpan = IsFloatBackend(backend)
+                var isFloatBackend = IsFloatBackend(backend);
+                var outputSpan = isFloatBackend
                     ? WriteFloatOutput(mix.AsSpan(0, frames * 2), output, out peak)
                     : WritePcm16Output(mix.AsSpan(0, frames * 2), output, out peak);
                 context.DeviceBackend = backend;
@@ -1614,7 +1615,7 @@ public static class AudioOut2Exports
                         $"ports={mixedPorts} peak={peak:F4} backend={backendName}");
                 }
 
-                return backend.Submit(outputSpan);
+                return SubmitWithReserve(context, backend, outputSpan, mix.AsSpan(0, frames * 2), frames, isFloatBackend);
             }
             finally
             {
@@ -1622,6 +1623,166 @@ public static class AudioOut2Exports
                 ArrayPool<byte>.Shared.Return(output);
             }
         }
+    }
+
+    private static readonly long ReserveBaseMicroseconds =
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_AUDIO_RESERVE_MS"), out var reserveMilliseconds)
+            ? Math.Clamp(reserveMilliseconds, 0, 200) * 1000L
+            : 20_000L;
+
+    private static readonly bool LogReserveStats = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_LOG_AUDIO_OUT2"),
+        "1",
+        StringComparison.Ordinal);
+
+    private const long ReserveStepMicroseconds = 20_000;
+    private const long ReserveLimitMicroseconds = 200_000;
+    private const long ReserveRelaxMicroseconds = 10_000;
+    private const long ReserveRelaxAfterMicroseconds = 60_000_000;
+    private const long DropoutWindowMicroseconds = 300_000;
+    private const float QuietSampleLimit = 0.001f;
+    private const int MixChannels = 2;
+
+    private static byte[] _silence = [];
+
+    private static long TicksToMicroseconds(long ticks) => ticks * 1_000_000L / Stopwatch.Frequency;
+
+    private static bool SubmitWithReserve(
+        ContextState context,
+        IHostAudioStream backend,
+        ReadOnlySpan<byte> output,
+        ReadOnlySpan<float> grain,
+        int frames,
+        bool isFloat)
+    {
+        var queuedMilliseconds = ReserveBaseMicroseconds == 0 ? -1 : backend.QueuedMilliseconds;
+        if (queuedMilliseconds < 0)
+        {
+            return backend.Submit(output);
+        }
+
+        var now = Stopwatch.GetTimestamp();
+        var grainMicroseconds = Math.Max(1L, frames * 1_000_000L / context.Frequency);
+        var first = context.LastOutputTimestamp == 0;
+        var ranDry = !first && queuedMilliseconds == 0;
+        var reserve = Volatile.Read(ref context.ReserveMicroseconds);
+        if (reserve == 0)
+        {
+            reserve = ReserveBaseMicroseconds;
+            context.CalmSince = now;
+        }
+
+        if (ranDry && TicksToMicroseconds(now - context.LastOutputTimestamp) < DropoutWindowMicroseconds)
+        {
+            reserve = Math.Min(reserve + ReserveStepMicroseconds, ReserveLimitMicroseconds);
+            context.CalmSince = now;
+            context.StatsDropouts++;
+        }
+        else if (TicksToMicroseconds(now - context.CalmSince) >= ReserveRelaxAfterMicroseconds &&
+                 reserve > ReserveBaseMicroseconds)
+        {
+            reserve = Math.Max(ReserveBaseMicroseconds, reserve - ReserveRelaxMicroseconds);
+            context.CalmSince = now;
+        }
+
+        Volatile.Write(ref context.ReserveMicroseconds, reserve);
+        context.LastOutputTimestamp = now;
+
+        var payload = output;
+        if (first || ranDry)
+        {
+            var silentGrains = (reserve + grainMicroseconds - 1) / grainMicroseconds;
+            SubmitSilence(backend, checked((int)(output.Length * silentGrains)));
+        }
+        else
+        {
+            var queuedMicroseconds = queuedMilliseconds * 1000L;
+            var quiet = IsQuietMix(grain);
+            var high = (context.CushionMilliseconds * 1000L) + (context.QueueDepth * grainMicroseconds) + 10_000;
+            if ((queuedMicroseconds > high && quiet) || queuedMicroseconds > high + 90_000)
+            {
+                context.StatsTrims++;
+                RecordReserveStats(context, queuedMilliseconds);
+                return true;
+            }
+
+            if (queuedMicroseconds * 2 < reserve && quiet)
+            {
+                SubmitSilence(backend, output.Length);
+                context.StatsSilentFills++;
+            }
+        }
+
+        RecordReserveStats(context, queuedMilliseconds);
+        return backend.Submit(payload);
+    }
+
+    private static void SubmitSilence(IHostAudioStream backend, int bytes)
+    {
+        if (bytes <= 0)
+        {
+            return;
+        }
+
+        if (_silence.Length < bytes)
+        {
+            _silence = new byte[bytes];
+        }
+
+        _ = backend.Submit(_silence.AsSpan(0, bytes));
+    }
+
+    private static bool IsQuietMix(ReadOnlySpan<float> grain)
+    {
+        foreach (var sample in grain)
+        {
+            if (sample > QuietSampleLimit || sample < -QuietSampleLimit)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static void RecordReserveStats(ContextState context, int queuedMilliseconds)
+    {
+        if (!LogReserveStats)
+        {
+            return;
+        }
+
+        context.StatsGrains++;
+        var now = Stopwatch.GetTimestamp();
+        if (context.StatsWindowStart == 0)
+        {
+            context.StatsWindowStart = now;
+            return;
+        }
+
+        var elapsed = now - context.StatsWindowStart;
+        if (elapsed < Stopwatch.Frequency)
+        {
+            return;
+        }
+
+        var seconds = elapsed / (double)Stopwatch.Frequency;
+        Console.Error.WriteLine(
+            $"[PERF][AUDIO_MIX] ctx=0x{context.Handle:X} {seconds:F1}s " +
+            $"grains/s={context.StatsGrains / seconds:F0} " +
+            $"expected/s={context.Frequency / (double)context.GrainSamples:F0} " +
+            $"queued_ms={queuedMilliseconds} " +
+            $"reserve_ms={Volatile.Read(ref context.ReserveMicroseconds) / 1000} dropouts={context.StatsDropouts} " +
+            $"stretches={context.StatsStretches} stretched_ms={context.StatsStretchedFrames * 1000.0 / context.Frequency:F0} " +
+            $"silent_fills={context.StatsSilentFills} trims={context.StatsTrims}");
+
+        context.StatsWindowStart = now;
+        context.StatsGrains = 0;
+        context.StatsDropouts = 0;
+        context.StatsStretches = 0;
+        context.StatsStretchedFrames = 0;
+        context.StatsSilentFills = 0;
+        context.StatsTrims = 0;
     }
 
     internal static byte[]? GetPortPcmSnapshotForTests(ulong portHandle)
