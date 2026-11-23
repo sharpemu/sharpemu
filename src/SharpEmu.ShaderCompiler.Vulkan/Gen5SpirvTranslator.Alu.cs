@@ -4734,7 +4734,7 @@ public static partial class Gen5SpirvTranslator
 
         private uint ApplyDpp8Source(Gen5Dpp8Control control, uint value)
         {
-            var lane = GuestWaveLane();
+            var lane = WaveMaskLane();
             var laneInGroup = BitwiseAnd(lane, UInt(7));
             var selector = UInt(control.LaneSelectors & 7);
             for (var index = 1u; index < 8; index++)
