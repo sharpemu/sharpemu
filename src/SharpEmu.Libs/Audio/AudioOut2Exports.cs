@@ -1345,7 +1345,10 @@ public static class AudioOut2Exports
     }
 
     internal static double DeviceSlotFreeThreshold(uint grainSamples, uint frequency, uint queueDepth) =>
-        DeviceCushionMilliseconds + (grainSamples * 1000.0 / frequency * Math.Max((long)queueDepth - 1, 0));
+        DeviceSlotFreeThreshold(grainSamples, frequency, queueDepth, DeviceCushionMilliseconds);
+
+    internal static double DeviceSlotFreeThreshold(uint grainSamples, uint frequency, uint queueDepth, int cushionMilliseconds) =>
+        cushionMilliseconds + (grainSamples * 1000.0 / frequency * Math.Max((long)queueDepth - 1, 0));
 
     // The guest thread's last push: a thread that pushed within the last ActiveProducerMilliseconds feeds a context now.
     [ThreadStatic]
@@ -1380,11 +1383,15 @@ public static class AudioOut2Exports
     // the device reports less than its cushion less one grain (-1: it cannot report).
     internal static bool PreciseProducerNap(ulong microseconds, double millisecondsSincePush, int queuedMilliseconds,
         uint grainSamples, uint frequency) =>
+        PreciseProducerNap(microseconds, millisecondsSincePush, queuedMilliseconds, grainSamples, frequency, DeviceCushionMilliseconds);
+
+    internal static bool PreciseProducerNap(ulong microseconds, double millisecondsSincePush, int queuedMilliseconds,
+        uint grainSamples, uint frequency, int cushionMilliseconds) =>
         microseconds <= PreciseNapLimitMicroseconds &&
         millisecondsSincePush >= 0 &&
         millisecondsSincePush < ActiveProducerMilliseconds &&
         queuedMilliseconds >= 0 &&
-        queuedMilliseconds < DeviceCushionMilliseconds - (grainSamples * 1000.0 / frequency);
+        queuedMilliseconds < cushionMilliseconds - (grainSamples * 1000.0 / frequency);
 
     /// <summary>
     /// Halves a usleep taken by a thread that feeds an AudioOut2 context while the device runs short,
