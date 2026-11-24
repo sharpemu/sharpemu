@@ -326,6 +326,27 @@ internal static class LauncherThemes
             ? brush
             : Brushes.Transparent;
 
+    public static LauncherPalette Resolve(LauncherAppearance appearance) =>
+        AdjustContrast(
+            IsCustom(appearance.Theme)
+                ? Derive(appearance.CustomBackground, appearance.CustomAccent)
+                : Find(appearance.Theme),
+            appearance.Contrast);
+
+    public static string EmulatorPalette(GuiSettings settings)
+    {
+        var palette = Resolve(new LauncherAppearance(
+            settings.LauncherTheme,
+            settings.CustomThemeBackground,
+            settings.CustomThemeAccent,
+            settings.GlassOpacity,
+            settings.ThemeContrast));
+        return string.Join(',',
+            palette.Background, palette.Menu, palette.Card, palette.Elevated, palette.RaisedHover,
+            palette.Text, palette.SecondaryText, palette.Muted, palette.Faint,
+            palette.Accent, palette.AccentForeground);
+    }
+
     public static void Apply(LauncherAppearance appearance)
     {
         if (Avalonia.Application.Current is not { } app)
@@ -333,11 +354,7 @@ internal static class LauncherThemes
             return;
         }
 
-        var palette = AdjustContrast(
-            IsCustom(appearance.Theme)
-                ? Derive(appearance.CustomBackground, appearance.CustomAccent)
-                : Find(appearance.Theme),
-            appearance.Contrast);
+        var palette = Resolve(appearance);
         var background = Color.Parse(palette.Background);
         var overlay = Color.Parse(palette.Overlay);
         var field = Color.Parse(palette.Field);

@@ -37,6 +37,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <PackageReference Include="Silk.NET.Vulkan.Extensions.KHR" />
     <PackageReference Include="SkiaSharp" />
     <PackageReference Include="SkiaSharp.NativeAssets.Linux" />
+    <PackageReference Include="SkiaSharp.HarfBuzz" />
     <PackageReference Include="System.IO.Hashing" />
   </ItemGroup>
 

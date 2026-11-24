@@ -598,6 +598,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _overlayStagingMemory = [];
             _overlayStagingMapped = [];
             _overlayImageInitialized = false;
+            DestroyOverlayLayerTargets();
             _frameInFlight = [];
             _frameTimelines = [];
             _frameGuestImageVersions = [];
