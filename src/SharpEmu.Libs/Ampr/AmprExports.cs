@@ -273,6 +273,20 @@ public static partial class AmprExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
+        // A buffer stays attached until ClearBuffer: setting it again is refused and keeps the
+        // queued commands. Death Stranding calls SetBuffer before every read it appends.
+        if (!ctx.TryReadUInt64(commandBuffer + CommandBufferDataOffset, out var attached))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        if (attached != 0)
+        {
+            TraceAmpr(ctx, "set_buffer_busy", commandBuffer, buffer, size);
+            ctx[CpuRegister.Rax] = unchecked((ulong)(long)KernelEbusy);
+            return KernelEbusy;
+        }
+
         if (!WriteCommandBufferPointers(ctx, commandBuffer, buffer, size))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
