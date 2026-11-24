@@ -506,5 +506,22 @@
   "Trophies.Sort.Progress": "Progress",
   "Trophies.Sort.Name": "A–Z",
   "Trophies.SearchWatermark": "Search games",
-  "Trophies.NoMatch": "No game matches your search."
+  "Trophies.NoMatch": "No game matches your search.",
+  "Overlay.SaveData.Title": "Saved Data",
+  "Overlay.SaveData.Caption.Load": "Select the saved data to load.",
+  "Overlay.SaveData.Caption.Save": "Select where to save.",
+  "Overlay.SaveData.Caption.Delete": "Select the saved data to delete.",
+  "Overlay.SaveData.Caption.Other": "Select saved data.",
+  "Overlay.SaveData.Select": "Select",
+  "Overlay.SaveData.Back": "Back",
+  "Overlay.SaveData.Move": "Move",
+  "Overlay.SaveData.Delete": "Delete",
+  "Overlay.SaveData.Cancel": "Cancel",
+  "Overlay.SaveData.NewItem": "New Saved Data",
+  "Overlay.SaveData.NewItemDetail": "Create a new save in an empty slot.",
+  "Overlay.SaveData.LastSaved": "Last saved",
+  "Overlay.SaveData.Size": "Size",
+  "Overlay.SaveData.ConfirmDelete": "Delete this saved data?",
+  "Overlay.SaveData.ConfirmDeleteNote": "Deleted saved data can't be restored.",
+  "Overlay.SaveData.InUse": "This saved data is in use and can't be deleted."
 }

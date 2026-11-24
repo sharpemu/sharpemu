@@ -504,5 +504,22 @@
   "Trophies.Sort.Progress": "İlerleme",
   "Trophies.Sort.Name": "A–Z",
   "Trophies.SearchWatermark": "Oyun ara",
-  "Trophies.NoMatch": "Aramanızla eşleşen oyun yok."
+  "Trophies.NoMatch": "Aramanızla eşleşen oyun yok.",
+  "Overlay.SaveData.Title": "Kayıtlı Veriler",
+  "Overlay.SaveData.Caption.Load": "Yüklenecek kayıtlı veriyi seçin.",
+  "Overlay.SaveData.Caption.Save": "Kaydedilecek yeri seçin.",
+  "Overlay.SaveData.Caption.Delete": "Silinecek kayıtlı veriyi seçin.",
+  "Overlay.SaveData.Caption.Other": "Kayıtlı veri seçin.",
+  "Overlay.SaveData.Select": "Seç",
+  "Overlay.SaveData.Back": "Geri",
+  "Overlay.SaveData.Move": "Gezin",
+  "Overlay.SaveData.Delete": "Sil",
+  "Overlay.SaveData.Cancel": "İptal",
+  "Overlay.SaveData.NewItem": "Yeni Kayıtlı Veri",
+  "Overlay.SaveData.NewItemDetail": "Boş bir yuvada yeni kayıt oluşturun.",
+  "Overlay.SaveData.LastSaved": "Son kayıt",
+  "Overlay.SaveData.Size": "Boyut",
+  "Overlay.SaveData.ConfirmDelete": "Bu kayıtlı veri silinsin mi?",
+  "Overlay.SaveData.ConfirmDeleteNote": "Silinen kayıtlı veriler geri getirilemez.",
+  "Overlay.SaveData.InUse": "Bu kayıtlı veri kullanımda olduğu için silinemiyor."
 }

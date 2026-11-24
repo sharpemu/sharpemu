@@ -502,5 +502,22 @@
   "Trophies.Sort.Progress": "진행률",
   "Trophies.Sort.Name": "A–Z",
   "Trophies.SearchWatermark": "게임 검색",
-  "Trophies.NoMatch": "검색과 일치하는 게임이 없습니다."
+  "Trophies.NoMatch": "검색과 일치하는 게임이 없습니다.",
+  "Overlay.SaveData.Title": "저장 데이터",
+  "Overlay.SaveData.Caption.Load": "불러올 저장 데이터를 선택하세요.",
+  "Overlay.SaveData.Caption.Save": "저장할 위치를 선택하세요.",
+  "Overlay.SaveData.Caption.Delete": "삭제할 저장 데이터를 선택하세요.",
+  "Overlay.SaveData.Caption.Other": "저장 데이터를 선택하세요.",
+  "Overlay.SaveData.Select": "선택",
+  "Overlay.SaveData.Back": "뒤로",
+  "Overlay.SaveData.Move": "이동",
+  "Overlay.SaveData.Delete": "삭제",
+  "Overlay.SaveData.Cancel": "취소",
+  "Overlay.SaveData.NewItem": "새 저장 데이터",
+  "Overlay.SaveData.NewItemDetail": "빈 슬롯에 새로 저장합니다.",
+  "Overlay.SaveData.LastSaved": "마지막 저장",
+  "Overlay.SaveData.Size": "크기",
+  "Overlay.SaveData.ConfirmDelete": "이 저장 데이터를 삭제하시겠습니까?",
+  "Overlay.SaveData.ConfirmDeleteNote": "삭제한 저장 데이터는 복원할 수 없습니다.",
+  "Overlay.SaveData.InUse": "이 저장 데이터는 사용 중이어서 삭제할 수 없습니다."
 }

@@ -505,5 +505,22 @@
   "Trophies.Sort.Progress": "Прогресс",
   "Trophies.Sort.Name": "А–Я",
   "Trophies.SearchWatermark": "Поиск игр",
-  "Trophies.NoMatch": "Ни одна игра не соответствует запросу."
+  "Trophies.NoMatch": "Ни одна игра не соответствует запросу.",
+  "Overlay.SaveData.Title": "Сохраненные данные",
+  "Overlay.SaveData.Caption.Load": "Выберите сохраненные данные для загрузки.",
+  "Overlay.SaveData.Caption.Save": "Выберите, куда сохранить.",
+  "Overlay.SaveData.Caption.Delete": "Выберите сохраненные данные для удаления.",
+  "Overlay.SaveData.Caption.Other": "Выберите сохраненные данные.",
+  "Overlay.SaveData.Select": "Выбрать",
+  "Overlay.SaveData.Back": "Назад",
+  "Overlay.SaveData.Move": "Перемещение",
+  "Overlay.SaveData.Delete": "Удалить",
+  "Overlay.SaveData.Cancel": "Отмена",
+  "Overlay.SaveData.NewItem": "Новые сохраненные данные",
+  "Overlay.SaveData.NewItemDetail": "Создать новое сохранение в свободном слоте.",
+  "Overlay.SaveData.LastSaved": "Последнее сохранение",
+  "Overlay.SaveData.Size": "Размер",
+  "Overlay.SaveData.ConfirmDelete": "Удалить эти сохраненные данные?",
+  "Overlay.SaveData.ConfirmDeleteNote": "Удаленные сохраненные данные нельзя восстановить.",
+  "Overlay.SaveData.InUse": "Эти сохраненные данные используются, их нельзя удалить."
 }

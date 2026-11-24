@@ -502,5 +502,22 @@
   "Trophies.Sort.Progress": "Voortgang",
   "Trophies.Sort.Name": "A–Z",
   "Trophies.SearchWatermark": "Games zoeken",
-  "Trophies.NoMatch": "Geen game komt overeen met je zoekopdracht."
+  "Trophies.NoMatch": "Geen game komt overeen met je zoekopdracht.",
+  "Overlay.SaveData.Title": "Opgeslagen gegevens",
+  "Overlay.SaveData.Caption.Load": "Selecteer de opgeslagen gegevens om te laden.",
+  "Overlay.SaveData.Caption.Save": "Selecteer waar je wilt opslaan.",
+  "Overlay.SaveData.Caption.Delete": "Selecteer de opgeslagen gegevens om te verwijderen.",
+  "Overlay.SaveData.Caption.Other": "Selecteer opgeslagen gegevens.",
+  "Overlay.SaveData.Select": "Selecteren",
+  "Overlay.SaveData.Back": "Terug",
+  "Overlay.SaveData.Move": "Navigeren",
+  "Overlay.SaveData.Delete": "Verwijderen",
+  "Overlay.SaveData.Cancel": "Annuleren",
+  "Overlay.SaveData.NewItem": "Nieuwe opgeslagen gegevens",
+  "Overlay.SaveData.NewItemDetail": "Maak een nieuwe opslag op een lege plek.",
+  "Overlay.SaveData.LastSaved": "Laatst opgeslagen",
+  "Overlay.SaveData.Size": "Grootte",
+  "Overlay.SaveData.ConfirmDelete": "Deze opgeslagen gegevens verwijderen?",
+  "Overlay.SaveData.ConfirmDeleteNote": "Verwijderde opgeslagen gegevens kunnen niet worden hersteld.",
+  "Overlay.SaveData.InUse": "Deze opgeslagen gegevens zijn in gebruik en kunnen niet worden verwijderd."
 }

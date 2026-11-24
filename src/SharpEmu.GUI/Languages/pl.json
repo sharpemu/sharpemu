@@ -504,5 +504,22 @@
   "Trophies.Sort.Progress": "Postęp",
   "Trophies.Sort.Name": "A–Z",
   "Trophies.SearchWatermark": "Szukaj gier",
-  "Trophies.NoMatch": "Żadna gra nie pasuje do wyszukiwania."
+  "Trophies.NoMatch": "Żadna gra nie pasuje do wyszukiwania.",
+  "Overlay.SaveData.Title": "Zapisane dane",
+  "Overlay.SaveData.Caption.Load": "Wybierz zapisane dane do wczytania.",
+  "Overlay.SaveData.Caption.Save": "Wybierz miejsce zapisu.",
+  "Overlay.SaveData.Caption.Delete": "Wybierz zapisane dane do usunięcia.",
+  "Overlay.SaveData.Caption.Other": "Wybierz zapisane dane.",
+  "Overlay.SaveData.Select": "Wybierz",
+  "Overlay.SaveData.Back": "Wstecz",
+  "Overlay.SaveData.Move": "Nawigacja",
+  "Overlay.SaveData.Delete": "Usuń",
+  "Overlay.SaveData.Cancel": "Anuluj",
+  "Overlay.SaveData.NewItem": "Nowe zapisane dane",
+  "Overlay.SaveData.NewItemDetail": "Utwórz nowy zapis w wolnym miejscu.",
+  "Overlay.SaveData.LastSaved": "Ostatni zapis",
+  "Overlay.SaveData.Size": "Rozmiar",
+  "Overlay.SaveData.ConfirmDelete": "Usunąć te zapisane dane?",
+  "Overlay.SaveData.ConfirmDeleteNote": "Usuniętych zapisanych danych nie można przywrócić.",
+  "Overlay.SaveData.InUse": "Te zapisane dane są w użyciu i nie można ich usunąć."
 }

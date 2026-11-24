@@ -504,5 +504,22 @@
   "Trophies.Sort.Progress": "Edenemine",
   "Trophies.Sort.Name": "A–Z",
   "Trophies.SearchWatermark": "Otsi mänge",
-  "Trophies.NoMatch": "Sinu otsingule ei vasta ükski mäng."
+  "Trophies.NoMatch": "Sinu otsingule ei vasta ükski mäng.",
+  "Overlay.SaveData.Title": "Salvestatud andmed",
+  "Overlay.SaveData.Caption.Load": "Vali laaditavad salvestatud andmed.",
+  "Overlay.SaveData.Caption.Save": "Vali, kuhu salvestada.",
+  "Overlay.SaveData.Caption.Delete": "Vali kustutatavad salvestatud andmed.",
+  "Overlay.SaveData.Caption.Other": "Vali salvestatud andmed.",
+  "Overlay.SaveData.Select": "Vali",
+  "Overlay.SaveData.Back": "Tagasi",
+  "Overlay.SaveData.Move": "Liigu",
+  "Overlay.SaveData.Delete": "Kustuta",
+  "Overlay.SaveData.Cancel": "Tühista",
+  "Overlay.SaveData.NewItem": "Uued salvestatud andmed",
+  "Overlay.SaveData.NewItemDetail": "Loo vabasse pesasse uus salvestus.",
+  "Overlay.SaveData.LastSaved": "Viimati salvestatud",
+  "Overlay.SaveData.Size": "Suurus",
+  "Overlay.SaveData.ConfirmDelete": "Kas kustutada need salvestatud andmed?",
+  "Overlay.SaveData.ConfirmDeleteNote": "Kustutatud salvestatud andmeid ei saa taastada.",
+  "Overlay.SaveData.InUse": "Need salvestatud andmed on kasutusel ja neid ei saa kustutada."
 }

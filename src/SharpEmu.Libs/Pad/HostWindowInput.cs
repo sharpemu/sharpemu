@@ -79,6 +79,7 @@ public static class HostWindowInput
             changed = down ? PressedKeys.Add(virtualKey) : PressedKeys.Remove(virtualKey);
         }
 
+        if (changed && down) SystemDialogInput.OnKeyDown(virtualKey);
         if (changed) Changed?.Invoke();
     }
 

@@ -502,5 +502,22 @@
   "Trophies.Sort.Progress": "進行状況",
   "Trophies.Sort.Name": "A–Z",
   "Trophies.SearchWatermark": "ゲームを検索",
-  "Trophies.NoMatch": "検索に一致するゲームはありません。"
+  "Trophies.NoMatch": "検索に一致するゲームはありません。",
+  "Overlay.SaveData.Title": "セーブデータ",
+  "Overlay.SaveData.Caption.Load": "ロードするセーブデータを選んでください。",
+  "Overlay.SaveData.Caption.Save": "セーブする場所を選んでください。",
+  "Overlay.SaveData.Caption.Delete": "削除するセーブデータを選んでください。",
+  "Overlay.SaveData.Caption.Other": "セーブデータを選んでください。",
+  "Overlay.SaveData.Select": "決定",
+  "Overlay.SaveData.Back": "戻る",
+  "Overlay.SaveData.Move": "移動",
+  "Overlay.SaveData.Delete": "削除",
+  "Overlay.SaveData.Cancel": "キャンセル",
+  "Overlay.SaveData.NewItem": "新しいセーブデータ",
+  "Overlay.SaveData.NewItemDetail": "空いているスロットに新しくセーブします。",
+  "Overlay.SaveData.LastSaved": "最終セーブ",
+  "Overlay.SaveData.Size": "サイズ",
+  "Overlay.SaveData.ConfirmDelete": "このセーブデータを削除しますか？",
+  "Overlay.SaveData.ConfirmDeleteNote": "削除したセーブデータは元に戻せません。",
+  "Overlay.SaveData.InUse": "このセーブデータは使用中のため削除できません。"
 }

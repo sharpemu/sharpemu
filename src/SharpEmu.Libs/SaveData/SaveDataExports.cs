@@ -1464,6 +1464,88 @@ public static class SaveDataExports
 
     private readonly record struct SaveEntry(string Name, string Path, DateTime LastWriteUtc);
 
+    internal static SaveDataDialogSlot? DescribeDialogSlot(int userId, string? titleId, string dirName)
+    {
+        try
+        {
+            var resolvedTitleId = string.IsNullOrWhiteSpace(titleId)
+                ? ResolveConfiguredTitleId()
+                : SanitizePathSegment(titleId);
+            var slotDir = SaveDataStorage.SlotDir(ResolveTitleSaveRoot(userId, resolvedTitleId), dirName);
+            if (!Directory.Exists(slotDir))
+            {
+                return null;
+            }
+
+            var lastWriteUtc = Directory.GetLastWriteTimeUtc(slotDir);
+            long sizeBytes = 0;
+            foreach (var file in new DirectoryInfo(slotDir).EnumerateFiles("*", SearchOption.AllDirectories))
+            {
+                sizeBytes += file.Length;
+                if (file.LastWriteTimeUtc > lastWriteUtc)
+                {
+                    lastWriteUtc = file.LastWriteTimeUtc;
+                }
+            }
+
+            var iconPath = SaveDataStorage.IconPath(slotDir);
+            return new SaveDataDialogSlot(
+                dirName,
+                slotDir,
+                SaveDataStorage.ReadMetadata(slotDir),
+                lastWriteUtc,
+                sizeBytes,
+                File.Exists(iconPath) ? iconPath : null);
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    internal static bool IsDialogSlotMounted(SaveDataDialogSlot slot)
+    {
+        lock (_mountGate)
+        {
+            foreach (var mount in _mounts.Values)
+            {
+                if (string.Equals(Path.GetFullPath(mount.SlotDir), Path.GetFullPath(slot.SlotDir),
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    internal static bool TryDeleteDialogSlot(SaveDataDialogSlot slot)
+    {
+        if (IsDialogSlotMounted(slot))
+        {
+            return false;
+        }
+
+        try
+        {
+            if (Directory.Exists(slot.SlotDir))
+            {
+                Directory.Delete(slot.SlotDir, recursive: true);
+            }
+
+            TraceSaveData($"dialog_delete dir='{slot.DirName}' path='{slot.SlotDir}'");
+            return true;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    internal static bool TryWriteDialogParam(CpuContext ctx, ulong address, SaveDataDialogSlot slot) =>
+        TryWriteParam(ctx, address, new SaveEntry(slot.DirName, slot.SlotDir, slot.LastWriteUtc));
+
     [SysAbiExport(
         Nid = "sDCBrmc61XU",
         ExportName = "sceSaveDataPrepare",

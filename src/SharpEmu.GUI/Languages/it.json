@@ -507,5 +507,22 @@
   "Trophies.Sort.Progress": "Avanzamento",
   "Trophies.Sort.Name": "A–Z",
   "Trophies.SearchWatermark": "Cerca giochi",
-  "Trophies.NoMatch": "Nessun gioco corrisponde alla ricerca."
+  "Trophies.NoMatch": "Nessun gioco corrisponde alla ricerca.",
+  "Overlay.SaveData.Title": "Dati salvati",
+  "Overlay.SaveData.Caption.Load": "Seleziona i dati salvati da caricare.",
+  "Overlay.SaveData.Caption.Save": "Seleziona dove salvare.",
+  "Overlay.SaveData.Caption.Delete": "Seleziona i dati salvati da eliminare.",
+  "Overlay.SaveData.Caption.Other": "Seleziona i dati salvati.",
+  "Overlay.SaveData.Select": "Seleziona",
+  "Overlay.SaveData.Back": "Indietro",
+  "Overlay.SaveData.Move": "Sposta",
+  "Overlay.SaveData.Delete": "Elimina",
+  "Overlay.SaveData.Cancel": "Annulla",
+  "Overlay.SaveData.NewItem": "Nuovi dati salvati",
+  "Overlay.SaveData.NewItemDetail": "Crea un nuovo salvataggio in uno slot libero.",
+  "Overlay.SaveData.LastSaved": "Ultimo salvataggio",
+  "Overlay.SaveData.Size": "Dimensione",
+  "Overlay.SaveData.ConfirmDelete": "Eliminare questi dati salvati?",
+  "Overlay.SaveData.ConfirmDeleteNote": "I dati salvati eliminati non possono essere ripristinati.",
+  "Overlay.SaveData.InUse": "Questi dati salvati sono in uso e non possono essere eliminati."
 }

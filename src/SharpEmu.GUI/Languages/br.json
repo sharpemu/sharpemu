@@ -503,5 +503,22 @@
   "Trophies.Sort.Progress": "Progresso",
   "Trophies.Sort.Name": "A–Z",
   "Trophies.SearchWatermark": "Pesquisar jogos",
-  "Trophies.NoMatch": "Nenhum jogo corresponde à sua pesquisa."
+  "Trophies.NoMatch": "Nenhum jogo corresponde à sua pesquisa.",
+  "Overlay.SaveData.Title": "Dados salvos",
+  "Overlay.SaveData.Caption.Load": "Selecione os dados salvos para carregar.",
+  "Overlay.SaveData.Caption.Save": "Selecione onde salvar.",
+  "Overlay.SaveData.Caption.Delete": "Selecione os dados salvos para excluir.",
+  "Overlay.SaveData.Caption.Other": "Selecione dados salvos.",
+  "Overlay.SaveData.Select": "Selecionar",
+  "Overlay.SaveData.Back": "Voltar",
+  "Overlay.SaveData.Move": "Mover",
+  "Overlay.SaveData.Delete": "Excluir",
+  "Overlay.SaveData.Cancel": "Cancelar",
+  "Overlay.SaveData.NewItem": "Novos dados salvos",
+  "Overlay.SaveData.NewItemDetail": "Crie um novo salvamento em um espaço livre.",
+  "Overlay.SaveData.LastSaved": "Último salvamento",
+  "Overlay.SaveData.Size": "Tamanho",
+  "Overlay.SaveData.ConfirmDelete": "Excluir estes dados salvos?",
+  "Overlay.SaveData.ConfirmDeleteNote": "Dados salvos excluídos não podem ser restaurados.",
+  "Overlay.SaveData.InUse": "Estes dados salvos estão em uso e não podem ser excluídos."
 }

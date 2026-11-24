@@ -930,6 +930,7 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
             SDL_Keycode.SDLK_UP => 0x26,
             SDL_Keycode.SDLK_RIGHT => 0x27,
             SDL_Keycode.SDLK_DOWN => 0x28,
+            SDL_Keycode.SDLK_DELETE => 0x2E,
             >= SDL_Keycode.SDLK_A and <= SDL_Keycode.SDLK_Z => 0x41 + (int)(key - SDL_Keycode.SDLK_A),
             _ => 0,
         };

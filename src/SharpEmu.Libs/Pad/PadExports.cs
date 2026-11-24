@@ -49,6 +49,7 @@ public static class PadExports
     private static readonly object HistoryGate = new();
     private static readonly (PadState State, ulong Timestamp)[] History = new (PadState, ulong)[HistoryCapacity];
     private static long _historyNext;
+    private static long _historyFloor;
 
     private static int _controlsAnnouncementLogged;
     private static readonly bool LogPadState =
@@ -113,7 +114,7 @@ public static class PadExports
                 session.ReadSequence = _historyNext;
             }
 
-            var first = Math.Max(session.ReadSequence, _historyNext - HistoryCapacity);
+            var first = Math.Max(Math.Max(session.ReadSequence, _historyNext - HistoryCapacity), _historyFloor);
             var take = (int)Math.Min(_historyNext - first, count);
             more = _historyNext - first > take;
             if (take == 0)
@@ -129,6 +130,44 @@ public static class PadExports
 
             session.ReadSequence = first + take;
             return states;
+        }
+    }
+
+    internal static PadState ReadSystemDialogState() => ReadHostInputState(fresh: true);
+
+    internal static long InputHistoryPosition => Volatile.Read(ref _historyNext);
+
+    internal static void TakeControllerHistory(ref long sequence, List<uint> buttons)
+    {
+        lock (HistoryGate)
+        {
+            var first = Math.Max(sequence, _historyNext - HistoryCapacity);
+            for (var index = first; index < _historyNext; index++)
+            {
+                buttons.Add(History[(int)(index % HistoryCapacity)].State.ControllerButtons);
+            }
+
+            sequence = _historyNext;
+        }
+    }
+
+    internal static HostGamepadType? ConnectedGamepadType()
+    {
+        Span<HostGamepadState> gamepads = stackalloc HostGamepadState[2];
+        return HostPlatform.Current.Input.GetGamepadStates(gamepads) > 0 ? gamepads[0].Type : null;
+    }
+
+    internal static bool IsHostKeyDown(int virtualKey)
+    {
+        var input = HostPlatform.Current.Input;
+        return input.IsHostWindowFocused() && input.IsKeyDown(virtualKey);
+    }
+
+    internal static void DiscardUnreadStates()
+    {
+        lock (HistoryGate)
+        {
+            _historyFloor = _historyNext;
         }
     }
 
@@ -1021,9 +1060,10 @@ public static class PadExports
         return ctx.Memory.TryWrite(dataAddress, data);
     }
 
-    private static bool WritePadState(CpuContext ctx, ulong dataAddress, int handle, PadSession session, in PadState input,
+    private static bool WritePadState(CpuContext ctx, ulong dataAddress, int handle, PadSession session, in PadState hostInput,
         ulong timestampMicroseconds, string exportName)
     {
+        var input = SystemDialogInput.Filter(hostInput);
         Span<byte> data = stackalloc byte[PadDataSize];
         data.Clear();
         var buttons = input.Buttons;

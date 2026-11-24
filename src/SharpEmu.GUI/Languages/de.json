@@ -502,5 +502,22 @@
   "Trophies.Sort.Progress": "Fortschritt",
   "Trophies.Sort.Name": "A–Z",
   "Trophies.SearchWatermark": "Spiele suchen",
-  "Trophies.NoMatch": "Kein Spiel passt zu deiner Suche."
+  "Trophies.NoMatch": "Kein Spiel passt zu deiner Suche.",
+  "Overlay.SaveData.Title": "Gespeicherte Daten",
+  "Overlay.SaveData.Caption.Load": "Wähle die gespeicherten Daten zum Laden aus.",
+  "Overlay.SaveData.Caption.Save": "Wähle aus, wo gespeichert werden soll.",
+  "Overlay.SaveData.Caption.Delete": "Wähle die zu löschenden gespeicherten Daten aus.",
+  "Overlay.SaveData.Caption.Other": "Wähle gespeicherte Daten aus.",
+  "Overlay.SaveData.Select": "Auswählen",
+  "Overlay.SaveData.Back": "Zurück",
+  "Overlay.SaveData.Move": "Bewegen",
+  "Overlay.SaveData.Delete": "Löschen",
+  "Overlay.SaveData.Cancel": "Abbrechen",
+  "Overlay.SaveData.NewItem": "Neue gespeicherte Daten",
+  "Overlay.SaveData.NewItemDetail": "Einen neuen Spielstand auf einem freien Platz anlegen.",
+  "Overlay.SaveData.LastSaved": "Zuletzt gespeichert",
+  "Overlay.SaveData.Size": "Größe",
+  "Overlay.SaveData.ConfirmDelete": "Diese gespeicherten Daten löschen?",
+  "Overlay.SaveData.ConfirmDeleteNote": "Gelöschte gespeicherte Daten können nicht wiederhergestellt werden.",
+  "Overlay.SaveData.InUse": "Diese gespeicherten Daten werden verwendet und können nicht gelöscht werden."
 }

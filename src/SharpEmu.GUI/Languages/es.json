@@ -503,5 +503,22 @@
   "Trophies.Sort.Progress": "Progreso",
   "Trophies.Sort.Name": "A–Z",
   "Trophies.SearchWatermark": "Buscar juegos",
-  "Trophies.NoMatch": "Ningún juego coincide con tu búsqueda."
+  "Trophies.NoMatch": "Ningún juego coincide con tu búsqueda.",
+  "Overlay.SaveData.Title": "Datos guardados",
+  "Overlay.SaveData.Caption.Load": "Selecciona los datos guardados que quieres cargar.",
+  "Overlay.SaveData.Caption.Save": "Selecciona dónde guardar.",
+  "Overlay.SaveData.Caption.Delete": "Selecciona los datos guardados que quieres eliminar.",
+  "Overlay.SaveData.Caption.Other": "Selecciona datos guardados.",
+  "Overlay.SaveData.Select": "Seleccionar",
+  "Overlay.SaveData.Back": "Atrás",
+  "Overlay.SaveData.Move": "Mover",
+  "Overlay.SaveData.Delete": "Eliminar",
+  "Overlay.SaveData.Cancel": "Cancelar",
+  "Overlay.SaveData.NewItem": "Nuevos datos guardados",
+  "Overlay.SaveData.NewItemDetail": "Crea una partida guardada nueva en un espacio libre.",
+  "Overlay.SaveData.LastSaved": "Último guardado",
+  "Overlay.SaveData.Size": "Tamaño",
+  "Overlay.SaveData.ConfirmDelete": "¿Eliminar estos datos guardados?",
+  "Overlay.SaveData.ConfirmDeleteNote": "Los datos guardados eliminados no se pueden recuperar.",
+  "Overlay.SaveData.InUse": "Estos datos guardados están en uso y no se pueden eliminar."
 }

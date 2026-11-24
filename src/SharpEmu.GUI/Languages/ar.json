@@ -502,5 +502,22 @@
   "Trophies.Sort.Progress": "التقدّم",
   "Trophies.Sort.Name": "أ–ي",
   "Trophies.SearchWatermark": "ابحث عن لعبة",
-  "Trophies.NoMatch": "لا توجد لعبة تطابق بحثك."
+  "Trophies.NoMatch": "لا توجد لعبة تطابق بحثك.",
+  "Overlay.SaveData.Title": "البيانات المحفوظة",
+  "Overlay.SaveData.Caption.Load": "اختر البيانات المحفوظة التي تريد تحميلها.",
+  "Overlay.SaveData.Caption.Save": "اختر مكان الحفظ.",
+  "Overlay.SaveData.Caption.Delete": "اختر البيانات المحفوظة التي تريد حذفها.",
+  "Overlay.SaveData.Caption.Other": "اختر البيانات المحفوظة.",
+  "Overlay.SaveData.Select": "تحديد",
+  "Overlay.SaveData.Back": "رجوع",
+  "Overlay.SaveData.Move": "تنقّل",
+  "Overlay.SaveData.Delete": "حذف",
+  "Overlay.SaveData.Cancel": "إلغاء",
+  "Overlay.SaveData.NewItem": "بيانات محفوظة جديدة",
+  "Overlay.SaveData.NewItemDetail": "أنشئ حفظًا جديدًا في خانة فارغة.",
+  "Overlay.SaveData.LastSaved": "آخر حفظ",
+  "Overlay.SaveData.Size": "الحجم",
+  "Overlay.SaveData.ConfirmDelete": "هل تريد حذف هذه البيانات المحفوظة؟",
+  "Overlay.SaveData.ConfirmDeleteNote": "لا يمكن استعادة البيانات المحفوظة المحذوفة.",
+  "Overlay.SaveData.InUse": "هذه البيانات المحفوظة قيد الاستخدام ولا يمكن حذفها."
 }

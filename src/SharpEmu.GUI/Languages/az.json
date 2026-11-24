@@ -505,5 +505,22 @@
   "Trophies.Sort.Progress": "İrəliləyiş",
   "Trophies.Sort.Name": "A–Z",
   "Trophies.SearchWatermark": "Oyun axtar",
-  "Trophies.NoMatch": "Axtarışınıza uyğun oyun tapılmadı."
+  "Trophies.NoMatch": "Axtarışınıza uyğun oyun tapılmadı.",
+  "Overlay.SaveData.Title": "Yadda saxlanılmış məlumatlar",
+  "Overlay.SaveData.Caption.Load": "Yükləmək üçün yadda saxlanılmış məlumatı seçin.",
+  "Overlay.SaveData.Caption.Save": "Yadda saxlanacaq yeri seçin.",
+  "Overlay.SaveData.Caption.Delete": "Silmək üçün yadda saxlanılmış məlumatı seçin.",
+  "Overlay.SaveData.Caption.Other": "Yadda saxlanılmış məlumatı seçin.",
+  "Overlay.SaveData.Select": "Seç",
+  "Overlay.SaveData.Back": "Geri",
+  "Overlay.SaveData.Move": "Hərəkət",
+  "Overlay.SaveData.Delete": "Sil",
+  "Overlay.SaveData.Cancel": "Ləğv et",
+  "Overlay.SaveData.NewItem": "Yeni yadda saxlanılmış məlumat",
+  "Overlay.SaveData.NewItemDetail": "Boş yerdə yeni qeyd yaradın.",
+  "Overlay.SaveData.LastSaved": "Son yadda saxlama",
+  "Overlay.SaveData.Size": "Ölçü",
+  "Overlay.SaveData.ConfirmDelete": "Bu yadda saxlanılmış məlumat silinsin?",
+  "Overlay.SaveData.ConfirmDeleteNote": "Silinmiş yadda saxlanılmış məlumatlar bərpa edilə bilməz.",
+  "Overlay.SaveData.InUse": "Bu yadda saxlanılmış məlumat istifadədədir və silinə bilməz."
 }

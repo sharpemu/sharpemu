@@ -502,5 +502,22 @@
   "Trophies.Sort.Progress": "Fremskridt",
   "Trophies.Sort.Name": "A–Z",
   "Trophies.SearchWatermark": "Søg efter spil",
-  "Trophies.NoMatch": "Intet spil matcher din søgning."
+  "Trophies.NoMatch": "Intet spil matcher din søgning.",
+  "Overlay.SaveData.Title": "Gemte data",
+  "Overlay.SaveData.Caption.Load": "Vælg de gemte data, der skal indlæses.",
+  "Overlay.SaveData.Caption.Save": "Vælg, hvor der skal gemmes.",
+  "Overlay.SaveData.Caption.Delete": "Vælg de gemte data, der skal slettes.",
+  "Overlay.SaveData.Caption.Other": "Vælg gemte data.",
+  "Overlay.SaveData.Select": "Vælg",
+  "Overlay.SaveData.Back": "Tilbage",
+  "Overlay.SaveData.Move": "Naviger",
+  "Overlay.SaveData.Delete": "Slet",
+  "Overlay.SaveData.Cancel": "Annuller",
+  "Overlay.SaveData.NewItem": "Nye gemte data",
+  "Overlay.SaveData.NewItemDetail": "Opret en ny gemning på en ledig plads.",
+  "Overlay.SaveData.LastSaved": "Sidst gemt",
+  "Overlay.SaveData.Size": "Størrelse",
+  "Overlay.SaveData.ConfirmDelete": "Vil du slette disse gemte data?",
+  "Overlay.SaveData.ConfirmDeleteNote": "Slettede gemte data kan ikke gendannes.",
+  "Overlay.SaveData.InUse": "Disse gemte data er i brug og kan ikke slettes."
 }

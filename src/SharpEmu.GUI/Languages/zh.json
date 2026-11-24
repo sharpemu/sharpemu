@@ -504,5 +504,22 @@
   "Trophies.Sort.Progress": "进度",
   "Trophies.Sort.Name": "名称",
   "Trophies.SearchWatermark": "搜索游戏",
-  "Trophies.NoMatch": "没有符合搜索条件的游戏。"
+  "Trophies.NoMatch": "没有符合搜索条件的游戏。",
+  "Overlay.SaveData.Title": "保存数据",
+  "Overlay.SaveData.Caption.Load": "请选择要读取的保存数据。",
+  "Overlay.SaveData.Caption.Save": "请选择保存位置。",
+  "Overlay.SaveData.Caption.Delete": "请选择要删除的保存数据。",
+  "Overlay.SaveData.Caption.Other": "请选择保存数据。",
+  "Overlay.SaveData.Select": "确定",
+  "Overlay.SaveData.Back": "返回",
+  "Overlay.SaveData.Move": "移动",
+  "Overlay.SaveData.Delete": "删除",
+  "Overlay.SaveData.Cancel": "取消",
+  "Overlay.SaveData.NewItem": "新建保存数据",
+  "Overlay.SaveData.NewItemDetail": "在空栏位中创建新的存档。",
+  "Overlay.SaveData.LastSaved": "最后保存",
+  "Overlay.SaveData.Size": "大小",
+  "Overlay.SaveData.ConfirmDelete": "要删除此保存数据吗？",
+  "Overlay.SaveData.ConfirmDeleteNote": "删除的保存数据无法恢复。",
+  "Overlay.SaveData.InUse": "此保存数据正在使用中，无法删除。"
 }

@@ -503,5 +503,22 @@
   "Trophies.Sort.Progress": "Előrehaladás",
   "Trophies.Sort.Name": "A–Z",
   "Trophies.SearchWatermark": "Játékok keresése",
-  "Trophies.NoMatch": "Nincs a keresésnek megfelelő játék."
+  "Trophies.NoMatch": "Nincs a keresésnek megfelelő játék.",
+  "Overlay.SaveData.Title": "Mentett adatok",
+  "Overlay.SaveData.Caption.Load": "Válaszd ki a betöltendő mentett adatot.",
+  "Overlay.SaveData.Caption.Save": "Válaszd ki a mentés helyét.",
+  "Overlay.SaveData.Caption.Delete": "Válaszd ki a törlendő mentett adatot.",
+  "Overlay.SaveData.Caption.Other": "Válassz mentett adatot.",
+  "Overlay.SaveData.Select": "Kiválasztás",
+  "Overlay.SaveData.Back": "Vissza",
+  "Overlay.SaveData.Move": "Mozgás",
+  "Overlay.SaveData.Delete": "Törlés",
+  "Overlay.SaveData.Cancel": "Mégse",
+  "Overlay.SaveData.NewItem": "Új mentett adat",
+  "Overlay.SaveData.NewItemDetail": "Új mentés létrehozása egy üres helyen.",
+  "Overlay.SaveData.LastSaved": "Utolsó mentés",
+  "Overlay.SaveData.Size": "Méret",
+  "Overlay.SaveData.ConfirmDelete": "Törlöd ezt a mentett adatot?",
+  "Overlay.SaveData.ConfirmDeleteNote": "A törölt mentett adatok nem állíthatók vissza.",
+  "Overlay.SaveData.InUse": "Ez a mentett adat használatban van, ezért nem törölhető."
 }
