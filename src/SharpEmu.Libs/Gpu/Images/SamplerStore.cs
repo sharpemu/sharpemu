@@ -34,6 +34,13 @@ public enum SamplerMipFilter : uint
     Linear = 2,
 }
 
+public enum SamplerFilterMode : uint
+{
+    Blend = 0,
+    Min = 1,
+    Max = 2,
+}
+
 public enum SamplerBorderColor : uint
 {
     TransparentBlack = 0,
@@ -111,6 +118,31 @@ public sealed unsafe class SamplerStore : IDisposable
         SamplerClampMode.MirrorOnceBorder => SamplerAddressMode.MirrorClampToEdge,
         _ => throw SubmissionScheduler.Fatal($"The sampler clamp mode is unknown: clamp={clamp}."),
     };
+
+    private static int _reportedMissingFilterMinmax;
+
+    // Reduction needs samplerFilterMinmax; without it the sampler stays a weighted blend.
+    private SamplerReductionMode? ReductionMode(uint filterMode)
+    {
+        var mode = (SamplerFilterMode)filterMode switch
+        {
+            SamplerFilterMode.Min => SamplerReductionMode.Min,
+            SamplerFilterMode.Max => SamplerReductionMode.Max,
+            // Blend, and the reserved value 3.
+            _ => (SamplerReductionMode?)null,
+        };
+        if (mode is null || _device.SamplerFilterMinmaxSupported)
+        {
+            return mode;
+        }
+
+        if (Interlocked.Exchange(ref _reportedMissingFilterMinmax, 1) == 0)
+        {
+            Console.Error.WriteLine("[LOADER][WARN] A min/max sampler filter mode needs samplerFilterMinmax, which this device lacks; blend is used.");
+        }
+
+        return null;
+    }
 
     // Bit per reserved ratio encoding already reported, so each warns once.
     private static int _reportedReservedAnisotropyRatios;
@@ -207,6 +239,18 @@ public sealed unsafe class SamplerStore : IDisposable
             info.MaxAnisotropy = 1.0f;
             info.CompareEnable = false;
             info.MipLodBias = 0.0f;
+        }
+
+        // Integer views are point filtered, so a reduction has nothing to reduce.
+        var reduction = integerView ? null : ReductionMode(words.FilterMode);
+        var reductionInfo = new SamplerReductionModeCreateInfo
+        {
+            SType = StructureType.SamplerReductionModeCreateInfo,
+            ReductionMode = reduction ?? SamplerReductionMode.WeightedAverage,
+        };
+        if (reduction is not null)
+        {
+            info.PNext = &reductionInfo;
         }
 
         var result = _device.Vk.CreateSampler(_device.Device, &info, null, out var sampler);

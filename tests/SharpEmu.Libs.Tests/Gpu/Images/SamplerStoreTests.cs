@@ -31,6 +31,15 @@ public sealed class SamplerStoreTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public void FilterMode_DecodesWord0Bits29To30()
+    {
+        Assert.Equal(0u, Words(0).FilterMode);
+        Assert.Equal((uint)SamplerFilterMode.Min, Words(1u << 29).FilterMode);
+        Assert.Equal((uint)SamplerFilterMode.Max, Words(2u << 29 | 0x1FFF).FilterMode);
+        Assert.Equal(3u, Words(0xFFFFFFFF).FilterMode);
+    }
+
+    [Fact]
     public void GetSampler_CachesByTheFourWordsAndTheViewClass()
     {
         if (!GatePrerequisites.Ready(_vulkan, samplerAnisotropy: true)) return;

@@ -118,6 +118,9 @@ public readonly struct SamplerDescriptorWords
 
     public bool ForceUnnormalizedCoordinates => ((Fields[0] >> 15) & 0x1) == 1;
 
+    // Texture filter reduction: 0 blend (weighted), 1 min, 2 max.
+    public uint FilterMode => (Fields[0] >> 29) & 0x3;
+
     public uint MinLod => (Fields[1] >> 0) & 0xFFF;
 
     public uint MaxLod => (Fields[1] >> 12) & 0xFFF;
