@@ -16,6 +16,8 @@ public interface IHostWindowInputSource
 
     void SetRumble(byte largeMotor, byte smallMotor);
 
+    void SetHapticRumble(byte largeMotor, byte smallMotor, uint durationMs);
+
     void SetTriggerRumble(byte? leftTrigger, byte? rightTrigger);
 
     void SetAdaptiveTriggerEffect(

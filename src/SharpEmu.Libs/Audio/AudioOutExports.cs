@@ -246,6 +246,11 @@ public static class AudioOutExports
             return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
+        if (port.Type == PortTypeVibration && port.Backend is null)
+        {
+            HapticRumble.Stop();
+        }
+
         port.Dispose();
         return ctx.SetReturn(0);
     }
@@ -370,6 +375,7 @@ public static class AudioOutExports
 
             if (port.Backend is null)
             {
+                FeedHapticRumble(port, source);
                 port.PaceSilence();
                 return ctx.SetReturn(0);
             }
@@ -501,6 +507,10 @@ public static class AudioOutExports
                     }
 
                     TraceOutput(output.Handle, output.Port, source);
+                    if (output.Port.Backend is null)
+                    {
+                        FeedHapticRumble(output.Port, source);
+                    }
 
                     output.HostBufferLength = HostBufferLength(output.Port);
                     output.HostBuffer = ArrayPool<byte>.Shared.Rent(output.HostBufferLength);
@@ -595,6 +605,27 @@ public static class AudioOutExports
         }
 
         return 0;
+    }
+
+    private static void FeedHapticRumble(PortState port, ReadOnlySpan<byte> source)
+    {
+        if (port.Type != PortTypeVibration || !HapticRumble.Enabled)
+        {
+            return;
+        }
+
+        var left = 0f;
+        var right = 0f;
+        HapticRumble.MeasurePeaks(
+            source,
+            checked((int)port.BufferLength),
+            port.Channels,
+            port.BytesPerSample,
+            port.IsFloat,
+            port.Volume,
+            ref left,
+            ref right);
+        HapticRumble.Update(left, right, port.BufferLength / (double)port.Frequency);
     }
 
     private static int HostBufferLength(PortState port) =>

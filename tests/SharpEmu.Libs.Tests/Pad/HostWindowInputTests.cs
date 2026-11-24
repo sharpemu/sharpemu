@@ -195,6 +195,9 @@ public sealed class HostWindowInputTests
         public void SetRumble(byte largeMotor, byte smallMotor) =>
             Rumble = (largeMotor, smallMotor);
 
+        public void SetHapticRumble(byte largeMotor, byte smallMotor, uint durationMs) =>
+            Rumble = (largeMotor, smallMotor);
+
         public void SetTriggerRumble(byte? leftTrigger, byte? rightTrigger) =>
             TriggerRumble = (leftTrigger, rightTrigger);
 

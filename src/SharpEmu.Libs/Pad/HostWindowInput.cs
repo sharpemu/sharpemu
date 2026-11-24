@@ -245,6 +245,17 @@ public static class HostWindowInput
             output?.SetRumble(largeMotor, smallMotor);
         }
 
+        public void SetHapticRumble(byte largeMotor, byte smallMotor, uint durationMs)
+        {
+            IHostGamepadOutput? output;
+            lock (Gate)
+            {
+                output = _gamepadOutput;
+            }
+
+            output?.SetHapticRumble(largeMotor, smallMotor, durationMs);
+        }
+
         public void SetTriggerRumble(byte? leftTrigger, byte? rightTrigger)
         {
             IHostGamepadOutput? output;
@@ -296,6 +307,8 @@ public static class HostWindowInput
 public interface IHostGamepadOutput
 {
     void SetRumble(byte largeMotor, byte smallMotor);
+
+    void SetHapticRumble(byte largeMotor, byte smallMotor, uint durationMs);
 
     void SetTriggerRumble(byte? leftTrigger, byte? rightTrigger);
 

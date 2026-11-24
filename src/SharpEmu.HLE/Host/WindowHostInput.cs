@@ -22,6 +22,9 @@ internal sealed class WindowHostInput : IHostInput
     public void SetRumble(byte largeMotor, byte smallMotor) =>
         HostWindowInputSource.Current?.SetRumble(largeMotor, smallMotor);
 
+    public void SetHapticRumble(byte largeMotor, byte smallMotor, uint durationMs) =>
+        HostWindowInputSource.Current?.SetHapticRumble(largeMotor, smallMotor, durationMs);
+
     public void SetTriggerRumble(byte? leftTrigger, byte? rightTrigger) =>
         HostWindowInputSource.Current?.SetTriggerRumble(leftTrigger, rightTrigger);
 

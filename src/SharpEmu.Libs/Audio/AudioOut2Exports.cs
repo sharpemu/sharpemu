@@ -1183,6 +1183,11 @@ public static class AudioOut2Exports
     {
         var portHandle = ctx[CpuRegister.Rdi];
         var removed = Ports.TryRemove(portHandle, out var port);
+        if (port is not null && IsVibrationPort(port.PortType) && !ControllerTakes(port))
+        {
+            HapticRumble.Stop();
+        }
+
         var n = Interlocked.Increment(ref _portDestroyTraceCount);
         if (n <= 8 || n % 500 == 0)
         {
@@ -1519,6 +1524,9 @@ public static class AudioOut2Exports
             {
                 mix.AsSpan(0, frames * 2).Clear();
                 var mixedPorts = 0;
+                var hapticPorts = 0;
+                var hapticLeft = 0f;
+                var hapticRight = 0f;
                 float[]? controllerMix = null;
                 foreach (var port in Ports.Values)
                 {
@@ -1548,6 +1556,26 @@ public static class AudioOut2Exports
                                 isFloat,
                                 port.Gain,
                                 (port.PortType & 0xFF) == AudioOut2PortTypePadSpeaker ? 0 : 2);
+                        }
+
+                        continue;
+                    }
+
+                    if (IsVibrationPort(port.PortType))
+                    {
+                        hapticPorts++;
+                        var hapticBytes = frames * ch * bps;
+                        if (TakePortPcmSnapshot(port) is { } hapticPcm && hapticPcm.Length >= hapticBytes)
+                        {
+                            HapticRumble.MeasurePeaks(
+                                hapticPcm.AsSpan(0, hapticBytes),
+                                frames,
+                                ch,
+                                bps,
+                                isFloat,
+                                port.Gain,
+                                ref hapticLeft,
+                                ref hapticRight);
                         }
 
                         continue;
@@ -1606,6 +1634,11 @@ public static class AudioOut2Exports
                         ArrayPool<byte>.Shared.Return(controllerOutput);
                         ArrayPool<float>.Shared.Return(controllerMix);
                     }
+                }
+
+                if (hapticPorts > 0)
+                {
+                    HapticRumble.Update(hapticLeft, hapticRight, frames / (double)context.Frequency);
                 }
 
                 if (mixedPorts == 0)
@@ -2092,10 +2125,14 @@ public static class AudioOut2Exports
         (RoutesToSpeakers(port.PortType) &&
          (port.PortType & 0xFF) != AudioOut2PortTypeVibration &&
          (!IsObjectPort(port.PortType) || channels == 1)) ||
-        ControllerTakes(port);
+        ControllerTakes(port) ||
+        (HapticRumble.Enabled && IsVibrationPort(port.PortType));
 
     private static bool IsControllerPort(ushort portType) =>
         !IsObjectPort(portType) && (portType & 0xFF) is AudioOut2PortTypePadSpeaker or AudioOut2PortTypeVibration;
+
+    private static bool IsVibrationPort(ushort portType) =>
+        !IsObjectPort(portType) && (portType & 0xFF) == AudioOut2PortTypeVibration;
 
     // A pad speaker or vibration port plays on the controller's own output device, when the host has one.
     private static bool ControllerTakes(PortState port) =>
@@ -2210,7 +2247,7 @@ public static class AudioOut2Exports
         }
     }
 
-    private static float ReadNormalizedSample(
+    internal static float ReadNormalizedSample(
         ReadOnlySpan<byte> frame,
         int channel,
         int bytesPerSample,
