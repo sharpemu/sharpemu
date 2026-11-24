@@ -48,6 +48,19 @@ public sealed class AmprSetBufferTests
         Assert.Equal(0, SetBuffer(context));
     }
 
+    // The APR and AMM constructors leave the header alone, so a recycled object can hold an old
+    // pointer there: only a buffer this module attached makes SetBuffer busy.
+    [Fact]
+    public void LeftoverBytesInAnObjectNeverSetAreNotBusy()
+    {
+        var context = new CpuContext(new FakeCpuMemory(MemoryBase, 0x1000), Generation.Gen5);
+        Construct(context);
+        Assert.True(context.TryWriteUInt64(CommandBuffer + 0x10, 0x1234_5000));
+
+        Assert.Equal(0, SetBuffer(context));
+        Assert.Equal(Records, Read(context, CommandBuffer + 0x10));
+    }
+
     private static void Construct(CpuContext context)
     {
         context[CpuRegister.Rdi] = CommandBuffer;
