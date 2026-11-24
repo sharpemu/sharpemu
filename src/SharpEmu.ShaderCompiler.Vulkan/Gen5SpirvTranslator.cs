@@ -4601,8 +4601,24 @@ public static partial class Gen5SpirvTranslator
 
             var canonical = new uint[4];
             var componentBounds = new uint[4];
+            var knownSwizzle = _module.TryGetConstantValue(descriptorWord3, out var knownWord3);
+            bool ComponentSelected(int component)
+            {
+                if (!knownSwizzle) return true;
+                for (var destination = 0; destination < componentCount; destination++)
+                {
+                    if (((knownWord3 >> (destination * 3)) & 7) == component + 4) return true;
+                }
+                return false;
+            }
             for (var component = 0; component < canonical.Length; component++)
             {
+                if (!ComponentSelected(component))
+                {
+                    canonical[component] = UInt(0);
+                    componentBounds[component] = _module.ConstantBool(true);
+                    continue;
+                }
                 canonical[component] = LoadGfx10DeviceBufferFormatComponent(
                     baseAddress,
                     size,
@@ -4979,9 +4995,25 @@ public static partial class Gen5SpirvTranslator
 
             var canonical = new uint[4];
             var componentBounds = new uint[4];
+            var knownSwizzle = _module.TryGetConstantValue(descriptorWord3, out var knownWord3);
+            bool ComponentSelected(int component)
+            {
+                if (!knownSwizzle) return true;
+                for (var destination = 0; destination < componentCount; destination++)
+                {
+                    if (((knownWord3 >> (destination * 3)) & 7) == component + 4) return true;
+                }
+                return false;
+            }
             var elementWords = new Dictionary<uint, uint>();
             for (var component = 0; component < canonical.Length; component++)
             {
+                if (!ComponentSelected(component))
+                {
+                    canonical[component] = UInt(0);
+                    componentBounds[component] = _module.ConstantBool(true);
+                    continue;
+                }
                 canonical[component] = LoadGfx10BufferFormatComponent(
                     bindingIndex,
                     byteAddress,
@@ -5622,6 +5654,17 @@ public static partial class Gen5SpirvTranslator
 
             void SetLayout(uint format, uint bytes, uint bits, uint count)
             {
+                if (_module.TryGetConstantValue(dataFormat, out var knownFormat))
+                {
+                    if (knownFormat == format)
+                    {
+                        byteOffset = UInt(bytes);
+                        bitOffset = UInt(bits);
+                        bitCount = UInt(count);
+                    }
+                    return;
+                }
+
                 var matches = _module.AddInstruction(
                     SpirvOp.IEqual,
                     _boolType,
@@ -5961,7 +6004,9 @@ public static partial class Gen5SpirvTranslator
             uint expected,
             uint whenTrue,
             uint whenFalse) =>
-            _module.AddInstruction(
+            _module.TryGetConstantValue(selector, out var knownSelector)
+                ? (knownSelector == expected ? whenTrue : whenFalse)
+                : _module.AddInstruction(
                 SpirvOp.Select,
                 _uintType,
                 _module.AddInstruction(
@@ -9910,14 +9955,18 @@ public static partial class Gen5SpirvTranslator
             _module.AddInstruction(SpirvOp.IAdd, _uintType, left, right);
 
         private uint ShiftLeftLogical(uint left, uint right) =>
-            _module.AddInstruction(
+            _module.TryGetConstantValue(left, out var l) && _module.TryGetConstantValue(right, out var r)
+                ? UInt(l << (int)(r & 31))
+                : _module.AddInstruction(
                 SpirvOp.ShiftLeftLogical,
                 _uintType,
                 left,
                 BitwiseAnd(right, UInt(31)));
 
         private uint ShiftRightLogical(uint left, uint right) =>
-            _module.AddInstruction(
+            _module.TryGetConstantValue(left, out var l) && _module.TryGetConstantValue(right, out var r)
+                ? UInt(l >> (int)(r & 31))
+                : _module.AddInstruction(
                 SpirvOp.ShiftRightLogical,
                 _uintType,
                 left,
@@ -9981,7 +10030,9 @@ public static partial class Gen5SpirvTranslator
                     BitwiseAnd64(right, _module.Constant64(_ulongType, 63))));
 
         private uint BitwiseAnd(uint left, uint right) =>
-            _module.AddInstruction(SpirvOp.BitwiseAnd, _uintType, left, right);
+            _module.TryGetConstantValue(left, out var l) && _module.TryGetConstantValue(right, out var r)
+                ? UInt(l & r)
+                : _module.AddInstruction(SpirvOp.BitwiseAnd, _uintType, left, right);
 
         private uint BitwiseAnd64(uint left, uint right) =>
             _module.AddInstruction(SpirvOp.BitwiseAnd, _ulongType, left, right);
@@ -9990,7 +10041,9 @@ public static partial class Gen5SpirvTranslator
             _module.AddInstruction(SpirvOp.BitwiseOr, _ulongType, left, right);
 
         private uint BitwiseOr(uint left, uint right) =>
-            _module.AddInstruction(SpirvOp.BitwiseOr, _uintType, left, right);
+            _module.TryGetConstantValue(left, out var l) && _module.TryGetConstantValue(right, out var r)
+                ? UInt(l | r)
+                : _module.AddInstruction(SpirvOp.BitwiseOr, _uintType, left, right);
 
         private uint BitwiseXor(uint left, uint right) =>
             _module.AddInstruction(SpirvOp.BitwiseXor, _uintType, left, right);
