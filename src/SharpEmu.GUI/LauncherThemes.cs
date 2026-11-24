@@ -347,6 +347,28 @@ internal static class LauncherThemes
             palette.Accent, palette.AccentForeground);
     }
 
+    public static SharpEmu.Libs.Overlay.OverlayPalette CurrentOverlayPalette()
+    {
+        SkiaSharp.SKColor Read(string key, SkiaSharp.SKColor fallback) =>
+            Brush(key) is ISolidColorBrush { Color: var color }
+                ? new SkiaSharp.SKColor(color.R, color.G, color.B)
+                : fallback;
+
+        var graphite = SharpEmu.Libs.Overlay.OverlayPalette.Graphite;
+        return new SharpEmu.Libs.Overlay.OverlayPalette(
+            Read("BgBrush", graphite.Background),
+            Read("GameOptionsMenuBrush", graphite.Menu),
+            Read("CardBrush", graphite.Card),
+            Read("ElevatedBrush", graphite.Elevated),
+            Read("RaisedHoverBrush", graphite.Raised),
+            Read("TextBrush", graphite.Text),
+            Read("SecondaryTextBrush", graphite.Secondary),
+            Read("MutedBrush", graphite.Muted),
+            Read("FaintBrush", graphite.Faint),
+            Read("AccentBrush", graphite.Accent),
+            Read("AccentForegroundBrush", graphite.AccentForeground));
+    }
+
     public static void Apply(LauncherAppearance appearance)
     {
         if (Avalonia.Application.Current is not { } app)
