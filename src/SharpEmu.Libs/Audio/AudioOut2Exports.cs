@@ -1401,6 +1401,28 @@ public static class AudioOut2Exports
             context.Frequency);
     }
 
+    private static int _preciseNappers;
+
+    internal const int MaxPreciseNappers = 1;
+
+    public static bool TryBeginPreciseNap(ulong microseconds)
+    {
+        if (!ProducerNeedsPreciseNap(microseconds))
+        {
+            return false;
+        }
+
+        if (Interlocked.Increment(ref _preciseNappers) <= MaxPreciseNappers)
+        {
+            return true;
+        }
+
+        Interlocked.Decrement(ref _preciseNappers);
+        return false;
+    }
+
+    public static void EndPreciseNap() => Interlocked.Decrement(ref _preciseNappers);
+
     // A nap of at most PreciseNapLimitMicroseconds by a thread that pushed within the last ActiveProducerMilliseconds, while
     // the device reports less than its cushion less one grain (-1: it cannot report).
     internal static bool PreciseProducerNap(ulong microseconds, double millisecondsSincePush, int queuedMilliseconds,
