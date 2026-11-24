@@ -105,9 +105,17 @@ public static partial class KernelRuntimeCompatExports
         GuestThreadExecution.Scheduler?.Pump(ctx, "sceKernelUsleep");
 
         // An audio producer that runs behind the device naps for the time it asks (a timer wait takes about 0.5 ms).
-        if (micros > UsleepSpinLimitMicroseconds && Audio.AudioOut2Exports.ProducerNeedsPreciseNap(micros))
+        if (micros > UsleepSpinLimitMicroseconds && Audio.AudioOut2Exports.TryBeginPreciseNap(micros))
         {
-            HostHighResolutionSleep.SpinMicroseconds(micros);
+            try
+            {
+                HostHighResolutionSleep.SpinMicroseconds(micros);
+            }
+            finally
+            {
+                Audio.AudioOut2Exports.EndPreciseNap();
+            }
+
             ctx[CpuRegister.Rax] = 0;
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
