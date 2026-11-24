@@ -1398,8 +1398,7 @@ public static class AudioOut2Exports
             sincePush,
             backend.QueuedMilliseconds,
             context.GrainSamples,
-            context.Frequency,
-            context.CushionMilliseconds);
+            context.Frequency);
     }
 
     // A nap of at most PreciseNapLimitMicroseconds by a thread that pushed within the last ActiveProducerMilliseconds, while
