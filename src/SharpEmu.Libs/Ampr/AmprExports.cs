@@ -257,45 +257,6 @@ public static partial class AmprExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
-    // The AMM command buffer lives in GPU-mapped memory the guest manages itself,
-    // so unlike the plain constructor there is nothing for the host to initialize
-    // or track: the guest writes the AMM commands through the mapped memory and
-    // submits them by address. Null is refused with EINVAL, everything else
-    // returns success and leaves the buffer untouched (observed behaviour, see
-    // AnyPS5's libSceAmpr port). The record/submit side of the AMM family
-    // (Map, Unmap, Remap, protect, PRT and the Amm submit/wait pair) is still
-    // TODO; the guest resolves its commands itself through the flat guest
-    // address space, so the missing pieces are bookkeeping rather than a boot
-    // blocker for the titles seen so far.
-    [SysAbiExport(
-        Nid = "EDq5bqCqYpA",
-        ExportName = "sceAmprAmmCommandBufferConstructor",
-        Target = Generation.Gen5,
-        LibraryName = "libSceAmpr")]
-    public static int AmmCommandBufferConstructor(CpuContext ctx)
-    {
-        var commandBuffer = ctx[CpuRegister.Rdi];
-        if (commandBuffer == 0)
-        {
-            return SetAmprResult(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
-        }
-
-        TraceAmpr(ctx, "amm_ctor", commandBuffer, 0, 0);
-        return SetAmprResult(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
-    }
-
-    [SysAbiExport(
-        Nid = "pvUFDOHilnE",
-        ExportName = "sceAmprAmmCommandBufferDestructor",
-        Target = Generation.Gen5,
-        LibraryName = "libSceAmpr")]
-    public static int AmmCommandBufferDestructor(CpuContext ctx)
-    {
-        var commandBuffer = ctx[CpuRegister.Rdi];
-        TraceAmpr(ctx, "amm_dtor", commandBuffer, 0, 0);
-        return SetAmprResult(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
-    }
-
     [SysAbiExport(
         Nid = "N-FSPA4S3nI",
         ExportName = "sceAmprCommandBufferSetBuffer",
