@@ -483,6 +483,7 @@ internal sealed partial class ShaderProgramCache
                 FrontendDomain = external?.CacheDomain ?? 0,
                 FrontendUserData = external is null ? [] : source.Registered.FrontendUserData.ToArray(),
                 FrontendContinuationOffset = external is null ? 0 : source.ContinuationAddressOffset,
+                FrontendEntryCodeSize = external is not null && source.Registered.IsFused ? source.Registered.CodeSizeBytes : 0,
             };
         }
 
@@ -531,6 +532,11 @@ internal sealed partial class ShaderProgramCache
         {
             if (strictShaders)
             {
+                if (_speculative)
+                {
+                    throw new GpuCommands.SerialResolveRequiredException("speculative strict rejection");
+                }
+
                 throw SubmissionScheduler.Fatal(exception.Message);
             }
 
@@ -547,6 +553,17 @@ internal sealed partial class ShaderProgramCache
 
     [ThreadStatic]
     private static ProgramSourceEntry? _lastEntry;
+
+    // A speculative resolve (a compute ticket worker) never raises a fatal, compiles or links: where the command thread would,
+    // it asks for the serial resolve instead, so a ticket made from bytes the guest is still writing only costs its refusal.
+    [ThreadStatic]
+    private static bool _speculative;
+
+    internal static bool SpeculativeResolve
+    {
+        get => _speculative;
+        set => _speculative = value;
+    }
 
     internal static ProgramSourceEntry? LastEntry => _lastEntry;
 
@@ -569,6 +586,11 @@ internal sealed partial class ShaderProgramCache
         {
             if (strictShaders)
             {
+                if (_speculative)
+                {
+                    throw new GpuCommands.SerialResolveRequiredException("speculative strict rejection");
+                }
+
                 throw SubmissionScheduler.Fatal(exception.Message);
             }
 
@@ -676,6 +698,11 @@ internal sealed partial class ShaderProgramCache
         };
         if (entry.Plan.DeviceRecordCounts is { } counts && !counts.SupportsDescriptors(entry.Plan, inputs))
         {
+            if (_speculative)
+            {
+                throw new GpuCommands.SerialResolveRequiredException("speculative device record fallback");
+            }
+
             var handle = GetOrCompileCore(source, options.WithoutDeviceRecordCounts(), ref pushDataCursor, out stage, deferLinking);
             if (runtimeFallback is null)
             {
@@ -686,6 +713,11 @@ internal sealed partial class ShaderProgramCache
         }
 
         var hasShaderCalls = entry.HasShaderCalls;
+        if (hasShaderCalls && _speculative)
+        {
+            throw new GpuCommands.SerialResolveRequiredException("speculative shader calls");
+        }
+
         if (hasShaderCalls && !_compiler.LinkedShaderCallsSupported)
             throw new ShaderProgramRejectedException(
                 $"The backend does not support linked shader calls: backend={_compiler.BackendName} stage={source.Label} hash=0x{source.Hash:X16}.");
@@ -757,6 +789,11 @@ internal sealed partial class ShaderProgramCache
                     System.Diagnostics.Stopwatch.GetTimestamp() - started, materialized ? snapshot : null);
                 if (!materialized)
                 {
+                    if (_speculative)
+                    {
+                        throw new GpuCommands.SerialResolveRequiredException("speculative materialization failure");
+                    }
+
                     var message = $"The shader resources could not be materialized: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} reason={materializationFailure}.";
                     if (materializationFailure is ResourceMaterializationFailure.IncompatibleImageCandidates or ResourceMaterializationFailure.ImageCapacityExceeded
                         or ResourceMaterializationFailure.OversizedImageTable)
@@ -971,6 +1008,8 @@ internal sealed partial class ShaderProgramCache
             // A ready program serves while this one is prepared; it is never translated again for another specialization.
             if (runtimeFallback is not null)
                 throw new ShaderProgramPendingException();
+            if (_speculative)
+                throw new GpuCommands.SerialResolveRequiredException("speculative permutation compile");
             try
             {
                 permutation = MakePermutation(source, options, entry, specialization, pushDataCursor, key, sourceWasCached, snapshot,
@@ -2406,16 +2445,65 @@ internal sealed partial class ShaderProgramCache
         }
     }
 
+    private static bool TryDecodeGraphicsPrewarm(ShaderCodeCapture code, ShaderStage stage, Func<ulong, IShaderFrontend?>? frontendOf,
+        out Gen5ShaderProgram program, out IShaderFrontend? frontend, out string error)
+    {
+        frontend = null;
+        if (code.FrontendDomain == 0)
+        {
+            return Gen5ShaderTranslator.TryDecodeProgram(code.CreateContext(), code.Address, out program, out error);
+        }
+
+        frontend = frontendOf?.Invoke(code.FrontendDomain);
+        if (frontend is null)
+        {
+            program = default!;
+            error = $"The shader frontend 0x{code.FrontendDomain:X16} is not registered.";
+            return false;
+        }
+
+        var continuation = code.FrontendContinuationOffset == 0 ? 0 : unchecked(code.Address + code.FrontendContinuationOffset);
+        var entrySize = code.FrontendEntryCodeSize;
+        if (entrySize == 0)
+        {
+            entrySize = code.CodeSize;
+            if (continuation != 0)
+            {
+                foreach (var range in code.Ranges)
+                {
+                    if (code.Address >= range.Address && code.Address - range.Address < (ulong)range.Bytes.Length)
+                    {
+                        entrySize = Math.Min(entrySize, (uint)((ulong)range.Bytes.Length - (code.Address - range.Address)));
+                        break;
+                    }
+                }
+
+                if (continuation > code.Address)
+                {
+                    entrySize = (uint)Math.Min(entrySize, continuation - code.Address);
+                }
+            }
+        }
+
+        var shader = new RegisteredShader(code.Address, 0, entrySize, 0, 0, 0, 0, continuation, checked(code.CodeSize - entrySize))
+        {
+            Frontend = frontend,
+            FrontendUserData = code.FrontendUserData,
+        };
+        return frontend.TryDecode(code.CreateContext(), shader, stage, out program, out error);
+    }
+
     // A recorded pixel program translated again as its session translated it (CreateEntry, then the specialized
     // translation through the translation cache); the caller compiles its pixel library.
     internal static bool TryCompilePixelPrewarm(PixelPrewarmRecord record, ShaderCodeCapture code, IGuestGpuBackend compiler,
-        IShaderPipelineHost host, out IGuestCompiledShader? compiled, out BindingLayout? layout, out string error)
+        IShaderPipelineHost host, out IGuestCompiledShader? compiled, out BindingLayout? layout, out string error,
+        Func<ulong, IShaderFrontend?>? frontendOf = null)
     {
         compiled = null;
         layout = null;
         try
         {
-            if (!Gen5ShaderTranslator.TryDecodeProgram(code.CreateContext(), code.Address, out var program, out error))
+            if (!TryDecodeGraphicsPrewarm(code, ShaderStage.Pixel, frontendOf, out var program, out var frontend, out error))
             {
                 return false;
             }
@@ -2430,11 +2518,15 @@ internal sealed partial class ShaderProgramCache
                 waveSize: 32, bindlessNullDescriptors: BindlessNullDescriptors, bindlessHeap: host.SupportsBindlessHeap,
                 stableImageLimits: host.GraphicsImageDescriptorLimits,
                 deviceRecordCounts: DeviceRecordCountPlan.Enabled && record.DeviceRecordCounts,
+                normalizeBufferDescriptor: frontend?.NormalizeBufferDescriptor,
+                normalizeImageDescriptor: frontend?.NormalizeImageDescriptor,
+                imageNormalizationVersion: frontend?.ImageNormalizationVersion,
                 preferHeapRecords: record.PreferHeapRecords);
             // A record's storage image selects as the session keeps them (RuntimeImageSwizzle.Canonical).
             var specialization = RuntimeImageSwizzle.Canonical(plan, record.Specialization);
             var resources = ResourceMaterializer.ApplyTo(plan, specialization);
             layout = AllocateLayout(program, plan, resources, record.UserDataBase, record.UserDataCount, record.PushDataCursor, false,
+                usesBufferLengths: frontend?.RequiresExplicitBufferLengths ?? false,
                 tableBlocks: UsesTableBlocks(host, ShaderStage.Pixel),
                 usesObjectId: record.Outputs.Any(static output => output.ObjectId != Gen5PixelObjectId.None));
             var options = new StageCompileOptions
@@ -2465,14 +2557,15 @@ internal sealed partial class ShaderProgramCache
     // its pre-rasterization libraries.
     internal static bool TryCompileVertexPrewarm(VertexPrewarmRecord record, ShaderCodeCapture code, IGuestGpuBackend compiler,
         IShaderPipelineHost host, out IGuestCompiledShader? compiled, out BindingLayout? layout, out MeshTaskLaunchInfo? task,
-        out string error)
+        out string error, Func<ulong, IShaderFrontend?>? frontendOf = null)
     {
         compiled = null;
         layout = null;
         task = null;
         try
         {
-            if (!Gen5ShaderTranslator.TryDecodeProgram(code.CreateContext(), code.Address, out var program, out error))
+            var stage = record.Mesh ? ShaderStage.Mesh : ShaderStage.Vertex;
+            if (!TryDecodeGraphicsPrewarm(code, stage, frontendOf, out var program, out var frontend, out error))
             {
                 return false;
             }
@@ -2483,7 +2576,6 @@ internal sealed partial class ShaderProgramCache
                 return false;
             }
 
-            var stage = record.Mesh ? ShaderStage.Mesh : ShaderStage.Vertex;
             var options = new StageCompileOptions
             {
                 VertexInfo = record.VertexInfo,
@@ -2505,12 +2597,16 @@ internal sealed partial class ShaderProgramCache
                 bindlessNullDescriptors: BindlessNullDescriptors, bindlessHeap: host.SupportsBindlessHeap,
                 stableImageLimits: host.GraphicsImageDescriptorLimits,
                 deviceRecordCounts: DeviceRecordCountPlan.Enabled && record.DeviceRecordCounts,
+                normalizeBufferDescriptor: frontend?.NormalizeBufferDescriptor,
+                normalizeImageDescriptor: frontend?.NormalizeImageDescriptor,
+                imageNormalizationVersion: frontend?.ImageNormalizationVersion,
                 preferHeapRecords: record.PreferHeapRecords);
             // A record's storage image selects as the session keeps them (RuntimeImageSwizzle.Canonical).
             var specialization = RuntimeImageSwizzle.Canonical(plan, record.Specialization);
             var resources = ResourceMaterializer.ApplyTo(plan, specialization);
             layout = AllocateLayout(program, plan, resources, record.UserDataBase, record.UserDataCount, record.PushDataCursor, false,
-                usesMeshDrawParameters: record.Mesh, pushDataAtTop: PushDataAtTop(stage), tableBlocks: UsesTableBlocks(host, stage));
+                usesMeshDrawParameters: record.Mesh, pushDataAtTop: PushDataAtTop(stage), tableBlocks: UsesTableBlocks(host, stage),
+                usesBufferLengths: frontend?.RequiresExplicitBufferLengths ?? false);
             var request = record.Mesh
                 ? BuildMeshRequest(host, plan, resources, layout, options)
                 : BuildVertexRequest(host, plan, resources, layout, options, vertexInputs);
@@ -2672,6 +2768,8 @@ internal sealed partial class ShaderProgramCache
             InstanceOffsetScalarRegister = entry.EmbeddedFetch?.InstanceOffsetScalarRegister ?? ShaderProgramInfo.NoScalarRegister,
             UsesDeviceAddresses = info.UsesDeviceAddresses,
             DeviceAddressReadsBounded = entry.Plan.DeviceAddressReadsBounded,
+            DeviceAddressReadsWindowed = entry.Plan.DeviceAddressReadsWindowed,
+            DeviceAddressWindowBytes = entry.Plan.DeviceAddressWindowBytes,
             ConstantStoreValue = FindConstantStoreValue(entry.Program),
             HasBitwiseExclusiveOr = entry.HasBitwiseExclusiveOr,
             ConstantFill = entry.ConstantFill,

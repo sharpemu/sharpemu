@@ -47,7 +47,7 @@ Shared card, badge, hint and cover surfaces.
     <Setter Property="BorderBrush" Value="{StaticResource InfoRimBrush}" />
   </Style>
 
-  <!-- Gamepad shoulder-button keycap (L1/R1): shown only while a controller is connected. -->
+  <!-- Gamepad shoulder-button keycap: shown only while a controller is connected. -->
   <Style Selector="Border.padHint">
     <Setter Property="Background" Value="{StaticResource FieldBrush}" />
     <Setter Property="BorderBrush" Value="{StaticResource CardBorderBrush}" />

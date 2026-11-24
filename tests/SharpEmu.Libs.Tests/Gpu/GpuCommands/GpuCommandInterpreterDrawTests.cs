@@ -328,6 +328,49 @@ public sealed class GpuCommandInterpreterDrawTests
     }
 
     [Fact]
+    public void IndexedRunKeepsArgumentOrderAndStopsBeforeAnotherPageOrRegisterWrite()
+    {
+        var runner = new StreamRunner();
+        runner.Host.ResolvesIndirectDrawOnGpu = true;
+        runner.Host.IndexedRuns = [];
+        var address = (Arguments + 4095) & ~4095ul;
+        runner.Host.WriteWords(address + 0x1000, new uint[] { 3, 1, 0, 0, 0 });
+
+        runner.Run(
+            SetBase(address, dispatch: false),
+            StreamRunner.Packet(PacketOpcode.SetUserConfigRegister, UserConfigRegisterOffset.VgtPrimitiveType, 4),
+            StreamRunner.Packet(PacketOpcode.IndexBase, StreamRunner.Low(Indices), StreamRunner.High(Indices)),
+            StreamRunner.Packet(PacketOpcode.IndexBufferSize, 40),
+            StreamRunner.Packet(PacketOpcode.DrawIndexIndirect, 0, 0, 0, 2),
+            StreamRunner.Packet(PacketOpcode.DrawIndexIndirect, 64, 0, 0, 2),
+            StreamRunner.Packet(PacketOpcode.DrawIndexIndirect, 32, 0, 0, 2),
+            StreamRunner.Packet(PacketOpcode.DrawIndexIndirect, 32, 0, 0, 2),
+            StreamRunner.Packet(PacketOpcode.DrawIndexIndirect, 0xFF0, 0, 0, 2),
+            StreamRunner.Packet(PacketOpcode.DrawIndexIndirect, 0x1000, ShaderRegisterOffset.SpiShaderUserDataGs0, 0, 2));
+
+        Assert.Equal(new uint[] { 0, 64, 32, 32 }, Assert.Single(runner.Host.IndexedRuns));
+        Assert.Equal(new ulong[] { address + 0xFF0, 0 }, runner.Host.IndexedDraws.Select(draw => draw.IndirectArgumentsAddress));
+        Assert.DoesNotContain(runner.Host.GuestReads, read => read >= address && read < address + 0xFF0);
+    }
+
+    [Fact]
+    public void RefusedIndexedRunLeavesEachIndirectDrawForTheNormalHandler()
+    {
+        var runner = new StreamRunner();
+        runner.Host.ResolvesIndirectDrawOnGpu = true;
+        runner.Run(
+            SetBase(Arguments, dispatch: false),
+            StreamRunner.Packet(PacketOpcode.SetUserConfigRegister, UserConfigRegisterOffset.VgtPrimitiveType, 4),
+            StreamRunner.Packet(PacketOpcode.IndexBase, StreamRunner.Low(Indices), StreamRunner.High(Indices)),
+            StreamRunner.Packet(PacketOpcode.IndexBufferSize, 40),
+            StreamRunner.Packet(PacketOpcode.DrawIndexIndirect, 16, 0, 0, 2),
+            StreamRunner.Packet(PacketOpcode.DrawIndexIndirect, 48, 0, 0, 2));
+
+        Assert.Equal(new ulong[] { Arguments + 16, Arguments + 48 }, runner.Host.IndexedDraws.Select(draw => draw.IndirectArgumentsAddress));
+        Assert.Equal(runner.Host.IndexedDraws[0].PacketAddress + 20, runner.Host.IndexedDraws[1].PacketAddress);
+    }
+
+    [Fact]
     public void UnsizedIndexedIndirectDraws_LearnTheIndexRangeBeforeUsingTheGpu()
     {
         var runner = new StreamRunner();

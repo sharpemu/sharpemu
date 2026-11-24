@@ -683,8 +683,11 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             SetNativeSubgroupCapabilities(subgroup.SubgroupSize, subgroup.SupportedStages);
             SetMipStatisticsCapabilities(true, subgroup.SupportedOperations, subgroup.SupportedStages);
+            _fixedComputeSubgroup32 = subgroup.SubgroupSize == RdnaSubgroupSize &&
+                subgroupSizeControl.MinSubgroupSize == RdnaSubgroupSize && subgroupSizeControl.MaxSubgroupSize == RdnaSubgroupSize &&
+                (subgroup.SupportedStages & ShaderStageFlags.ComputeBit) != 0;
             _canRequireComputeSubgroup32 =
-                subgroup.SubgroupSize != RdnaSubgroupSize &&
+                !_fixedComputeSubgroup32 &&
                 subgroupSizeControl.MinSubgroupSize <= RdnaSubgroupSize &&
                 subgroupSizeControl.MaxSubgroupSize >= RdnaSubgroupSize &&
                 (subgroupSizeControl.RequiredSubgroupSizeStages & ShaderStageFlags.ComputeBit) != 0;

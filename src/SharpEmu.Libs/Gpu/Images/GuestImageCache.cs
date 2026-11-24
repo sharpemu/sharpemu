@@ -324,7 +324,10 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
                         : InsertDimensionTwin(replacement, resolved)
                     : GrowImage(replacement, result);
             }
-            else if (request.View.Type == ImageViewType.Type3D && resolved.Backing.ImageType != ImageType.Type3D)
+            // A volume view needs a 3D image, and only a volume request makes one: an image made from any other request
+            // would not be 3D either, so each lookup would make another image that never serves the view.
+            else if (request.View.Type == ImageViewType.Type3D && resolved.Backing.ImageType != ImageType.Type3D &&
+                     request.Description.IsVolume)
             {
                 result = ResourceSlotIdentifier.Invalid;
                 viewMip = -1;
@@ -537,6 +540,11 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         switch (request.Role)
         {
             case ImageRole.Texture:
+                if (hasData && SampleClearsDepth(image))
+                {
+                    ClearDepthBeforeSample(image);
+                }
+
                 break;
             case ImageRole.StorageImage:
                 if (hasData)

@@ -81,6 +81,32 @@ public sealed class HalfConversionDeviceTests(HeadlessVulkanFixture fixture) : I
         Assert.Equal("x 48A00005, y 00091234", $"x {actual[0]:X8}, y {actual[1]:X8}");
     }
 
+    // V_CVT_PKRTZ_F16_F32 rounds toward zero, so a finite value beyond the half range packs to 65504 (0x7BFF) with its sign and
+    // never to infinity; infinity and NaN pass through. An infinity in packed lighting data never decays: a lighting pass that
+    // feeds back into itself spreads it frame after frame.
+    [Fact]
+    public void ARoundTowardZeroPackSaturatesOnlyFiniteOverflow()
+    {
+        var actual = Run(3,
+            MoveVector(0, 40, BitConverter.SingleToUInt32Bits(70000f)),
+            MoveVector(0, 41, BitConverter.SingleToUInt32Bits(-1e30f)),
+            Vop2(0, "VCvtPkrtzF16F32", 44, Gen5Operand.Vector(40), Gen5Operand.Vector(41)),
+            Store(44, 0),
+            MoveVector(0, 42, 0x7F800000),
+            MoveVector(0, 43, BitConverter.SingleToUInt32Bits(65519f)),
+            Vop2(0, "VCvtPkrtzF16F32", 45, Gen5Operand.Vector(42), Gen5Operand.Vector(43)),
+            Store(45, 1),
+            MoveVector(0, 46, 0x7FC00000),
+            MoveVector(0, 47, BitConverter.SingleToUInt32Bits(-2.5f)),
+            Vop2(0, "VCvtPkrtzF16F32", 48, Gen5Operand.Vector(46), Gen5Operand.Vector(47)),
+            Store(48, 2));
+        if (actual is null) return;
+        var nan = actual[2] & 0xFFFF;
+        Assert.Equal(
+            "FBFF7BFF 7BFF7C00 C100 nan True",
+            $"{actual[0]:X8} {actual[1]:X8} {actual[2] >> 16:X4} nan {(nan & 0x7C00) == 0x7C00 && (nan & 0x3FF) != 0}");
+    }
+
     private uint[]? Run(int results, params Gen5ShaderInstruction[] body)
     {
         var vulkan = fixture.Vulkan;

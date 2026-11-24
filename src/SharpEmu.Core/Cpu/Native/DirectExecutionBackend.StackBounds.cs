@@ -7,7 +7,10 @@ namespace SharpEmu.Core.Cpu.Native;
 
 public sealed partial class DirectExecutionBackend
 {
-    private const int HostStackStateBytes = 3 * sizeof(ulong);
+    // The host's stack pointer, its two stack bounds, then its MXCSR and x87 control word.
+    private const int HostStackStateBytes = 4 * sizeof(ulong);
+    private const byte HostMxcsrOffset = 3 * sizeof(ulong);
+    private const byte HostFpuControlWordOffset = HostMxcsrOffset + sizeof(uint);
 
     internal static unsafe bool TryGetGuestStackBounds(ulong stackPointer, out ulong bottom, out ulong top)
     {

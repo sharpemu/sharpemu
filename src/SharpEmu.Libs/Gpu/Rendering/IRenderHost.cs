@@ -202,7 +202,9 @@ public interface IRenderHost
     {
     }
 
-    bool TryReplayDispatch(in PipelineHandle pipeline, in ShaderStageResources stage) => false;
+    // replaceTable: the stage differs from the sealed dispatch only in its flattened resource table, which the replay
+    // uploads again and binds by pushing that one descriptor.
+    bool TryReplayDispatch(in PipelineHandle pipeline, in ShaderStageResources stage, bool replaceTable) => false;
 
     void RebindBuffers(IPreparedBindings prepared)
     {
@@ -237,6 +239,8 @@ public interface IRenderHost
     void DrawIndexed(uint indexCount, uint instanceCount, uint firstIndex, int vertexOffset, uint firstInstance);
 
     // One indexed draw whose counts the GPU reads from the buffer (VkDrawIndexedIndirectCommand layout).
+    bool CanShareIndexedBindings(IPreparedBindings stage, ReadOnlySpan<ColorTargetState> colors, in DepthAttachmentState depth) => false;
+
     void DrawIndexedIndirect(BufferBinding arguments) =>
         throw new NotSupportedException("The render host does not draw from indirect arguments.");
 

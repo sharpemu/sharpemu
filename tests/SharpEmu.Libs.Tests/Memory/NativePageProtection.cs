@@ -35,6 +35,13 @@ internal static unsafe class NativePageProtection
         return 0;
     }
 
+    // Fails with the page and the step named, so a failure says which check it was.
+    public static void Expect(uint expected, ulong address, string step)
+    {
+        var actual = Query(address);
+        Assert.True(actual == expected, $"{step}: page 0x{address:X} has protection 0x{actual:X2}, expected 0x{expected:X2}.");
+    }
+
     private static uint ConvertProtection(bool readable, bool writable, bool executable) =>
         (readable, writable, executable) switch
         {

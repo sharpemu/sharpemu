@@ -17,7 +17,6 @@ public sealed partial class GuestImageCache
         PublishImagesUnderRead(tiledAddress, tiledSize);
         InvalidateMemoryFromGpu(linearAddress, linearSize);
         var (source, sourceOffset) = _bufferCache.ObtainBuffer(tiledAddress, tiledSize, isWritten: false, isTexelBuffer: true);
-        _bufferCache.NoteCopyWrite();
         var (target, targetOffset) = _bufferCache.ObtainBuffer(linearAddress, linearSize, isWritten: true, isTexelBuffer: true);
         _tiler.Detile(source.Handle, sourceOffset, tiledSize, target.Handle, targetOffset, linearSize, transfers);
         return true;

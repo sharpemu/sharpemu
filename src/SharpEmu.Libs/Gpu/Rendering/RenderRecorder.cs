@@ -36,6 +36,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
     private static readonly ThreadCounter _drawReplayMisses = new();
     private static readonly bool DrawReplayEnabled = Environment.GetEnvironmentVariable("SHARPEMU_DRAW_REPLAY") != "0";
     private readonly Dictionary<ShaderProgramInfo, bool> _replayablePrograms = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<ShaderProgramInfo, bool> _tableReplayablePrograms = new(ReferenceEqualityComparer.Instance);
     private bool _replayValid;
     private long _replaySequence;
     private ShaderStageResources _replayVertex;
@@ -332,6 +333,30 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
 
     private void RecordDraw(ResolvedDraw record)
     {
+        var offsets = record.IndirectOffsets;
+        RecordDraw(record, out var issuedRun);
+        if (issuedRun || offsets is null) return;
+
+        var first = record.Emission;
+        try
+        {
+            record.IndirectOffsets = null;
+            foreach (var offset in offsets.AsSpan(1))
+            {
+                record.Emission = first with { IndirectArgumentsAddress = first.IndirectArgumentsAddress + offset };
+                RecordDraw(record, out _);
+            }
+        }
+        finally
+        {
+            record.IndirectOffsets = offsets;
+            record.Emission = first;
+        }
+    }
+
+    private void RecordDraw(ResolvedDraw record, out bool issuedRun)
+    {
+        issuedRun = false;
         if (record.Announce)
         {
             if (!_host.IsRecording)
@@ -389,7 +414,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
                     NoteFoundTargets(ref state);
                 }
 
-                RecordDrawCommands(record, ref state, inPlace);
+                RecordDrawCommands(record, ref state, inPlace, out issuedRun);
                 break;
             }
         }
@@ -504,8 +529,9 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         }
     }
 
-    private void RecordDrawCommands(ResolvedDraw record, ref DrawState state, bool inPlace)
+    private void RecordDrawCommands(ResolvedDraw record, ref DrawState state, bool inPlace, out bool issuedRun)
     {
+        issuedRun = false;
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawResourcePreparation);
         var submitId = record.SubmitId;
         ref readonly var draw = ref record.Draw;
@@ -657,9 +683,11 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
 
         var vertexBuffers = meshInput is null ? AcquireVertexBuffers(vertexInput) : default;
         var indexBuffer = meshInput is null ? AcquireIndexBuffer(in indexSource) : default;
+        var indirectBytes = record.IndirectOffsets is not null ? record.IndirectBytes :
+            emission.Indexed ? RenderExecutor.IndexedIndirectArgumentsSize : RenderExecutor.AutoIndirectArgumentsSize;
         var indirectArguments = meshInput is null && emission.IndirectArgumentsAddress != 0
             ? _host.ObtainBuffer(emission.IndirectArgumentsAddress,
-                emission.Indexed ? RenderExecutor.IndexedIndirectArgumentsSize : RenderExecutor.AutoIndirectArgumentsSize, isWritten: false)
+                indirectBytes, isWritten: false)
             : default;
         RenderExecutor.DropUnwrittenColorTargets(context, ref state, pixelProgram);
         var reusedAttachments = inPlace && TryRestoreAttachments(ref state);
@@ -700,7 +728,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
                 if (emission.IndirectArgumentsAddress != 0)
                 {
                     indirectArguments = _host.ObtainBuffer(emission.IndirectArgumentsAddress,
-                        emission.Indexed ? RenderExecutor.IndexedIndirectArgumentsSize : RenderExecutor.AutoIndirectArgumentsSize, isWritten: false);
+                        indirectBytes, isWritten: false);
                 }
             }
         }
@@ -770,7 +798,18 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         }
         else if (emission.IndirectArgumentsAddress != 0 && emission.Indexed)
         {
-            _host.DrawIndexedIndirect(indirectArguments);
+            var targets = DrawState.BoundColors(ref state);
+            issuedRun = imageSnapshot == 0 && record.IndirectOffsets is not null && _host.CanShareIndexedBindings(vertexBindings, targets, in state.Depth) &&
+                (pixelBindings is null || _host.CanShareIndexedBindings(pixelBindings, targets, in state.Depth));
+            if (issuedRun)
+            {
+                foreach (var offset in record.IndirectOffsets!)
+                    _host.DrawIndexedIndirect(indirectArguments with { Offset = indirectArguments.Offset + offset });
+            }
+            else
+            {
+                _host.DrawIndexedIndirect(indirectArguments);
+            }
         }
         else if (emission.IndirectArgumentsAddress != 0)
         {
@@ -826,21 +865,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
             return known;
         }
 
-        var layout = program.Bindings;
-        var reason = layout is null ? "no_layout"
-            : layout.UsesBindlessHeap ? "bindless"
-            : program.UsesDeviceAddresses ? "device_addresses"
-            : program.CallRecordCallees.Count != 0 || layout.CallTargetCount != 0 || layout.CallArgumentCount != 0 ? "calls"
-            : layout.UsesTessellationData ? "tessellation"
-            : layout.UsesObjectId ? "object_id"
-            : program.Frontend is { RequiresOrderedImagePreparation: true } ? "frontend"
-            : layout.Find(ShaderCompiler.Resources.DescriptorBindingKind.ShaderData) is not null ? "shader_data"
-            : layout.Find(ShaderCompiler.Resources.DescriptorBindingKind.FlattenedResourceTable) is not null ? "flattened_table"
-            : layout.Find(ShaderCompiler.Resources.DescriptorBindingKind.CallRecords) is not null ||
-              layout.Find(ShaderCompiler.Resources.DescriptorBindingKind.CallMarks) is not null ? "call_records"
-            : layout.Find(ShaderCompiler.Resources.DescriptorBindingKind.GlobalDataShare) is not null ? "gds"
-            : layout.Find(ShaderCompiler.Resources.DescriptorBindingKind.DeviceAddressFallback) is not null ? "device_address_fallback"
-            : null;
+        var reason = UnreplayableReason(program);
         var replayable = reason is null;
         if (!replayable)
         {
@@ -849,6 +874,73 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
 
         _replayablePrograms[program] = replayable;
         return replayable;
+    }
+
+    // A compute program whose one replay refusal is its flattened table seals a replay basis too: a dispatch whose table
+    // alone differs replays with the table uploaded again and only that descriptor pushed.
+    private bool IsDispatchReplayable(ShaderProgramInfo? program)
+    {
+        if (IsReplayable(program))
+        {
+            return true;
+        }
+
+        if (program is null)
+        {
+            return false;
+        }
+
+        if (_tableReplayablePrograms.TryGetValue(program, out var known))
+        {
+            return known;
+        }
+
+        var replayable = program.Bindings?.Find(ShaderCompiler.Resources.DescriptorBindingKind.FlattenedResourceTable) is not null &&
+            UnreplayableReason(program, ignoreFlattenedTable: true) is null;
+        _tableReplayablePrograms[program] = replayable;
+        return replayable;
+    }
+
+    // Why a program cannot seal a replay basis, or null.
+    private static string? UnreplayableReason(ShaderProgramInfo program, bool ignoreFlattenedTable = false)
+    {
+        var layout = program.Bindings;
+        return layout is null ? "no_layout"
+            : layout.UsesBindlessHeap ? "bindless"
+            : program.UsesDeviceAddresses ? "device_addresses"
+            : program.CallRecordCallees.Count != 0 || layout.CallTargetCount != 0 || layout.CallArgumentCount != 0 ? "calls"
+            : layout.UsesTessellationData ? "tessellation"
+            : layout.UsesObjectId ? "object_id"
+            : program.Frontend is { RequiresOrderedImagePreparation: true } ? "frontend"
+            : layout.Find(ShaderCompiler.Resources.DescriptorBindingKind.ShaderData) is not null ? "shader_data"
+            : !ignoreFlattenedTable && layout.Find(ShaderCompiler.Resources.DescriptorBindingKind.FlattenedResourceTable) is not null ? "flattened_table"
+            : layout.Find(ShaderCompiler.Resources.DescriptorBindingKind.CallRecords) is not null ||
+              layout.Find(ShaderCompiler.Resources.DescriptorBindingKind.CallMarks) is not null ? "call_records"
+            : layout.Find(ShaderCompiler.Resources.DescriptorBindingKind.GlobalDataShare) is not null ? "gds"
+            : layout.Find(ShaderCompiler.Resources.DescriptorBindingKind.DeviceAddressFallback) is not null ? "device_address_fallback"
+            : null;
+    }
+
+    // StageInputMismatch's checks after the flattened table, for a stage whose table differs.
+    private static int StageInputMismatchAfterTable(in ShaderStageResources current, in ShaderStageResources kept)
+    {
+        var resources = current.Resources;
+        var keptResources = kept.Resources;
+        if (!ReferenceEquals(resources.DeviceAddressRanges, keptResources.DeviceAddressRanges) &&
+            !resources.DeviceAddressRanges.AsSpan().SequenceEqual(keptResources.DeviceAddressRanges))
+        {
+            return 6;
+        }
+
+        if (resources.Heaps.Length != 0 || keptResources.Heaps.Length != 0)
+        {
+            return 7;
+        }
+
+        return ReferenceEquals(resources.MipStatistics, keptResources.MipStatistics) ||
+            (resources.MipStatistics ?? []).AsSpan().SequenceEqual(keptResources.MipStatistics ?? [])
+            ? -1
+            : 8;
     }
 
     private static bool SameWordSets(uint[][] current, uint[][] kept)
@@ -978,7 +1070,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
     private bool TryReplayDraw(ResolvedDraw record, ref DrawState state, bool inPlace, VertexInputInfo vertexInput, PixelInputInfo pixelInput,
         in IndexSource indexSource, in DrawEmission emission, in DrawCall draw)
     {
-        if (!DrawReplayEnabled || !_replayValid || !inPlace || record.Kind != ResolvedDrawKind.Draw || record.WritesMemory ||
+        if (record.IndirectOffsets is not null || !DrawReplayEnabled || !_replayValid || !inPlace || record.Kind != ResolvedDrawKind.Draw || record.WritesMemory ||
             record.WriteStages != PipelineStageFlags.None || record.IndexedTrace is not null || MeshDrawTrace.Active)
         {
             return false;

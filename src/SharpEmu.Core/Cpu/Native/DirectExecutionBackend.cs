@@ -2231,7 +2231,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		frame[14] = target.R13;
 		frame[15] = target.R14;
 		frame[16] = target.R15;
-		frame[17] = target.Mxcsr == 0 ? 0x1F80u : target.Mxcsr;
+		frame[17] = target.Mxcsr == 0 ? CpuContext.InitialMxcsr : target.Mxcsr;
 		frame[18] = target.FpuControlWord == 0 ? 0x037Fu : target.FpuControlWord;
 		frame[19] = target.RestoreFullFpuState ? 1u : 0u;
 		// The TEB stores NT_TIB.StackBase (the high address) at +0x08 and
@@ -2765,6 +2765,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		EmitByte(code, ref offset, 0x20);
 		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xC2); // mov r10,rax
 		EmitHostStackBounds(code, ref offset, save: false);
+		EmitHostFloatingPointControlRestore(code, ref offset);
 		EmitHostNonvolatileXmmRestore(code, ref offset);
 		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5F);
 		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5E);
@@ -4849,7 +4850,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			FsBase = callerContext.FsBase != 0 ? callerContext.FsBase : (continuation.FsBase != 0 ? continuation.FsBase : fallbackTlsBase),
 			GsBase = callerContext.GsBase != 0 ? callerContext.GsBase : (continuation.GsBase != 0 ? continuation.GsBase : fallbackTlsBase),
 			FpuControlWord = continuation.FpuControlWord == 0 ? (ushort)0x037F : continuation.FpuControlWord,
-			Mxcsr = continuation.Mxcsr == 0 ? 0x1F80u : continuation.Mxcsr,
+			Mxcsr = continuation.Mxcsr == 0 ? CpuContext.InitialMxcsr : continuation.Mxcsr,
 		};
 
 		context[CpuRegister.Rax] = continuation.Rax;
@@ -6296,7 +6297,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		context.FpuControlWord = continuation.FpuControlWord == 0
 			? (ushort)0x037F
 			: continuation.FpuControlWord;
-		context.Mxcsr = continuation.Mxcsr == 0 ? 0x1F80u : continuation.Mxcsr;
+		context.Mxcsr = continuation.Mxcsr == 0 ? CpuContext.InitialMxcsr : continuation.Mxcsr;
 	}
 
 	private unsafe GuestNativeCallExitReason ExecuteGuestThreadEntry(CpuContext context, ulong entryPoint, string name, out string? reason)
@@ -6364,6 +6365,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr2[offset++] = 73;
 			ptr2[offset++] = 137;
 			ptr2[offset++] = 34;
+			EmitFloatingPointControlSwitch(ptr2, ref offset, context.Mxcsr, context.FpuControlWord);
 			EmitGuestStackBounds(ptr2, ref offset, context[CpuRegister.Rsp]);
 			ptr2[offset++] = 72;
 			ptr2[offset++] = 184;
@@ -6427,6 +6429,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr2[offset++] = 139;
 			ptr2[offset++] = 34;
 			EmitHostStackBounds(ptr2, ref offset, save: false);
+			EmitHostFloatingPointControlRestore(ptr2, ref offset);
 			EmitHostNonvolatileXmmRestore(ptr2, ref offset);
 			ptr2[offset++] = 65;
 			ptr2[offset++] = 95;
@@ -6576,19 +6579,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			emitter.Emit(0x41); emitter.Emit(0x56); // push r14
 			emitter.Emit(0x41); emitter.Emit(0x57); // push r15
 			EmitHostNonvolatileXmmSave(ptr2, ref emitter.Offset);
+			emitter.EmitMovR64Immediate(0x49, 0xBA, hostRspSlot); // mov r10, hostRspSlot
+			emitter.Emit(0x49); emitter.Emit(0x89); emitter.Emit(0x22); // mov [r10], rsp
 			// Restore the fiber's floating-point control environment before
 			// abandoning the host stack. This path is used when a blocked guest
 			// continuation migrates to another managed worker.
-			emitter.Emit(0x48); emitter.Emit(0x83); emitter.Emit(0xEC); emitter.Emit(0x08); // sub rsp,8
-			emitter.Emit(0xC7); emitter.Emit(0x04); emitter.Emit(0x24); // mov dword [rsp],imm32
-			emitter.Emit(context.Mxcsr);
-			emitter.Emit(0x0F); emitter.Emit(0xAE); emitter.Emit(0x14); emitter.Emit(0x24); // ldmxcsr [rsp]
-			emitter.Emit(0x66); emitter.Emit(0xC7); emitter.Emit(0x04); emitter.Emit(0x24); // mov word [rsp],imm16
-			emitter.Emit(context.FpuControlWord);
-			emitter.Emit(0xD9); emitter.Emit(0x2C); emitter.Emit(0x24); // fldcw [rsp]
-			emitter.Emit(0x48); emitter.Emit(0x83); emitter.Emit(0xC4); emitter.Emit(0x08); // add rsp,8
-			emitter.EmitMovR64Immediate(0x49, 0xBA, hostRspSlot); // mov r10, hostRspSlot
-			emitter.Emit(0x49); emitter.Emit(0x89); emitter.Emit(0x22); // mov [r10], rsp
+			EmitFloatingPointControlSwitch(ptr2, ref emitter.Offset, context.Mxcsr, context.FpuControlWord);
 			EmitGuestStackBounds(ptr2, ref emitter.Offset, context[CpuRegister.Rsp]);
 			emitter.EmitMovR64Immediate(0x48, 0xB8, context[CpuRegister.Rsp]); // mov rax, guest rsp
 			emitter.Emit(0x48); emitter.Emit(0x89); emitter.Emit(0xC4); // mov rsp, rax
@@ -6742,6 +6738,31 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		offset += sizeof(uint);
 	}
 
+	// R10 holds the host state block. The guest starts with its context's MXCSR and x87 control word (a new thread gets
+	// the console's) instead of the host thread's, which the block keeps for every way back to the host: their control
+	// bits are callee-saved on the host.
+	private static unsafe void EmitFloatingPointControlSwitch(byte* code, ref int offset, uint mxcsr, ushort fpuControlWord)
+	{
+		ReadOnlySpan<byte> save = [0x41, 0x0F, 0xAE, 0x5A, HostMxcsrOffset, 0x41, 0xD9, 0x7A, HostFpuControlWordOffset]; // stmxcsr [r10+24]; fnstcw [r10+28]
+		foreach (var value in save) EmitByte(code, ref offset, value);
+		ReadOnlySpan<byte> storeMxcsr = [0x48, 0x83, 0xEC, 0x08, 0xC7, 0x04, 0x24]; // sub rsp,8; mov dword [rsp],imm32
+		foreach (var value in storeMxcsr) EmitByte(code, ref offset, value);
+		EmitUInt32(code, ref offset, mxcsr);
+		ReadOnlySpan<byte> storeControlWord = [0x0F, 0xAE, 0x14, 0x24, 0x66, 0xC7, 0x04, 0x24]; // ldmxcsr [rsp]; mov word [rsp],imm16
+		foreach (var value in storeControlWord) EmitByte(code, ref offset, value);
+		EmitByte(code, ref offset, (byte)fpuControlWord);
+		EmitByte(code, ref offset, (byte)(fpuControlWord >> 8));
+		ReadOnlySpan<byte> load = [0xD9, 0x2C, 0x24, 0x48, 0x83, 0xC4, 0x08]; // fldcw [rsp]; add rsp,8
+		foreach (var value in load) EmitByte(code, ref offset, value);
+	}
+
+	// R10 holds the host state block.
+	private static unsafe void EmitHostFloatingPointControlRestore(byte* code, ref int offset)
+	{
+		ReadOnlySpan<byte> restore = [0x41, 0x0F, 0xAE, 0x52, HostMxcsrOffset, 0x41, 0xD9, 0x6A, HostFpuControlWordOffset]; // ldmxcsr [r10+24]; fldcw [r10+28]
+		foreach (var value in restore) EmitByte(code, ref offset, value);
+	}
+
 	private static unsafe void EmitHostNonvolatileXmmSave(byte* code, ref int offset)
 	{
 		EmitByte(code, ref offset, 0x48);
@@ -6859,6 +6880,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr2[num3++] = 73;
 			ptr2[num3++] = 137;
 			ptr2[num3++] = 34;
+			EmitFloatingPointControlSwitch(ptr2, ref num3, context.Mxcsr, context.FpuControlWord);
 			EmitGuestStackBounds(ptr2, ref num3, context[CpuRegister.Rsp]);
 			ptr2[num3++] = 72;
 			ptr2[num3++] = 184;
@@ -6922,6 +6944,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr2[num3++] = 139;
 			ptr2[num3++] = 34;
 			EmitHostStackBounds(ptr2, ref num3, save: false);
+			EmitHostFloatingPointControlRestore(ptr2, ref num3);
 			EmitHostNonvolatileXmmRestore(ptr2, ref num3);
 			ptr2[num3++] = 65;
 			ptr2[num3++] = 95;

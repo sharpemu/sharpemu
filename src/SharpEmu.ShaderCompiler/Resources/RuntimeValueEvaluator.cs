@@ -632,6 +632,8 @@ public sealed class RuntimeValueEvaluator : IEvaluatedValues
         return EvaluateActiveSources(plan, inputs, cleanEvaluator, cleanScratch);
     }
 
+    // MaterializationProgram.BranchSelection makes this walk, with the same reads in the same order, on registers lowered once
+    // per plan.
     private static bool[] EvaluateActiveSources(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, RuntimeValueEvaluator cleanEvaluator,
         RuntimeEvaluationScratch scratch)
     {

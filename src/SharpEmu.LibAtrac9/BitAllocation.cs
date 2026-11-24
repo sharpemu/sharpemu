@@ -113,7 +113,9 @@ namespace LibAtrac9
                 channel.PrecisionsFine[i] = 0;
                 if (channel.Precisions[i] > 15)
                 {
-                    channel.PrecisionsFine[i] = channel.Precisions[i] - 15;
+                    // The fine precision tops out at 15 (precision 30), the last entry of the step size table: a unit with
+                    // a high scale factor and the boundary boost reached 16 or more and indexed past the table.
+                    channel.PrecisionsFine[i] = Math.Min(channel.Precisions[i], 30) - 15;
                     channel.Precisions[i] = 15;
                 }
             }

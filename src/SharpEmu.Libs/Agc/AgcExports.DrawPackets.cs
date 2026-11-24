@@ -249,11 +249,8 @@ public static partial class AgcExports
         var drawInitiator = (modifier & (1UL << 32)) != 0
             ? 2u : ((modifierBits >> 3) & 0x20u) | 2u;
         if (commandBufferAddress == 0 ||
-            !TryAllocateCommandDwords(ctx, commandBufferAddress, 5, out var commandAddress) ||
-            !TryWriteUInt32(ctx, commandAddress, Pm4(5, ItDrawIndexIndirect, 0)) ||
-            !TryWriteUInt32(ctx, commandAddress + 4, dataOffset) ||
-            !ctx.TryWriteUInt64(commandAddress + 8, registerLocations) ||
-            !TryWriteUInt32(ctx, commandAddress + 16, drawInitiator))
+            !TryEmitCommandDwords(ctx, commandBufferAddress, out var commandAddress, Pm4(5, ItDrawIndexIndirect, 0), dataOffset,
+                (uint)registerLocations, (uint)(registerLocations >> 32), drawInitiator))
         {
             return ReturnPointer(ctx, 0);
         }

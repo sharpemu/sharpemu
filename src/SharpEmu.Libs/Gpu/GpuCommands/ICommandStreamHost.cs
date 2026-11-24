@@ -135,6 +135,9 @@ public interface ICommandStreamHost
     // Draws resolve ahead of the stream on this many worker threads; zero resolves them on the stream thread.
     int ResolveWorkerCount => 0;
 
+    // Accept the complete run or leave every packet for the normal draw handler.
+    bool TryDrawIndexedRun(ulong submitId, in DrawIndexedArguments first, ReadOnlySpan<uint> offsets) => false;
+
     // Reads on this thread now serve a draw at this stream position: a range earlier work may still
     // write refuses with SerialResolveRequiredException, every other read lands in the log.
     void BeginWorkerResolve(long sequence, ResolveReadLog reads)
@@ -148,6 +151,20 @@ public interface ICommandStreamHost
     // At the stream position of the draw: whether the bytes a worker read are what it would read now.
     bool ValidateWorkerReads(ResolveReadLog reads) => true;
 
+    // As BeginWorkerResolve, but a read the worker cannot serve and log refuses the resolve (SerialResolveRequiredException):
+    // a deferred dispatch member rolls back to the command thread instead.
+    void BeginStrictWorkerResolve(long sequence, ResolveReadLog reads) => BeginWorkerResolve(sequence, reads);
+
+    // The deferred dispatch runs of the stream thread, or null.
+    IDeferredDispatchRuns? DispatchRuns => null;
+
+    // SHARPEMU_COMPUTE_TICKETS: the worker rebinds direct dispatches take ahead of the stream, or null.
+    SharpEmu.Libs.Gpu.Pipelines.ComputeTickets? ComputeTickets => null;
+
+    // At a compute ticket's take: whether the bytes its worker read are what the stream would read now. The ticket was
+    // requested ahead of earlier dispatches, so writes they posted since must refuse it.
+    bool ValidateTicketReads(ResolveReadLog reads) => ValidateWorkerReads(reads);
+
     // Runs commands other threads posted to this worker. Called before every packet.
     void RunPendingCommands();
 
@@ -157,6 +174,8 @@ public interface ICommandStreamHost
     void BeginSubmission(int queueId, ulong submissionId, object? geometrySnapshots);
 
     void Flush();
+
+    void FlushSlice() => Flush();
 
     // A frame boundary: submits what the frame recorded. The submitter resumes once it returns, so a
     // host that runs the stream ahead of its recording returns only after the frame is recorded.

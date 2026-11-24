@@ -588,6 +588,7 @@ internal static class RenderPhaseProfile
         Console.Error.WriteLine(SharpEmu.Libs.Agc.AgcExports.TakeResolvePoolReport());
         SharpEmu.Libs.Agc.DcbParseProfile.TryReport();
         Console.Error.WriteLine(SharpEmu.Libs.Diagnostics.PacketHandlerTally.TakeReport());
+        Console.Error.WriteLine(SharpEmu.Libs.Gpu.Pipelines.ComputeTickets.TakeReport());
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Pipelines.ShaderPipelineCache.TakeKeptProgramsReport());
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Pipelines.ShaderPipelineCache.TakeFastPathReport());
         Console.Error.WriteLine(SharpEmu.Libs.Gpu.Pipelines.ShaderPipelineCache.TakeCpuKernelReport());

@@ -59,6 +59,11 @@ public class ShaderProgramInfo
     public bool UsesDeviceAddresses { get; init; }
     public bool DeviceAddressReadsBounded { get; init; }
 
+    // See ShaderResourcePlan.DeviceAddressReadsWindowed.
+    public bool DeviceAddressReadsWindowed { get; init; }
+
+    public ulong DeviceAddressWindowBytes { get; init; }
+
     // The dword every invocation stores when the whole program is 'index, v_mov constant, one
     // buffer store, end' (AGC's constant fill kernels); null for any other program.
     public uint? ConstantStoreValue { get; init; }

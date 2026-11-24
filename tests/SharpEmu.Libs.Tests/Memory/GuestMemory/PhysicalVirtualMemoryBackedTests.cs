@@ -602,6 +602,50 @@ public sealed unsafe class PhysicalVirtualMemoryBackedTests
         Assert.True(memory.TryRead(address, new byte[3 * Segment]));
     }
 
+    // Unmapping part of a backed view, through GuestSpaceOwner, maps the rest of the view again. Its pages must keep the
+    // protection the GPU memory derived for them (the guest's own protection and the watches): a CPU store to a page the GPU
+    // owns has to fault, or the store goes unseen and a later download or landing writes GPU bytes over it.
+    [NativePageProtectionFact]
+    public void PartialUnmapKeepsTheGpuProtectionOfTheRestOfTheView()
+    {
+        if (!Supported) return;
+        const GuestPageProtection readWrite = GuestPageProtection.Read | GuestPageProtection.Write;
+        var host = HostViewMemory.Create();
+        using var memory = new PhysicalVirtualMemory(viewHost: host, backingBytes: BackingSize);
+        var view = Hold(memory, host);
+        Assert.True(memory.TryMapBacked(view, 3 * Segment, 0, readWrite, out _));
+        using var gpu = new GuestGpuMemory(memory);
+        gpu.Register(view, 3 * Segment, readWrite);
+        GuestGpuMemoryHook.Attach(gpu);
+        var writeWatched = view + 0x1000;
+        var guestReadOnly = view + 2 * Segment;
+        var readWatched = view + 2 * Segment + 0x2000;
+        gpu.Pages.AddWatch(writeWatched, 0x1000, blockReads: false);
+        gpu.Pages.AddWatch(readWatched, 0x1000, blockReads: true);
+        try
+        {
+            Assert.True(gpu.NoteProtected(guestReadOnly, 0x1000, GuestPageProtection.Read));
+            ExpectAccess("before the unmap");
+            Assert.True(memory.TryUnmapBacked(view + Segment, Segment));
+            ExpectAccess("after the unmap");
+        }
+        finally
+        {
+            gpu.Pages.RemoveWatch(writeWatched, 0x1000, blockReads: false);
+            gpu.Pages.RemoveWatch(readWatched, 0x1000, blockReads: true);
+            GuestGpuMemoryHook.Attach(null);
+        }
+
+        void ExpectAccess(string step)
+        {
+            NativePageProtection.Expect(HostMemory.PAGE_READONLY, writeWatched, $"write-watched page {step}");
+            NativePageProtection.Expect(HostMemory.PAGE_READONLY, guestReadOnly, $"guest read-only page {step}");
+            NativePageProtection.Expect(HostMemory.PAGE_NOACCESS, readWatched, $"read-watched page {step}");
+            NativePageProtection.Expect(HostMemory.PAGE_READWRITE, view, $"left page {step}");
+            NativePageProtection.Expect(HostMemory.PAGE_READWRITE, view + 3 * Segment - 0x1000, $"right page {step}");
+        }
+    }
+
     [Fact]
     public void SearchSkipsOccupiedMemoryWithoutChangingIt()
     {

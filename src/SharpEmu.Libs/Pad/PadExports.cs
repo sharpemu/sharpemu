@@ -38,6 +38,18 @@ public static class PadExports
     [ThreadStatic]
     private static PadState _cachedInputState;
 
+    [ThreadStatic]
+    private static long _cachedInputHistory;
+
+    // The history scePadRead returns (64 states, as the console keeps): the pad's state after each change of a button
+    // or a touch contact, in order, taken as the window's input events come (RecordInputChange). Each session reads
+    // the states it has not read yet, so a press and its release between two reads reach the game as two states
+    // instead of none.
+    private const int HistoryCapacity = 64;
+    private static readonly object HistoryGate = new();
+    private static readonly (PadState State, ulong Timestamp)[] History = new (PadState, ulong)[HistoryCapacity];
+    private static long _historyNext;
+
     private static int _controlsAnnouncementLogged;
     private static readonly bool LogPadState =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_PAD_STATE"), "1", StringComparison.Ordinal);
@@ -65,8 +77,59 @@ public static class PadExports
     public static int PadInit(CpuContext ctx)
     {
         GetSessions(ctx).Initialize();
+        HostWindowInput.Changed = RecordInputChange;
         HostPlatform.Current.Input.EnsureStarted();
         return ctx.SetReturn(0);
+    }
+
+    private static void RecordInputChange()
+    {
+        var state = ReadHostInputState(fresh: true);
+        var timestamp = TimestampMicroseconds();
+        lock (HistoryGate)
+        {
+            if (_historyNext != 0 && SameButtonsAndContacts(History[(int)((_historyNext - 1) % HistoryCapacity)].State, state))
+            {
+                return;
+            }
+
+            History[(int)(_historyNext % HistoryCapacity)] = (state, timestamp);
+            _historyNext++;
+        }
+    }
+
+    private static bool SameButtonsAndContacts(in PadState left, in PadState right) =>
+        left.Buttons == right.Buttons &&
+        left.Touch.First.Active == right.Touch.First.Active && left.Touch.First.Id == right.Touch.First.Id &&
+        left.Touch.Second.Active == right.Touch.Second.Active && left.Touch.Second.Id == right.Touch.Second.Id;
+
+    // The states the session has not read, oldest first, at most count; a session reads from its first read on.
+    private static (PadState State, ulong Timestamp)[] TakeUnreadStates(PadSession session, int count, out bool more)
+    {
+        lock (HistoryGate)
+        {
+            if (session.ReadSequence < 0)
+            {
+                session.ReadSequence = _historyNext;
+            }
+
+            var first = Math.Max(session.ReadSequence, _historyNext - HistoryCapacity);
+            var take = (int)Math.Min(_historyNext - first, count);
+            more = _historyNext - first > take;
+            if (take == 0)
+            {
+                return [];
+            }
+
+            var states = new (PadState State, ulong Timestamp)[take];
+            for (var index = 0; index < take; index++)
+            {
+                states[index] = History[(int)((first + index) % HistoryCapacity)];
+            }
+
+            session.ReadSequence = first + take;
+            return states;
+        }
     }
 
     #pragma warning disable SHEM006
@@ -259,9 +322,13 @@ public static class PadExports
     public static int PadSetTiltCorrectionState(CpuContext ctx)
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
-        return TryGetSession(ctx, handle, out _)
-            ? ctx.SetReturn(0)
-            : ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        if (!TryGetSession(ctx, handle, out _))
+        {
+            return ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        }
+
+        HostWindowInput.SetMotionTiltCorrection((byte)ctx[CpuRegister.Rsi] != 0);
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -478,14 +545,44 @@ public static class PadExports
             return ctx.SetReturn(OrbisPadErrorInvalidHandle);
         }
 
-        if (dataAddress == 0 || count < 1 || count > 64)
+        if (dataAddress == 0 || count < 1 || count > HistoryCapacity)
         {
             return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        return WritePadData(ctx, dataAddress, handle, session, "scePadRead")
-            ? ctx.SetReturn(1)
-            : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        if (!session.Connected)
+        {
+            return WritePadData(ctx, dataAddress, handle, session, "scePadRead")
+                ? ctx.SetReturn(1)
+                : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        // The unread states, then the state now when room is left and none waits: a connected pad keeps reporting, so
+        // the last state a read returns is the current one (the sticks and sensors since the last change).
+        var states = TakeUnreadStates(session, count, out var more);
+        var written = 0;
+        foreach (var (state, timestamp) in states)
+        {
+            if (!WritePadState(ctx, dataAddress + (ulong)(written * PadDataSize), handle, session, state, timestamp, "scePadRead"))
+            {
+                return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+
+            written++;
+        }
+
+        if (!more && written < count)
+        {
+            if (!WritePadState(ctx, dataAddress + (ulong)(written * PadDataSize), handle, session,
+                    ReadHostInputState(fresh: written != 0), TimestampMicroseconds(), "scePadRead"))
+            {
+                return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+
+            written++;
+        }
+
+        return ctx.SetReturn(written);
     }
 
     [SysAbiExport(
@@ -535,6 +632,19 @@ public static class PadExports
         }
 
         var triggerMask = parameter[0];
+        lock (session.TriggerEffects)
+        {
+            if ((triggerMask & 0x01) != 0)
+            {
+                parameter[8..64].CopyTo(session.TriggerEffects);
+            }
+
+            if ((triggerMask & 0x02) != 0)
+            {
+                parameter[64..120].CopyTo(session.TriggerEffects.AsSpan(56));
+            }
+        }
+
         HostPlatform.Current.Input.SetAdaptiveTriggerEffect(
             (triggerMask & 0x01) != 0 ? DecodeTriggerEffect(parameter[8..64]) : null,
             (triggerMask & 0x02) != 0 ? DecodeTriggerEffect(parameter[64..120]) : null);
@@ -556,7 +666,7 @@ public static class PadExports
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
         var stateAddress = ctx[CpuRegister.Rsi];
-        if (!TryGetSession(ctx, handle, out _))
+        if (!TryGetSession(ctx, handle, out var session))
         {
             return ctx.SetReturn(OrbisPadErrorInvalidHandle);
         }
@@ -566,15 +676,40 @@ public static class PadExports
             return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        // No host pad exposes DualSense adaptive-trigger feedback, so every
-        // trigger reports the neutral "no effect engaged" state. Reporting it
-        // as success is what lets the caller take its normal path instead of
-        // falling back to a cached button bitmask every poll.
+        // A DualSense reports where each trigger is against its running effect, but SDL does not expose that report
+        // and other pads have no trigger motors. The state follows from the game's last effect and the trigger's
+        // travel instead, so a game that waits for a weapon or feedback state before acting on L2 or R2 sees it.
+        var input = ReadHostInputState();
         Span<byte> state = stackalloc byte[TriggerEffectStateSize];
-        state.Clear();
+        lock (session.TriggerEffects)
+        {
+            BinaryPrimitives.WriteInt32LittleEndian(state, TriggerEffectState(session.TriggerEffects.AsSpan(0, 56), input.L2));
+            BinaryPrimitives.WriteInt32LittleEndian(state[4..], TriggerEffectState(session.TriggerEffects.AsSpan(56, 56), input.R2));
+        }
+
         return ctx.Memory.TryWrite(stateAddress, state)
             ? ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_OK)
             : ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    // A trigger's state against a trigger effect command: 0 no effect, 1/2 feedback standby/pushing, 3/4/5 weapon
+    // standby/pulling/fired, 6/7 vibration standby/firing. The travel 0..255 maps to the effect's ten positions, and
+    // below 8 the trigger counts as released.
+    internal static int TriggerEffectState(ReadOnlySpan<byte> command, byte travel)
+    {
+        var data = command[8..];
+        var position = travel * 10 / 256;
+        var pressed = travel >= 8;
+        return BinaryPrimitives.ReadUInt32LittleEndian(command) switch
+        {
+            1 => pressed && data[1] != 0 && position >= data[0] ? 2 : 1,
+            2 => position >= data[1] ? 5 : position >= data[0] ? 4 : 3,
+            3 => pressed && data[1] != 0 && data[2] != 0 && position >= data[0] ? 7 : 6,
+            4 => pressed && data[position] != 0 ? 2 : 1,
+            5 => pressed && position >= data[0] ? 2 : 1,
+            6 => pressed && data[0] != 0 && data[1 + position] != 0 ? 7 : 6,
+            _ => 0,
+        };
     }
 
     private static HostAdaptiveTriggerEffect DecodeTriggerEffect(ReadOnlySpan<byte> command)
@@ -835,9 +970,13 @@ public static class PadExports
     public static int PadResetOrientation(CpuContext ctx)
     {
         var handle = unchecked((int)ctx[CpuRegister.Rdi]);
-        return TryGetSession(ctx, handle, out _)
-            ? ctx.SetReturn(0)
-            : ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        if (!TryGetSession(ctx, handle, out _))
+        {
+            return ctx.SetReturn(OrbisPadErrorInvalidHandle);
+        }
+
+        HostWindowInput.ResetMotionOrientation();
+        return ctx.SetReturn(0);
     }
 
     [SysAbiExport(
@@ -867,19 +1006,26 @@ public static class PadExports
 
     private static bool WritePadData(CpuContext ctx, ulong dataAddress, int handle, PadSession session, string exportName)
     {
-        Span<byte> data = stackalloc byte[PadDataSize];
-        data.Clear();
-        if (!session.Connected)
+        if (session.Connected)
         {
-            data[0x04] = 128;
-            data[0x05] = 128;
-            data[0x06] = 128;
-            data[0x07] = 128;
-            BinaryPrimitives.WriteSingleLittleEndian(data[0x18..], 1.0f);
-            return ctx.Memory.TryWrite(dataAddress, data);
+            return WritePadState(ctx, dataAddress, handle, session, ReadHostInputState(), TimestampMicroseconds(), exportName);
         }
 
-        var input = ReadHostInputState();
+        Span<byte> data = stackalloc byte[PadDataSize];
+        data.Clear();
+        data[0x04] = 128;
+        data[0x05] = 128;
+        data[0x06] = 128;
+        data[0x07] = 128;
+        BinaryPrimitives.WriteSingleLittleEndian(data[0x18..], 1.0f);
+        return ctx.Memory.TryWrite(dataAddress, data);
+    }
+
+    private static bool WritePadState(CpuContext ctx, ulong dataAddress, int handle, PadSession session, in PadState input,
+        ulong timestampMicroseconds, string exportName)
+    {
+        Span<byte> data = stackalloc byte[PadDataSize];
+        data.Clear();
         var buttons = input.Buttons;
         var leftX = input.LeftX;
         var leftY = input.LeftY;
@@ -898,6 +1044,10 @@ public static class PadExports
         BinaryPrimitives.WriteSingleLittleEndian(data[0x18..], 1.0f);
         if (Volatile.Read(ref session.MotionSensorEnabled) != 0 && input.Motion.Available)
         {
+            BinaryPrimitives.WriteSingleLittleEndian(data[0x0C..], input.Motion.OrientationX);
+            BinaryPrimitives.WriteSingleLittleEndian(data[0x10..], input.Motion.OrientationY);
+            BinaryPrimitives.WriteSingleLittleEndian(data[0x14..], input.Motion.OrientationZ);
+            BinaryPrimitives.WriteSingleLittleEndian(data[0x18..], input.Motion.OrientationW);
             // Host acceleration is m/s^2 (SDL); ScePadData.acceleration is in G.
             BinaryPrimitives.WriteSingleLittleEndian(data[0x1C..], input.Motion.AccelerationX / StandardGravity);
             BinaryPrimitives.WriteSingleLittleEndian(data[0x20..], input.Motion.AccelerationY / StandardGravity);
@@ -909,10 +1059,6 @@ public static class PadExports
 
         WriteTouchData(data, input.Touch);
         data[0x4C] = 1;
-        var timestampTicks = Stopwatch.GetTimestamp();
-        var timestampMicroseconds =
-            ((ulong)(timestampTicks / Stopwatch.Frequency) * 1_000_000UL) +
-            ((ulong)(timestampTicks % Stopwatch.Frequency) * 1_000_000UL / (ulong)Stopwatch.Frequency);
         BinaryPrimitives.WriteUInt64LittleEndian(
             data[0x50..],
             timestampMicroseconds);
@@ -923,10 +1069,20 @@ public static class PadExports
         return guestWriteSucceeded;
     }
 
-    private static PadState ReadHostInputState()
+    private static ulong TimestampMicroseconds()
+    {
+        var ticks = Stopwatch.GetTimestamp();
+        return ((ulong)(ticks / Stopwatch.Frequency) * 1_000_000UL) +
+               ((ulong)(ticks % Stopwatch.Frequency) * 1_000_000UL / (ulong)Stopwatch.Frequency);
+    }
+
+    // A cached state serves only while no input change was recorded since; fresh: never the cached state.
+    private static PadState ReadHostInputState(bool fresh = false)
     {
         var now = Stopwatch.GetTimestamp();
-        if (_lastInputSampleTicks != 0 && now - _lastInputSampleTicks < InputSampleIntervalTicks)
+        var history = Volatile.Read(ref _historyNext);
+        if (!fresh && _lastInputSampleTicks != 0 && now - _lastInputSampleTicks < InputSampleIntervalTicks &&
+            history == _cachedInputHistory)
         {
             return _cachedInputState;
         }
@@ -1012,6 +1168,7 @@ public static class PadExports
             ControllerButtons = controllerButtons,
         };
         _lastInputSampleTicks = now;
+        _cachedInputHistory = history;
         return _cachedInputState;
     }
 

@@ -289,11 +289,6 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _presenter.RunPendingCommands();
-            if (_presenter._batchOpen && _preparation is null && _bufferCache?.HotWritePending == true && _presenter._batchDrawCount >= Presenter.MinimumFlushDraws)
-            {
-                EndRendering();
-                FlushBatchedGuestCommands();
-            }
         }
 
         public void SetDebugInformation(RecordedOperation operation, ulong submitId, uint argument0, uint argument1, uint argument2, uint argument3, ulong argument4) =>
@@ -456,6 +451,11 @@ internal static unsafe partial class VulkanVideoPresenter
             if (metadataClear && !_imageCache.SetMetadataSlice(resolution.HtileAddress, layer, false))
             {
                 throw SubmissionScheduler.Fatal($"The HTile clear state could not be consumed: htile=0x{resolution.HtileAddress:X16} layer={layer}.");
+            }
+
+            if (resolution.HasHtile)
+            {
+                _imageCache.NoteDepthClearValue(resolution.HtileAddress, depth.Target.State.DepthClearValue);
             }
 
             var image = _imageCache.GetImage(depth.Image);
@@ -634,6 +634,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw SubmissionScheduler.Fatal("A resource preparation is already open.");
             }
 
+            _preparationStreamCopied = false;
             if (_worker)
             {
                 _preparation = (_sparePreparation ??= new RenderPreparation(this)).Open(null);
@@ -1185,6 +1186,11 @@ internal static unsafe partial class VulkanVideoPresenter
         public void BeginRendering(in RenderingState state)
         {
             using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawRenderingSetup);
+            if (_worker && _segment is { Requests.DepthClears.Count: > 0 } segment)
+            {
+                NoteDepthClearArea(segment.Requests, in state);
+            }
+
             if (_renderingActive && _renderingState == state)
             {
                 _renderingWritesMemory |= _nextDrawWritesMemory;
@@ -1536,6 +1542,20 @@ internal static unsafe partial class VulkanVideoPresenter
             _gpuCommandProfile?.WriteMarker(command, VulkanCommandProfile.IntervalKind.DrawIndexed,
                 _boundGraphicsPipeline?.Id ?? 0, indexCount, instanceCount);
             CountDraw();
+        }
+
+        bool IRenderHost.CanShareIndexedBindings(IPreparedBindings stage, ReadOnlySpan<ColorTargetState> colors, in DepthAttachmentState depth)
+        {
+            if (_preparation?.StencilStorageImages is not null || _preparation?.FeedbackSnapshots is not null || _snapshotPixelHash != 0)
+                return false;
+            foreach (var texture in ((PreparedStageBindings)stage).Textures)
+            {
+                if (texture.IsHostMovie || texture.IsFeedbackSnapshot || texture.IsStorage) return false;
+                if (depth.HasTarget && texture.ImageIdentifier == depth.Image) return false;
+                foreach (ref readonly var color in colors)
+                    if (texture.ImageIdentifier == color.Image) return false;
+            }
+            return true;
         }
 
         void IRenderHost.DrawIndexedIndirect(BufferBinding arguments)

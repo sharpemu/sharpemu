@@ -65,6 +65,28 @@ public sealed class ShaderRegisterMirror : IReadOnlyDictionary<uint, uint>
         values.CopyTo(_values.AsSpan((int)firstOffset, values.Length));
     }
 
+    // A bank register as it stands, and put back as it stood (a deferred dispatch run's rollback).
+    internal (uint Value, bool Written) Peek(uint offset) =>
+        (_values[offset], (_written[offset / BitsPerWord] & (1ul << (int)(offset % BitsPerWord))) != 0);
+
+    internal void Restore(uint offset, uint value, bool written)
+    {
+        _values[offset] = value;
+        if (written)
+        {
+            MarkWritten(offset);
+            return;
+        }
+
+        ref var word = ref _written[offset / BitsPerWord];
+        var bit = 1ul << (int)(offset % BitsPerWord);
+        if ((word & bit) != 0)
+        {
+            word &= ~bit;
+            _bankCount--;
+        }
+    }
+
     public bool ContainsKey(uint offset) => TryGetValue(offset, out _);
 
     public bool TryGetValue(uint offset, out uint value)

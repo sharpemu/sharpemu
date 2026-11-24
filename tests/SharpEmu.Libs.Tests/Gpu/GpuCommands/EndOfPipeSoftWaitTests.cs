@@ -258,8 +258,9 @@ public sealed class EndOfPipeSoftWaitTests
     public void AQueuesOwnReleaseIsNoHint()
     {
         var setup = NewQueue();
-        Compute(setup, FirstCompute + 1, ComputeB, 2, Instances(5));
+        // The other head is admitted after the graphics stream, so the release does not yield to it.
         Graphics0(setup, 3, Release32(Label, 1), Wait32(3, Label, 1), Draw(7));
+        Compute(setup, FirstCompute + 1, ComputeB, 2, Instances(5));
 
         Assert.Equal(SliceResult.Completed, setup.Queue.ProcessOne());
         Assert.Equal(1, Draws(setup));

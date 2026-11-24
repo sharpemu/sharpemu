@@ -195,7 +195,7 @@ internal sealed partial class RenderRecorder
             }
 
             if (DispatchReplayEnabled && record.IndirectArgumentsAddress == 0 && !record.GpuThreadCounts && threadDispatch is null && imageSnapshot == 0 &&
-                IsReplayable(program) && _host.CurrentItemSequence is var sequence and not 0)
+                IsDispatchReplayable(program) && _host.CurrentItemSequence is var sequence and not 0)
             {
                 _dispatchReplayStage = stage;
                 _dispatchReplayPipeline = pipeline;
@@ -268,12 +268,24 @@ internal sealed partial class RenderRecorder
             return DispatchMiss(7);
         }
 
+        var replaceTable = false;
         if (StageInputMismatch(in stage, in _dispatchReplayStage, compareThreadLimits: false) is var mismatch and >= 0)
         {
-            return DispatchMiss(2 + mismatch);
+            // Only the flattened table may differ: the host uploads it again and pushes its descriptor alone.
+            if (mismatch != 4)
+            {
+                return DispatchMiss(2 + mismatch);
+            }
+
+            if (StageInputMismatchAfterTable(in stage, in _dispatchReplayStage) is var after and >= 0)
+            {
+                return DispatchMiss(2 + after);
+            }
+
+            replaceTable = true;
         }
 
-        if (!_host.TryReplayDispatch(in pipeline, in stage))
+        if (!_host.TryReplayDispatch(in pipeline, in stage, replaceTable))
         {
             return DispatchMiss(11);
         }

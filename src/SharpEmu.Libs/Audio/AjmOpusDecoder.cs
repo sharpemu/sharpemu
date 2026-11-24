@@ -25,6 +25,10 @@ internal sealed unsafe class AjmOpusDecoder(int maxChannels, Atrac9PcmEncoding e
     private bool _disposed;
     private Atrac9Gapless _gaplessInitial;
     private Atrac9Gapless _gapless;
+
+    // Samples written and lead-in samples discarded since the last reset: the gapless window counts from there.
+    private uint _producedSinceReset;
+    private uint _skippedSinceReset;
     private ulong _totalSamples;
 
     public int Channels { get; private set; }
@@ -106,6 +110,8 @@ internal sealed unsafe class AjmOpusDecoder(int maxChannels, Atrac9PcmEncoding e
             _totalSamples = 0;
             FramesPerPacket = 0;
             _gapless = _gaplessInitial;
+            _producedSinceReset = 0;
+            _skippedSinceReset = 0;
             _end = false;
         }
     }
@@ -114,9 +120,18 @@ internal sealed unsafe class AjmOpusDecoder(int maxChannels, Atrac9PcmEncoding e
     {
         lock (_gate)
         {
+            // As the ATRAC9 window: a set without a reset moves the limits and keeps the progress made against them.
             _gaplessInitial = new Atrac9Gapless(totalSamples, skipSamples, 0);
-            if (reset || _gapless == default)
-                _gapless = _gaplessInitial;
+            if (reset)
+            {
+                _producedSinceReset = 0;
+                _skippedSinceReset = 0;
+            }
+
+            _gapless = new Atrac9Gapless(
+                totalSamples is not 0 and not uint.MaxValue ? totalSamples - Math.Min(totalSamples, _producedSinceReset) : totalSamples,
+                (ushort)(skipSamples - Math.Min(skipSamples, _skippedSinceReset)),
+                reset ? (ushort)0 : _gapless.SkippedSamples);
         }
     }
 
@@ -205,6 +220,8 @@ internal sealed unsafe class AjmOpusDecoder(int maxChannels, Atrac9PcmEncoding e
                 frames += packetFrames;
                 FramesPerPacket = packetFrames;
                 _totalSamples += (uint)count;
+                _producedSinceReset = unchecked(_producedSinceReset + (uint)count);
+                _skippedSinceReset = unchecked(_skippedSinceReset + (uint)skipped);
                 _gapless = _gapless with
                 {
                     SkipSamples = (ushort)(_gapless.SkipSamples - skipped),

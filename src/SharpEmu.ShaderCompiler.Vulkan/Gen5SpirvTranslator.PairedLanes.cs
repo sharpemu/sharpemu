@@ -91,9 +91,9 @@ public static partial class Gen5SpirvTranslator
             _module.AddName(_upperScratch, "scratchUpperHalf");
         }
 
-        private void DeclarePairedLaneInputs()
+        private void DeclareComputeSubgroupId()
         {
-            if (!_pairedLanes)
+            if (!_pairedLanes && !UsesHalfWaveSubgroups)
             {
                 return;
             }

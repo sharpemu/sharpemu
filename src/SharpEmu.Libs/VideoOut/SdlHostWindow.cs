@@ -32,6 +32,11 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
     private HostGamepadType _gamepadType;
     private byte _leftTriggerRumble;
     private byte _rightTriggerRumble;
+    private byte _padLargeRumble;
+    private byte _padSmallRumble;
+    private byte _hapticLargeRumble;
+    private byte _hapticSmallRumble;
+    private long _hapticRumbleExpires;
     private int _closeRequested;
     private bool _closedByUser;
     private bool _fullscreen;
@@ -218,15 +223,42 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
     {
         lock (_gamepadGate)
         {
-            if (IsGamepadConnected())
-            {
-                SDL_RumbleGamepad(
-                    _gamepad,
-                    ExpandByte(largeMotor),
-                    ExpandByte(smallMotor),
-                    OutputDurationMs);
-            }
+            _padLargeRumble = largeMotor;
+            _padSmallRumble = smallMotor;
+            ApplyRumble();
         }
+    }
+
+    public void SetHapticRumble(byte largeMotor, byte smallMotor, uint durationMs)
+    {
+        lock (_gamepadGate)
+        {
+            _hapticLargeRumble = largeMotor;
+            _hapticSmallRumble = smallMotor;
+            _hapticRumbleExpires = Environment.TickCount64 + durationMs;
+            ApplyRumble();
+        }
+    }
+
+    private void ApplyRumble()
+    {
+        if (!IsGamepadConnected())
+        {
+            return;
+        }
+
+        var hapticRemaining = _hapticRumbleExpires - Environment.TickCount64;
+        var hapticActive = hapticRemaining > 0;
+        var large = Math.Max(_padLargeRumble, hapticActive ? _hapticLargeRumble : (byte)0);
+        var small = Math.Max(_padSmallRumble, hapticActive ? _hapticSmallRumble : (byte)0);
+        var duration = (_padLargeRumble | _padSmallRumble) == 0 && hapticActive
+            ? (uint)hapticRemaining
+            : OutputDurationMs;
+        SDL_RumbleGamepad(
+            _gamepad,
+            ExpandByte(large),
+            ExpandByte(small),
+            duration);
     }
 
     public void SetTriggerRumble(byte? leftTrigger, byte? rightTrigger)
@@ -488,6 +520,69 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
                         OpenFirstGamepad();
                     }
                     break;
+                case SDL_EventType.SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+                case SDL_EventType.SDL_EVENT_GAMEPAD_BUTTON_UP:
+                case SDL_EventType.SDL_EVENT_GAMEPAD_AXIS_MOTION:
+                    ApplyGamepadEvent(in windowEvent);
+                    break;
+                case SDL_EventType.SDL_EVENT_GAMEPAD_SENSOR_UPDATE:
+                    ApplySensorEvent(in windowEvent);
+                    break;
+            }
+        }
+    }
+
+    private void ApplySensorEvent(in SDL_Event windowEvent)
+    {
+        lock (_gamepadGate)
+        {
+            var sensor = (SDL_SensorType)windowEvent.gsensor.sensor;
+            if (_gamepad is null || windowEvent.gsensor.which != SDL_GetGamepadID(_gamepad) ||
+                sensor is not (SDL_SensorType.SDL_SENSOR_GYRO or SDL_SensorType.SDL_SENSOR_ACCEL))
+            {
+                return;
+            }
+
+            HostWindowInput.ApplyGamepadMotion(
+                sensor == SDL_SensorType.SDL_SENSOR_GYRO,
+                windowEvent.gsensor.data[0],
+                windowEvent.gsensor.data[1],
+                windowEvent.gsensor.data[2],
+                windowEvent.gsensor.sensor_timestamp);
+        }
+    }
+
+    // A button event of the open gamepad, or a trigger crossing its button threshold, applied in the order SDL queued
+    // it: the poll after the events sees only where the buttons ended up, so a press and its release between two polls
+    // would never reach the pad.
+    private void ApplyGamepadEvent(in SDL_Event windowEvent)
+    {
+        lock (_gamepadGate)
+        {
+            if (_gamepad is null)
+            {
+                return;
+            }
+
+            var gamepad = SDL_GetGamepadID(_gamepad);
+            if (windowEvent.Type != SDL_EventType.SDL_EVENT_GAMEPAD_AXIS_MOTION)
+            {
+                var button = SdlGamepadStateReader.MapButton(windowEvent.gbutton.button);
+                if (windowEvent.gbutton.which == gamepad && button != HostGamepadButtons.None)
+                {
+                    HostWindowInput.SetGamepadButton(button, windowEvent.gbutton.down);
+                }
+
+                return;
+            }
+
+            var axis = (SDL_GamepadAxis)windowEvent.gaxis.axis;
+            if (windowEvent.gaxis.which == gamepad &&
+                axis is SDL_GamepadAxis.SDL_GAMEPAD_AXIS_LEFT_TRIGGER or SDL_GamepadAxis.SDL_GAMEPAD_AXIS_RIGHT_TRIGGER)
+            {
+                HostWindowInput.SetGamepadButton(
+                    axis == SDL_GamepadAxis.SDL_GAMEPAD_AXIS_LEFT_TRIGGER ? HostGamepadButtons.L2 : HostGamepadButtons.R2,
+                    SdlGamepadStateReader.IsTriggerPressed(HostWindowInput.ToTriggerByte(windowEvent.gaxis.value)));
             }
         }
     }
@@ -711,6 +806,11 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
             _gamepadType = HostGamepadType.Generic;
             _leftTriggerRumble = 0;
             _rightTriggerRumble = 0;
+            _padLargeRumble = 0;
+            _padSmallRumble = 0;
+            _hapticLargeRumble = 0;
+            _hapticSmallRumble = 0;
+            _hapticRumbleExpires = 0;
         }
 
         HostWindowInput.ClearGamepad();

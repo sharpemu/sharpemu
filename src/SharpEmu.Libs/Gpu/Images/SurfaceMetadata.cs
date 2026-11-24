@@ -59,4 +59,7 @@ public sealed class SurfaceMetadata
     public ulong RangeSize;
     public bool NativeColorClear;
     public bool Invalidated;
+    // HTile: the depth clear value (DB_DEPTH_CLEAR) of the surface's last depth-target bind.
+    public float DepthClearValue;
+    public bool HasDepthClearValue;
 }

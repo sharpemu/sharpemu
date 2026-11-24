@@ -116,6 +116,9 @@ public sealed unsafe partial class CachedImage : IDisposable
     public ResourceSlotIdentifier DepthOwner;
     public ulong LastAccessTick;
     public int RecencyEntryIndex;
+    // The frame of the use before the last one (collection ticks), or ulong.MaxValue for none. An image used in each of the
+    // two frames before the current one is a recurring alias, which an overlapping request keeps registered.
+    public ulong PreviousUseTick = ulong.MaxValue;
     public bool Parked;
     public ulong ParkedTick;
 

@@ -493,7 +493,7 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         private PreparedStageBindings ReuseStagePreparation(RenderPreparation preparation, ShaderStageResources stage, ShaderProgramInfo program,
-            StagePreparationMemo memo)
+            StagePreparationMemo memo, ReadOnlySpan<uint> heapViews)
         {
             var prepared = RentStage(stage, program);
             prepared.Memoized = true;
@@ -516,6 +516,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             var layout = program.Bindings!;
             prepared.ShaderData = AssembleShaderData(stage, program, layout);
+            heapViews.CopyTo(prepared.ShaderData.AsSpan((int)layout.HeapViewsDword));
             if (layout.Find(DescriptorBindingKind.GlobalDataShare) is not null)
             {
                 descriptors.GlobalDataShare = new BufferView(_bufferCache.GdsBuffer.Handle, 0, Vk.WholeSize);
@@ -1009,7 +1010,7 @@ internal static unsafe partial class VulkanVideoPresenter
             if (frontendReady && !movieActive && !Gpu.Images.ImageClearTrace.Enabled && !MeshDrawTrace.Active &&
                 TryFindStagePreparation(preparations, snapshot, stage.ShaderBase, out var memo))
             {
-                return ReuseStagePreparation(preparation, stage, program, memo);
+                return ReuseStagePreparation(preparation, stage, program, memo, heapViews);
             }
 
             Interlocked.Increment(ref _stageMemoMisses);
@@ -1071,7 +1072,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 FindBuffers(prepared);
             using (DescriptorStallProfile.Measure(DescriptorStallProfile.Operation.ValidateImages, program.Hash, info.Buffers.Count, info.Images.Count, info.Samplers.Count))
                 ValidateDrawImageTypes(prepared);
-            if (!movieActive && layout.CallTargetCount == 0 && layout.CallArgumentCount == 0 && !layout.UsesBindlessHeap)
+            // A stage that reads the bindless heap is kept like any other: the heap and its views were prepared above, before
+            // the memo is looked up, and a reuse writes this draw's views. Call records are made per draw, so their stages are not.
+            if (!movieActive && layout.CallTargetCount == 0 && layout.CallArgumentCount == 0 &&
+                (!layout.UsesBindlessHeap || program.CallRecordCallees.Count == 0))
             {
                 if (frontendReady)
                     NoteStagePreparation(preparations, prepared, snapshot, stage.ShaderBase);
@@ -1372,6 +1376,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 GuestGpuMemoryHook.Trace(traceAddress, 1,
                     $"device-address-mapping-check readable={_guestMemory.CanRead(traceAddress, 1)} backed={_guestBacking.IsBackedView(traceAddress)}");
             var bounded = BoundedDeviceAddressReads && ReadsOnlyBoundedRanges(preparation);
+            var windowed = !bounded && ReadsOnlyWindowedRanges(preparation) && CollectWindows(preparation, _bdaWindows);
             if (_worker)
             {
                 if (bounded)
@@ -1381,6 +1386,14 @@ internal static unsafe partial class VulkanVideoPresenter
                 else
                 {
                     Requests.NeedsBdaSweep = true;
+                    if (windowed)
+                    {
+                        Requests.BdaWindows.AddRange(_bdaWindows);
+                    }
+                    else
+                    {
+                        Requests.BdaFullSweep = true;
+                    }
                 }
 
                 Requests.BdaSpans = spans;
@@ -1403,7 +1416,83 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
+            if (windowed)
+            {
+                GuestBufferCache.ClipSpansToWindows(spans, _bdaWindows, _bdaWindowSpans);
+                _bufferCache.PrepareWindowedBda(_bdaWindowSpans, GuestBufferCache.MappingKey(_bdaWindowSpans), _bdaSpanMapping);
+                return;
+            }
+
             _bufferCache.PrepareBda(spans, _bdaSpanMapping);
+        }
+
+        // Every device-address stage is bounded, with ranges that pass the bounded checks, or windowed, with planned read-only
+        // ranges, and at least one is windowed.
+        private bool ReadsOnlyWindowedRanges(RenderPreparation preparation)
+        {
+            var any = false;
+            foreach (var stage in preparation.Stages)
+            {
+                if (!stage.Program.UsesDeviceAddresses)
+                {
+                    continue;
+                }
+
+                var windowedStage = stage.Program.DeviceAddressReadsWindowed;
+                if (!windowedStage && !stage.Program.DeviceAddressReadsBounded)
+                {
+                    return false;
+                }
+
+                foreach (var range in DeviceAddressRangesOf(stage))
+                {
+                    if (!range.Planned || range.Written || (!windowedStage && range.Size > ShaderCompiler.Resources.DeviceAddressRangePlanner.MaxRangeBytes))
+                    {
+                        return false;
+                    }
+                }
+
+                any |= windowedStage;
+            }
+
+            return any;
+        }
+
+        // The windows of the windowed stages' ranges that are not bounded exactly (an unbounded range evaluates to MaxRangeBytes):
+        // from each range base for the program's window bytes. False when one would wrap the 48-bit device address space.
+        private const ulong DeviceAddressSpaceEnd = 1UL << 48;
+        private readonly List<(ulong Start, ulong End)> _bdaWindows = [];
+        private readonly List<GuestSpan> _bdaWindowSpans = [];
+
+        private bool CollectWindows(RenderPreparation preparation, List<(ulong Start, ulong End)> windows)
+        {
+            windows.Clear();
+            foreach (var stage in preparation.Stages)
+            {
+                if (!stage.Program.UsesDeviceAddresses || !stage.Program.DeviceAddressReadsWindowed)
+                {
+                    continue;
+                }
+
+                var bytes = stage.Program.DeviceAddressWindowBytes;
+                foreach (var range in DeviceAddressRangesOf(stage))
+                {
+                    if (range.Size < ShaderCompiler.Resources.DeviceAddressRangePlanner.MaxRangeBytes)
+                    {
+                        continue;
+                    }
+
+                    if (bytes == 0 || range.Base >= DeviceAddressSpaceEnd || DeviceAddressSpaceEnd - range.Base < bytes)
+                    {
+                        windows.Clear();
+                        return false;
+                    }
+
+                    windows.Add((range.Base, range.Base + bytes));
+                }
+            }
+
+            return true;
         }
 
         private static readonly bool BoundedDeviceAddressReads = Environment.GetEnvironmentVariable("SHARPEMU_BOUNDED_BDA") != "0";

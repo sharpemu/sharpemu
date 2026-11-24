@@ -26,6 +26,8 @@ public interface IHostInput
     /// <summary>Sets rumble on all connected gamepads; large = strong/left motor.</summary>
     void SetRumble(byte largeMotor, byte smallMotor);
 
+    void SetHapticRumble(byte largeMotor, byte smallMotor, uint durationMs);
+
     /// <summary>
     /// Approximates per-trigger vibration on gamepads without independent trigger
     /// actuators; null leaves that trigger's current value unchanged.

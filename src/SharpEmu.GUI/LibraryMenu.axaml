@@ -89,5 +89,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
                    Text="{Binding [Library.OpenFile], Source={x:Static local:Localization.Instance}}" />
       </StackPanel>
     </Button>
+    <Button x:Name="InstallPkgButton" Classes="menuItem">
+      <StackPanel Orientation="Horizontal" Spacing="12">
+        <TextBlock Classes="materialSymbol compact menuIcon" Text="download" />
+        <TextBlock Classes="menuLabel"
+                   Text="{Binding [Library.Pkg.Install], Source={x:Static local:Localization.Instance}}" />
+      </StackPanel>
+    </Button>
   </StackPanel>
 </local:SheetView>

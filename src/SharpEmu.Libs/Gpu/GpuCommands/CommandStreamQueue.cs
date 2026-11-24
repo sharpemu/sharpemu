@@ -40,6 +40,8 @@ public sealed class CommandStreamQueue
     private readonly LinkedList<CommandSubmission>[] _queues = new LinkedList<CommandSubmission>[QueueCount];
     private readonly GpuCommandInterpreter?[] _interpreters = new GpuCommandInterpreter?[QueueCount];
     private readonly Queue<ControlBarrier> _controlBarriers = new();
+    // Per queue: the admission order of its head while that head's release waits for older compute work, or 0.
+    private readonly ulong[] _waitingReleases = new ulong[QueueCount];
     private int _nextQueue;
     private int _submissionCount;
     private ulong _admissionOrdinal;
@@ -433,6 +435,59 @@ public sealed class CommandStreamQueue
         }
     }
 
+    // For a release (GpuCommandInterpreter.YieldsToOlderWork): whether another compute queue's head was admitted before the
+    // given submission and, with runnableOnly, is not blocked on an unmet wait. If so, the release waits and the older heads
+    // run before it without soft waits. Its first wait retries the blocked heads once, so each re-reads its wait; later
+    // checks leave the blocked state alone, because a retry from one waiting release kept the heads another one checks
+    // runnable, and two such releases then waited for each other for good.
+    internal bool YieldToOlderWork(int queueId, ulong admissionOrdinal, bool runnableOnly)
+    {
+        lock (_gate)
+        {
+            var older = false;
+            for (var other = 1; other < QueueCount && !older; other++)
+            {
+                older = other != queueId && _queues[other].First is { } head && head.Value.AdmissionOrdinal < admissionOrdinal &&
+                    (!runnableOnly || !head.Value.Blocked);
+            }
+
+            _waitingReleases[queueId] = older ? admissionOrdinal : 0;
+            if (!older)
+            {
+                return false;
+            }
+
+            for (var other = 1; other < QueueCount; other++)
+            {
+                if (other != queueId && _queues[other].First is { } head && head.Value.AdmissionOrdinal < admissionOrdinal)
+                {
+                    head.Value.Deferral = null;
+                }
+            }
+
+            if (!runnableOnly)
+            {
+                RetryBlocked();
+            }
+
+            return true;
+        }
+    }
+
+    // A younger release waits for this submission (YieldToOlderWork).
+    private bool ReleaseWaitsForLocked(CommandSubmission submission)
+    {
+        foreach (var ordinal in _waitingReleases)
+        {
+            if (ordinal > submission.AdmissionOrdinal)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     // Runs one slice of the next unblocked submission on the calling thread.
     public SliceResult ProcessOne()
     {
@@ -466,9 +521,10 @@ public sealed class CommandStreamQueue
                 queue.RemoveFirst();
                 _submissionCount--;
                 _nextQueue = (selected + 1) % QueueCount;
+                _waitingReleases[selected] = 0;
                 if (_landings is not null)
                 {
-                    mayDeferForLanding = HasOtherRunnableLocked(selected);
+                    mayDeferForLanding = HasOtherRunnableLocked(selected) && !ReleaseWaitsForLocked(submission);
                     completedGpuTick = _lastCompletedGpuTick;
                 }
             }
@@ -541,7 +597,9 @@ public sealed class CommandStreamQueue
                 var deferral = _landings is null ? null : _interpreters[submission!.QueueId]?.TakeLandingDeferral(out deferredSince);
                 submission!.Deferral = deferral;
                 submission.DeferredSinceTicks = deferral is null ? 0 : deferredSince;
-                submission.Blocked = deferral is null && retryGeneration == _retryGeneration;
+                // A release that waits for older work stays runnable: it checks again on its next turn.
+                var yielded = _interpreters[submission.QueueId]?.TakeReleaseYield() == true;
+                submission.Blocked = deferral is null && !yielded && retryGeneration == _retryGeneration;
                 submission.BlockedSinceTicks = System.Diagnostics.Stopwatch.GetTimestamp();
                 submission.BlockedPacketAddress = submission.Commands.CurrentPacketAddress;
                 _queues[submission.QueueId].AddFirst(submission);
@@ -612,6 +670,8 @@ public sealed class CommandStreamQueue
         SlicesRun++;
         processor.MayDeferForLanding = mayDeferForLanding;
         processor.CompletedGpuTick = completedGpuTick;
+        processor.Queues = this;
+        processor.AdmissionOrdinal = submission.AdmissionOrdinal;
         _host.BeginSubmission(submission.QueueId, submission.SubmissionId, submission.GeometrySnapshots);
         processor.ConstantEngineComplete = true;
         var complete = processor.Process(submission.Commands, submission.Address, submission.DwordCount,
@@ -624,7 +684,7 @@ public sealed class CommandStreamQueue
                 _host.RunGarbageCollector();
             }
 
-            _host.Flush();
+            _host.FlushSlice();
         }
         else if (complete)
         {

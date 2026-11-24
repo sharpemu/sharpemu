@@ -146,7 +146,8 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool PrewarmPixelLibrary(PixelPrewarmRecord record, ShaderCodeCapture code, IGuestGpuBackend compiler)
         {
             var name = $"ps=0x{record.Hash:X16} shader=0x{record.Address:X16}";
-            if (!ShaderProgramCache.TryCompilePixelPrewarm(record, code, compiler, this, out var compiled, out var layout, out var error))
+            if (!ShaderProgramCache.TryCompilePixelPrewarm(record, code, compiler, this, out var compiled, out var layout, out var error,
+                    Agc.AgcExports.ShaderFrontendForDomain))
             {
                 NoteGraphicsPrewarmFailure(name, error);
                 return false;
@@ -195,7 +196,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             var name = $"{(program.Mesh ? "ms" : "vs")}=0x{program.Hash:X16} shader=0x{program.Address:X16}";
             if (!ShaderProgramCache.TryCompileVertexPrewarm(program, code, compiler, this, out var compiled, out var layout,
-                    out var task, out var error))
+                    out var task, out var error, Agc.AgcExports.ShaderFrontendForDomain))
             {
                 NoteGraphicsPrewarmFailure(name, error);
                 return false;

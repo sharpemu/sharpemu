@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.GnmMode.Shaders;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
@@ -286,6 +287,41 @@ public sealed class VertexPrewarmTests : IDisposable
         Assert.NotNull(layout);
         Assert.Single(Assert.IsType<FakeCompiledShader>(compiled).Request.VertexInputs);
         Assert.Equal(runtime, Assert.IsType<FakeCompiledShader>(compiled).Spirv);
+    }
+
+    [Fact]
+    public void GcnVertexPrewarmReplaysTheRecordedFetchShader()
+    {
+        var frontend = new GcnShaderFrontend();
+        var guest = new PipelineTestGuest(Compile);
+        const ulong fetchAddress = CodeAddress - 0x100;
+        guest.RegisterProgram(CodeAddress, HeaderAddress, [0xBE802100, 0xBF810000]);
+        guest.RegisterProgram(fetchAddress, HeaderAddress - 0x100, [0x7E0802F2, 0xBE802000]);
+        uint[] userData = [unchecked((uint)fetchAddress), (uint)(fetchAddress >> 32)];
+        var registered = new RegisteredShader(CodeAddress, 0, 8, 0, 0, 0, 0, fetchAddress, 8)
+        {
+            Frontend = frontend,
+            FrontendUserData = userData,
+        };
+        var context = new CpuContext(guest.Memory, Generation.Gen4);
+        using (var list = Open())
+        {
+            guest.Host.ShaderPrewarm = list;
+            var programs = new ShaderProgramCache(context, guest.Compiler, guest.Host);
+            var cursor = 0u;
+            programs.GetOrCompile(new ShaderSource(registered, 0x1234, userData, 0, ShaderStage.Vertex),
+                new StageCompileOptions { VertexInfo = new VertexInputInfo() }, ref cursor, out _);
+            var (_, identity) = Assert.Single(guest.Host.RecordedVertexPrograms);
+            list.RecordPreRasterization(identity, new PreRasterizationState(0, 0, 0, false, false, true, false));
+        }
+
+        using var reloaded = Open();
+        var part = Assert.IsType<PreRasterizationPrewarmItem>(Assert.Single(reloaded.LoadedGraphicsPrewarm()));
+        Assert.Equal(registered.CodeSizeBytes, part.Code.FrontendEntryCodeSize);
+        var compiler = new FakeShaderCompiler(Compile);
+        Assert.True(ShaderProgramCache.TryCompileVertexPrewarm(part.Program, part.Code, compiler, guest.Host,
+            out var compiled, out _, out _, out var error, domain => domain == frontend.CacheDomain ? frontend : null), error);
+        Assert.Equal(Assert.Single(guest.Compiler.Shaders).Spirv, Assert.IsType<FakeCompiledShader>(compiled).Spirv);
     }
 
     // A vertex program compiled after pixel stages that end at different push cursors is one translation, whose push

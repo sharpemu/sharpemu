@@ -162,6 +162,11 @@ internal static partial class Program
             TryEnableConsoleFileMirror(earlyLogFilePath);
         }
 
+        if (args.Length > 0 && string.Equals(args[0], "--install-pkg", StringComparison.OrdinalIgnoreCase))
+        {
+            return InstallPkg(args);
+        }
+
         if (!CheckHostArchitecture())
         {
             return 5;
@@ -989,9 +994,69 @@ internal static partial class Program
         return builder.ToString();
     }
 
+    // --install-pkg <file.pkg> [destination]: unpacks a fake PS4 or PS5 package into a game folder (by
+    // default <pkg folder>/<game title>) that can then be launched through its eboot.bin.
+    private static int InstallPkg(string[] args)
+    {
+        if (args.Length is < 2 or > 3)
+        {
+            Log.Error("Usage: SharpEmu.CLI --install-pkg <path-to-game.pkg> [destination-folder]");
+            return 2;
+        }
+
+        var pkgPath = Path.GetFullPath(args[1]);
+        if (!File.Exists(pkgPath))
+        {
+            Log.Error($"Package not found: {pkgPath}");
+            return 2;
+        }
+
+        try
+        {
+            using var package = SharpEmu.HLE.FileSystem.Pkg.GamePackage.Open(pkgPath);
+            if (!package.IsGameApplication)
+            {
+                Log.Error($"{Path.GetFileName(pkgPath)} is not a base game (category '{package.Category}'). Patches and DLC packages are not supported yet.");
+                return 2;
+            }
+
+            var destination = args.Length == 3
+                ? Path.GetFullPath(args[2])
+                : Path.Combine(
+                    Path.GetDirectoryName(pkgPath)!,
+                    package.GetFolderName(Path.GetFileNameWithoutExtension(pkgPath)));
+            Log.Info($"Installing {Path.GetFileName(pkgPath)} ({package.ContentId}) into {destination}");
+
+            var lastPercent = -1;
+            var progress = new SynchronousProgress<SharpEmu.HLE.FileSystem.Pkg.PkgExtractProgress>(report =>
+            {
+                var percent = report.BytesTotal == 0 ? 100 : (int)(report.BytesDone * 100 / report.BytesTotal);
+                if (percent != lastPercent)
+                {
+                    lastPercent = percent;
+                    Log.Info($"{percent,3}%  {report.BytesDone / (1024.0 * 1024 * 1024):0.00} / {report.BytesTotal / (1024.0 * 1024 * 1024):0.00} GB  {report.CurrentFile}");
+                }
+            });
+            package.Extract(destination, progress);
+            Log.Info($"Done. Launch it with: SharpEmu.CLI \"{Path.Combine(destination, "eboot.bin")}\"");
+            return 0;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            Log.Error($"Installing the package failed: {exception.Message}");
+            return 1;
+        }
+    }
+
+    private sealed class SynchronousProgress<T>(Action<T> handler) : IProgress<T>
+    {
+        public void Report(T value) => handler(value);
+    }
+
     private static void PrintUsage()
     {
         Log.Info("Usage: SharpEmu.CLI [--strict[=on|off]] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--no-log-file] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin|path-to-game.zar>");
+        Log.Info("Install a fake PS4 or PS5 package: SharpEmu.CLI --install-pkg <path-to-game.pkg> [destination-folder]");
         Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
         Log.Info("Debug server: --debug-server starts a live debug listener (default 127.0.0.1:5714); connect with SharpEmu.DebugClient.");
     }

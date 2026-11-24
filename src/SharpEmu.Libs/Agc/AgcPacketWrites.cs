@@ -7,9 +7,10 @@ namespace SharpEmu.Libs.Agc;
 // - Marker names are read in chunks within a page.
 // - A release reads its six stack words in one read.
 // - The submitted command scan uses a copy loaded a page at a time.
-// Register ranges always use the ordinary marker allocation/write, packet allocation/header and payload-copy sequence.
-// Push markers retain ordinary allocation/header/name-word writes after name resolution. There is no combined packet
-// write, cursor rollback or speculative write followed by replay in either emitter.
+// The switch leaves packet emission alone. A register range allocates its marker and packet together, with one write
+// for the marker and header, only when both fit without the buffer-full callback, and otherwise apart; the payload
+// copy follows either way. Push markers retain ordinary allocation/header/name-word writes after name resolution.
+// Neither emitter rolls the cursor back or writes speculatively and replays.
 // The retained read optimizations have separate input-stability and read-effect contracts.
 internal static class AgcPacketWrites
 {

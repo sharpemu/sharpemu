@@ -9,26 +9,6 @@ public static partial class Gen5SpirvTranslator
 {
     private sealed partial class CompilationContext
     {
-        private uint _integerReciprocalFunction;
-
-        private void DeclareIntegerReciprocalFunction()
-        {
-            if (!_request.Program.Instructions.Any(instruction => instruction.Opcode == "VRcpIflagF32"))
-            {
-                return;
-            }
-
-            // Keep integer reciprocal lowering outside the caller's optimization region.
-            const uint dontInline = 2;
-            var functionType = _module.TypeFunction(_floatType, _floatType);
-            _integerReciprocalFunction = _module.BeginFunction(_floatType, functionType, dontInline);
-            var source = _module.AddFunctionParameter(_floatType);
-            _module.AddLabel();
-            var reciprocal = _module.AddInstruction(SpirvOp.FDiv, _floatType, Float(1), source);
-            _module.AddStatement(SpirvOp.ReturnValue, reciprocal);
-            _module.EndFunction();
-        }
-
         private bool TryEmitVectorAlu(
             Gen5ShaderInstruction instruction,
             out string error)
@@ -615,15 +595,26 @@ public static partial class Gen5SpirvTranslator
                             EmitFlushF32DenormToSignedZero(
                                 GetFloatSource(instruction, 0))));
                     break;
+                // Inline: NVIDIA miscompiled a shader holding a real call (Demon's Souls half-wave culling compute).
+                // The fma Newton step keeps the reciprocal within the ~1 ulp the AMD integer division needs, which
+                // OpFDiv alone does not guarantee; inf/NaN/zero keep the division result.
                 case "VRcpIflagF32":
+                {
+                    var x = GetFloatSource(instruction, 0);
+                    var r = _module.AddInstruction(SpirvOp.FDiv, _floatType, Float(1), x);
+                    var negX = _module.AddInstruction(SpirvOp.FNegate, _floatType, x);
+                    var e = Ext(50, _floatType, negX, r, Float(1));
+                    var r1 = Ext(50, _floatType, r, e, r);
+                    var keep = LogicalOr(
+                        LogicalOr(
+                            _module.AddInstruction(SpirvOp.IsInf, _boolType, r),
+                            _module.AddInstruction(SpirvOp.IsNan, _boolType, r)),
+                        _module.AddInstruction(SpirvOp.FOrdEqual, _boolType, r, Float(0)));
                     result = EmitFloatResult(
                         instruction,
-                        _module.AddInstruction(
-                            SpirvOp.FunctionCall,
-                            _floatType,
-                            _integerReciprocalFunction,
-                            GetFloatSource(instruction, 0)));
+                        _module.AddInstruction(SpirvOp.Select, _floatType, keep, r, r1));
                     break;
+                }
                 case "VLogF32":
                     result = EmitFloatResult(
                         instruction,
@@ -6296,12 +6287,21 @@ public static partial class Gen5SpirvTranslator
             return value;
         }
 
+        // V_CVT_PKRTZ_F16_F32 rounds toward zero. Clearing the 13 mantissa bits a half cannot hold makes the
+        // round-to-nearest pack exact inside the half range, but a finite value of 65536 or more would still round
+        // to infinity, where rounding toward zero gives the largest finite half, 65504. A NaN keeps its bits, so a
+        // payload held only in the cleared bits does not become infinity either.
         private uint TruncateFloat32ForPack(uint value)
         {
-            var raw = BitwiseAnd(
-                Bitcast(_uintType, value),
-                UInt(0xFFFF_E000));
-            return Bitcast(_floatType, raw);
+            var bits = Bitcast(_uintType, value);
+            var raw = BitwiseAnd(bits, UInt(0xFFFF_E000));
+            var magnitude = BitwiseAnd(bits, UInt(0x7FFF_FFFF));
+            var overflow = LogicalAnd(
+                UCmp(SpirvOp.UGreaterThanEqual, magnitude, UInt(0x4780_0000)),
+                UCmp(SpirvOp.ULessThan, magnitude, UInt(0x7F80_0000)));
+            var largest = BitwiseOr(BitwiseAnd(bits, UInt(0x8000_0000)), UInt(0x477F_E000));
+            var nan = UCmp(SpirvOp.UGreaterThan, magnitude, UInt(0x7F80_0000));
+            return Bitcast(_floatType, SelectU(nan, bits, SelectU(overflow, largest, raw)));
         }
 
         private uint Ext(uint operation, uint resultType, params uint[] operands)

@@ -130,7 +130,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
 
       <!-- Page titles with the library toolbar on the same row. Every child is
            centred on the one 56 pt row and every toolbar control is 44 pt tall.
-           Plain buttons (not TabItem) so there is no Fluent tab chrome; the L1/R1
+           Plain buttons (not TabItem) so there is no Fluent tab chrome; the shoulder-button
            keycaps appear only while a controller is connected and the shoulder
            buttons switch pages from anywhere. -->
       <Grid x:Name="ContentToolbar" Grid.Row="0" ColumnDefinitions="Auto,*,Auto" Height="56" Margin="0,0,0,16">
@@ -239,6 +239,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
                           FontWeight="SemiBold">
                   <MenuItem.Icon>
                     <TextBlock Classes="materialSymbol compact" Text="play_arrow" />
+                  </MenuItem.Icon>
+                </MenuItem>
+                <MenuItem x:Name="CtxLaunchVariables"
+                          Header="{Binding [Launch.Variables.Title], Source={x:Static local:Localization.Instance}}">
+                  <MenuItem.Icon>
+                    <TextBlock Classes="materialSymbol compact" Text="data_object" />
                   </MenuItem.Icon>
                 </MenuItem>
                 <MenuItem x:Name="CtxCreateShortcut"

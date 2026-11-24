@@ -1724,7 +1724,11 @@ public sealed partial class DirectExecutionBackend
 			"1j3S3n-tTW4" or // sceKernelGetTscFrequency
 			"ob5xAW4ln-0" or // strchr
 			"9yDWMxEFdJU" or // strrchr
-			"V++UgBtQhn0";   // sceAgcGetDataPacketPayloadAddress
+			"V++UgBtQhn0" or // sceAgcGetDataPacketPayloadAddress
+			"d-6uF9sZDIU" or // sceAgcSetCxRegIndirectPatchAddRegisters
+			"z2duB-hHQSM" or // sceAgcSetShRegIndirectPatchAddRegisters
+			"vRoArM9zaIk" or // sceAgcSetUcRegIndirectPatchAddRegisters
+			"D9sr1xGUriE";   // sceAgcCreatePrimState
 
 	private unsafe ulong DispatchTrivialLeaf(
 		CpuContext cpuContext,
@@ -1949,6 +1953,8 @@ public sealed partial class DirectExecutionBackend
 			"LtTouSCZjHM" or // sceAgcCbNop
 			"k3GhuSNmBLU" or // sceAgcCbDispatch
 			"UZbQjYAwwXM" or // sceAgcCbSetShRegistersDirect
+			"n2fD4A+pb+g" or // sceAgcCbSetShRegisterRangeDirect
+			"t1vNu082-jM" or // sceAgcDcbDrawIndexIndirect
 			"JrtiDtKeS38" or // sceAgcAcbResetQueue
 			"cFazmnXpJOE" or // sceAgcAcbEventWrite
 			"KT-hTp-Ch14" or // sceAgcAcbAcquireMem

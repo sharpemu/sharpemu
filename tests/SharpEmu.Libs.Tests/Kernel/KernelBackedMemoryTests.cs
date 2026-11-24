@@ -187,6 +187,50 @@ public sealed class KernelBackedMemoryTests
         }
     }
 
+    // A guest munmap of a piece of a larger direct mapping maps the rest of its view again. The pages on both sides of the
+    // hole keep the protection the GPU memory gave them, so a CPU store to a page the GPU owns still faults.
+    [NativePageProtectionFact]
+    public void PartialMunmapKeepsTheGpuWatchesOfTheRestOfTheMapping()
+    {
+        using var test = new BackedKernelMemory();
+        var address = SharpEmu.Libs.Tests.Memory.HostViews.HostViewTestSupport.ProbeGuestAddress(test.Host, 0x30000);
+        using var memory = new GuestGpuMemory(test.Memory);
+        GuestGpuMemoryHook.Attach(memory);
+        var below = address + 0xF000;
+        var above = address + 0x20000;
+        var watching = false;
+        try
+        {
+            test.Allocate(0, 0x30000);
+            Assert.Equal(address, test.Map(0, 0x30000, address));
+            Assert.True(memory.Covers(address, 0x30000));
+            memory.Pages.AddWatch(below, 0x1000, blockReads: false);
+            memory.Pages.AddWatch(above, 0x1000, blockReads: true);
+            watching = true;
+            ExpectAccess("before the munmap");
+            Assert.Equal(0, test.Unmap(address + 0x10000, 0x10000));
+            Assert.False(memory.Covers(address + 0x10000, 0x10000));
+            ExpectAccess("after the munmap");
+        }
+        finally
+        {
+            if (watching)
+            {
+                memory.Pages.RemoveWatch(below, 0x1000, blockReads: false);
+                memory.Pages.RemoveWatch(above, 0x1000, blockReads: true);
+            }
+
+            GuestGpuMemoryHook.Attach(null);
+        }
+
+        void ExpectAccess(string step)
+        {
+            SharpEmu.Libs.Tests.Memory.NativePageProtection.Expect(HostMemory.PAGE_READONLY, below, $"write-watched page below the hole {step}");
+            SharpEmu.Libs.Tests.Memory.NativePageProtection.Expect(HostMemory.PAGE_NOACCESS, above, $"read-watched page above the hole {step}");
+            SharpEmu.Libs.Tests.Memory.NativePageProtection.Expect(HostMemory.PAGE_READWRITE, address, $"unwatched page {step}");
+        }
+    }
+
     [Fact]
     public void SparseImageReadCopiesResidentRangesAndClearsReservedGaps()
     {

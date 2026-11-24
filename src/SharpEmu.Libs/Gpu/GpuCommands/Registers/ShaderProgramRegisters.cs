@@ -300,6 +300,40 @@ public sealed class ComputeStageRegisters
         copy.UserScalars = UserScalars.Copy();
         return copy;
     }
+
+    // Copies every register into target, which keeps its own user scalar set: a holder that copies registers often reuses
+    // one object instead of allocating two per copy.
+    public void CopyTo(ComputeStageRegisters target)
+    {
+        target.Address = Address;
+        target.ProgramChecksum = ProgramChecksum;
+        target.ThreadsX = ThreadsX;
+        target.ThreadsY = ThreadsY;
+        target.ThreadsZ = ThreadsZ;
+        target.VectorRegisterCount = VectorRegisterCount;
+        target.Priority = Priority;
+        target.FloatMode = FloatMode;
+        target.Dx10Clamp = Dx10Clamp;
+        target.DebugMode = DebugMode;
+        target.IeeeMode = IeeeMode;
+        target.RequireForwardProgress = RequireForwardProgress;
+        target.HalfPrecisionOverflow = HalfPrecisionOverflow;
+        target.ThreadgroupConfiguration = ThreadgroupConfiguration;
+        target.WaveSize = WaveSize;
+        target.ScratchEnable = ScratchEnable;
+        target.UserScalarCount = UserScalarCount;
+        target.ThreadGroupIdXEnable = ThreadGroupIdXEnable;
+        target.ThreadGroupIdYEnable = ThreadGroupIdYEnable;
+        target.ThreadGroupIdZEnable = ThreadGroupIdZEnable;
+        target.ThreadGroupSizeEnable = ThreadGroupSizeEnable;
+        target.ThreadIdComponentCount = ThreadIdComponentCount;
+        target.LocalDataShareSize = LocalDataShareSize;
+        target.SharedVectorRegisters = SharedVectorRegisters;
+        var scalars = target.UserScalars;
+        scalars.Values = UserScalars.Values;
+        scalars.Kinds = UserScalars.Kinds;
+        scalars.Count = UserScalars.Count;
+    }
 }
 
 // The shader bank: the program registers of every stage and their user scalars.
