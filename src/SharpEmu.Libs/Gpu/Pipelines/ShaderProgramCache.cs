@@ -727,7 +727,8 @@ internal sealed partial class ShaderProgramCache
                     outcome = MaterializationTally.Outcome.Full;
                 }
 
-                if (!materialized && materializationFailure is ResourceMaterializationFailure.IncompatibleImageCandidates or ResourceMaterializationFailure.ImageCapacityExceeded &&
+                if (!materialized && materializationFailure is ResourceMaterializationFailure.IncompatibleImageCandidates or ResourceMaterializationFailure.ImageCapacityExceeded
+                        or ResourceMaterializationFailure.OversizedImageTable &&
                     preparation is null && PreferHeapRecords(source, options, entry))
                 {
                     // The table binds every image it can select, and this one selects more than a draw may bind. The
@@ -737,7 +738,7 @@ internal sealed partial class ShaderProgramCache
                         captureIndirectImageFailure);
                 }
 
-                if (!materialized && materializationFailure == ResourceMaterializationFailure.IncompatibleImageCandidates &&
+                if (!materialized && materializationFailure is ResourceMaterializationFailure.IncompatibleImageCandidates or ResourceMaterializationFailure.OversizedImageTable &&
                     !entry.Plan.NullIncompatibleImageCandidates)
                 {
                     // No heap record serves the table, and an image of another kind cannot share its binding. That image
@@ -757,7 +758,8 @@ internal sealed partial class ShaderProgramCache
                 if (!materialized)
                 {
                     var message = $"The shader resources could not be materialized: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} reason={materializationFailure}.";
-                    if (materializationFailure is ResourceMaterializationFailure.IncompatibleImageCandidates or ResourceMaterializationFailure.ImageCapacityExceeded)
+                    if (materializationFailure is ResourceMaterializationFailure.IncompatibleImageCandidates or ResourceMaterializationFailure.ImageCapacityExceeded
+                        or ResourceMaterializationFailure.OversizedImageTable)
                         throw new ShaderProgramRejectedException(message);
                     throw SubmissionScheduler.Fatal(message);
                 }
@@ -1528,8 +1530,9 @@ internal sealed partial class ShaderProgramCache
     }
 
     private ShaderResourcePlan ExtractPlan(ShaderSource source, StageCompileOptions options, Gen5ShaderProgram program,
-        EmbeddedVertexFetchPlan? fetch, bool preferHeapRecords, bool dumpPlanning) =>
-        ShaderResourcePlan.Extract(program, source.Stage, source.Hash, source.UserDataBase, (uint)source.UserData.Length,
+        EmbeddedVertexFetchPlan? fetch, bool preferHeapRecords, bool dumpPlanning)
+    {
+        var plan = ShaderResourcePlan.Extract(program, source.Stage, source.Hash, source.UserDataBase, (uint)source.UserData.Length,
             fetch?.Loads.Select(load => load.Pc).ToHashSet(),
             beforeResourceTracking: dumpPlanning ? resourcePlan => ShaderPlanningDump.WriteGraph(source, resourcePlan) : null,
             // Resource planning must use the guest wave size of shader compilation.
@@ -1546,6 +1549,10 @@ internal sealed partial class ShaderProgramCache
             normalizeImageDescriptor: ImageNormalizer(source.Registered.Frontend),
             imageNormalizationVersion: source.Registered.Frontend?.ImageNormalizationVersion,
             preferHeapRecords: preferHeapRecords);
+        // An image table too large to enumerate is replanned with heap records (see PreferHeapRecords) before it reads as null.
+        plan.ReplanOversizedImageTables = _host.SupportsBindlessHeap;
+        return plan;
+    }
 
     // A program an earlier session had to replan (PreferHeapRecords) is planned so from the start, as its prewarm record is.
     private bool PrefersHeapRecords(ShaderSource source) =>

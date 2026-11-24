@@ -244,6 +244,24 @@ public sealed class ResourceMaterializerTests
         Assert.Equal(ResourceMaterializationFailure.None, failureKind);
     }
 
+    // A host with the bindless heap asks for the table to be planned again instead: the heap reads the record each lane picks.
+    // Once the cache finds no heap record for it, the table reads as null as before.
+    [Fact]
+    public void UnclampedSelectorOverTheProbeCapFailsForAHeapReplanUntilItIsNulled()
+    {
+        var (plan, inputs, _) = ClampedTable(null);
+        plan.ReplanOversizedImageTables = true;
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+
+        Assert.False(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization, out var failureKind));
+        Assert.Equal(ResourceMaterializationFailure.OversizedImageTable, failureKind);
+
+        plan.NullIncompatibleImageCandidates = true;
+        Assert.True(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization, out failureKind));
+        Assert.Equal(ResourceMaterializationFailure.None, failureKind);
+    }
+
     [Fact]
     public void ClampedSelectorReportsTheClampBoundedMode()
     {

@@ -2686,7 +2686,12 @@ public static partial class Gen5SpirvTranslator
             var atField = _module.AddInstruction(SpirvOp.IEqual, _boolType,
                 _module.AddInstruction(SpirvOp.ISub, _uintType, offset, _module.AddInstruction(SpirvOp.IMul, _uintType, record, stride)), fieldOffset);
             var inView = LogicalAnd(atField, _module.AddInstruction(SpirvOp.ULessThan, _boolType, record, records));
-            return _module.AddInstruction(SpirvOp.Select, _uintType, inView, IAdd(first, record), UInt(BindlessHeap.CallRecordNullIndex));
+            // Whatever the view's words hold, the element stays inside set 1's arrays (a descriptor index past an array is
+            // undefined and can lose the device): an element at or past BindlessHeap.Capacity reads the null element.
+            var element = IAdd(first, record);
+            var inArray = _module.AddInstruction(SpirvOp.IEqual, _boolType,
+                ShiftRightLogical(element, UInt((uint)System.Numerics.BitOperations.Log2(BindlessHeap.Capacity))), UInt(0));
+            return _module.AddInstruction(SpirvOp.Select, _uintType, LogicalAnd(inView, inArray), element, UInt(BindlessHeap.CallRecordNullIndex));
         }
 
         // One runtime array of set 1, declared at its first use. The integer declarations of an image array share its binding.
