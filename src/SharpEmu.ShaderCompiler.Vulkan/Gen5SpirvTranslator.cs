@@ -339,7 +339,6 @@ public static partial class Gen5SpirvTranslator
                 FindLocalComparisonPredicates(blocks);
                 profile.Switch(ShaderTranslationProfile.Part.Declarations);
                 DeclareModule();
-                DeclareIntegerReciprocalFunction();
                 var functionType = _module.TypeFunction(_voidType);
                 var main = _module.BeginFunction(_voidType, functionType);
                 _module.AddName(main, "main");
