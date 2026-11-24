@@ -522,5 +522,16 @@
   "Overlay.SaveData.Size": "Размер",
   "Overlay.SaveData.ConfirmDelete": "Удалить эти сохраненные данные?",
   "Overlay.SaveData.ConfirmDeleteNote": "Удаленные сохраненные данные нельзя восстановить.",
-  "Overlay.SaveData.InUse": "Эти сохраненные данные используются, их нельзя удалить."
+  "Overlay.SaveData.InUse": "Эти сохраненные данные используются, их нельзя удалить.",
+  "Overlay.Ime.Title": "Введите текст",
+  "Overlay.Ime.Done": "Готово",
+  "Overlay.Ime.Send": "Отправить",
+  "Overlay.Ime.Search": "Поиск",
+  "Overlay.Ime.Go": "Перейти",
+  "Overlay.Ime.Close": "Закрыть",
+  "Overlay.Ime.Delete": "Удалить",
+  "Overlay.Ime.Space": "Пробел",
+  "Overlay.Ime.Cursor": "Курсор",
+  "Overlay.Ime.Select": "Выбрать",
+  "Overlay.Ime.Type": "Печатайте на клавиатуре"
 }

@@ -520,5 +520,16 @@
   "Overlay.SaveData.Size": "Tamanho",
   "Overlay.SaveData.ConfirmDelete": "Eliminar estes dados guardados?",
   "Overlay.SaveData.ConfirmDeleteNote": "Os dados guardados eliminados não podem ser recuperados.",
-  "Overlay.SaveData.InUse": "Estes dados guardados estão a ser utilizados e não podem ser eliminados."
+  "Overlay.SaveData.InUse": "Estes dados guardados estão a ser utilizados e não podem ser eliminados.",
+  "Overlay.Ime.Title": "Introduzir texto",
+  "Overlay.Ime.Done": "Concluído",
+  "Overlay.Ime.Send": "Enviar",
+  "Overlay.Ime.Search": "Pesquisar",
+  "Overlay.Ime.Go": "Ir",
+  "Overlay.Ime.Close": "Fechar",
+  "Overlay.Ime.Delete": "Eliminar",
+  "Overlay.Ime.Space": "Espaço",
+  "Overlay.Ime.Cursor": "Cursor",
+  "Overlay.Ime.Select": "Selecionar",
+  "Overlay.Ime.Type": "Escreva com o teclado"
 }

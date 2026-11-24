@@ -519,5 +519,16 @@
   "Overlay.SaveData.Size": "الحجم",
   "Overlay.SaveData.ConfirmDelete": "هل تريد حذف هذه البيانات المحفوظة؟",
   "Overlay.SaveData.ConfirmDeleteNote": "لا يمكن استعادة البيانات المحفوظة المحذوفة.",
-  "Overlay.SaveData.InUse": "هذه البيانات المحفوظة قيد الاستخدام ولا يمكن حذفها."
+  "Overlay.SaveData.InUse": "هذه البيانات المحفوظة قيد الاستخدام ولا يمكن حذفها.",
+  "Overlay.Ime.Title": "أدخل النص",
+  "Overlay.Ime.Done": "تم",
+  "Overlay.Ime.Send": "إرسال",
+  "Overlay.Ime.Search": "بحث",
+  "Overlay.Ime.Go": "انتقال",
+  "Overlay.Ime.Close": "إغلاق",
+  "Overlay.Ime.Delete": "حذف",
+  "Overlay.Ime.Space": "مسافة",
+  "Overlay.Ime.Cursor": "المؤشر",
+  "Overlay.Ime.Select": "تحديد",
+  "Overlay.Ime.Type": "اكتب باستخدام لوحة المفاتيح"
 }

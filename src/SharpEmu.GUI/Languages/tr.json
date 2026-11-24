@@ -521,5 +521,16 @@
   "Overlay.SaveData.Size": "Boyut",
   "Overlay.SaveData.ConfirmDelete": "Bu kayıtlı veri silinsin mi?",
   "Overlay.SaveData.ConfirmDeleteNote": "Silinen kayıtlı veriler geri getirilemez.",
-  "Overlay.SaveData.InUse": "Bu kayıtlı veri kullanımda olduğu için silinemiyor."
+  "Overlay.SaveData.InUse": "Bu kayıtlı veri kullanımda olduğu için silinemiyor.",
+  "Overlay.Ime.Title": "Metin girin",
+  "Overlay.Ime.Done": "Bitti",
+  "Overlay.Ime.Send": "Gönder",
+  "Overlay.Ime.Search": "Ara",
+  "Overlay.Ime.Go": "Git",
+  "Overlay.Ime.Close": "Kapat",
+  "Overlay.Ime.Delete": "Sil",
+  "Overlay.Ime.Space": "Boşluk",
+  "Overlay.Ime.Cursor": "İmleç",
+  "Overlay.Ime.Select": "Seç",
+  "Overlay.Ime.Type": "Klavyenizle yazın"
 }

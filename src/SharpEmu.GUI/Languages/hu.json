@@ -520,5 +520,16 @@
   "Overlay.SaveData.Size": "Méret",
   "Overlay.SaveData.ConfirmDelete": "Törlöd ezt a mentett adatot?",
   "Overlay.SaveData.ConfirmDeleteNote": "A törölt mentett adatok nem állíthatók vissza.",
-  "Overlay.SaveData.InUse": "Ez a mentett adat használatban van, ezért nem törölhető."
+  "Overlay.SaveData.InUse": "Ez a mentett adat használatban van, ezért nem törölhető.",
+  "Overlay.Ime.Title": "Szöveg beírása",
+  "Overlay.Ime.Done": "Kész",
+  "Overlay.Ime.Send": "Küldés",
+  "Overlay.Ime.Search": "Keresés",
+  "Overlay.Ime.Go": "Ugrás",
+  "Overlay.Ime.Close": "Bezárás",
+  "Overlay.Ime.Delete": "Törlés",
+  "Overlay.Ime.Space": "Szóköz",
+  "Overlay.Ime.Cursor": "Kurzor",
+  "Overlay.Ime.Select": "Kiválasztás",
+  "Overlay.Ime.Type": "Gépelj a billentyűzeteddel"
 }

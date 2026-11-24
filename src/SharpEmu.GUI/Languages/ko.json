@@ -519,5 +519,16 @@
   "Overlay.SaveData.Size": "크기",
   "Overlay.SaveData.ConfirmDelete": "이 저장 데이터를 삭제하시겠습니까?",
   "Overlay.SaveData.ConfirmDeleteNote": "삭제한 저장 데이터는 복원할 수 없습니다.",
-  "Overlay.SaveData.InUse": "이 저장 데이터는 사용 중이어서 삭제할 수 없습니다."
+  "Overlay.SaveData.InUse": "이 저장 데이터는 사용 중이어서 삭제할 수 없습니다.",
+  "Overlay.Ime.Title": "텍스트 입력",
+  "Overlay.Ime.Done": "완료",
+  "Overlay.Ime.Send": "보내기",
+  "Overlay.Ime.Search": "검색",
+  "Overlay.Ime.Go": "이동",
+  "Overlay.Ime.Close": "닫기",
+  "Overlay.Ime.Delete": "삭제",
+  "Overlay.Ime.Space": "스페이스",
+  "Overlay.Ime.Cursor": "커서",
+  "Overlay.Ime.Select": "선택",
+  "Overlay.Ime.Type": "키보드로 입력하세요"
 }

@@ -278,24 +278,67 @@ public sealed class OverlayPainter : IDisposable
 
     public void Dispose() => _paint.Dispose();
 
-    private float GlyphWidth(OverlayPrompt prompt, OverlayInputScheme scheme) =>
-        scheme == OverlayInputScheme.Keyboard
-            ? Measure(prompt.KeyLabel, OverlayStyle.KeyCap) + U(18)
-            : U(OverlayStyle.PromptGlyphRadius * 2);
+    public float PromptGlyphWidth(OverlayPrompt prompt, OverlayInputScheme scheme, float scale = 1) =>
+        GlyphWidth(prompt, scheme, scale);
 
-    private float Glyph(OverlayPrompt prompt, OverlayInputScheme scheme, float x, float middle)
+    public float PromptGlyph(OverlayPrompt prompt, OverlayInputScheme scheme, float x, float middle, float scale = 1) =>
+        Glyph(prompt, scheme, x, middle, scale);
+
+    private static string? ShoulderLabel(OverlayButton button, OverlayInputScheme scheme) => (button, scheme) switch
     {
-        var width = GlyphWidth(prompt, scheme);
-        var radius = U(OverlayStyle.PromptGlyphRadius);
+        (OverlayButton.L1, OverlayInputScheme.Xbox) => "LB",
+        (OverlayButton.R1, OverlayInputScheme.Xbox) => "RB",
+        (OverlayButton.L2, OverlayInputScheme.Xbox) => "LT",
+        (OverlayButton.R2, OverlayInputScheme.Xbox) => "RT",
+        (OverlayButton.L3, OverlayInputScheme.Xbox) => "LS",
+        (OverlayButton.R3, OverlayInputScheme.Xbox) => "RS",
+        (OverlayButton.L1, _) => "L1",
+        (OverlayButton.R1, _) => "R1",
+        (OverlayButton.L2, _) => "L2",
+        (OverlayButton.R2, _) => "R2",
+        (OverlayButton.L3, _) => "L3",
+        (OverlayButton.R3, _) => "R3",
+        _ => null,
+    };
+
+    private float GlyphWidth(OverlayPrompt prompt, OverlayInputScheme scheme, float scale = 1)
+    {
+        if (scheme == OverlayInputScheme.Keyboard)
+        {
+            return Measure(prompt.KeyLabel, Scaled(OverlayStyle.KeyCap, scale)) + U(18 * scale);
+        }
+
+        return ShoulderLabel(prompt.Button, scheme) is { } label
+            ? Measure(label, Scaled(OverlayStyle.KeyCap, scale)) + U(16 * scale)
+            : U(OverlayStyle.PromptGlyphRadius * 2 * scale);
+    }
+
+    private static OverlayFont Scaled(OverlayFont font, float scale) => font with { Size = font.Size * scale };
+
+    private float Glyph(OverlayPrompt prompt, OverlayInputScheme scheme, float x, float middle, float scale = 1)
+    {
+        var width = GlyphWidth(prompt, scheme, scale);
+        var radius = U(OverlayStyle.PromptGlyphRadius * scale);
         var cx = x + width / 2;
         if (scheme == OverlayInputScheme.Keyboard)
         {
-            var key = SKRect.Create(x, middle - U(14), width, U(28));
-            RoundRect(key, U(6), Palette.Elevated);
-            Outline(key, U(6), Palette.Faint);
-            Rect(new SKRect(key.Left + U(5), key.Bottom - U(2.5f), key.Right - U(5), key.Bottom - U(2.5f) + Math.Max(1, Unit)),
-                Palette.Faint);
-            Text(prompt.KeyLabel, cx, middle + U(5), OverlayStyle.KeyCap, Palette.Text, width, SKTextAlign.Center);
+            var key = SKRect.Create(x, middle - U(14 * scale), width, U(28 * scale));
+            RoundRect(key, U(6 * scale), Palette.Elevated);
+            Outline(key, U(6 * scale), Palette.Faint);
+            Rect(new SKRect(key.Left + U(5 * scale), key.Bottom - U(2.5f * scale), key.Right - U(5 * scale),
+                key.Bottom - U(2.5f * scale) + Math.Max(1, Unit)), Palette.Faint);
+            Text(prompt.KeyLabel, cx, middle + U(5 * scale), Scaled(OverlayStyle.KeyCap, scale), Palette.Text, width,
+                SKTextAlign.Center);
+            return width;
+        }
+
+        if (ShoulderLabel(prompt.Button, scheme) is { } shoulder)
+        {
+            var pill = SKRect.Create(x, middle - U(12 * scale), width, U(24 * scale));
+            RoundRect(pill, U(12 * scale), Palette.Elevated);
+            Outline(pill, U(12 * scale), Palette.Faint);
+            Text(shoulder, cx, middle + U(5 * scale), Scaled(OverlayStyle.KeyCap, scale), Palette.Text, width,
+                SKTextAlign.Center);
             return width;
         }
 
@@ -311,7 +354,7 @@ public sealed class OverlayPainter : IDisposable
             _paint.Style = SKPaintStyle.Fill;
             _paint.Color = fill;
             Canvas.DrawCircle(cx, middle, radius, _paint);
-            Text(letter, cx, middle + U(6), new OverlayFont(17, OverlayWeight.Bold), ink, width, SKTextAlign.Center);
+            Text(letter, cx, middle + U(6 * scale), new OverlayFont(17 * scale, OverlayWeight.Bold), ink, width, SKTextAlign.Center);
             return width;
         }
 
@@ -319,7 +362,7 @@ public sealed class OverlayPainter : IDisposable
         _paint.Color = Palette.Elevated;
         Canvas.DrawCircle(cx, middle, radius, _paint);
         _paint.Style = SKPaintStyle.Stroke;
-        _paint.StrokeWidth = Math.Max(1, U(1.2f));
+        _paint.StrokeWidth = Math.Max(1, U(1.2f * scale));
         _paint.Color = Palette.Faint;
         Canvas.DrawCircle(cx, middle, radius, _paint);
         Symbol(prompt.Button, scheme, cx, middle, radius);
@@ -330,7 +373,7 @@ public sealed class OverlayPainter : IDisposable
     private void Symbol(OverlayButton button, OverlayInputScheme scheme, float cx, float cy, float radius)
     {
         _paint.Style = SKPaintStyle.Stroke;
-        _paint.StrokeWidth = Math.Max(1.2f, U(1.8f));
+        _paint.StrokeWidth = Math.Max(1.2f, radius * 0.12f);
         _paint.StrokeCap = SKStrokeCap.Round;
         _paint.StrokeJoin = SKStrokeJoin.Round;
         _paint.Color = Palette.Text;

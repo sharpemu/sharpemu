@@ -522,5 +522,16 @@
   "Overlay.SaveData.Size": "Ölçü",
   "Overlay.SaveData.ConfirmDelete": "Bu yadda saxlanılmış məlumat silinsin?",
   "Overlay.SaveData.ConfirmDeleteNote": "Silinmiş yadda saxlanılmış məlumatlar bərpa edilə bilməz.",
-  "Overlay.SaveData.InUse": "Bu yadda saxlanılmış məlumat istifadədədir və silinə bilməz."
+  "Overlay.SaveData.InUse": "Bu yadda saxlanılmış məlumat istifadədədir və silinə bilməz.",
+  "Overlay.Ime.Title": "Mətn daxil edin",
+  "Overlay.Ime.Done": "Hazırdır",
+  "Overlay.Ime.Send": "Göndər",
+  "Overlay.Ime.Search": "Axtar",
+  "Overlay.Ime.Go": "Keç",
+  "Overlay.Ime.Close": "Bağla",
+  "Overlay.Ime.Delete": "Sil",
+  "Overlay.Ime.Space": "Boşluq",
+  "Overlay.Ime.Cursor": "Kursor",
+  "Overlay.Ime.Select": "Seç",
+  "Overlay.Ime.Type": "Klaviatura ilə yazın"
 }

@@ -27,6 +27,7 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
     private readonly Action? _toggleBackendHud;
     private readonly object _gamepadGate = new();
     private SDL_Window* _window;
+    private bool _textInputActive;
     private SDL_Gamepad* _gamepad;
     private readonly Pad.TouchContactIds _touchIds = new();
     private HostGamepadType _gamepadType;
@@ -453,6 +454,7 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
             }
             _lastEventPumpTimestamp = timestamp;
         }
+        SyncTextInput();
         SDL_Event windowEvent;
         while (PollWindowEvent(&windowEvent))
         {
@@ -497,6 +499,9 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
                 case SDL_EventType.SDL_EVENT_KEY_UP:
                     HandleKey(windowEvent.key);
                     break;
+                case SDL_EventType.SDL_EVENT_TEXT_INPUT:
+                    SystemDialogInput.OnText(PtrToStringUTF8(windowEvent.text.text) ?? string.Empty);
+                    break;
                 case SDL_EventType.SDL_EVENT_MOUSE_MOTION:
                     ShowCursorTemporarily();
                     break;
@@ -529,6 +534,25 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
                     ApplySensorEvent(in windowEvent);
                     break;
             }
+        }
+    }
+
+    private void SyncTextInput()
+    {
+        var wanted = SystemDialogInput.WantsText;
+        if (wanted == _textInputActive || _window is null)
+        {
+            return;
+        }
+
+        _textInputActive = wanted;
+        if (wanted)
+        {
+            SDL_StartTextInput(_window);
+        }
+        else
+        {
+            SDL_StopTextInput(_window);
         }
     }
 

@@ -521,5 +521,16 @@
   "Overlay.SaveData.Size": "大小",
   "Overlay.SaveData.ConfirmDelete": "要删除此保存数据吗？",
   "Overlay.SaveData.ConfirmDeleteNote": "删除的保存数据无法恢复。",
-  "Overlay.SaveData.InUse": "此保存数据正在使用中，无法删除。"
+  "Overlay.SaveData.InUse": "此保存数据正在使用中，无法删除。",
+  "Overlay.Ime.Title": "输入文本",
+  "Overlay.Ime.Done": "完成",
+  "Overlay.Ime.Send": "发送",
+  "Overlay.Ime.Search": "搜索",
+  "Overlay.Ime.Go": "前往",
+  "Overlay.Ime.Close": "关闭",
+  "Overlay.Ime.Delete": "删除",
+  "Overlay.Ime.Space": "空格",
+  "Overlay.Ime.Cursor": "光标",
+  "Overlay.Ime.Select": "选择",
+  "Overlay.Ime.Type": "使用键盘输入"
 }

@@ -17,6 +17,12 @@ public enum OverlayButton
     Triangle,
     Square,
     DirectionalPad,
+    L1,
+    R1,
+    L2,
+    R2,
+    L3,
+    R3,
 }
 
 public readonly record struct OverlayPrompt(OverlayButton Button, string Label, string KeyLabel);

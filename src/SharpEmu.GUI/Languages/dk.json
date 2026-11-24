@@ -519,5 +519,16 @@
   "Overlay.SaveData.Size": "Størrelse",
   "Overlay.SaveData.ConfirmDelete": "Vil du slette disse gemte data?",
   "Overlay.SaveData.ConfirmDeleteNote": "Slettede gemte data kan ikke gendannes.",
-  "Overlay.SaveData.InUse": "Disse gemte data er i brug og kan ikke slettes."
+  "Overlay.SaveData.InUse": "Disse gemte data er i brug og kan ikke slettes.",
+  "Overlay.Ime.Title": "Indtast tekst",
+  "Overlay.Ime.Done": "Færdig",
+  "Overlay.Ime.Send": "Send",
+  "Overlay.Ime.Search": "Søg",
+  "Overlay.Ime.Go": "Gå",
+  "Overlay.Ime.Close": "Luk",
+  "Overlay.Ime.Delete": "Slet",
+  "Overlay.Ime.Space": "Mellemrum",
+  "Overlay.Ime.Cursor": "Markør",
+  "Overlay.Ime.Select": "Vælg",
+  "Overlay.Ime.Type": "Skriv med dit tastatur"
 }

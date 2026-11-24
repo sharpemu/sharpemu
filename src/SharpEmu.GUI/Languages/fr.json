@@ -520,5 +520,16 @@
   "Overlay.SaveData.Size": "Taille",
   "Overlay.SaveData.ConfirmDelete": "Supprimer ces données sauvegardées ?",
   "Overlay.SaveData.ConfirmDeleteNote": "Les données sauvegardées supprimées ne peuvent pas être restaurées.",
-  "Overlay.SaveData.InUse": "Ces données sauvegardées sont en cours d’utilisation et ne peuvent pas être supprimées."
+  "Overlay.SaveData.InUse": "Ces données sauvegardées sont en cours d’utilisation et ne peuvent pas être supprimées.",
+  "Overlay.Ime.Title": "Saisir du texte",
+  "Overlay.Ime.Done": "Terminé",
+  "Overlay.Ime.Send": "Envoyer",
+  "Overlay.Ime.Search": "Rechercher",
+  "Overlay.Ime.Go": "OK",
+  "Overlay.Ime.Close": "Fermer",
+  "Overlay.Ime.Delete": "Supprimer",
+  "Overlay.Ime.Space": "Espace",
+  "Overlay.Ime.Cursor": "Curseur",
+  "Overlay.Ime.Select": "Sélectionner",
+  "Overlay.Ime.Type": "Tapez avec votre clavier"
 }

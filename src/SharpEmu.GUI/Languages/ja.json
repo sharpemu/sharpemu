@@ -519,5 +519,16 @@
   "Overlay.SaveData.Size": "サイズ",
   "Overlay.SaveData.ConfirmDelete": "このセーブデータを削除しますか？",
   "Overlay.SaveData.ConfirmDeleteNote": "削除したセーブデータは元に戻せません。",
-  "Overlay.SaveData.InUse": "このセーブデータは使用中のため削除できません。"
+  "Overlay.SaveData.InUse": "このセーブデータは使用中のため削除できません。",
+  "Overlay.Ime.Title": "テキストを入力",
+  "Overlay.Ime.Done": "決定",
+  "Overlay.Ime.Send": "送信",
+  "Overlay.Ime.Search": "検索",
+  "Overlay.Ime.Go": "移動",
+  "Overlay.Ime.Close": "閉じる",
+  "Overlay.Ime.Delete": "削除",
+  "Overlay.Ime.Space": "スペース",
+  "Overlay.Ime.Cursor": "カーソル",
+  "Overlay.Ime.Select": "選択",
+  "Overlay.Ime.Type": "キーボードで入力"
 }

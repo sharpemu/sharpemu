@@ -519,5 +519,16 @@
   "Overlay.SaveData.Size": "Größe",
   "Overlay.SaveData.ConfirmDelete": "Diese gespeicherten Daten löschen?",
   "Overlay.SaveData.ConfirmDeleteNote": "Gelöschte gespeicherte Daten können nicht wiederhergestellt werden.",
-  "Overlay.SaveData.InUse": "Diese gespeicherten Daten werden verwendet und können nicht gelöscht werden."
+  "Overlay.SaveData.InUse": "Diese gespeicherten Daten werden verwendet und können nicht gelöscht werden.",
+  "Overlay.Ime.Title": "Text eingeben",
+  "Overlay.Ime.Done": "Fertig",
+  "Overlay.Ime.Send": "Senden",
+  "Overlay.Ime.Search": "Suchen",
+  "Overlay.Ime.Go": "Los",
+  "Overlay.Ime.Close": "Schließen",
+  "Overlay.Ime.Delete": "Löschen",
+  "Overlay.Ime.Space": "Leertaste",
+  "Overlay.Ime.Cursor": "Cursor",
+  "Overlay.Ime.Select": "Auswählen",
+  "Overlay.Ime.Type": "Mit der Tastatur tippen"
 }

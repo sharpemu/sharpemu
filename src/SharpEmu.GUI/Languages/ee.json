@@ -521,5 +521,16 @@
   "Overlay.SaveData.Size": "Suurus",
   "Overlay.SaveData.ConfirmDelete": "Kas kustutada need salvestatud andmed?",
   "Overlay.SaveData.ConfirmDeleteNote": "Kustutatud salvestatud andmeid ei saa taastada.",
-  "Overlay.SaveData.InUse": "Need salvestatud andmed on kasutusel ja neid ei saa kustutada."
+  "Overlay.SaveData.InUse": "Need salvestatud andmed on kasutusel ja neid ei saa kustutada.",
+  "Overlay.Ime.Title": "Sisesta tekst",
+  "Overlay.Ime.Done": "Valmis",
+  "Overlay.Ime.Send": "Saada",
+  "Overlay.Ime.Search": "Otsi",
+  "Overlay.Ime.Go": "Mine",
+  "Overlay.Ime.Close": "Sulge",
+  "Overlay.Ime.Delete": "Kustuta",
+  "Overlay.Ime.Space": "Tühik",
+  "Overlay.Ime.Cursor": "Kursor",
+  "Overlay.Ime.Select": "Vali",
+  "Overlay.Ime.Type": "Kirjuta klaviatuuriga"
 }

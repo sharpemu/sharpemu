@@ -1131,6 +1131,8 @@ public static class PadExports
         var acceptsKeyboardInput = input.IsHostWindowFocused();
         var keyboardButtons = acceptsKeyboardInput ? ReadKeyboardButtons(input) : 0;
         var controllerButtons = 0u;
+        var controllerLeftX = (byte)128;
+        var controllerLeftY = (byte)128;
         var buttons = keyboardButtons;
         var leftX = acceptsKeyboardInput ? ReadAnalogStick(input.IsKeyDown(0x41), input.IsKeyDown(0x44)) : (byte)128;
         var leftY = acceptsKeyboardInput ? ReadAnalogStick(input.IsKeyDown(0x57), input.IsKeyDown(0x53)) : (byte)128;
@@ -1155,6 +1157,8 @@ public static class PadExports
             // small deadzone; otherwise any keyboard value stays.
             leftX = MergeAxis(pad.LeftX, leftX);
             leftY = MergeAxis(pad.LeftY, leftY);
+            controllerLeftX = MergeAxis(pad.LeftX, controllerLeftX);
+            controllerLeftY = MergeAxis(pad.LeftY, controllerLeftY);
             rightX = MergeAxis(pad.RightX, rightX);
             rightY = MergeAxis(pad.RightY, rightY);
             l2 = Math.Max(l2, pad.LeftTrigger);
@@ -1206,6 +1210,8 @@ public static class PadExports
             HostWindowFocused = acceptsKeyboardInput,
             KeyboardButtons = keyboardButtons,
             ControllerButtons = controllerButtons,
+            ControllerLeftX = controllerLeftX,
+            ControllerLeftY = controllerLeftY,
         };
         _lastInputSampleTicks = now;
         _cachedInputHistory = history;

@@ -523,5 +523,16 @@
   "Overlay.SaveData.Size": "Size",
   "Overlay.SaveData.ConfirmDelete": "Delete this saved data?",
   "Overlay.SaveData.ConfirmDeleteNote": "Deleted saved data can't be restored.",
-  "Overlay.SaveData.InUse": "This saved data is in use and can't be deleted."
+  "Overlay.SaveData.InUse": "This saved data is in use and can't be deleted.",
+  "Overlay.Ime.Title": "Enter text",
+  "Overlay.Ime.Done": "Done",
+  "Overlay.Ime.Send": "Send",
+  "Overlay.Ime.Search": "Search",
+  "Overlay.Ime.Go": "Go",
+  "Overlay.Ime.Close": "Close",
+  "Overlay.Ime.Delete": "Delete",
+  "Overlay.Ime.Space": "Space",
+  "Overlay.Ime.Cursor": "Cursor",
+  "Overlay.Ime.Select": "Select",
+  "Overlay.Ime.Type": "Type with your keyboard"
 }

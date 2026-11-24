@@ -274,6 +274,7 @@ These variables apply to the controller and input libraries.
 | `SHARPEMU_BTHID_EVENT_CODE` | number (decimal or `0x` hex) | Sets the event code of the synthetic Bluetooth HID callback event. The default is 0. It has an effect only with `SHARPEMU_BTHID_FIRE_CALLBACK=1`. | `BluetoothHidExports.cs` |
 | `SHARPEMU_BTHID_EVENT_SIZE` | number (bytes, decimal or `0x` hex) | Sets the size of the zeroed event structure for the synthetic Bluetooth HID callback. The default is 256. It has an effect only with `SHARPEMU_BTHID_FIRE_CALLBACK=1`. | `BluetoothHidExports.cs` |
 | `SHARPEMU_BTHID_FIRE_CALLBACK` | `1` | Calls the registered Bluetooth HID guest callback one time with a zeroed event structure. The call occurs at the first `sceBluetoothHidRegisterDevice`. The default is off. | `BluetoothHidExports.cs` |
+| `SHARPEMU_IME_AUTOFILL` | `1` | Skips the on-screen keyboard of `sceImeDialogInit` and fills the game's text buffer at once with its existing text, or with `SHARPEMU_DEFAULT_PROFILE` (default `Sharp`) when it is empty. The default opens the keyboard. | `ImeDialogExports.cs` |
 
 ## Memory and CPU
 

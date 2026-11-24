@@ -524,5 +524,16 @@
   "Overlay.SaveData.Size": "Dimensione",
   "Overlay.SaveData.ConfirmDelete": "Eliminare questi dati salvati?",
   "Overlay.SaveData.ConfirmDeleteNote": "I dati salvati eliminati non possono essere ripristinati.",
-  "Overlay.SaveData.InUse": "Questi dati salvati sono in uso e non possono essere eliminati."
+  "Overlay.SaveData.InUse": "Questi dati salvati sono in uso e non possono essere eliminati.",
+  "Overlay.Ime.Title": "Inserisci testo",
+  "Overlay.Ime.Done": "Fine",
+  "Overlay.Ime.Send": "Invia",
+  "Overlay.Ime.Search": "Cerca",
+  "Overlay.Ime.Go": "Vai",
+  "Overlay.Ime.Close": "Chiudi",
+  "Overlay.Ime.Delete": "Elimina",
+  "Overlay.Ime.Space": "Spazio",
+  "Overlay.Ime.Cursor": "Cursore",
+  "Overlay.Ime.Select": "Seleziona",
+  "Overlay.Ime.Type": "Scrivi con la tastiera"
 }

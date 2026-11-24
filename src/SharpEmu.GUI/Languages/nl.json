@@ -519,5 +519,16 @@
   "Overlay.SaveData.Size": "Grootte",
   "Overlay.SaveData.ConfirmDelete": "Deze opgeslagen gegevens verwijderen?",
   "Overlay.SaveData.ConfirmDeleteNote": "Verwijderde opgeslagen gegevens kunnen niet worden hersteld.",
-  "Overlay.SaveData.InUse": "Deze opgeslagen gegevens zijn in gebruik en kunnen niet worden verwijderd."
+  "Overlay.SaveData.InUse": "Deze opgeslagen gegevens zijn in gebruik en kunnen niet worden verwijderd.",
+  "Overlay.Ime.Title": "Tekst invoeren",
+  "Overlay.Ime.Done": "Gereed",
+  "Overlay.Ime.Send": "Verzenden",
+  "Overlay.Ime.Search": "Zoeken",
+  "Overlay.Ime.Go": "Ga",
+  "Overlay.Ime.Close": "Sluiten",
+  "Overlay.Ime.Delete": "Verwijderen",
+  "Overlay.Ime.Space": "Spatie",
+  "Overlay.Ime.Cursor": "Cursor",
+  "Overlay.Ime.Select": "Selecteren",
+  "Overlay.Ime.Type": "Typ met je toetsenbord"
 }

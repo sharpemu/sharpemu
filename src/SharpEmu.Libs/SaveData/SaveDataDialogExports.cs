@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
-using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Pad;
 using SharpEmu.Libs.Overlay;
 using System.Buffers.Binary;
@@ -789,11 +788,6 @@ public static class SaveDataDialogExports
             return up == down ? 0 : up ? -1 : 1;
         }
 
-        private static OverlayInputScheme CurrentScheme() => PadExports.ConnectedGamepadType() switch
-        {
-            null => OverlayInputScheme.Keyboard,
-            HostGamepadType.DualSense or HostGamepadType.DualShock4 => OverlayInputScheme.PlayStation,
-            _ => OverlayInputScheme.Xbox,
-        };
+        private static OverlayInputScheme CurrentScheme() => SystemDialogInput.CurrentScheme();
     }
 }

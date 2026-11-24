@@ -521,5 +521,16 @@
   "Overlay.SaveData.Size": "Rozmiar",
   "Overlay.SaveData.ConfirmDelete": "Usunąć te zapisane dane?",
   "Overlay.SaveData.ConfirmDeleteNote": "Usuniętych zapisanych danych nie można przywrócić.",
-  "Overlay.SaveData.InUse": "Te zapisane dane są w użyciu i nie można ich usunąć."
+  "Overlay.SaveData.InUse": "Te zapisane dane są w użyciu i nie można ich usunąć.",
+  "Overlay.Ime.Title": "Wprowadź tekst",
+  "Overlay.Ime.Done": "Gotowe",
+  "Overlay.Ime.Send": "Wyślij",
+  "Overlay.Ime.Search": "Szukaj",
+  "Overlay.Ime.Go": "Przejdź",
+  "Overlay.Ime.Close": "Zamknij",
+  "Overlay.Ime.Delete": "Usuń",
+  "Overlay.Ime.Space": "Spacja",
+  "Overlay.Ime.Cursor": "Kursor",
+  "Overlay.Ime.Select": "Wybierz",
+  "Overlay.Ime.Type": "Pisz na klawiaturze"
 }
