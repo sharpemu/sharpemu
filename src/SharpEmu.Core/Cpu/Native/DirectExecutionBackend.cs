@@ -559,7 +559,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private readonly record struct PendingGuestException(
 		ulong Handler,
 		int ExceptionType,
-		ulong ExceptionStackBase);
+		ulong ExceptionStackBase,
+		GuestExceptionHandlerArguments Arguments);
 
 	private sealed class GuestContinuationRunner : IDisposable
 	{
@@ -3360,17 +3361,49 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return (nint)ptr;
 	}
 
+	// rel32 calls from guest code reach +-2 GiB; stay well inside it so stubs at both ends of the block are reachable.
+	private const ulong NearEntryWindow = 0x70000000uL;
+	private const ulong AllocationGranularity = 0x10000uL;
+	private const ulong MaxUserAddress = 0x00007FFFFFFE0000uL;
+	private const uint MEM_FREE = 0x10000u;
+
 	private unsafe void* TryAllocateNearEntry(nuint size)
 	{
-		ulong entryPoint = _entryPoint;
-		ulong baseAddress = entryPoint & 0xFFFFFFFFFFFF0000uL;
-		for (long num = 0L; num <= 1879048192; num += 16777216)
+		ulong baseAddress = _entryPoint & ~(AllocationGranularity - 1);
+		ulong lowLimit = baseAddress > NearEntryWindow ? baseAddress - NearEntryWindow : 0;
+		if (lowLimit < AllocationGranularity)
 		{
-			if (TryAllocAt(baseAddress, num, size, out var memory))
+			lowLimit = AllocationGranularity;
+		}
+		ulong highLimit = Math.Min(baseAddress + NearEntryWindow, MaxUserAddress);
+
+		// Grid probing missed every gap in crowded layouts; ask the OS where the free ranges are instead.
+		var freeRegions = new List<(ulong Start, ulong End)>();
+		ulong cursor = lowLimit;
+		while (cursor < highLimit)
+		{
+			if (VirtualQuery((void*)cursor, out var information, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 ||
+				information.RegionSize == 0)
 			{
-				return memory;
+				break;
 			}
-			if (num != 0L && TryAllocAt(baseAddress, -num, size, out memory))
+			ulong regionStart = information.BaseAddress;
+			ulong regionEnd = regionStart + information.RegionSize;
+			if (information.State == MEM_FREE)
+			{
+				freeRegions.Add((regionStart, regionEnd));
+			}
+			if (regionEnd <= cursor)
+			{
+				break;
+			}
+			cursor = regionEnd;
+		}
+
+		foreach (ulong candidate in OrderNearEntryCandidates(freeRegions, baseAddress, size, lowLimit, highLimit))
+		{
+			void* memory = VirtualAlloc((void*)candidate, size, 12288u, 64u);
+			if (memory != null)
 			{
 				return memory;
 			}
@@ -3378,36 +3411,52 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return null;
 	}
 
-	private unsafe static bool TryAllocAt(ulong baseAddress, long signedDelta, nuint size, out void* memory)
+	// Returns 64 KiB-aligned addresses where `size` bytes fit inside a free region and inside
+	// [lowLimit, highLimit), nearest to entryBase first.
+	internal static List<ulong> OrderNearEntryCandidates(
+		IReadOnlyList<(ulong Start, ulong End)> freeRegions,
+		ulong entryBase,
+		ulong size,
+		ulong lowLimit,
+		ulong highLimit)
 	{
-		memory = null;
-		ulong num;
-		if (signedDelta >= 0)
+		var candidates = new List<(ulong Distance, ulong Address)>();
+		foreach (var (regionStart, regionEnd) in freeRegions)
 		{
-			if (baseAddress > (ulong)(-1 - signedDelta))
+			ulong start = (Math.Max(regionStart, lowLimit) + AllocationGranularity - 1) & ~(AllocationGranularity - 1);
+			ulong end = Math.Min(regionEnd, highLimit);
+			if (end <= start || end - start < size)
 			{
-				return false;
+				continue;
 			}
-			num = baseAddress + (ulong)signedDelta;
-		}
-		else
-		{
-			ulong num2 = (ulong)(-signedDelta);
-			if (baseAddress < num2)
-			{
-				return false;
-			}
-			num = baseAddress - num2;
-		}
-		void* ptr = VirtualAlloc((void*)num, size, 12288u, 64u);
-		if (ptr == null)
-		{
-			return false;
-		}
-		memory = ptr;
-		return true;
-	}
 
+			// Candidate above the entry: the lowest aligned address at or after it.
+			ulong above = (Math.Max(start, entryBase) + AllocationGranularity - 1) & ~(AllocationGranularity - 1);
+			if (above <= end && end - above >= size)
+			{
+				candidates.Add((above - entryBase, above));
+			}
+
+			// Candidate below the entry: the highest aligned address whose block ends at or before it.
+			ulong belowEnd = Math.Min(end, entryBase);
+			if (belowEnd >= start && belowEnd - start >= size)
+			{
+				ulong below = (belowEnd - size) & ~(AllocationGranularity - 1);
+				if (below >= start)
+				{
+					candidates.Add((entryBase - below, below));
+				}
+			}
+		}
+
+		candidates.Sort(static (left, right) => left.Distance.CompareTo(right.Distance));
+		var result = new List<ulong>(candidates.Count);
+		foreach (var candidate in candidates)
+		{
+			result.Add(candidate.Address);
+		}
+		return result;
+	}
 	internal readonly record struct TlsPatchScanRange(ulong Start, ulong End);
 
 	private readonly record struct TlsPatchCounts(
@@ -3495,10 +3544,15 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			}
 		}
 
+		var outOfRange = Volatile.Read(ref _tlsOutOfRangeSites);
 		Console.Error.WriteLine(
 			$"[LOADER][INFO] Patched {counts.Loads} TLS loads, {counts.Stores} TLS stores, " +
 			$"{counts.StackCanaries} stack-canary accesses " +
-			$"across {scannedRanges} executable range(s), bytes=0x{scannedBytes:X}, reused={reusedRanges}");
+			$"across {scannedRanges} executable range(s), bytes=0x{scannedBytes:X}, reused={reusedRanges}, out_of_range={outOfRange}");
+		if (outOfRange > 0)
+		{
+			Console.Error.WriteLine($"[LOADER][WARNING] {outOfRange} TLS site(s) are beyond rel32 range of the TLS handler at 0x{_tlsHandlerAddress:X16}.");
+		}
 	}
 
 	private unsafe TlsPatchCounts PatchTlsPatternsInRange(ulong rangeStart, ulong rangeEnd)
@@ -3706,7 +3760,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
         }
         var displacement = (long)handler - ((long)address + 6);
         if (displacement < int.MinValue || displacement > int.MaxValue)
+        {
+            Interlocked.Increment(ref _tlsOutOfRangeSites);
             return false;
+        }
         // REX.W keeps retained operand-size prefixes from changing the call width.
         Span<byte> patch = stackalloc byte[instructionLength];
         patch.Fill(0x90);
@@ -3715,6 +3772,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
         System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(patch[2..], (int)displacement);
         return WriteTlsInstruction(address, patch);
     }
+
+    private int _tlsOutOfRangeSites;
 
     private readonly nint[] _tlsRegisterLoadHelpers = new nint[16];
 
@@ -3771,6 +3830,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		long num3 = _tlsHandlerAddress - (num + num2 + 4);
 		if (num3 < int.MinValue || num3 > int.MaxValue)
 		{
+			Interlocked.Increment(ref _tlsOutOfRangeSites);
 			Console.Error.WriteLine($"[LOADER][WARNING] TLS store helper out of rel32 range at 0x{num:X16}");
 			return 0;
 		}
@@ -3823,6 +3883,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		var displacement = (long)target - ((long)address + 5);
 		if (displacement < int.MinValue || displacement > int.MaxValue)
 		{
+			Interlocked.Increment(ref _tlsOutOfRangeSites);
 			Console.Error.WriteLine($"[LOADER][WARNING] TLS patch out of rel32 range at 0x{address:X16}");
 			return false;
 		}
@@ -4988,6 +5049,23 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		int exceptionType,
 		out string? error)
 	{
+		return TryRaiseGuestException(
+			callerContext,
+			threadHandle,
+			handler,
+			exceptionType,
+			GuestExceptionHandlerArguments.Signal,
+			out error);
+	}
+
+	public bool TryRaiseGuestException(
+		CpuContext callerContext,
+		ulong threadHandle,
+		ulong handler,
+		int exceptionType,
+		GuestExceptionHandlerArguments arguments,
+		out string? error)
+	{
 		error = null;
 		var logGuestExceptions = string.Equals(
 			Environment.GetEnvironmentVariable("SHARPEMU_LOG_GUEST_EXCEPTIONS"),
@@ -5051,7 +5129,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					QueuePendingGuestExceptionLocked(threadHandle, new PendingGuestException(
 						handler,
 						exceptionType,
-						external.ExceptionStackBase));
+						external.ExceptionStackBase,
+						arguments));
 					return true;
 				}
 
@@ -5063,7 +5142,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				QueuePendingGuestExceptionLocked(threadHandle, new PendingGuestException(
 					handler,
 					exceptionType,
-					external.ExceptionStackBase));
+					external.ExceptionStackBase,
+					arguments));
 				if (logGuestExceptions)
 				{
 					Console.Error.WriteLine(
@@ -5111,14 +5191,16 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					QueuePendingGuestExceptionLocked(threadHandle, new PendingGuestException(
 						handler,
 						exceptionType,
-						exceptionStackBase));
+						exceptionStackBase,
+						arguments));
 					return true;
 				}
 
 				QueuePendingGuestExceptionLocked(threadHandle, new PendingGuestException(
 					handler,
 					exceptionType,
-					exceptionStackBase));
+					exceptionStackBase,
+					arguments));
 				if (logGuestExceptions)
 				{
 					Console.Error.WriteLine(
@@ -5230,11 +5312,18 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			var deliveryStarted = Stopwatch.GetTimestamp();
 			try
 			{
+				ResolveGuestExceptionHandlerArguments(
+					target.Context,
+					arguments,
+					exceptionType,
+					exceptionContextAddress,
+					out var handlerArg0,
+					out var handlerArg1);
 				deliverySucceeded = TryCallGuestFunction(
 						target.Context,
 						handler,
-						unchecked((ulong)exceptionType),
-						exceptionContextAddress,
+						handlerArg0,
+						handlerArg1,
 						exceptionStackBase + callbackStackOffset,
 						callbackStackSize,
 						$"kernel exception 0x{exceptionType:X2}",
@@ -5289,6 +5378,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 						threadHandle,
 						pendingFollowUp.Handler,
 						pendingFollowUp.ExceptionType,
+						pendingFollowUp.Arguments,
 						out var followUpError))
 				{
 					Console.Error.WriteLine(
@@ -5438,11 +5528,18 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					$"rip=0x{interruptedContinuation.Rip:X16}");
 			}
 
+			ResolveGuestExceptionHandlerArguments(
+				currentContext,
+				pending.Arguments,
+				pending.ExceptionType,
+				exceptionContextAddress,
+				out var handlerArg0,
+				out var handlerArg1);
 			if (!TryCallGuestFunction(
 					currentContext,
 					pending.Handler,
-					unchecked((ulong)pending.ExceptionType),
-					exceptionContextAddress,
+					handlerArg0,
+					handlerArg1,
 					pending.ExceptionStackBase + callbackStackOffset,
 					callbackStackSize,
 					$"kernel exception 0x{pending.ExceptionType:X2} safe point",
@@ -5461,6 +5558,29 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				_activeGuestExceptionDeliveries.Remove(threadHandle);
 			}
 		}
+	}
+
+	// A Unity GC suspend callback takes (mcontext, interrupted rsp), where the signal
+	// convention takes (type, mcontext). The rsp is read back from the context the
+	// writer just filled in, so both paths agree on the interrupted stack pointer.
+	internal static void ResolveGuestExceptionHandlerArguments(
+		CpuContext context,
+		GuestExceptionHandlerArguments arguments,
+		int exceptionType,
+		ulong exceptionContextAddress,
+		out ulong arg0,
+		out ulong arg1)
+	{
+		if (arguments == GuestExceptionHandlerArguments.UnityGcSuspend)
+		{
+			_ = context.TryReadUInt64(exceptionContextAddress + 0xB8, out var interruptedRsp);
+			arg0 = exceptionContextAddress;
+			arg1 = interruptedRsp;
+			return;
+		}
+
+		arg0 = unchecked((ulong)exceptionType);
+		arg1 = exceptionContextAddress;
 	}
 
 	private void QueuePendingGuestExceptionLocked(
@@ -6186,6 +6306,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					thread.ThreadHandle,
 					pendingException.Handler,
 					pendingException.ExceptionType,
+					pendingException.Arguments,
 					out var pendingError))
 			{
 				Console.Error.WriteLine(

@@ -273,6 +273,22 @@ public static partial class AmprExports
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
         }
 
+        // A buffer stays attached until ClearBuffer: setting it again is refused and keeps the
+        // queued commands. Death Stranding calls SetBuffer before every read it appends.
+        // Only a buffer this module attached counts: leftover bytes in an object no
+        // constructor cleared (the APR and AMM ones keep the header) must not read as busy.
+        if (!ctx.TryReadUInt64(commandBuffer + CommandBufferDataOffset, out var attached))
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+        }
+
+        if (attached != 0 && IsAttachedHere(commandBuffer, attached))
+        {
+            TraceAmpr(ctx, "set_buffer_busy", commandBuffer, buffer, size);
+            ctx[CpuRegister.Rax] = unchecked((ulong)(long)KernelEbusy);
+            return KernelEbusy;
+        }
+
         if (!WriteCommandBufferPointers(ctx, commandBuffer, buffer, size))
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
@@ -1333,6 +1349,19 @@ public static partial class AmprExports
         if (buffer != 0 && buffer != commandBuffer)
         {
             _commandBufferAliases[buffer] = commandBuffer;
+        }
+    }
+
+    private static bool IsAttachedHere(ulong commandBuffer, ulong buffer)
+    {
+        if (!_commandBuffers.TryGetValue(commandBuffer, out var state))
+        {
+            return false;
+        }
+
+        lock (state)
+        {
+            return state.Buffer == buffer;
         }
     }
 

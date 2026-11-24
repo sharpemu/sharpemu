@@ -3,7 +3,9 @@
 
 using SharpEmu.HLE;
 using SharpEmu.Libs.Kernel;
+using SharpEmu.Libs.Np;
 using System.Buffers.Binary;
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 
@@ -15,10 +17,33 @@ public static class AppContentExports
     private const int AppContentErrorParameter = unchecked((int)0x80D90002);
     private const int AppContentErrorDrmNoEntitlement = unchecked((int)0x80D90007);
     private const int MountPointSize = 16;
+    private const int EntitlementLabelSize = 17;
     private const ulong BootParamAttrOffset = 4;
     private const string Temp0MountPoint = "/temp0";
     private const uint AppParamSkuFlag = 0;
     private const int AppParamSkuFlagFull = 3;
+
+    // Each add-on package gets its own guest mount point, as the SDK does; mounting the
+    // same label again returns the mount point it already has.
+    private static readonly ConcurrentDictionary<string, string> AddcontMounts = new(StringComparer.Ordinal);
+    private static readonly object AddcontMountGate = new();
+    private static int _addcontMountIndex = -1;
+
+    public static void ResetRuntimeState()
+    {
+        lock (AddcontMountGate)
+        {
+            foreach (var mountPoint in AddcontMounts.Values)
+            {
+                KernelMemoryCompatExports.UnregisterGuestPathMount(mountPoint);
+            }
+
+            AddcontMounts.Clear();
+            Volatile.Write(ref _addcontMountIndex, -1);
+        }
+
+        AddcontEntitlements.ResetRuntimeState();
+    }
 
     [SysAbiExport(
         Nid = "R9lA82OraNs",
@@ -116,13 +141,58 @@ public static class AppContentExports
             return ctx.SetReturn(AppContentErrorParameter);
         }
 
-        Span<byte> emptyMountPoint = stackalloc byte[MountPointSize];
-        if (!ctx.Memory.TryWrite(mountPointAddress, emptyMountPoint))
+        Span<byte> labelBytes = stackalloc byte[EntitlementLabelSize];
+        if (!ctx.Memory.TryRead(entitlementLabelAddress, labelBytes))
         {
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        return ctx.SetReturn(AppContentErrorDrmNoEntitlement);
+        var label = ReadLabel(labelBytes);
+        if (!AddcontEntitlements.IsValidLabel(label))
+        {
+            TraceAppContent("addcont_mount rejected an invalid label");
+            return ctx.SetReturn(AppContentErrorParameter);
+        }
+
+        TraceAppContent($"addcont_mount label='{label}'");
+
+        // Only an add-on package present on disk is mounted; any other label is refused as
+        // before, so titles without installed add-ons keep their usual behaviour.
+        if (!AddcontEntitlements.TryResolvePackageRoot(label, out var packageRoot))
+        {
+            Span<byte> emptyMountPoint = stackalloc byte[MountPointSize];
+            emptyMountPoint.Clear();
+            if (!ctx.Memory.TryWrite(mountPointAddress, emptyMountPoint))
+            {
+                return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+
+            return ctx.SetReturn(AppContentErrorDrmNoEntitlement);
+        }
+
+        // Each package gets its own guest mount point backed by its host folder.
+        if (!AddcontMounts.TryGetValue(label, out var mountPoint))
+        {
+            lock (AddcontMountGate)
+            {
+                if (!AddcontMounts.TryGetValue(label, out mountPoint))
+                {
+                    mountPoint = $"/addcont{Interlocked.Increment(ref _addcontMountIndex)}";
+                    KernelMemoryCompatExports.RegisterGuestPathMount(mountPoint, packageRoot);
+                    AddcontMounts[label] = mountPoint;
+                }
+            }
+        }
+
+        Span<byte> mountPointBytes = stackalloc byte[MountPointSize];
+        mountPointBytes.Clear();
+        Encoding.ASCII.GetBytes(mountPoint).CopyTo(mountPointBytes);
+        if (!ctx.Memory.TryWrite(mountPointAddress, mountPointBytes))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
     [SysAbiExport(
@@ -255,6 +325,19 @@ public static class AppContentExports
         {
             return true;
         }
+    }
+
+    private static string ReadLabel(ReadOnlySpan<byte> bytes)
+    {
+        var length = 0;
+        while (length < bytes.Length && bytes[length] != 0)
+        {
+            length++;
+        }
+
+        return length == 0
+            ? string.Empty
+            : Encoding.ASCII.GetString(bytes[..length]);
     }
 
     private static void TraceAppContent(string message)

@@ -931,6 +931,29 @@ public static class AvPlayerExports
     }
 
     [SysAbiExport(
+        Nid = "BOVKAzRmuTQ",
+        ExportName = "sceAvPlayerDisableStream",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceAvPlayer")]
+    public static int AvPlayerDisableStream(CpuContext ctx)
+    {
+        TraceOnce(
+            $"disable_stream_{ctx[CpuRegister.Rsi]}",
+            $"disable_stream index={ctx[CpuRegister.Rsi]}");
+        lock (StateGate)
+        {
+            if (Players.TryGetValue(ctx[CpuRegister.Rdi], out var player) &&
+                player.AudioDecoderOutput is null &&
+                ctx[CpuRegister.Rsi] < (ulong)player.Streams.Length &&
+                player.Streams[(int)ctx[CpuRegister.Rsi]].Index == player.AudioStreamIndex)
+            {
+                player.AudioStreamIndex = -1;
+            }
+        }
+        return ValidatePlayer(ctx);
+    }
+
+    [SysAbiExport(
         Nid = "k-q+xOxdc3E",
         ExportName = "sceAvPlayerSetAvSyncMode",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -1179,7 +1202,8 @@ public static class AvPlayerExports
                 return SetReturn(ctx, InvalidParameters);
             }
 
-            var milliseconds = player.AvSyncMode == AvSyncModeDefault && player.HasAudio
+            var milliseconds = player.AvSyncMode == AvSyncModeDefault &&
+                AudioClockIsMaster(player)
                 ? player.StartTimeMilliseconds + DefaultSyncElapsedMilliseconds(
                     player.NextAudioFrameIndex,
                     SecondsSinceAudioEnded(player.AudioEndedSeconds, player.PlaybackClock.Elapsed.TotalSeconds))
@@ -1811,8 +1835,10 @@ public static class AvPlayerExports
             var expectedFrame = player.NextFrameIndex;
             if (player.AvSyncMode == AvSyncModeDefault)
             {
+                // The default sync follows the delivered audio only when the game consumes
+                // it (see AudioClockIsMaster); otherwise the video runs on the playback clock.
                 expectedFrame = CalculateExpectedDefaultSyncVideoFrame(
-                    player.HasAudio,
+                    AudioClockIsMaster(player),
                     player.NextAudioFrameIndex,
                     player.PlaybackClock.Elapsed.TotalSeconds,
                     fps,
@@ -2805,6 +2831,14 @@ public static class AvPlayerExports
         requested is >= MinimumFrameBufferCount and <= MaximumFrameBufferCount
             ? requested
             : DefaultFrameBufferCount;
+
+    // Street Fighter 6 enables the video stream alone and plays the movie audio through its own
+    // audio system: following the never-consumed audio track stalled the video on its first frame
+    // forever. The audio is the master clock only once the game enabled the audio stream or pulled
+    // audio data (autoStart titles never call sceAvPlayerEnableStream; the first
+    // sceAvPlayerGetAudioData opens the decoder). Both fields are cleared when the player resets.
+    private static bool AudioClockIsMaster(PlayerState player) =>
+        player.HasAudio && (player.AudioStreamIndex >= 0 || player.AudioDecoderOutput is not null);
 
     internal static bool IsValidAvSyncMode(uint mode) =>
         mode is AvSyncModeDefault or AvSyncModeNone;
