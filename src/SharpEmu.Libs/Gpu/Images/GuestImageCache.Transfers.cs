@@ -130,7 +130,10 @@ public sealed unsafe partial class GuestImageCache
             }
 
             format = role == ImageRole.ColorTarget ? ImageDescription.RenderTargetTransferFormat(info.BytesPerBlock) : info.GuestFormat;
-            allowDepthTile = role is ImageRole.StorageImage or ImageRole.ColorTarget;
+            // A readback takes the tiling its upload took. A texture in the depth tiling holds GPU contents when it
+            // was filled from a depth image over the same memory (GTA V's 16-bit shadow textures), and it publishes
+            // them before a write over part of that memory.
+            allowDepthTile = role is not ImageRole.DisplaySurface;
             plan.SwapBgra16 = info.Bgra16;
         }
 
