@@ -54,6 +54,68 @@ internal static class OverlayFonts
         }
     }
 
+    internal static List<string> Wrap(string text, float size, OverlayWeight weight, float maxWidth, int maxLines)
+    {
+        var lines = new List<string>();
+        if (string.IsNullOrEmpty(text) || maxWidth <= 0 || maxLines <= 0)
+        {
+            return lines;
+        }
+
+        lock (Gate)
+        {
+            var typeface = Resolve(text, weight);
+            using var font = Create(typeface, size);
+            var shaper = Shaper(typeface);
+            foreach (var paragraph in text.Split('\n'))
+            {
+                var runes = paragraph.Trim().EnumerateRunes().ToArray();
+                var start = 0;
+                while (start < runes.Length)
+                {
+                    if (lines.Count == maxLines - 1)
+                    {
+                        lines.Add(Fit(shaper, font, Join(runes[start..], runes.Length - start), maxWidth));
+                        return lines;
+                    }
+
+                    var end = start;
+                    var lastBreak = -1;
+                    while (end < runes.Length &&
+                           shaper.Shape(Join(runes[start..], end - start + 1), font).Width <= maxWidth)
+                    {
+                        if (Rune.IsWhiteSpace(runes[end]))
+                        {
+                            lastBreak = end;
+                        }
+
+                        end++;
+                    }
+
+                    if (end < runes.Length && lastBreak > start)
+                    {
+                        end = lastBreak;
+                    }
+
+                    end = Math.Max(end, start + 1);
+                    lines.Add(Join(runes[start..], end - start).Trim());
+                    start = end;
+                    while (start < runes.Length && Rune.IsWhiteSpace(runes[start]))
+                    {
+                        start++;
+                    }
+                }
+
+                if (lines.Count == maxLines)
+                {
+                    break;
+                }
+            }
+        }
+
+        return lines;
+    }
+
     private static string Fit(SKShaper shaper, SKFont font, string text, float maxWidth)
     {
         if (shaper.Shape(text, font).Width <= maxWidth)

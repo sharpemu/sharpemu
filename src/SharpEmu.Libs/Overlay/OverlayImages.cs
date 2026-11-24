@@ -38,6 +38,26 @@ public sealed class OverlayImages : IDisposable
         }
     }
 
+    public SKImage? FromBytes(string key, byte[]? encoded)
+    {
+        if (encoded is null || encoded.Length == 0)
+        {
+            return null;
+        }
+
+        lock (_gate)
+        {
+            if (!_images.TryGetValue(key, out var image))
+            {
+                using var data = SKData.CreateCopy(encoded);
+                image = SKImage.FromEncodedData(data);
+                _images[key] = image;
+            }
+
+            return image;
+        }
+    }
+
     public void Clear()
     {
         lock (_gate)

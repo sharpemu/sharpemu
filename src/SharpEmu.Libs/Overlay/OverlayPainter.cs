@@ -120,6 +120,50 @@ public sealed class OverlayPainter : IDisposable
         OverlayFonts.Draw(Canvas, _paint, text, x, baseline, U(font.Size), font.Weight, maxWidth, align);
     }
 
+    public float Paragraph(string? text, float x, float baseline, OverlayFont font, SKColor color, float maxWidth,
+        int maxLines, float lineHeight)
+    {
+        if (string.IsNullOrEmpty(text))
+        {
+            return baseline - lineHeight;
+        }
+
+        var lines = OverlayFonts.Wrap(text, U(font.Size), font.Weight, maxWidth, maxLines);
+        for (var index = 0; index < lines.Count; index++)
+        {
+            Text(lines[index], x, baseline + index * lineHeight, font, color, maxWidth);
+        }
+
+        return baseline + (Math.Max(1, lines.Count) - 1) * lineHeight;
+    }
+
+    public IReadOnlyList<string> Wrap(string? text, OverlayFont font, float maxWidth, int maxLines) =>
+        string.IsNullOrEmpty(text) ? [] : OverlayFonts.Wrap(text, U(font.Size), font.Weight, maxWidth, maxLines);
+
+    public void Shadow(SKRect bounds, float radius, float blur, float offsetY, byte alpha)
+    {
+        using var shadow = SKMaskFilter.CreateBlur(SKBlurStyle.Normal, U(blur));
+        _paint.Style = SKPaintStyle.Fill;
+        _paint.MaskFilter = shadow;
+        _paint.Color = new SKColor(0, 0, 0, alpha);
+        var shifted = bounds;
+        shifted.Offset(0, U(offsetY));
+        Canvas.DrawRoundRect(shifted, radius, radius, _paint);
+        _paint.MaskFilter = null;
+    }
+
+    public void Progress(SKRect track, float fraction)
+    {
+        var radius = track.Height / 2;
+        RoundRect(track, radius, Palette.Raised);
+        var width = track.Width * Math.Clamp(fraction, 0, 1);
+        if (width > 0)
+        {
+            RoundRect(new SKRect(track.Left, track.Top, track.Left + Math.Max(width, track.Height), track.Bottom), radius,
+                Palette.Accent);
+        }
+    }
+
     public void Card(SKRect bounds, bool focused)
     {
         var radius = U(OverlayStyle.CardRadius);
