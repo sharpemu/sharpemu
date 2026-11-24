@@ -32,7 +32,7 @@ public static partial class AmprExports
     private static readonly object _ammGate = new();
     // Free auto pages and the mapped runs, both sorted by start.
     private static readonly List<(ulong Offset, ulong Length)> _ammFreePages = [];
-    private static readonly List<(ulong Address, ulong Length, ulong Offset)> _ammMappings = [];
+    private static readonly List<(ulong Address, ulong Length, ulong Offset, bool Auto)> _ammMappings = [];
     private static bool _ammAreaReserved;
     private static ulong _ammAddressSlot;
 
@@ -43,6 +43,8 @@ public static partial class AmprExports
         public ulong Address;
         public ulong Size;
         public int Protection;
+        // Set for MapDirect: the title names the direct memory offset instead of taking auto pages.
+        public ulong? DirectOffset;
     }
 
     [SysAbiExport(
@@ -136,6 +138,58 @@ public static partial class AmprExports
         AppendAmmCommand(ctx, unmap: false, ctx[CpuRegister.Rsi], ctx[CpuRegister.Rdx], unchecked((int)ctx[CpuRegister.R8]));
 
     [SysAbiExport(
+        Nid = "8TBE+9XCZbI",
+        ExportName = "sceAmprAmmCommandBufferMapDirect",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int AmmCommandBufferMapDirect(CpuContext ctx) =>
+        AppendAmmMapDirect(ctx);
+
+    [SysAbiExport(
+        Nid = "kOfZlhbVAkc",
+        ExportName = "sceAmprAmmCommandBufferMapDirectWithGpuMaskId",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int AmmCommandBufferMapDirectWithGpuMaskId(CpuContext ctx) =>
+        AppendAmmMapDirect(ctx);
+
+    // The AMM buffer object is plain memory the title sets up with SetBuffer; only stale host state goes.
+    [SysAbiExport(
+        Nid = "EDq5bqCqYpA",
+        ExportName = "sceAmprAmmCommandBufferConstructor",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int AmmCommandBufferConstructor(CpuContext ctx)
+    {
+        var commandBuffer = ctx[CpuRegister.Rdi];
+        if (commandBuffer == 0)
+        {
+            return SetAmmResult(ctx, KernelEinval);
+        }
+
+        RemoveCommandBufferState(commandBuffer);
+        TraceAmpr(ctx, "amm_ctor", commandBuffer, 0, 0);
+        return SetAmmResult(ctx, 0);
+    }
+
+    [SysAbiExport(
+        Nid = "pvUFDOHilnE",
+        ExportName = "sceAmprAmmCommandBufferDestructor",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int AmmCommandBufferDestructor(CpuContext ctx)
+    {
+        var commandBuffer = ctx[CpuRegister.Rdi];
+        if (commandBuffer != 0)
+        {
+            RemoveCommandBufferState(commandBuffer);
+        }
+
+        TraceAmpr(ctx, "amm_dtor", commandBuffer, 0, 0);
+        return SetAmmResult(ctx, 0);
+    }
+
+    [SysAbiExport(
         Nid = "M-VFI2DJWQA",
         ExportName = "sceAmprAmmCommandBufferUnmap",
         Target = Generation.Gen5,
@@ -188,7 +242,19 @@ public static partial class AmprExports
         }
     }
 
-    private static int AppendAmmCommand(CpuContext ctx, bool unmap, ulong address, ulong size, int protection)
+    // MapDirect takes (buffer, va, direct memory offset, size, memory type, protection).
+    private static int AppendAmmMapDirect(CpuContext ctx)
+    {
+        var offset = ctx[CpuRegister.Rdx];
+        if (offset % AmmPageSize != 0)
+        {
+            return SetAmmResult(ctx, KernelEinval);
+        }
+
+        return AppendAmmCommand(ctx, unmap: false, ctx[CpuRegister.Rsi], ctx[CpuRegister.Rcx], unchecked((int)ctx[CpuRegister.R9]), offset);
+    }
+
+    private static int AppendAmmCommand(CpuContext ctx, bool unmap, ulong address, ulong size, int protection, ulong? directOffset = null)
     {
         var commandBuffer = ctx[CpuRegister.Rdi];
         if (commandBuffer == 0 || size == 0 || address % AmmPageSize != 0 || size % AmmPageSize != 0 ||
@@ -233,6 +299,7 @@ public static partial class AmprExports
                 Address = address,
                 Size = size,
                 Protection = protection,
+                DirectOffset = directOffset,
             });
         }
 
@@ -256,9 +323,18 @@ public static partial class AmprExports
                 return result;
             }
 
-            if (!TryTakeAmmPagesLocked(command.Size, out var runs))
+            var auto = command.DirectOffset is null;
+            List<(ulong Offset, ulong Length)> runs;
+            if (auto)
             {
-                return KernelEagain;
+                if (!TryTakeAmmPagesLocked(command.Size, out runs))
+                {
+                    return KernelEagain;
+                }
+            }
+            else
+            {
+                runs = [(command.DirectOffset!.Value, command.Size)];
             }
 
             var address = command.Address;
@@ -278,7 +354,7 @@ public static partial class AmprExports
                     : KernelEfault;
                 if (result != 0)
                 {
-                    for (var j = i; j < runs.Count; j++)
+                    for (var j = i; auto && j < runs.Count; j++)
                     {
                         ReleaseAmmPagesLocked(runs[j].Offset, runs[j].Length);
                     }
@@ -287,7 +363,7 @@ public static partial class AmprExports
                     return result;
                 }
 
-                InsertAmmMappingLocked(address, length, offset);
+                InsertAmmMappingLocked(address, length, offset, auto);
                 address += length;
             }
 
@@ -320,30 +396,34 @@ public static partial class AmprExports
 
         while (first < _ammMappings.Count && _ammMappings[first].Address < end)
         {
-            var (mappedAddress, length, offset) = _ammMappings[first];
+            var (mappedAddress, length, offset, auto) = _ammMappings[first];
             _ammMappings.RemoveAt(first);
             var mappedEnd = mappedAddress + length;
             var cutStart = Math.Max(mappedAddress, address);
             var cutEnd = Math.Min(mappedEnd, end);
-            ReleaseAmmPagesLocked(offset + (cutStart - mappedAddress), cutEnd - cutStart);
+            if (auto)
+            {
+                ReleaseAmmPagesLocked(offset + (cutStart - mappedAddress), cutEnd - cutStart);
+            }
+
             if (mappedAddress < cutStart)
             {
-                _ammMappings.Insert(first++, (mappedAddress, cutStart - mappedAddress, offset));
+                _ammMappings.Insert(first++, (mappedAddress, cutStart - mappedAddress, offset, auto));
             }
 
             if (cutEnd < mappedEnd)
             {
-                _ammMappings.Insert(first++, (cutEnd, mappedEnd - cutEnd, offset + (cutEnd - mappedAddress)));
+                _ammMappings.Insert(first++, (cutEnd, mappedEnd - cutEnd, offset + (cutEnd - mappedAddress), auto));
             }
         }
 
         return 0;
     }
 
-    private static void InsertAmmMappingLocked(ulong address, ulong length, ulong offset)
+    private static void InsertAmmMappingLocked(ulong address, ulong length, ulong offset, bool auto)
     {
         var index = _ammMappings.FindIndex(mapping => mapping.Address > address);
-        _ammMappings.Insert(index < 0 ? _ammMappings.Count : index, (address, length, offset));
+        _ammMappings.Insert(index < 0 ? _ammMappings.Count : index, (address, length, offset, auto));
     }
 
     private static bool TryTakeAmmPagesLocked(ulong size, out List<(ulong Offset, ulong Length)> runs)
