@@ -9475,7 +9475,8 @@ public static partial class Gen5SpirvTranslator
             return true;
         }
 
-        private uint LaneSelectMask => _stage is Gen5SpirvStage.Compute or Gen5SpirvStage.Mesh ? _waveLaneCount - 1 : 63u;
+        // RDNA wave32 decodes only lane bits [4:0], so lane 63 names lane 31 there.
+        private uint LaneSelectMask => _waveLaneCount - 1;
 
         private uint ReadLaneSpillSlot(Gen5ShaderInstruction instruction, uint selectedLane, uint value)
         {
