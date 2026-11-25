@@ -81,6 +81,8 @@ public sealed class GuiSettings
     // shown outside any game follow it too.
     public string ConsoleLanguage { get; set; } = "EnglishUS";
 
+    public string ConsoleModel { get; set; } = "PS5";
+
     /// <summary>
     /// The console user's name, machine-wide as on the console itself. Games read it as the
     /// default text of on-screen keyboards (SHARPEMU_DEFAULT_PROFILE).
@@ -181,6 +183,7 @@ public sealed class GuiSettings
             "Vietnamese",
             "Indonesian",
             "Ukrainian");
+        settings.ConsoleModel = NormalizeChoice(settings.ConsoleModel, "PS5", "PS5Pro");
         settings.EmbeddedConsoleHeight = NormalizeConsoleSize(settings.EmbeddedConsoleHeight, 240, 120);
         settings.ConsoleWindowWidth = NormalizeConsoleSize(settings.ConsoleWindowWidth, 980, 520);
         settings.ConsoleWindowHeight = NormalizeConsoleSize(settings.ConsoleWindowHeight, 620, 320);

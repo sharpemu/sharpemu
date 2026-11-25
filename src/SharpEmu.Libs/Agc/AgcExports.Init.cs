@@ -119,10 +119,6 @@ public static partial class AgcExports
     public static int GetRegisterDefaults2Internal(CpuContext ctx) =>
         ReturnRegisterDefaults(ctx, internalDefaults: true);
 
-    /// <summary>
-    /// Reports that the GPU is not running in Trinity mode, matching the base
-    /// console this backend emulates.
-    /// </summary>
     [SysAbiExport(
         Nid = "BfBDZGbti7A",
         ExportName = "sceAgcGetIsTrinityMode",
@@ -130,7 +126,7 @@ public static partial class AgcExports
         LibraryName = "libSceAgc")]
     public static int GetIsTrinityMode(CpuContext ctx)
     {
-        ctx[CpuRegister.Rax] = 0;
+        ctx[CpuRegister.Rax] = SharpEmu.Libs.Kernel.ConsoleHardware.IsPro ? 1UL : 0UL;
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 

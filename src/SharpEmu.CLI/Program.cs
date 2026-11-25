@@ -1106,7 +1106,7 @@ internal static partial class Program
 
     private static void PrintUsage()
     {
-        Log.Info("Usage: SharpEmu.CLI [--strict[=on|off]] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--no-log-file] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin|path-to-game.zar|path-to-ps5-game.pkg>");
+        Log.Info("Usage: SharpEmu.CLI [--strict[=on|off]] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5|ps5pro>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--no-log-file] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin|path-to-game.zar|path-to-ps5-game.pkg>");
         Log.Info("Install a fake PS4 or PS5 package: SharpEmu.CLI --install-pkg <path-to-game.pkg> [destination-folder]");
         Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
         Log.Info("Debug server: --debug-server starts a live debug listener (default 127.0.0.1:5714); connect with SharpEmu.DebugClient.");
@@ -1183,6 +1183,7 @@ internal static partial class Program
         var importTraceLimit = 0;
         var cpuEngine = CpuExecutionEngine.NativeOnly;
         var systemLanguage = 1;
+        bool? consoleProOverride = null;
         HostWindowMode? windowModeOverride = null;
         HostScalingMode? scalingModeOverride = null;
         int? windowWidthOverride = null;
@@ -1207,12 +1208,13 @@ internal static partial class Program
             }
             if (TrySplitOption(argument, "--console", out var consoleText))
             {
-                if (!string.Equals(consoleText, "ps5", StringComparison.OrdinalIgnoreCase))
+                if (!TryParseConsoleModel(consoleText, out var pro))
                 {
                     ebootPath = string.Empty;
                     runtimeOptions = default;
                     return false;
                 }
+                consoleProOverride = pro;
                 continue;
             }
             if (TrySplitOption(argument, "--console-language", out var consoleLanguageText))
@@ -1540,10 +1542,13 @@ internal static partial class Program
             logFilePath = BuildDefaultLogFilePath(ebootPath);
         }
         if (logFilePath == string.Empty) logFilePath = BuildDefaultLogFilePath(ebootPath);
+        var consolePro = consoleProOverride ??
+            (TryParseConsoleModel(launcher.ConsoleModel, out var configuredPro) && configuredPro);
         runtimeOptions = new SharpEmuRuntimeOptions
         {
             CpuEngine = cpuEngine,
             SystemLanguage = systemLanguage,
+            Ps5Pro = consolePro,
             StrictDynlibResolution = strictDynlibResolution ?? configured.Settings.StrictDynlibResolution,
             ImportTraceLimit = importTraceLimit,
         };
@@ -1636,6 +1641,22 @@ internal static partial class Program
             _ => (HostWindowMode)(-1),
         };
         return Enum.IsDefined(mode);
+    }
+
+    private static bool TryParseConsoleModel(string? value, out bool pro)
+    {
+        switch (value?.Trim().ToLowerInvariant())
+        {
+            case "ps5":
+                pro = false;
+                return true;
+            case "ps5pro" or "ps5-pro" or "pro":
+                pro = true;
+                return true;
+            default:
+                pro = false;
+                return false;
+        }
     }
 
     private static bool TryParseSystemLanguage(string value, out int language)

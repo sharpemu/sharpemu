@@ -98,6 +98,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
     {
         Console.Error.WriteLine("[MEDIA][INFO] BINK VIDEO PLAYBACK MODE: " +
             SharpEmu.Libs.Media.HostMovieBridge.GetPlaybackModeName(Environment.GetEnvironmentVariable("SHARPEMU_BINK_MODE")));
+        ConsoleHardware.Configure(options.Ps5Pro);
+        Console.Error.WriteLine($"[LOADER][INFO] Console model: {(options.Ps5Pro ? "PS5 Pro" : "PS5")}");
         var cpuExecutionOptions = new CpuExecutionOptions
         {
             CpuEngine = options.CpuEngine,
