@@ -1416,6 +1416,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                  Text="{Binding [Options.Graphics], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
                     </Grid>
                   </Button>
+                  <Button x:Name="OptionsPssrNav" Classes="optionsNav"
+                          AutomationProperties.Name="{Binding [Options.Pssr.Tab], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                    <Grid ColumnDefinitions="36,*">
+                      <TextBlock Grid.Column="0" Classes="materialSymbol optionsNavIcon" Text="auto_awesome" />
+                      <TextBlock Grid.Column="1" Classes="optionsNavLabel"
+                                 Text="{Binding [Options.Pssr.Tab], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                    </Grid>
+                  </Button>
                   <Button x:Name="OptionsEnvironmentNav" Classes="optionsNav"
                           AutomationProperties.Name="{Binding [Options.Env.Tab], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
                     <Grid ColumnDefinitions="36,*">
@@ -1537,7 +1545,37 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     </StackPanel>
                   </Border>
 
-                  <Border Classes="optionsGroup">
+                  <ContentControl x:Name="GlobalGeneralSettingsHost" HorizontalContentAlignment="Stretch" />
+                </StackPanel>
+              </ScrollViewer>
+
+              <ScrollViewer x:Name="OptionsGraphicsPanel" Classes="optionsSectionPanel" />
+              <ScrollViewer x:Name="OptionsPssrPanel" Classes="optionsSectionPanel">
+                <StackPanel>
+                  <StackPanel Classes="optionsSectionHeader">
+                    <TextBlock Classes="optionsSectionTitle"
+                               Text="{Binding [Options.Pssr.Tab], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                    <TextBlock Classes="optionsSectionDesc"
+                               Text="{Binding [Options.Page.Pssr.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  </StackPanel>
+
+                  <Border x:Name="PssrProOnlyNotice" Classes="optionsGroup" IsVisible="False">
+                    <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12" Margin="18,14">
+                      <TextBlock Grid.Column="0"
+                                 Classes="materialSymbol"
+                                 Text="warning"
+                                 Foreground="{DynamicResource WarningBrush}"
+                                 VerticalAlignment="Center" />
+                      <TextBlock Grid.Column="1"
+                                 Text="{Binding [Options.Pssr.ProOnly], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                 Foreground="{DynamicResource WarningBrush}"
+                                 TextWrapping="Wrap"
+                                 VerticalAlignment="Center" />
+                    </Grid>
+                  </Border>
+
+                  <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Pssr.Group.General], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  <Border x:Name="PssrGeneralGroup" Classes="optionsGroup">
                     <StackPanel>
                       <local:SettingRow x:Name="PssrUpscalerRow"
                                         Classes="optionRow"
@@ -1549,11 +1587,16 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                   HorizontalContentAlignment="Left"
                                   VerticalAlignment="Center" />
                       </local:SettingRow>
+                    </StackPanel>
+                  </Border>
 
+                  <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Pssr.Group.Dlss], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  <Border x:Name="PssrDlssGroup" Classes="optionsGroup">
+                    <StackPanel>
                       <local:SettingRow x:Name="DlssFilesRow"
                                         Classes="optionRow"
                                         Label="{Binding [Options.Pssr.DlssFiles.Label], Source={x:Static local:Localization.Instance}}"
-                                        Description="">
+                                        Description="{Binding [Options.Pssr.DlssFiles.Hint], Source={x:Static local:Localization.Instance}}">
                         <WrapPanel Orientation="Horizontal" HorizontalAlignment="Right">
                           <Button x:Name="StreamlineDownloadButton"
                                   Classes="optionAction"
@@ -1575,14 +1618,50 @@ SPDX-License-Identifier: GPL-2.0-or-later
                           </Button>
                         </WrapPanel>
                       </local:SettingRow>
+                      <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12" Margin="18,4,18,16">
+                        <TextBlock x:Name="DlssFilesStatusIcon"
+                                   Grid.Column="0"
+                                   Classes="materialSymbol"
+                                   VerticalAlignment="Top" />
+                        <StackPanel Grid.Column="1" Spacing="4">
+                          <TextBlock x:Name="DlssFilesStatusTitle"
+                                     FontWeight="SemiBold"
+                                     TextWrapping="Wrap" />
+                          <TextBlock x:Name="DlssFilesStatusDetails"
+                                     Classes="optionsSectionDesc"
+                                     TextWrapping="Wrap" />
+                          <TextBlock x:Name="DlssFilesCheckedText"
+                                     Classes="optionsSectionDesc"
+                                     IsVisible="False"
+                                     TextWrapping="Wrap" />
+                        </StackPanel>
+                      </Grid>
                     </StackPanel>
                   </Border>
 
-                  <ContentControl x:Name="GlobalGeneralSettingsHost" HorizontalContentAlignment="Stretch" />
+                  <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Pssr.Group.Fsr], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  <Border Classes="optionsGroup">
+                    <StackPanel>
+                      <local:SettingRow x:Name="PssrFsrRow"
+                                        Classes="optionRow"
+                                        IsEnabled="False"
+                                        Label="{Binding [Options.Pssr.Fsr.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.Pssr.ComingSoon], Source={x:Static local:Localization.Instance}}" />
+                    </StackPanel>
+                  </Border>
+
+                  <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Pssr.Group.Xess], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  <Border Classes="optionsGroup">
+                    <StackPanel>
+                      <local:SettingRow x:Name="PssrXessRow"
+                                        Classes="optionRow"
+                                        IsEnabled="False"
+                                        Label="{Binding [Options.Pssr.Xess.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.Pssr.ComingSoon], Source={x:Static local:Localization.Instance}}" />
+                    </StackPanel>
+                  </Border>
                 </StackPanel>
               </ScrollViewer>
-
-              <ScrollViewer x:Name="OptionsGraphicsPanel" Classes="optionsSectionPanel" />
               <ScrollViewer x:Name="OptionsEnvironmentPanel" Classes="optionsSectionPanel" />
 
               <ScrollViewer x:Name="OptionsLoggingPanel"

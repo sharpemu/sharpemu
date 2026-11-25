@@ -28,6 +28,7 @@ public partial class MainWindow
         ConsoleModelBox.SelectionChanged += (_, _) =>
         {
             _settings.ConsoleModel = SelectedComboText(ConsoleModelBox, "PS5");
+            UpdatePssrAvailability();
             ScheduleSettingsSave();
         };
         PssrUpscalerBox.SelectionChanged += (_, _) =>
@@ -37,13 +38,20 @@ public partial class MainWindow
         };
         StreamlineDownloadButton.Click += (_, _) => OpenWebPage(DlssRuntimeFiles.StreamlineReleasesUrl);
         DlssFolderButton.Click += (_, _) => OpenFolder(DlssDirectory());
-        DlssRefreshButton.Click += (_, _) => UpdateDlssFilesStatus();
+        DlssRefreshButton.Click += (_, _) =>
+        {
+            _dlssFilesCheckedAt = DateTime.Now;
+            UpdateDlssFilesStatus();
+        };
     }
+
+    private DateTime? _dlssFilesCheckedAt;
 
     private void ApplyPssrSettingsToControls()
     {
         ConsoleModelBox.SelectedIndex = ChoiceIndex(_settings.ConsoleModel, _consoleModelChoices.Select(choice => choice.Value).ToArray());
         PssrUpscalerBox.SelectedIndex = ChoiceIndex(_settings.PssrUpscaler, _pssrUpscalerChoices.Select(choice => choice.Value).ToArray());
+        UpdatePssrAvailability();
         UpdateDlssFilesStatus();
     }
 
@@ -52,6 +60,16 @@ public partial class MainWindow
         RefreshChoices(_consoleModelChoices);
         RefreshChoices(_pssrUpscalerChoices);
         UpdateDlssFilesStatus();
+    }
+
+    private void UpdatePssrAvailability()
+    {
+        var pro = string.Equals(_settings.ConsoleModel, "PS5Pro", StringComparison.OrdinalIgnoreCase);
+        PssrProOnlyNotice.IsVisible = !pro;
+        PssrGeneralGroup.IsEnabled = pro;
+        PssrDlssGroup.IsEnabled = pro;
+        PssrGeneralGroup.Opacity = pro ? 1 : 0.5;
+        PssrDlssGroup.Opacity = pro ? 1 : 0.5;
     }
 
     private string DlssDirectory() =>
@@ -64,19 +82,21 @@ public partial class MainWindow
         var directory = DlssDirectory();
         var missing = DlssRuntimeFiles.Missing(directory);
         var localization = Localization.Instance;
-        if (missing.Count == 0)
+        var found = missing.Count == 0;
+        var brush = found ? SuccessLineBrush : ErrorLineBrush;
+        DlssFilesStatusIcon.Text = found ? "check_circle" : "error";
+        DlssFilesStatusIcon.Foreground = brush;
+        DlssFilesStatusTitle.Foreground = brush;
+        DlssFilesStatusTitle.Text = localization.Get(found ? "Options.Pssr.DlssFiles.FoundTitle" : "Options.Pssr.DlssFiles.MissingTitle");
+        DlssFilesStatusDetails.Text = found
+            ? localization.Format("Options.Pssr.DlssFiles.Found", string.Join(", ", DlssRuntimeFiles.Required.Select(file => file.Name)))
+            : localization.Format("Options.Pssr.DlssFiles.Missing", directory) + Environment.NewLine +
+              string.Join(Environment.NewLine, missing.Select(file => localization.Format("Options.Pssr.DlssFiles.MissingItem", file.Name, file.Source)));
+        DlssFilesCheckedText.IsVisible = _dlssFilesCheckedAt is not null;
+        if (_dlssFilesCheckedAt is { } checkedAt)
         {
-            DlssFilesRow.Description = localization.Format(
-                "Options.Pssr.DlssFiles.Found",
-                string.Join(", ", DlssRuntimeFiles.Required.Select(file => file.Name)));
-            return;
+            DlssFilesCheckedText.Text = localization.Format("Options.Pssr.DlssFiles.Checked", checkedAt.ToString("T", System.Globalization.CultureInfo.CurrentCulture));
         }
-
-        var lines = missing.Select(file => localization.Format("Options.Pssr.DlssFiles.MissingItem", file.Name, file.Source));
-        DlssFilesRow.Description =
-            localization.Format("Options.Pssr.DlssFiles.Missing", directory) + Environment.NewLine +
-            string.Join(Environment.NewLine, lines) + Environment.NewLine +
-            localization.Get("Options.Pssr.DlssFiles.Hint");
     }
 
     private void OpenWebPage(string url)
