@@ -111,6 +111,16 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             viewHost: HostViewMemory.Create(),
             preReserveGuestAddressSpace: true,
             adoptStartupAddressReservations: options.AdoptStartupAddressReservations);
+        if (ConsoleHardware.IsPro && SharpEmu.Libs.VideoOut.Upscaling.SuperResolutionSettings.WantsDlss)
+        {
+            const ulong driverApertureStart = 0xF4_0000_0000;
+            const ulong driverApertureSize = 0x8_0000_0000;
+            var released = virtualMemory.PrepareForNativeGpuInterop(driverApertureStart, driverApertureSize);
+            Console.Error.WriteLine(released
+                ? $"[LOADER][INFO] DLSS address layout: low guest addresses are held for fixed mappings; 0x{driverApertureStart:X}+0x{driverApertureSize:X} is left to the GPU driver."
+                : "[LOADER][WARN] DLSS address layout could not be prepared; games that map fixed low addresses may fail with DLSS on.");
+        }
+
         SharpEmu.Libs.VideoOut.Upscaling.SuperResolutionStartup.Begin();
         var moduleManager = new ModuleManager();
         // The compile-time generated registry (SharpEmu.SourceGenerators) is the sole
