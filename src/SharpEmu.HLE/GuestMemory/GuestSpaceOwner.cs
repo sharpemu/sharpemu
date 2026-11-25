@@ -527,7 +527,8 @@ public sealed class GuestSpaceOwner : IDisposable
 
             foreach (var (address, size) in _owned)
             {
-                if (_startupReservation is { } startupRange && address == startupRange.Address && size == startupRange.Size)
+                if (_startupReservation is { } startupRange && address >= startupRange.Address &&
+                    address + size <= startupRange.Address + startupRange.Size)
                 {
                     if (!_host.JoinHoles(address, size))
                         OnFatal($"Could not restore the startup guest reservation at 0x{address:X16}.");
