@@ -2883,8 +2883,10 @@ public static partial class Gen5SpirvTranslator
             var opcode = instruction.Opcode;
             if (opcode is "VCmpClassF32" or "VCmpxClassF32")
             {
+                // The class is tested on the value after its abs/neg input modifiers, so the sign
+                // comes from the modified float and not from the register bits.
                 var source = GetFloatSource(instruction, 0);
-                var raw = GetRawSource(instruction, 0);
+                var raw = Bitcast(_uintType, source);
                 var mask = GetRawSource(instruction, 1);
                 var negative = IsNotZero(BitwiseAnd(raw, UInt(0x8000_0000)));
                 var positive = _module.AddInstruction(
