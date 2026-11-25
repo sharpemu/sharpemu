@@ -920,6 +920,25 @@ internal static unsafe partial class VulkanVideoPresenter
         private const string ShaderClockExtensionName = "VK_KHR_shader_clock";
         private const string UnifiedImageLayoutsExtensionName = "VK_KHR_unified_image_layouts";
         private bool _supportsImageViewMinLod;
+        private string _deviceConfigurationSignature = "";
+
+        private static string DeviceConfigurationSignature(byte** extensions, uint count, StreamlineRuntime? streamline)
+        {
+            var names = new List<string>();
+            for (var index = 0; index < count; index++)
+            {
+                if (SilkMarshal.PtrToString((nint)extensions[index]) is { } name)
+                {
+                    names.Add(name);
+                }
+            }
+
+            names.Sort(StringComparer.Ordinal);
+            var signature = "ext:" + string.Join(',', names);
+            return streamline is null
+                ? signature
+                : $"{signature};sl12:{string.Join(',', streamline.Features12)};sl13:{string.Join(',', streamline.Features13)}";
+        }
         private const string MeshShaderExtensionName = "VK_EXT_mesh_shader";
         private bool _supportsUnifiedImageLayouts;
 
@@ -1708,6 +1727,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     PpEnabledExtensionNames = extensions,
                 };
 
+                _deviceConfigurationSignature = DeviceConfigurationSignature(extensions, extensionCount, _streamline);
                 Check(_vk.CreateDevice(_physicalDevice, &createInfo, null, out _device), "vkCreateDevice");
                 if (reportDeviceFaults)
                     SharpEmu.Libs.Gpu.Vulkan.DeviceFaultReport.Attach(_vk, _device, faultFeatures.DeviceFaultVendorBinary);
