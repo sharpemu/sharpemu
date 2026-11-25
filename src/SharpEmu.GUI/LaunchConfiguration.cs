@@ -91,6 +91,8 @@ public sealed record LaunchConfiguration(EffectiveLaunchSettings Settings, IRead
         {
             "guest" => "guest", "skip" => "skip", _ => "native",
         };
+        values[SharpEmu.Libs.VideoOut.Upscaling.SuperResolutionSettings.UpscalerVariable] =
+            GuiSettings.NormalizeChoice(launcher.PssrUpscaler, "Auto", "Dlss", "Basic").ToLowerInvariant();
         foreach (var entry in CustomEnvironment)
         {
             if (CustomEnvironmentVariables.TryParseEntry(entry, out var name, out var value)) values[name] = value;
@@ -116,12 +118,13 @@ public sealed record LaunchConfiguration(EffectiveLaunchSettings Settings, IRead
         return string.IsNullOrEmpty(directory) ? name : Path.Combine(directory, name);
     }
 
-    public List<string> BuildArguments(string gamePath, string consoleLanguage)
+    public List<string> BuildArguments(string gamePath, string consoleLanguage, string consoleModel = "PS5")
     {
         var settings = Settings;
+        var console = string.Equals(consoleModel, "PS5Pro", StringComparison.OrdinalIgnoreCase) ? "ps5pro" : "ps5";
         var args = new List<string>
         {
-            "--cpu-engine=native", $"--log-level={settings.LogLevel}", "--console=ps5",
+            "--cpu-engine=native", $"--log-level={settings.LogLevel}", $"--console={console}",
             $"--console-language={consoleLanguage}", $"--strict={(settings.StrictDynlibResolution ? "on" : "off")}",
             $"--trace-imports={Math.Max(0, settings.ImportTraceLimit).ToString(CultureInfo.InvariantCulture)}",
             $"--window-mode={settings.WindowMode.ToLowerInvariant()}", $"--resolution={settings.Resolution}",

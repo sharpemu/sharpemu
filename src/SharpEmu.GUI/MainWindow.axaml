@@ -1486,6 +1486,17 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                   VerticalAlignment="Center" />
                       </local:SettingRow>
 
+                      <local:SettingRow x:Name="ConsoleModelRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Options.Console.Model.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.Console.Model.Desc], Source={x:Static local:Localization.Instance}}">
+                        <ComboBox x:Name="ConsoleModelBox"
+                                  Classes="optionValue"
+                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
+                                  HorizontalContentAlignment="Left"
+                                  VerticalAlignment="Center" />
+                      </local:SettingRow>
+
                       <local:SettingRow x:Name="DefaultProfileRow"
                                         Classes="optionRow"
                                         Label="{Binding [Options.DefaultProfile.Label], Source={x:Static local:Localization.Instance}}"
@@ -1522,6 +1533,47 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                        VerticalAlignment="Center" />
                           </Button>
                         </StackPanel>
+                      </local:SettingRow>
+                    </StackPanel>
+                  </Border>
+
+                  <Border Classes="optionsGroup">
+                    <StackPanel>
+                      <local:SettingRow x:Name="PssrUpscalerRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Options.Pssr.Upscaler.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.Pssr.Upscaler.Desc], Source={x:Static local:Localization.Instance}}">
+                        <ComboBox x:Name="PssrUpscalerBox"
+                                  Classes="optionValue"
+                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
+                                  HorizontalContentAlignment="Left"
+                                  VerticalAlignment="Center" />
+                      </local:SettingRow>
+
+                      <local:SettingRow x:Name="DlssFilesRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Options.Pssr.DlssFiles.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="">
+                        <WrapPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                          <Button x:Name="StreamlineDownloadButton"
+                                  Classes="optionAction"
+                                  Margin="0,0,8,8">
+                            <TextBlock Text="{Binding [Options.Pssr.DlssFiles.Streamline], Source={x:Static local:Localization.Instance}}"
+                                       VerticalAlignment="Center" />
+                          </Button>
+                          <Button x:Name="DlssFolderButton"
+                                  Classes="optionAction"
+                                  Margin="0,0,8,8">
+                            <TextBlock Text="{Binding [Options.Pssr.DlssFiles.Folder], Source={x:Static local:Localization.Instance}}"
+                                       VerticalAlignment="Center" />
+                          </Button>
+                          <Button x:Name="DlssRefreshButton"
+                                  Classes="optionAction"
+                                  Margin="0,0,0,8">
+                            <TextBlock Text="{Binding [Options.Pssr.DlssFiles.Refresh], Source={x:Static local:Localization.Instance}}"
+                                       VerticalAlignment="Center" />
+                          </Button>
+                        </WrapPanel>
                       </local:SettingRow>
                     </StackPanel>
                   </Border>

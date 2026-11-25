@@ -83,6 +83,8 @@ public sealed class GuiSettings
 
     public string ConsoleModel { get; set; } = "PS5";
 
+    public string PssrUpscaler { get; set; } = "Auto";
+
     /// <summary>
     /// The console user's name, machine-wide as on the console itself. Games read it as the
     /// default text of on-screen keyboards (SHARPEMU_DEFAULT_PROFILE).
@@ -184,7 +186,7 @@ public sealed class GuiSettings
             "Indonesian",
             "Ukrainian");
         settings.ConsoleModel = NormalizeChoice(settings.ConsoleModel, "PS5", "PS5Pro");
-        settings.EmbeddedConsoleHeight = NormalizeConsoleSize(settings.EmbeddedConsoleHeight, 240, 120);
+        settings.PssrUpscaler = NormalizeChoice(settings.PssrUpscaler, "Auto", "Dlss", "Basic");        settings.EmbeddedConsoleHeight = NormalizeConsoleSize(settings.EmbeddedConsoleHeight, 240, 120);
         settings.ConsoleWindowWidth = NormalizeConsoleSize(settings.ConsoleWindowWidth, 980, 520);
         settings.ConsoleWindowHeight = NormalizeConsoleSize(settings.ConsoleWindowHeight, 620, 320);
         if (!settings.ConsoleWindowLeft.HasValue || !settings.ConsoleWindowTop.HasValue)
