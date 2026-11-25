@@ -187,6 +187,22 @@ public static partial class KernelMemoryCompatExports
         public uint Type;
     }
 
+    private static int _mapFailureReports;
+
+    private static void ReportMapFailure(string reason, ulong address, ulong length, ulong directMemoryStart, ulong flags)
+    {
+        if (Interlocked.Increment(ref _mapFailureReports) > 16 && !ShouldTraceDirectMemory())
+        {
+            return;
+        }
+
+        var region = VirtualQuery((nint)address, out var info, 0) == 0
+            ? "unknown"
+            : $"base=0x{info.BaseAddress:X} allocation_base=0x{info.AllocationBase:X} size=0x{info.RegionSize:X} state=0x{info.State:X} type=0x{info.Type:X} protect=0x{info.Protect:X}";
+        Console.Error.WriteLine($"[LOADER][WARN] map_direct failed={reason} address=0x{address:X} size=0x{length:X} offset=0x{directMemoryStart:X} " +
+            $"flags=0x{flags:X} host_region: {region}");
+    }
+
     private static unsafe nuint VirtualQuery(nint lpAddress, out MemoryBasicInformation lpBuffer, nuint dwLength)
     {
         _ = dwLength;
@@ -3302,21 +3318,18 @@ public static partial class KernelMemoryCompatExports
                 physicalSpanValid = HasPhysicalSpan(directMemoryStart, length);
             if (!physicalSpanValid)
             {
-                if (ShouldTraceDirectMemory())
-                    Console.Error.WriteLine($"[LOADER][TRACE] map_direct failed=physical-span address=0x{requested:X} size=0x{length:X} offset=0x{directMemoryStart:X}");
+                ReportMapFailure("physical-span", requested, length, directMemoryStart, flags);
                 return MemoryNoSpace;
             }
             var space = ResolveBackingSpace(ctx);
             if (space is null || !TrySelectBackingAddress(space, requested, length, alignment, flags, out var address))
             {
-                if (ShouldTraceDirectMemory())
-                    Console.Error.WriteLine($"[LOADER][TRACE] map_direct failed=address-selection address=0x{requested:X} size=0x{length:X} offset=0x{directMemoryStart:X} flags=0x{flags:X} backing={space is not null}");
+                ReportMapFailure(space is null ? "no-backing" : "address-selection", requested, length, directMemoryStart, flags);
                 return MemoryNoSpace;
             }
             if (!space.TryMapBacked(address, length, directMemoryStart, mode, out var failure))
             {
-                if (ShouldTraceDirectMemory())
-                    Console.Error.WriteLine($"[LOADER][TRACE] map_direct failed=host-view reason={failure} address=0x{address:X} size=0x{length:X} offset=0x{directMemoryStart:X} protection=0x{protection:X}");
+                ReportMapFailure($"host-view:{failure}", address, length, directMemoryStart, flags);
                 return MemoryNoSpace;
             }
             ReplaceMappedRegionRangeLocked(new MappedRegion(address, length, protection,
