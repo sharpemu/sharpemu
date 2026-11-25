@@ -125,17 +125,17 @@ internal static unsafe partial class VulkanVideoPresenter
                 Clipped = true,
             };
 
-            Check(_swapchainApi.CreateSwapchain(_device, &createInfo, null, out _swapchain), "vkCreateSwapchainKHR");
+            Check(CreateSwapchainThroughHooks(&createInfo, out _swapchain), "vkCreateSwapchainKHR");
 
             uint swapchainImageCount = 0;
             Check(
-                _swapchainApi.GetSwapchainImages(_device, _swapchain, &swapchainImageCount, null),
+                GetSwapchainImagesThroughHooks(_swapchain, &swapchainImageCount, null),
                 "vkGetSwapchainImagesKHR");
             _swapchainImages = new Image[swapchainImageCount];
             fixed (Image* imagePointer = _swapchainImages)
             {
                 Check(
-                    _swapchainApi.GetSwapchainImages(_device, _swapchain, &swapchainImageCount, imagePointer),
+                    GetSwapchainImagesThroughHooks(_swapchain, &swapchainImageCount, imagePointer),
                     "vkGetSwapchainImagesKHR");
             }
 
@@ -718,7 +718,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             if (_swapchain.Handle != 0)
             {
-                _swapchainApi.DestroySwapchain(_device, _swapchain, null);
+                DestroySwapchainThroughHooks(_swapchain);
                 _swapchain = default;
             }
 

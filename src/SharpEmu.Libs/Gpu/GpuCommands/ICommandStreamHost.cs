@@ -264,6 +264,10 @@ public interface ICommandStreamHost
 
     void DispatchDirect(ulong submitId, uint groupsX, uint groupsY, uint groupsZ, uint dispatchInitiator, ulong indirectArgumentsAddress = 0);
 
+    void DispatchSuperResolution(Upscaling.SuperResolutionDispatch dispatch)
+    {
+    }
+
     // True when an indirect dispatch in workgroup units reads its group counts on the
     // GPU, so the interpreter need not wait for the GPU to read them back first.
     bool ResolvesIndirectDispatchOnGpu => false;

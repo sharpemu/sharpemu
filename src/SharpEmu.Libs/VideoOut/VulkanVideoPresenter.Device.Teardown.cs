@@ -67,6 +67,9 @@ internal static unsafe partial class VulkanVideoPresenter
 
             DrainFlipSnapshotPool();
             DestroySwapchainResources();
+            _superResolution?.Dispose();
+            _superResolution = null;
+            _streamline = null;
             Console.Error.WriteLine(
                 $"[LOADER][INFO] vk.device_memory live_allocations={_deviceInfo.LiveAllocations} " +
                 $"peak_allocations={_deviceInfo.PeakAllocations} limit={_deviceInfo.MaxMemoryAllocationCount}");
