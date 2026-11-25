@@ -35,8 +35,16 @@ internal static class DriverShaderCacheFolder
 
         try
         {
+            var usedBefore = Directory.Exists(folder);
             Directory.CreateDirectory(folder);
             var files = new DirectoryInfo(folder).GetFiles("*", SearchOption.AllDirectories);
+            if (usedBefore && files.Length == 0)
+            {
+                Console.Error.WriteLine($"[LOADER][WARN] Driver shader cache: the driver stored nothing in {folder} in earlier sessions, " +
+                    "so its own default cache folder is used.");
+                return null;
+            }
+
             Environment.SetEnvironmentVariable(PathVariable, folder);
             Console.Error.WriteLine($"[LOADER][INFO] Driver shader cache: folder={folder} files={files.Length} " +
                 $"bytes={files.Sum(static file => file.Length)}");
