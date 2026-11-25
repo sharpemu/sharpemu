@@ -912,6 +912,11 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageCreate);
         var imageIdentifier = _slots.Insert(new CachedImage(_device, _scheduler, _backing, description, _backingPool, _reportAllocationFailure));
         _createdImageCount++;
+        if (_slots[imageIdentifier].Backing.InSystemMemory)
+        {
+            _systemMemoryImages.Add(imageIdentifier);
+        }
+
         ReportLargeImageCreation(_slots[imageIdentifier], creationPath);
         ReportImageLifetime(_slots[imageIdentifier], "recreate");
         if (RenderPhaseProfile.Enabled)
