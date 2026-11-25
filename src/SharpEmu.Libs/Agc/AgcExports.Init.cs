@@ -126,8 +126,17 @@ public static partial class AgcExports
         LibraryName = "libSceAgc")]
     public static int GetIsTrinityMode(CpuContext ctx)
     {
-        ctx[CpuRegister.Rax] = SharpEmu.Libs.Kernel.ConsoleHardware.IsPro ? 1UL : 0UL;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        var output = ctx[CpuRegister.Rdi];
+        if (output != 0)
+        {
+            Span<byte> value = [SharpEmu.Libs.Kernel.ConsoleHardware.IsPro ? (byte)1 : (byte)0];
+            if (!ctx.Memory.TryWrite(output, value))
+            {
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+        }
+
+        return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
     private static int ReturnRegisterDefaults(CpuContext ctx, bool internalDefaults)
