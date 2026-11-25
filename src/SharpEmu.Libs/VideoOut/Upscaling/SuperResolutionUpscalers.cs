@@ -56,6 +56,12 @@ internal static class SuperResolutionTuning
     public static readonly float JitterSignY = Sign("SHARPEMU_PSSR_JITTER_SIGN", 1);
     public static readonly float MotionSignX = Sign("SHARPEMU_PSSR_MV_SIGN", 0);
     public static readonly float MotionSignY = Sign("SHARPEMU_PSSR_MV_SIGN", 1);
+    public static readonly string? Exposure = Environment.GetEnvironmentVariable("SHARPEMU_PSSR_EXPOSURE")?.Trim().ToLowerInvariant();
+    public static readonly string? Hdr = Environment.GetEnvironmentVariable("SHARPEMU_PSSR_HDR")?.Trim();
+
+    public static bool IsHdrFormat(uint format) => (Format)format is
+        Format.R16G16B16A16Sfloat or Format.R32G32B32A32Sfloat or Format.B10G11R11UfloatPack32 or
+        Format.E5B9G9R9UfloatPack32 or Format.R16G16B16Sfloat or Format.R32G32B32Sfloat;
 
     private static float Sign(string variable, int component)
     {

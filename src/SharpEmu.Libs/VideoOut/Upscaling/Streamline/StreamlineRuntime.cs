@@ -27,7 +27,8 @@ internal sealed unsafe class StreamlineRuntime : IDisposable
 
     private readonly List<nint> _allocations = [];
     private readonly Dictionary<uint, SlDlssOptions> _viewportOptions = [];
-    private readonly Dictionary<(uint, uint, uint, uint), SlDlssMode> _modes = [];
+    private readonly Dictionary<(uint, uint), Dictionary<SlDlssMode, ModeRange>> _outputRanges = [];
+    private readonly Dictionary<(uint, uint), SlDlssMode> _lastModes = [];
     private uint _frameIndex;
     private int _failures;
     private int _reportedFailures;
@@ -260,7 +261,18 @@ internal sealed unsafe class StreamlineRuntime : IDisposable
 
         var dispatch = frame.Dispatch;
         var viewport = SlViewportHandle.Create(dispatch.ContextId == 0 ? 1u : dispatch.ContextId);
-        var useExposure = frame.Exposure.IsValid && (dispatch.Flags & SuperResolutionFlags.AutoExposure) == 0;
+        var useExposure = SuperResolutionTuning.Exposure switch
+        {
+            "auto" => false,
+            "texture" => frame.Exposure.IsValid,
+            _ => frame.Exposure.IsValid && (dispatch.Flags & SuperResolutionFlags.AutoExposure) == 0,
+        };
+        var hdr = SuperResolutionTuning.Hdr switch
+        {
+            "0" => false,
+            "1" => true,
+            _ => SuperResolutionTuning.IsHdrFormat(frame.Color.Format),
+        };
         var options = new SlDlssOptions
         {
             Header = new SlHeader(SlDlssOptions.TypeId, 3),
@@ -270,7 +282,7 @@ internal sealed unsafe class StreamlineRuntime : IDisposable
             Sharpness = 0,
             PreExposure = dispatch.PreExposure > 0 && float.IsFinite(dispatch.PreExposure) ? dispatch.PreExposure : 1f,
             ExposureScale = 1f,
-            ColorBuffersHdr = SlBoolean.True,
+            ColorBuffersHdr = hdr ? SlBoolean.True : SlBoolean.False,
             UseAutoExposure = useExposure ? SlBoolean.False : SlBoolean.True,
         };
         if (options.Mode == SlDlssMode.Off)
@@ -290,7 +302,10 @@ internal sealed unsafe class StreamlineRuntime : IDisposable
             _viewportOptions[viewport.Value] = options;
             Console.Error.WriteLine(
                 $"[DLSS][INFO] Context {viewport.Value}: mode={options.Mode} render={frame.RenderWidth}x{frame.RenderHeight} " +
-                $"output={frame.OutputWidth}x{frame.OutputHeight} exposure={(useExposure ? "texture" : "auto")}.");
+                $"output={frame.OutputWidth}x{frame.OutputHeight} exposure={(useExposure ? "texture" : "auto")} hdr={hdr} " +
+                $"color={(Format)frame.Color.Format} {frame.Color.Width}x{frame.Color.Height} depth={(Format)frame.Depth.Format} " +
+                $"motion={(Format)frame.MotionVectors.Format} exposure_texture={(Format)frame.Exposure.Format} {frame.Exposure.Width}x{frame.Exposure.Height} " +
+                $"output_texture={(Format)frame.Output.Format} pre_exposure={dispatch.PreExposure:0.###} color_space={dispatch.InputColorSpace}.");
         }
 
         nint token = 0;
@@ -355,34 +370,42 @@ internal sealed unsafe class StreamlineRuntime : IDisposable
 
     private SlDlssMode SelectMode(SuperResolutionFrame frame)
     {
-        var key = (frame.RenderWidth, frame.RenderHeight, frame.OutputWidth, frame.OutputHeight);
-        if (_modes.TryGetValue(key, out var cached))
+        var outputKey = (frame.OutputWidth, frame.OutputHeight);
+        if (!_outputRanges.TryGetValue(outputKey, out var ranges))
         {
-            return cached;
-        }
-
-        var ranges = new Dictionary<SlDlssMode, ModeRange>();
-        foreach (var mode in AllModes)
-        {
-            if (TryQueryRange(frame, mode, out var range))
+            ranges = new Dictionary<SlDlssMode, ModeRange>();
+            foreach (var mode in AllModes)
             {
-                ranges[mode] = range;
+                if (TryQueryRange(frame, mode, out var range))
+                {
+                    ranges[mode] = range;
+                }
             }
+
+            _outputRanges[outputKey] = ranges;
+            Console.Error.WriteLine(
+                $"[DLSS][INFO] DLSS input ranges for {frame.OutputWidth}x{frame.OutputHeight}: " +
+                string.Join(", ", AllModes.Select(mode => ranges.TryGetValue(mode, out var range)
+                    ? $"{mode} {range.MinimumWidth}x{range.MinimumHeight}-{range.MaximumWidth}x{range.MaximumHeight}"
+                    : $"{mode} unsupported")) + ".");
         }
 
-        var percent = frame.OutputWidth == 0 ? 0 : frame.RenderWidth * 100.0 / frame.OutputWidth;
-        Console.Error.WriteLine(
-            $"[DLSS][INFO] Game renders {frame.RenderWidth}x{frame.RenderHeight} for {frame.OutputWidth}x{frame.OutputHeight} ({percent:0}%). DLSS input ranges: " +
-            string.Join(", ", AllModes.Select(mode => ranges.TryGetValue(mode, out var range)
-                ? $"{mode} {range.MinimumWidth}x{range.MinimumHeight}-{range.MaximumWidth}x{range.MaximumHeight}{(range.Accepts(frame) ? " (fits)" : string.Empty)}"
-                : $"{mode} unsupported")) + ".");
+        if (_lastModes.TryGetValue(outputKey, out var current) && current != SlDlssMode.Off &&
+            ranges.TryGetValue(current, out var currentRange) && currentRange.Accepts(frame))
+        {
+            return current;
+        }
 
         var selected = ClosestFittingMode(frame, ranges);
-        Console.Error.WriteLine(selected == SlDlssMode.Off
-            ? $"[DLSS][WARN] No DLSS mode accepts {frame.RenderWidth}x{frame.RenderHeight} for {frame.OutputWidth}x{frame.OutputHeight}; the basic upscaler runs."
-            : $"[DLSS][INFO] DLSS mode {selected}.");
+        if (!_lastModes.TryGetValue(outputKey, out var previous) || previous != selected)
+        {
+            _lastModes[outputKey] = selected;
+            var percent = frame.OutputWidth == 0 ? 0 : frame.RenderWidth * 100.0 / frame.OutputWidth;
+            Console.Error.WriteLine(selected == SlDlssMode.Off
+                ? $"[DLSS][WARN] No DLSS mode accepts {frame.RenderWidth}x{frame.RenderHeight} for {frame.OutputWidth}x{frame.OutputHeight}; the basic upscaler runs."
+                : $"[DLSS][INFO] Game renders {frame.RenderWidth}x{frame.RenderHeight} for {frame.OutputWidth}x{frame.OutputHeight} ({percent:0}%): DLSS mode {selected}.");
+        }
 
-        _modes[key] = selected;
         return selected;
     }
 
@@ -469,7 +492,8 @@ internal sealed unsafe class StreamlineRuntime : IDisposable
 
     private static bool SameOptions(in SlDlssOptions left, in SlDlssOptions right) =>
         left.Mode == right.Mode && left.OutputWidth == right.OutputWidth && left.OutputHeight == right.OutputHeight &&
-        left.PreExposure == right.PreExposure && left.UseAutoExposure == right.UseAutoExposure;
+        left.PreExposure == right.PreExposure && left.UseAutoExposure == right.UseAutoExposure &&
+        left.ColorBuffersHdr == right.ColorBuffersHdr;
 
     private static void Tag(SlResource* resources, SlResourceTag* tags, ref uint count, in SuperResolutionImage image, uint type, SlExtent extent)
     {
@@ -499,9 +523,61 @@ internal sealed unsafe class StreamlineRuntime : IDisposable
             Header = new SlHeader(SlResourceTag.TypeId, 1),
             Resource = (nint)(&resources[index]),
             Type = type,
-            Lifecycle = SlResourceTag.LifecycleOnlyValidNow,
+            Lifecycle = SlResourceTag.LifecycleValidUntilEvaluate,
             Extent = extent,
         };
+    }
+
+    private static int _depthReported;
+
+    private static bool DepthIsInverted(SuperResolutionDispatch dispatch, in Matrix4x4 projection, bool hasProjection)
+    {
+        var flagged = (dispatch.Flags & SuperResolutionFlags.ReverseDepth) != 0;
+        var inferred = hasProjection ? InferReverseDepth(projection) : null;
+        var inverted = flagged || inferred == true;
+        if (Interlocked.Exchange(ref _depthReported, 1) == 0)
+        {
+            Console.Error.WriteLine($"[DLSS][INFO] Depth: {(inverted ? "reverse" : "standard")} (flag={flagged}, projection={inferred?.ToString() ?? "unknown"}).");
+        }
+
+        return inverted;
+    }
+
+    private static bool? InferReverseDepth(in Matrix4x4 projection)
+    {
+        bool? result = null;
+        var columnDistance = MathF.Abs(MathF.Abs(projection.M43) - 1f);
+        var rowDistance = MathF.Abs(MathF.Abs(projection.M34) - 1f);
+        bool[] conventions = columnDistance < rowDistance ? [true] : rowDistance < columnDistance ? [false] : [true, false];
+        foreach (var column in conventions)
+        {
+            foreach (var forward in new[] { 1f, -1f })
+            {
+                var near = ClipDepth(projection, column, forward, out var nearW);
+                var far = ClipDepth(projection, column, forward * 1000f, out var farW);
+                if (nearW <= 0 || farW <= 0 || !float.IsFinite(near) || !float.IsFinite(far) || near == far)
+                {
+                    continue;
+                }
+
+                var reverse = near > far;
+                if (result is { } previous && previous != reverse)
+                {
+                    return null;
+                }
+
+                result = reverse;
+            }
+        }
+
+        return result;
+    }
+
+    private static float ClipDepth(in Matrix4x4 projection, bool column, float z, out float w)
+    {
+        var clipZ = column ? projection.M33 * z + projection.M34 : projection.M33 * z + projection.M43;
+        w = column ? projection.M43 * z + projection.M44 : projection.M34 * z + projection.M44;
+        return clipZ / w;
     }
 
     private static SlConstants BuildConstants(SuperResolutionFrame frame)
@@ -559,7 +635,7 @@ internal sealed unsafe class StreamlineRuntime : IDisposable
         constants.CameraFov = hasProjection && yScale > 0 ? 2f * MathF.Atan(1f / yScale) : MathF.PI / 3f;
         constants.CameraAspectRatio = hasProjection && xScale > 0 ? yScale / xScale : frame.OutputWidth / (float)Math.Max(frame.OutputHeight, 1u);
         constants.MotionVectorsInvalidValue = InvalidFloat;
-        constants.DepthInverted = (dispatch.Flags & SuperResolutionFlags.ReverseDepth) != 0 ? SlBoolean.True : SlBoolean.False;
+        constants.DepthInverted = DepthIsInverted(dispatch, projection, hasProjection) ? SlBoolean.True : SlBoolean.False;
         constants.CameraMotionIncluded = SlBoolean.True;
         constants.MotionVectors3D = SlBoolean.False;
         constants.Reset = dispatch.Reset ? SlBoolean.True : SlBoolean.False;
@@ -691,6 +767,7 @@ internal sealed unsafe class StreamlineRuntime : IDisposable
         text.Contains("since it is was not requested by the host", StringComparison.Ordinal) ||
         text.Contains("VK_EXT_debug_utils extension not enabled", StringComparison.Ordinal) ||
         text.Contains("Exceeded VRAM budget", StringComparison.Ordinal) ||
+        text.Contains("more than allowed by the VRAM budget", StringComparison.Ordinal) ||
         text.Contains("'getOptimalSettings' returns invalid size", StringComparison.Ordinal) ||
         (text.Contains("Hook sl.common:Vulkan:", StringComparison.Ordinal) && text.Contains("is NOT supported", StringComparison.Ordinal));
 

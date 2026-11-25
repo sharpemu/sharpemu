@@ -245,6 +245,7 @@ internal struct SlResourceTag
     [FieldOffset(48)] public SlExtent Extent;
 
     public const uint LifecycleOnlyValidNow = 0;
+    public const uint LifecycleValidUntilEvaluate = 2;
 }
 
 [StructLayout(LayoutKind.Explicit, Size = 456)]
