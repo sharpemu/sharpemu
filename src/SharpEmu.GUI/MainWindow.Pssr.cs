@@ -34,6 +34,7 @@ public partial class MainWindow
         PssrUpscalerBox.SelectionChanged += (_, _) =>
         {
             _settings.PssrUpscaler = SelectedComboText(PssrUpscalerBox, "Auto");
+            UpdatePssrAutoChoice();
             ScheduleSettingsSave();
         };
         StreamlineDownloadButton.Click += (_, _) => OpenWebPage(DlssRuntimeFiles.StreamlineReleasesUrl);
@@ -60,6 +61,23 @@ public partial class MainWindow
         RefreshChoices(_consoleModelChoices);
         RefreshChoices(_pssrUpscalerChoices);
         UpdateDlssFilesStatus();
+    }
+
+    private void UpdatePssrAutoChoice()
+    {
+        var localization = Localization.Instance;
+        var gpu = SharpEmu.Logging.HostSystemInfo.GpuName;
+        var vendor = SharpEmu.Logging.HostSystemInfo.GpuVendor;
+        var backend = SuperResolutionSettings.Choose(SuperResolutionUpscaler.Auto, vendor);
+        PssrAutoChoiceRow.Description = vendor == SharpEmu.Logging.HostGpuVendor.Unknown
+            ? localization.Get("Options.Pssr.AutoChoice.Unknown")
+            : localization.Format(backend == SuperResolutionBackend.Dlss ? "Options.Pssr.AutoChoice.Dlss" : "Options.Pssr.AutoChoice.Fsr", gpu);
+        var nvidiaMissing = vendor is SharpEmu.Logging.HostGpuVendor.Amd or SharpEmu.Logging.HostGpuVendor.Intel;
+        DlssVendorNotice.IsVisible = nvidiaMissing;
+        if (nvidiaMissing)
+        {
+            DlssVendorNotice.Text = localization.Format("Options.Pssr.Dlss.NvidiaOnly", gpu);
+        }
     }
 
     private void UpdatePssrAvailability()
@@ -92,6 +110,7 @@ public partial class MainWindow
             ? localization.Format("Options.Pssr.DlssFiles.Found", string.Join(", ", DlssRuntimeFiles.Required.Select(file => file.Name)))
             : localization.Format("Options.Pssr.DlssFiles.Missing", directory) + Environment.NewLine +
               string.Join(Environment.NewLine, missing.Select(file => localization.Format("Options.Pssr.DlssFiles.MissingItem", file.Name, file.Source)));
+        UpdatePssrAutoChoice();
         DlssFilesCheckedText.IsVisible = _dlssFilesCheckedAt is not null;
         if (_dlssFilesCheckedAt is { } checkedAt)
         {

@@ -1587,6 +1587,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                   HorizontalContentAlignment="Left"
                                   VerticalAlignment="Center" />
                       </local:SettingRow>
+                      <local:SettingRow x:Name="PssrAutoChoiceRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Options.Pssr.AutoChoice.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="" />
                     </StackPanel>
                   </Border>
 
@@ -1632,6 +1636,10 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                      TextWrapping="Wrap" />
                           <TextBlock x:Name="DlssFilesCheckedText"
                                      Classes="optionsSectionDesc"
+                                     IsVisible="False"
+                                     TextWrapping="Wrap" />
+                          <TextBlock x:Name="DlssVendorNotice"
+                                     Foreground="{DynamicResource WarningBrush}"
                                      IsVisible="False"
                                      TextWrapping="Wrap" />
                         </StackPanel>

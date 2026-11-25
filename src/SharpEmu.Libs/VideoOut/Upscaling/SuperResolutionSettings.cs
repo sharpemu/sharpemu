@@ -10,6 +10,13 @@ public enum SuperResolutionUpscaler
     Basic,
 }
 
+public enum SuperResolutionBackend
+{
+    Dlss,
+    Fsr,
+    Basic,
+}
+
 public static class SuperResolutionSettings
 {
     public const string UpscalerVariable = "SHARPEMU_PSSR_UPSCALER";
@@ -23,16 +30,42 @@ public static class SuperResolutionSettings
         _ => SuperResolutionUpscaler.Auto,
     };
 
-    public static bool WantsDlss => Requested is SuperResolutionUpscaler.Auto or SuperResolutionUpscaler.Dlss;
+    public static SuperResolutionBackend Choose(SuperResolutionUpscaler requested, SharpEmu.Logging.HostGpuVendor vendor) => requested switch
+    {
+        SuperResolutionUpscaler.Dlss => SuperResolutionBackend.Dlss,
+        SuperResolutionUpscaler.Basic => SuperResolutionBackend.Basic,
+        _ => vendor is SharpEmu.Logging.HostGpuVendor.Amd or SharpEmu.Logging.HostGpuVendor.Intel
+            ? SuperResolutionBackend.Fsr
+            : SuperResolutionBackend.Dlss,
+    };
+
+    public static SuperResolutionBackend Backend => Choose(Requested, SharpEmu.Logging.HostSystemInfo.GpuVendor);
+
+    public static bool WantsDlss => Backend == SuperResolutionBackend.Dlss;
 }
 
 public static class SuperResolutionStartup
 {
     public static void Begin()
     {
-        if (SharpEmu.Libs.Kernel.ConsoleHardware.IsPro && SuperResolutionSettings.WantsDlss)
+        if (!SharpEmu.Libs.Kernel.ConsoleHardware.IsPro)
         {
-            Streamline.StreamlineRuntime.BeginStart(DlssRuntimeFiles.DefaultDirectory);
+            return;
+        }
+
+        var gpu = SharpEmu.Logging.HostSystemInfo.GpuName;
+        switch (SuperResolutionSettings.Backend)
+        {
+            case SuperResolutionBackend.Dlss:
+                Console.Error.WriteLine($"[PSSR][INFO] PSSR upscaler: DLSS ({SuperResolutionSettings.Requested}, GPU: {gpu}).");
+                Streamline.StreamlineRuntime.BeginStart(DlssRuntimeFiles.DefaultDirectory);
+                break;
+            case SuperResolutionBackend.Fsr:
+                Console.Error.WriteLine($"[PSSR][INFO] PSSR upscaler: FSR for {gpu}. FSR is not available yet, so the basic upscaler runs.");
+                break;
+            default:
+                Console.Error.WriteLine("[PSSR][INFO] PSSR upscaler: basic (set in the PSSR settings).");
+                break;
         }
     }
 }
