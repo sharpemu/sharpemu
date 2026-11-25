@@ -889,14 +889,21 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var chunks = slice.Chunks;
+            var arenas = _arenaPool!;
             slice.Chunks = [];
             if (slice.Submitted)
             {
-                _scheduler.QueueCompletionAction(() => chunks.ForEach(_arenaPool!.Return));
+                _scheduler.QueueCompletionAction(() =>
+                {
+                    if (ReferenceEquals(_arenaPool, arenas))
+                    {
+                        chunks.ForEach(arenas.Return);
+                    }
+                });
             }
             else
             {
-                chunks.ForEach(_arenaPool!.Return);
+                chunks.ForEach(arenas.Return);
             }
         }
 
