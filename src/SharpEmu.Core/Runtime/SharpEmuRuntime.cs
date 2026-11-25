@@ -100,7 +100,6 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             SharpEmu.Libs.Media.HostMovieBridge.GetPlaybackModeName(Environment.GetEnvironmentVariable("SHARPEMU_BINK_MODE")));
         ConsoleHardware.Configure(options.Ps5Pro);
         Console.Error.WriteLine($"[LOADER][INFO] Console model: {(options.Ps5Pro ? "PS5 Pro" : "PS5")}");
-        SharpEmu.Libs.VideoOut.Upscaling.SuperResolutionStartup.Begin();
         var cpuExecutionOptions = new CpuExecutionOptions
         {
             CpuEngine = options.CpuEngine,
@@ -112,6 +111,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             viewHost: HostViewMemory.Create(),
             preReserveGuestAddressSpace: true,
             adoptStartupAddressReservations: options.AdoptStartupAddressReservations);
+        SharpEmu.Libs.VideoOut.Upscaling.SuperResolutionStartup.Begin();
         var moduleManager = new ModuleManager();
         // The compile-time generated registry (SharpEmu.SourceGenerators) is the sole
         // registration source; content tests in SharpEmu.Libs.Tests pin its invariants.
