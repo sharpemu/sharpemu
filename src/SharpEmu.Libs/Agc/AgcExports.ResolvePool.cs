@@ -18,7 +18,28 @@ public static partial class AgcExports
     // the stream position checks what the worker read before it records the result.
     internal sealed record DeferredDraw : DeferredWork
     {
+        // Under 4 MiB of additional stage/scalar objects per translation, even after a queue spike.
+        internal const int MaxOwnedSnapshots = 4096;
+        private bool _ownsSnapshotSlot;
         public RegisterBanks Banks = null!;
+        private VertexStageRegisters? _vertex;
+        private PixelStageRegisters? _pixel;
+
+        public void CaptureBanks(RegisterBanks live, ref int slots)
+        {
+            if (!_ownsSnapshotSlot && (Banks is null || slots >= MaxOwnedSnapshots))
+            {
+                Banks = live.Snapshot(Banks);
+                return;
+            }
+            if (!_ownsSnapshotSlot)
+            {
+                _ownsSnapshotSlot = true;
+                slots++;
+            }
+            Banks = live.SnapshotForDeferredDraw(Banks, ref _vertex, ref _pixel);
+        }
+
         public ulong SubmitId;
         public bool Indexed;
         public DrawIndexedArguments IndexedArguments;
@@ -97,6 +118,8 @@ public static partial class AgcExports
         private RenderExecutor? _joinExecutor;
         private CapturingSink? _joinSink;
         private readonly ConcurrentQueue<DeferredDraw> _spareDeferred = new();
+        // Only the producer admits retired shells to the reusable snapshot set.
+        private int _ownedSnapshotSlots;
 
         private readonly Dictionary<(ulong Vertex, ulong Pixel), (bool Writes, long Registrations, bool Group)> _drawWrites = new();
         private (ulong Vertex, ulong Pixel) _learningKey;
@@ -128,7 +151,7 @@ public static partial class AgcExports
         private void DeferDraw(ResolvePool pool, ulong submitId, RegisterBanks banks, bool indexed, in DrawIndexedArguments indexedArguments, in DrawAutoArguments autoArguments, uint[]? offsets = null)
         {
             var work = _spareDeferred.TryDequeue(out var spare) ? spare : new DeferredDraw();
-            work.Banks = banks.Snapshot(work.Banks);
+            work.CaptureBanks(banks, ref _ownedSnapshotSlots);
             work.SubmitId = submitId;
             work.Indexed = indexed;
             work.IndexedArguments = indexedArguments;

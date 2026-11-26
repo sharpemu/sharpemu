@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Pipelines;
@@ -96,6 +97,81 @@ public sealed class ProgramInputDependenciesTests : IDisposable
         var first = ResolvePixel(before, shader);
         var second = ResolvePixel(after, shader);
         Assert.False(StaticKey(first).SequenceEqual(StaticKey(second)));
+    }
+
+    [Fact]
+    public void RepeatedCaptureRequiresEveryReadablePacketAndNoStaleKeys()
+    {
+        uint[] packet = [PacketHeader.Make(5, PacketOpcode.SetShaderRegisterIndirect),
+            (uint)(UserBlock & uint.MaxValue), (uint)(UserBlock >> 32), 0, 1];
+        uint[] words = [.. packet, .. packet, .. packet];
+        IReadOnlyDictionary<ulong, byte[]>? Capture() => SharpEmu.Libs.Agc.AgcExports.CaptureSubmittedTables(_context, Code,
+            System.Runtime.InteropServices.MemoryMarshal.AsBytes(words.AsSpan()));
+        Write32(UserBlock, 17);
+        var all = Capture()!;
+        Assert.Same(all, Capture());
+        words[7] = uint.MaxValue; // Middle packet is unreadable; the first and third still match.
+        var two = Capture()!;
+        Assert.Equal(2, two.Count);
+        Assert.False(two.ContainsKey(Code + 20));
+        Assert.True(all.ContainsKey(Code + 20));
+        words[7] = packet[2];
+        words[6] += 8;
+        Write32(UserBlock + 8, 29);
+        var different = Capture()!;
+        Assert.Equal(29u, BinaryPrimitives.ReadUInt32LittleEndian(different[Code + 20]));
+        Assert.Equal(17u, BinaryPrimitives.ReadUInt32LittleEndian(all[Code + 20]));
+        Assert.Equal(17u, BinaryPrimitives.ReadUInt32LittleEndian(different[Code + 40]));
+        words = Enumerable.Repeat(packet, 17).SelectMany(part => part).ToArray();
+        Assert.NotSame(Capture(), Capture());
+        words = [.. packet, .. packet, .. packet, .. packet, .. packet];
+        for (int i = 4; i < words.Length; i += 5) words[i] = 256;
+        Assert.NotSame(Capture(), Capture()); // 10 KiB is above the retained byte limit.
+        Array.Fill(words, PacketHeader.FillerHeader);
+        Assert.Null(Capture());
+    }
+
+    [Fact]
+    public void FusedMeshCaptureIncludesHashPointerAndEveryScalar()
+    {
+        var header = new ShaderHeaderEntry(Shader() with { ContinuationAddress = Code + 16, ContinuationSizeBytes = 4 }, 1);
+        ShaderSource Read(ulong hash, ulong address, uint[] words) => ShaderPipelineCache.SourceOf(header, hash,
+            SharpEmu.ShaderCompiler.Resources.ShaderStage.Mesh, words, 8, address);
+        var first = Read(1, 2, [3, 4]);
+        Assert.Same(first, Read(1, 2, [3, 4]));
+        Assert.NotSame(first, Read(2, 2, [3, 4]));
+        var pointer = Read(1, 0x100000002, [3, 4]);
+        Assert.Equal(1u, pointer.UserData[1]);
+        var changed = Read(1, 0x100000002, [3, 5]);
+        Assert.Equal(5u, changed.UserData[9]);
+        Assert.Equal(4u, pointer.UserData[9]);
+        Assert.Equal(0u, first.UserData[1]);
+    }
+
+    [Fact]
+    public void CompileOptionsFollowDrawOverridesAndDetachKeptInputs()
+    {
+        var keptVertex = new KeptVertexInput { Info = new VertexInputInfo() };
+        var vertex = keptVertex.Info.WithoutStage();
+        var first = keptVertex.OptionsFor(vertex, 3, null, borrowed: true);
+        Assert.Same(first, keptVertex.OptionsFor(vertex, 3, null, borrowed: true));
+        vertex.BaseVertexUserData = 5;
+        Assert.Equal(5, keptVertex.OptionsFor(vertex, 3, null, borrowed: true).VertexInfo!.BaseVertexUserData);
+        Assert.Equal(4, keptVertex.OptionsFor(vertex, 4, null, borrowed: true).RequiredVertexOutputCount);
+        Assert.Equal(-1, first.VertexInfo!.BaseVertexUserData);
+
+        var keptPixel = new KeptPixelInput { Info = new PixelInputInfo() };
+        var pixel = keptPixel.Info.WithoutStage();
+        var registers = new ShaderInterfaceRegisters();
+        SharpEmu.ShaderCompiler.Gen5PixelOutputBinding[] outputs = [];
+        var old = keptPixel.OptionsFor(pixel, outputs, registers, borrowed: true);
+        Assert.Same(old, keptPixel.OptionsFor(pixel, outputs, registers, borrowed: true));
+        registers.PixelInputEnable = 7;
+        pixel.IeeeMode = true;
+        var updated = keptPixel.OptionsFor(pixel, outputs, registers, borrowed: true);
+        Assert.Equal(7u, updated.PixelInputEnable);
+        Assert.True(updated.PixelInfo!.IeeeMode);
+        Assert.False(old.PixelInfo!.IeeeMode);
     }
 
     [Fact]

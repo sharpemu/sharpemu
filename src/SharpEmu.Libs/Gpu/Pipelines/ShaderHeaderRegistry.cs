@@ -39,6 +39,8 @@ public readonly record struct FusedProgramParts(ulong ContinuationAddress, ulong
 
 internal sealed class ShaderHeaderEntry
 {
+    internal ShaderSource? LastSource;
+
     public ShaderHeaderEntry(RegisteredShader shader, long registrations)
     {
         Shader = shader;

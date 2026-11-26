@@ -109,6 +109,43 @@ public sealed class RegisterBanks
     // deferred draw takes one per draw, and between draws only a few parts change.
     public RegisterBanks Snapshot() => Snapshot(null);
 
+    private ulong _lastDrawGeometryData;
+    private ulong _lastDrawPixelData;
+
+    // These destinations belong to one deferred draw until its worker and any serial replay have
+    // finished. Resolved draws retain Context, while shader resolution publishes independent inputs.
+    internal RegisterBanks SnapshotForDeferredDraw(RegisterBanks? shell, ref VertexStageRegisters? vertex, ref PixelStageRegisters? pixel)
+    {
+        var geometryStamp = Stamp(RegisterStamp.VertexUserData);
+        var pixelStamp = Stamp(RegisterStamp.PixelUserData);
+        bool copyVertex = !_vertexShared && !_geometryScalarsShared && _lastDrawGeometryData != geometryStamp;
+        bool copyPixel = !_pixelShared && !_pixelScalarsShared && _lastDrawPixelData != pixelStamp;
+        _lastDrawGeometryData = geometryStamp;
+        _lastDrawPixelData = pixelStamp;
+
+        var snapshot = Snapshot(shell);
+        if (copyVertex)
+        {
+            if (vertex is null)
+            {
+                vertex = Shader.Vertex.ShallowCopy();
+                vertex.GeometryUserScalars = new();
+            }
+            Shader.Vertex.CopyForDeferredDraw(vertex);
+            snapshot.Shader.Vertex = vertex;
+            // The other three scalar banks are still published by reference.
+            _vertexShared = _geometryScalarsShared = false;
+        }
+        if (copyPixel)
+        {
+            pixel ??= new PixelStageRegisters();
+            Shader.Pixel.CopyForDeferredDraw(pixel);
+            snapshot.Shader.Pixel = pixel;
+            _pixelShared = _pixelScalarsShared = false;
+        }
+        return snapshot;
+    }
+
     public RegisterBanks Snapshot(RegisterBanks? shell)
     {
         RegisterBanks snapshot;

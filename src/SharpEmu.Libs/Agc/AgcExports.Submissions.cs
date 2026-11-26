@@ -415,11 +415,22 @@ public static partial class AgcExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
-    private static Dictionary<ulong, byte[]>? CaptureSubmittedTables(CpuContext ctx, ulong address, ReadOnlySpan<byte> commands)
+    private const int SmallTableBytes = 2048;
+
+    // One completed, read-only capture per submitting thread. Large submissions do not become roots.
+    private const int MaxRememberedTables = 16;
+    private const int MaxRememberedTableBytes = 8192;
+    [ThreadStatic] private static Dictionary<ulong, byte[]>? _lastSubmission;
+
+    internal static IReadOnlyDictionary<ulong, byte[]>? CaptureSubmittedTables(CpuContext ctx, ulong address, ReadOnlySpan<byte> commands)
     {
         var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(commands);
         Dictionary<ulong, byte[]>? tables = null;
         var remainingBytes = 64 * 1024 * 1024;
+        var prior = _lastSubmission;
+        Span<ulong> matched = stackalloc ulong[prior?.Count ?? 0];
+        int matches = 0;
+        Span<byte> scratch = stackalloc byte[SmallTableBytes];
         for (var offset = 0; offset < words.Length;)
         {
             var header = words[offset];
@@ -434,17 +445,54 @@ public static partial class AgcExports
                 var size = (int)count * 8;
                 if (size != 0 && size <= remainingBytes)
                 {
-                    var table = new byte[size];
-                    if (ctx.Memory.TryRead(target, table))
+                    ulong key = address + (ulong)offset * 4;
+                    byte[]? previousTable = null;
+                    prior?.TryGetValue(key, out previousTable);
+                    byte[]? table;
+                    if (size <= scratch.Length)
                     {
-                        (tables ??= [])[address + (ulong)offset * 4] = table;
+                        var current = scratch[..size];
+                        table = null;
+                        if (ctx.Memory.TryRead(target, current))
+                        {
+                            if (previousTable is not null && current.SequenceEqual(previousTable))
+                                table = previousTable;
+                            else table = current.ToArray();
+                        }
+                    }
+                    else
+                    {
+                        table = new byte[size];
+                        if (!ctx.Memory.TryRead(target, table)) table = null;
+                    }
+                    if (table is not null)
+                    {
+                        if (tables is null && ReferenceEquals(table, previousTable))
+                            matched[matches++] = key;
+                        else
+                        {
+                            tables ??= CopyMatchedTables(prior, matched[..matches], prior?.Count ?? 0);
+                            tables.Add(key, table);
+                        }
                         remainingBytes -= size;
                     }
                 }
             }
             offset += length;
         }
+        if (tables is null && matches != 0)
+            tables = matches == prior!.Count ? prior : CopyMatchedTables(prior, matched[..matches], matches);
+        _lastSubmission = tables?.Count <= MaxRememberedTables && 64 * 1024 * 1024 - remainingBytes <= MaxRememberedTableBytes
+            ? tables : null;
         return tables;
+    }
+
+    private static Dictionary<ulong, byte[]> CopyMatchedTables(Dictionary<ulong, byte[]>? prior, ReadOnlySpan<ulong> keys, int capacity)
+    {
+        var result = new Dictionary<ulong, byte[]>(Math.Max(capacity, keys.Length));
+        foreach (ulong key in keys)
+            result.Add(key, prior![key]);
+        return result;
     }
 
     private static bool TrySubmitCommandStream(
