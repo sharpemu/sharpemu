@@ -492,6 +492,47 @@ public sealed class SliceRecordingTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public async Task DrainedItemsFinishWhileTheProducerHoldsTheHandoffLock()
+    {
+        var presenter = RuntimeHelpers.GetUninitializedObject(PresenterUnderTest.PresenterType);
+        PresenterUnderTest.PresenterType.GetField("_bufferCache", PresenterUnderTest.InstanceMembers)!.SetValue(
+            presenter, RuntimeHelpers.GetUninitializedObject(typeof(GuestBufferCache)));
+        var type = typeof(VulkanVideoPresenter).GetNestedType("CommandThread", BindingFlags.NonPublic)!;
+        var thread = Activator.CreateInstance(type, [presenter, null, null, null, null])!;
+        var post = type.GetMethod("Post")!.CreateDelegate<Action<Action, string>>(thread);
+        var run = type.GetMethod("RunBatch")!.CreateDelegate<Func<long, int, Action, int>>(thread);
+        var gate = type.GetField("_lock", PresenterUnderTest.InstanceMembers)!.GetValue(thread)!;
+        var seen = new List<int>();
+        void Post(int n) => post(() => seen.Add(n), "test");
+        for (int i = 0; i < 96; i++) Post(i);
+        Assert.Equal(32, run(long.MaxValue, 32, static () => { }));
+
+        using var held = new ManualResetEventSlim();
+        using var drained = new ManualResetEventSlim();
+        var producer = Task.Run(() =>
+        {
+            bool finished;
+            lock (gate)
+            {
+                held.Set();
+                finished = drained.Wait(TimeSpan.FromSeconds(5));
+            }
+            Post(96);
+            return finished;
+        });
+        try
+        {
+            Assert.True(held.Wait(TimeSpan.FromSeconds(5)));
+            Assert.Equal(64, run(long.MaxValue, 64, static () => { }));
+        }
+        finally { drained.Set(); }
+
+        Assert.True(await producer);
+        Assert.Equal(1, run(long.MaxValue, 64, static () => { }));
+        Assert.Equal(Enumerable.Range(0, 97), seen);
+    }
+
+    [Fact]
     public void ReadyPresentationYieldsQueuedWorkButShutdownStillDrainsIt()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;

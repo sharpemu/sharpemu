@@ -118,6 +118,8 @@ internal static partial class VulkanVideoPresenter
         private List<Item> _incoming = new();
         private List<Item> _draining = new();
         private int _drainIndex;
+        private long _drainedSequence;
+        private int _queuedSlices;
         private int _outstanding;
         private long _enqueued;
         private long _executed;
@@ -824,6 +826,7 @@ internal static partial class VulkanVideoPresenter
                 var unit = _units[_unitHead++];
                 if (unit.Slice is { } slice)
                 {
+                    _queuedSlices--;
                     ran += JoinSlice(slice, betweenItems);
                 }
                 else
@@ -848,20 +851,20 @@ internal static partial class VulkanVideoPresenter
         // recording while the render thread joins and the command thread runs ahead.
         private void FillUnits()
         {
-            var slicing = _presenter.SlicesEnabled;
-            var slicesAhead = 0;
-            for (var index = _unitHead; index < _units.Count; index++)
+            // The last swap took every item through this sequence. A new post will be seen by the next fill.
+            if (_drainIndex == _draining.Count && Volatile.Read(ref _enqueued) == _drainedSequence)
             {
-                if (_units[index].Slice is not null)
-                {
-                    slicesAhead++;
-                }
+                return;
             }
+
+            var slicing = _presenter.SlicesEnabled;
+            var slicesAhead = _queuedSlices;
 
             var limit = slicing ? SlicesAheadPerWorker * _presenter.WorkerCount : 0;
             while (slicesAhead <= limit)
             {
-                if (_drainIndex == _draining.Count && !RefillDraining())
+                if (_drainIndex == _draining.Count &&
+                    (Volatile.Read(ref _enqueued) == _drainedSequence || !RefillDraining()))
                 {
                     break;
                 }
@@ -896,6 +899,7 @@ internal static partial class VulkanVideoPresenter
             lock (_lock)
             {
                 (_incoming, _draining) = (_draining, _incoming);
+                _drainedSequence = _enqueued;
             }
 
             return _draining.Count != 0;
@@ -932,6 +936,7 @@ internal static partial class VulkanVideoPresenter
                 var part = new RenderSlice { Origin = 1 };
                 part.Items.AddRange(tail.Items.GetRange(start, end - start));
                 _units.Add(new Unit { Slice = part });
+                _queuedSlices++;
                 _presenter.DispatchSlice(part, urgent: true);
                 start = end;
             }
@@ -942,6 +947,7 @@ internal static partial class VulkanVideoPresenter
             var slice = _cutting!;
             _cutting = null;
             _units.Add(new Unit { Slice = slice });
+            _queuedSlices++;
             _presenter.DispatchSlice(slice);
         }
 
@@ -1056,6 +1062,7 @@ internal static partial class VulkanVideoPresenter
                 var rest = new RenderSlice { Origin = 2 };
                 rest.Items.AddRange(slice.Items.GetRange(start, end - start));
                 _units.Insert(_unitHead + chunk, new Unit { Slice = rest });
+                _queuedSlices++;
                 _presenter.DispatchSlice(rest, urgent: true);
                 Presenter.NoteRestChunk(rest.Items.Count);
                 start = end;
