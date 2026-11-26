@@ -104,6 +104,7 @@ internal sealed class GameLibraryWatcher : IDisposable
         return name.Length == 0 ||
                Path.GetExtension(name).Length == 0 ||
                name.EndsWith(".zar", StringComparison.OrdinalIgnoreCase) ||
+               name.EndsWith(".pkg", StringComparison.OrdinalIgnoreCase) ||
                LibraryFiles.Contains(name);
     }
 

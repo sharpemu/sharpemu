@@ -16,7 +16,7 @@ namespace SharpEmu.HLE.FileSystem;
 //   offset records    per 16 blocks: the first block's offset (u64) and each block's size - 1 (u16)
 //   names             per node: a 1-byte length (or 2 bytes when the top bit is set) and the bytes
 //   file tree         16-byte nodes; node 0 is the unnamed root directory
-public sealed class ZArchive : IDisposable
+public sealed class ZArchive : IApp0Source
 {
     public const int BlockSize = 64 * 1024;
     private const int BlocksPerOffsetRecord = 16;

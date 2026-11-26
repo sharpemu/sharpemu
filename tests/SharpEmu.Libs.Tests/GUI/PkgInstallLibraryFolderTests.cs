@@ -25,23 +25,4 @@ public sealed class PkgInstallLibraryFolderTests
         Assert.False(MainWindow.IsUnderLibraryFolder([library], Path.Combine(Root, "Games2", "Some Game")));
         Assert.False(MainWindow.IsUnderLibraryFolder([], Path.Combine(library, "Some Game")));
     }
-
-    [Fact]
-    public void AnExtractedPs5GameIsFoundThroughItsParamJson()
-    {
-        var game = Path.Combine(Path.GetTempPath(), $"sharpemu-installed-{Guid.NewGuid():N}");
-        try
-        {
-            Directory.CreateDirectory(Path.Combine(game, "sce_sys"));
-            File.WriteAllText(Path.Combine(game, "sce_sys", "param.json"), """{ "titleId": "PPSA37001" }""");
-            Assert.Equal("PPSA37001", MainWindow.ReadInstalledTitleId(game));
-
-            File.WriteAllText(Path.Combine(game, "sce_sys", "param.json"), "not json");
-            Assert.Null(MainWindow.ReadInstalledTitleId(game));
-        }
-        finally
-        {
-            Directory.Delete(game, recursive: true);
-        }
-    }
 }

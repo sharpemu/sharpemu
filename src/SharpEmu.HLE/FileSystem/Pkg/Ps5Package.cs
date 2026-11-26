@@ -62,6 +62,9 @@ public sealed class Ps5Package : IGamePackage
 
     public bool IsGameApplication => true;
 
+    // The plain sce_sys files of the container, names relative to sce_sys.
+    internal IReadOnlyList<Ps5CntFile> MetadataFiles => _cnt.Files;
+
     public string GetFolderName(string fallback) =>
         PkgPackage.ToFolderName(Title) ?? PkgPackage.ToFolderName(TitleId) ?? fallback;
 
@@ -288,7 +291,7 @@ public sealed class Ps5Package : IGamePackage
     }
 
     // Opens the inner image and lists its files once; both GetInstalledSize and Extract need them.
-    private (Ps5InnerImage Image, List<Ps5InnerFile> Files) LoadTree()
+    internal (Ps5InnerImage Image, List<Ps5InnerFile> Files) LoadTree()
     {
         if (_inner is not null && _files is not null)
         {

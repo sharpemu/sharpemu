@@ -272,6 +272,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     <TextBlock Classes="materialSymbol compact" Text="tag" />
                   </MenuItem.Icon>
                 </MenuItem>
+                <MenuItem x:Name="CtxInstallPkg"
+                          Header="{Binding [Library.Context.InstallPkg], Source={x:Static local:Localization.Instance}}">
+                  <MenuItem.Icon>
+                    <TextBlock Classes="materialSymbol compact" Text="download" />
+                  </MenuItem.Icon>
+                </MenuItem>
                 <MenuItem x:Name="CtxPackZar"
                           Header="{Binding [Library.Context.PackZar], Source={x:Static local:Localization.Instance}}">
                   <MenuItem.Icon>
@@ -315,7 +321,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
             </ListBox.ContextMenu>
             <ListBox.DataTemplates>
               <DataTemplate x:DataType="local:GameEntry" x:CompileBindings="True">
-                <StackPanel Spacing="7">
+                <StackPanel Spacing="7" Opacity="{Binding TileOpacity}">
                   <Border Classes="coverShadow libraryGameCard"
                           ToolTip.Tip="{Binding Name}"
                           AutomationProperties.Name="{Binding Name}">
@@ -346,6 +352,17 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                      Text="layers"
                                      FontSize="16"
                                      LineHeight="19.2" />
+                        </Border>
+                        <Border Classes="pkgBadge"
+                                IsVisible="{Binding RunsFromPackage}">
+                          <TextBlock Classes="pkgBadgeText" Text="PKG" />
+                        </Border>
+                        <Border Classes="pkgBadge"
+                                IsVisible="{Binding NeedsInstall}">
+                          <TextBlock Classes="pkgBadgeText"
+                                     Text="{Binding [Library.Pkg.NeedsInstall],
+                                                    Source={x:Static local:Localization.Instance},
+                                                    x:CompileBindings=False}" />
                         </Border>
                       </Panel>
                     </Border>

@@ -51,9 +51,9 @@ internal static class TrophyUi
         Transitions = [new Avalonia.Animation.DoubleTransition { Property = Visual.OpacityProperty, Duration = TimeSpan.FromMilliseconds(180) }],
     };
 
-    // A .zar game keeps its metadata, trophy package included, in its cache folder.
+    // A .zar or .pkg game keeps its metadata, trophy package included, in its cache folder.
     public static string? GameDirectory(string gamePath) =>
-        SharpEmu.HLE.FileSystem.ZArchive.IsArchivePath(gamePath)
+        SharpEmu.HLE.FileSystem.ZArchiveCache.IsMountablePath(gamePath)
             ? SharpEmu.HLE.FileSystem.ZArchiveCache.GetCacheRoot(gamePath,
                 Path.Combine(SharpEmu.Libs.SharpEmuPaths.DataRoot, "user", "zar-cache"))
             : Path.GetDirectoryName(gamePath);

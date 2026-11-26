@@ -42,6 +42,7 @@ public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
     private string? _version;
     private int _versionCount = 1;
     private bool _compatibilityMode;
+    private bool _needsInstall;
     private string? _coverPath;
     private string? _backgroundPath;
     private string _initials;
@@ -50,8 +51,9 @@ public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
 
     public GameEntry(
         string name, string? titleId, string? version, string path, long sizeBytes,
-        string? coverPath, string? backgroundPath, bool compatibilityMode = false)
+        string? coverPath, string? backgroundPath, bool compatibilityMode = false, bool needsInstall = false)
     {
+        _needsInstall = needsInstall;
         _name = name;
         _titleId = titleId;
         _version = version;
@@ -77,7 +79,18 @@ public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
     public string Path { get; }
 
     // Keep an archive's type while the library watcher catches up with a moved or removed file.
-    public bool IsArchive => Path.EndsWith(".zar", StringComparison.OrdinalIgnoreCase);
+    // A .pkg is run in place like an archive: one file holds the whole game.
+    public bool IsArchive => Path.EndsWith(".zar", StringComparison.OrdinalIgnoreCase) || IsPackage;
+
+    public bool IsPackage => Path.EndsWith(".pkg", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>A package that cannot run in place (PS4): listed dimmed, launching it offers to install it.</summary>
+    public bool NeedsInstall => _needsInstall;
+
+    /// <summary>A package the emulator runs straight from the file (PS5): shows the "PKG" badge.</summary>
+    public bool RunsFromPackage => IsPackage && !_needsInstall;
+
+    public double TileOpacity => _needsInstall ? 0.5 : 1;
 
     /// <summary>
     /// Total size of the game. Initially the eboot's own size from the scan;
@@ -198,6 +211,15 @@ public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
             RaisePropertyChanged(nameof(Version));
             RaisePropertyChanged(nameof(VersionText));
             RaisePropertyChanged(nameof(HasVersion));
+            changes |= GameEntryChanges.Metadata;
+        }
+
+        if (_needsInstall != scanned._needsInstall)
+        {
+            _needsInstall = scanned._needsInstall;
+            RaisePropertyChanged(nameof(NeedsInstall));
+            RaisePropertyChanged(nameof(RunsFromPackage));
+            RaisePropertyChanged(nameof(TileOpacity));
             changes |= GameEntryChanges.Metadata;
         }
 

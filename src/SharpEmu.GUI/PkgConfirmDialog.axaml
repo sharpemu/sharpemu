@@ -10,7 +10,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                  SheetWidth="520">
   <StackPanel Margin="28" Spacing="14">
     <TextBlock Classes="sheetTitle"
-               Text="{Binding [Library.Pkg.ConfirmTitle], Source={x:Static local:Localization.Instance}}"
+               Text="{Binding [Library.Pkg.PromptTitle], Source={x:Static local:Localization.Instance}}"
                TextWrapping="Wrap" />
 
     <TextBlock x:Name="MessageText"
@@ -22,7 +22,7 @@ SPDX-License-Identifier: GPL-2.0-or-later
                 Spacing="10">
       <Button x:Name="SkipButton"
               Classes="ghost"
-              Content="{Binding [Library.Pkg.ConfirmSkip], Source={x:Static local:Localization.Instance}}" />
+              Content="{Binding [Common.Cancel], Source={x:Static local:Localization.Instance}}" />
       <Button x:Name="InstallButton"
               Content="{Binding [Library.Pkg.ConfirmInstall], Source={x:Static local:Localization.Instance}}" />
     </StackPanel>
