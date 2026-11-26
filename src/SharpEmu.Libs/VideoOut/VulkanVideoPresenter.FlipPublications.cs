@@ -48,7 +48,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var labelled = write.Kind != EndOfPipeWriteKind.Flip;
             // A held cross-queue store uses the interpreter's ordinary ordered-write path.
             if (labelled && (write.Destination == 0 || InCrossQueueOrderWindow(queueId))) return false;
-            if (!_translation.TryEndFrameBeforeCapture()) return false;
+            if (!_translation.TryEndFrameBeforeCapture(write.FlipHandle, write.FlipIndex)) return false;
 
             // The predecessor may retire before capture. Reserve the signal's place now,
             // but leave it unregistered until earlier render items have run. Later parser

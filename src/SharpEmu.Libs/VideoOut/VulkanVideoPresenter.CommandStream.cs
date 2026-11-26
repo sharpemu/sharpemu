@@ -1169,7 +1169,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             if (OnCommandThread)
             {
-                if (!_guestPublications.HasQueue(queueId) && _translation.TryEndFrameBeforeCapture())
+                if (!_guestPublications.HasQueue(queueId) && _translation.TryEndFrameBeforeCapture(handle, index))
                     return PostGpuFlip(handle, index, flipMode, flipArgument);
                 return _commandThread!.Run(() => PrepareFlip(queueId, handle, index, flipMode, flipArgument));
             }
