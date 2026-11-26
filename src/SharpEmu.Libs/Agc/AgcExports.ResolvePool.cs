@@ -257,6 +257,8 @@ public static partial class AgcExports
                 (deferred.IndirectOffsets is null || deferred.Record.IndirectOffsets is not null) && ValidateDeferredReads(deferred);
         }
 
+        internal long? KnownFrontendImageVersion => _pipelines?.KnownFrontendImageVersion;
+
         // At the stream position of a slice segment: whether a worker-resolved draw or dispatch it recorded still holds.
         internal bool ValidateDeferred(DeferredWork work) => work switch
         {

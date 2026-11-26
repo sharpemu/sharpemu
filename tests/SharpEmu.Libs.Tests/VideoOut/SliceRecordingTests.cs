@@ -9,6 +9,7 @@ using SharpEmu.HLE.Diagnostics;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu.Buffers;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
@@ -455,6 +456,8 @@ public sealed class SliceRecordingTests : IClassFixture<HeadlessVulkanFixture>
         using var presenter = new PresenterUnderTest(_vulkan!);
         var harness = presenter.Harness;
         var address = harness.MapBacked(0x10000, ImageCacheTestSupport.ReadWrite);
+        var host = (ICommandStreamHost)presenter.Instance;
+        presenter.SetField("_translation", AgcExports.CreateCommandStreamTranslation(host.Memory, host));
         var skipped = SliceCounter("_validateDeferredSkipped");
         presenter.Run(() =>
         {
@@ -479,6 +482,74 @@ public sealed class SliceRecordingTests : IClassFixture<HeadlessVulkanFixture>
             requestsType.GetField("MixedReadsVersions")!.SetValue(requests, true);
             Assert.True(ValidateSegment(presenter, slice, segment));
             Assert.Equal(before + 2, skipped.Total);
+        });
+        harness.Shutdown();
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public void JoinRechecksWorkerDescriptorsAfterGuestWritesAreQueuedOrImageStateChanges(bool dispatch, bool staleImageVersion)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var presenter = new PresenterUnderTest(_vulkan!);
+        var harness = presenter.Harness;
+        var host = (ICommandStreamHost)presenter.Instance;
+        presenter.SetField("_translation", AgcExports.CreateCommandStreamTranslation(host.Memory, host));
+        var publications = presenter.GetField<PendingGuestPublications>("_guestPublications");
+        var address = harness.MapBacked(0x10000, ImageCacheTestSupport.ReadWrite);
+        presenter.Run(() =>
+        {
+            var buffer = harness.Cache.ObtainBuffer(address, 4, isWritten: false).Buffer;
+            var (slice, segment) = NewSegment(presenter, harness.Cache.RegistrationSerial, new BufferSliceUse(address, 4, false, false, false, buffer));
+            var requests = SegmentType.GetField("Requests")!.GetValue(segment)!;
+            var items = (IList)SliceType.GetField("Items")!.GetValue(slice)!;
+            var itemType = items.GetType().GetGenericArguments()[0];
+            void Add(AgcExports.DeferredWork work)
+            {
+                var item = Activator.CreateInstance(itemType, nonPublic: true)!;
+                itemType.GetField("Work")!.SetValue(item, work);
+                items.Add(item);
+                SegmentType.GetField("Count")!.SetValue(segment, items.Count);
+                PresenterUnderTest.RecordingHostType.GetMethod("NoteReadsVersion", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [requests, work]);
+            }
+
+            var draw = new AgcExports.DeferredDraw();
+            var compute = new AgcExports.DeferredDispatch();
+            var reads = dispatch ? compute.Reads : draw.Reads;
+            host.BeginWorkerResolve(1, reads);
+            reads.Add(address, 0u);
+            host.EndWorkerResolve();
+            if (staleImageVersion) draw.FrontendImageVersion = compute.FrontendImageVersion = -1;
+            Add(dispatch ? compute : draw);
+            if (staleImageVersion)
+            {
+                Assert.True(host.ValidateWorkerReads(reads));
+                Assert.False(ValidateSegment(presenter, slice, segment));
+                return;
+            }
+            Assert.True(ValidateSegment(presenter, slice, segment));
+
+            var disjoint = publications.Add(0, address + 16, 4);
+            Assert.True(ValidateSegment(presenter, slice, segment));
+            var overlapping = publications.AddAfterPending(0, address, 4, 7)!;
+            Assert.Equal(reads.Version, harness.Cache.GpuModifiedVersion);
+            Assert.False(host.ValidateWorkerReads(reads));
+            Assert.False(ValidateSegment(presenter, slice, segment));
+
+            // A later member resolving against the new publication cannot vouch for the first.
+            var later = new AgcExports.DeferredDraw();
+            host.BeginWorkerResolve(2, later.Reads);
+            host.EndWorkerResolve();
+            Add(later);
+            Assert.False(ValidateSegment(presenter, slice, segment));
+            publications.Publish(disjoint, static () => { });
+            publications.Publish(overlapping, () => harness.Write(address, BitConverter.GetBytes(7u)));
+            Assert.False(ValidateSegment(presenter, slice, segment));
+            harness.Write(address, BitConverter.GetBytes(0u));
+            Assert.True(ValidateSegment(presenter, slice, segment));
         });
         harness.Shutdown();
     }

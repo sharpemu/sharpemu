@@ -10,6 +10,7 @@ using SharpEmu.HLE.Diagnostics;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu.Buffers;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
@@ -282,6 +283,8 @@ internal static unsafe partial class VulkanVideoPresenter
         public bool NeedsBdaTouch;
         public long BufferSerial;
         public long? ReadsVersion;
+        public long ReadPublications;
+        public long ReadFrontendVersion;
         public bool MixedReadsVersions;
         public readonly List<(ResourceSlotIdentifier Image, ImageRequest Request)> NativeColorUses = new();
         // Native color clears the worker passed because only their registration was not current; the join applies them.
@@ -784,7 +787,9 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
             }
 
-            if (!requests.MixedReadsVersions && (requests.ReadsVersion is not { } version || version == _bufferCache.GpuModifiedVersion))
+            if (!requests.MixedReadsVersions && (requests.ReadsVersion is not { } version ||
+                (version == _bufferCache.GpuModifiedVersion && requests.ReadPublications == _guestPublications.Ordinal &&
+                 requests.ReadFrontendVersion == _translation.KnownFrontendImageVersion)))
             {
                 _validateDeferredSkipped.Increment();
             }
@@ -1134,17 +1139,19 @@ internal static unsafe partial class VulkanVideoPresenter
             _presenter.RecordGlobalBarrier(BeginBatchedGuestCommands());
         }
 
-        private static void NoteReadsVersion(SliceRequests requests, SharpEmu.Libs.Agc.AgcExports.DeferredWork work)
+        private static void NoteReadsVersion(SliceRequests requests, AgcExports.DeferredWork work)
         {
-            long readsVersion;
-            if (work is SharpEmu.Libs.Agc.AgcExports.DeferredDraw draw)
+            ResolveReadLog reads;
+            long frontendVersion;
+            if (work is AgcExports.DeferredDraw draw)
             {
-                readsVersion = draw.Reads.Version;
+                reads = draw.Reads;
+                frontendVersion = draw.FrontendImageVersion;
             }
-            else if (work is SharpEmu.Libs.Agc.AgcExports.DeferredDispatch { Cancelled: false } dispatch)
+            else if (work is AgcExports.DeferredDispatch { Cancelled: false } dispatch)
             {
-                // A deferred dispatch member's reads join the segment's check like a deferred draw's.
-                readsVersion = dispatch.Reads.Version;
+                reads = dispatch.Reads;
+                frontendVersion = dispatch.FrontendImageVersion;
             }
             else
             {
@@ -1153,9 +1160,12 @@ internal static unsafe partial class VulkanVideoPresenter
 
             if (requests.ReadsVersion is not { } version)
             {
-                requests.ReadsVersion = readsVersion;
+                requests.ReadsVersion = reads.Version;
+                requests.ReadPublications = reads.Publications;
+                requests.ReadFrontendVersion = frontendVersion;
             }
-            else if (version != readsVersion)
+            else if (version != reads.Version || requests.ReadPublications != reads.Publications ||
+                     requests.ReadFrontendVersion != frontendVersion)
             {
                 requests.MixedReadsVersions = true;
             }

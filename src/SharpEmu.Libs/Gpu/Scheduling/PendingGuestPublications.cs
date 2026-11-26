@@ -43,9 +43,12 @@ internal sealed class PendingGuestPublications
 
     private void Track(Entry entry)
     {
-        entry.Ordinal = ++_nextOrdinal;
+        entry.Ordinal = _nextOrdinal + 1;
         _queueEntries[entry.Queue] = _queueEntries.GetValueOrDefault(entry.Queue) + 1;
         _queueNewest[entry.Queue] = entry.Ordinal;
+        Index(entry, 1);
+        // A worker that sees this ordinal must also see the new range in the overlap filters.
+        Volatile.Write(ref _nextOrdinal, entry.Ordinal);
     }
 
     // True when the queue has a pending entry added after the given one, so it publishes later.
@@ -253,7 +256,6 @@ internal sealed class PendingGuestPublications
             var entry = new Entry(queue, address, size);
             _entries.Add(entry);
             Track(entry);
-            Index(entry, 1);
             return entry;
         }
     }
@@ -289,7 +291,6 @@ internal sealed class PendingGuestPublications
             var entry = new Entry(queue, address, size) { HeldWrite = true, Payload = payload };
             _entries.Add(entry);
             Track(entry);
-            Index(entry, 1);
             return entry;
         }
     }
@@ -328,7 +329,6 @@ internal sealed class PendingGuestPublications
             };
             _entries.Add(entry);
             Track(entry);
-            Index(entry, 1);
             return entry;
         }
     }
