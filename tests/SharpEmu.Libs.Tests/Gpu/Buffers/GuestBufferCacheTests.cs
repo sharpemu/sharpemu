@@ -64,6 +64,39 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public void SparseAddressTablePreservesMissingAndRegisteredEntriesAcrossBlocks()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var cache = harness.Cache;
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var buffer = harness.Worker.Run(() => cache.ObtainBuffer(address, 2 * Page, false).Buffer);
+        var table = cache.BdaPageTableBuffer;
+        var offset = address / Page * sizeof(ulong);
+        Assert.Equal(GuestBufferCache.BdaPageTableSize, table.Size);
+        Assert.Equal(buffer.DeviceAddress, BitConverter.ToUInt64(harness.ReadBack(table, offset, 8)));
+        Assert.Equal(0UL, BitConverter.ToUInt64(harness.ReadBack(table, table.Size - 8, 8)));
+        harness.Worker.Run(() =>
+        {
+            var device = _vulkan.DeviceInfo;
+            var live = device.LiveAllocations;
+            var sparse = SparseAddressTable.TryCreate(device, harness.Scheduler);
+            if (sparse is null) return;
+            try
+            {
+                Assert.Equal(live, device.LiveAllocations);
+                sparse.Cover(0, 8);
+                Assert.Equal(live + 1, device.LiveAllocations);
+                sparse.Cover(8, 8);
+                Assert.Equal(live + 1, device.LiveAllocations);
+            }
+            finally { sparse.Dispose(); }
+            Assert.Equal(live, device.LiveAllocations);
+        });
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void DownloadRingAcceptsFiftyMiBReservation()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;

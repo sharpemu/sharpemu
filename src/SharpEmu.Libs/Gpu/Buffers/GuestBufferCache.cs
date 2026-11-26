@@ -48,6 +48,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     private readonly ICpuMemory _guest;
     private readonly BdaFaultProcessor _faults;
     private readonly GpuBuffer _gds;
+    private readonly SparseAddressTable? _sparseTable;
     private readonly GpuBuffer _bdaPageTable;
     private GpuBuffer? _bdaFallback;
     private GpuBuffer? _bdaFallbackAddress;
@@ -104,7 +105,8 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         _guest = guest;
         _faults = new BdaFaultProcessor(device, scheduler, this, CachingPageBits, CachingPageCount);
         _gds = new GpuBuffer(device, scheduler, GpuBufferUsage.Stream, 0, GpuBuffer.AllFlags, GdsBufferSize);
-        _bdaPageTable = new GpuBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AllFlags, BdaPageTableSize);
+        _sparseTable = SparseAddressTable.TryCreate(device, scheduler);
+        _bdaPageTable = _sparseTable?.Buffer ?? new GpuBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AllFlags, BdaPageTableSize);
         _tracker = new GuestPageTracker(pages);
         _managedWrites = pages.ManagedWrites;
         _stageCapacity = new(this, GpuBufferUsage.Upload, 16 * MiB, 512 * MiB);
@@ -1820,7 +1822,8 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         _stream.Dispose();
         _staging.Dispose();
         _sweepCopy.Dispose();
-        _bdaPageTable.Dispose();
+        if (_sparseTable is null) _bdaPageTable.Dispose();
+        else _sparseTable.Dispose();
         _bdaFallback?.Dispose();
         _bdaFallbackAddress?.Dispose();
         _gds.Dispose();
@@ -2710,6 +2713,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             _registry.RegisterBuffer(bufferIdentifier, _retirementPolicy.CurrentTick);
             buffer.CacheIdentifier = bufferIdentifier;
             _registrationGeneration++;
+            _sparseTable?.Cover(first * sizeof(ulong), sizePages * sizeof(ulong));
             var addresses = new ulong[sizePages];
             for (ulong page = 0; page < sizePages; page++)
             {

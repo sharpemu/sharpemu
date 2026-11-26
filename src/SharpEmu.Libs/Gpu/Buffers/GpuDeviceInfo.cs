@@ -22,6 +22,8 @@ public sealed unsafe class GpuDeviceInfo : IImageFormatSupport
     private int _liveAllocations;
     private int _peakAllocations;
 
+    internal uint SparseQueueFamily { get; set; }
+    internal Silk.NET.Vulkan.Queue SparseQueue { get; set; }
     internal bool MemoryBudgetSupported { get; init; }
     internal uint LocalBudgetHeap { get; } = uint.MaxValue;
     internal Func<uint, ulong, ulong>? ReleaseIdleMemory { get; set; }

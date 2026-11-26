@@ -431,8 +431,11 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         var computeSubgroup32 = vulkan13Features.SubgroupSizeControl &&
             (sizeControlProperties.RequiredSubgroupSizeStages & ShaderStageFlags.ComputeBit) != 0 &&
             sizeControlProperties.MinSubgroupSize <= 32 && sizeControlProperties.MaxSubgroupSize >= 32;
+        var sparseTable = SparseAddressTable.CanEnable(vk, physical, family, baseFeatures);
         var enabledFeatures = new PhysicalDeviceFeatures
         {
+            SparseBinding = sparseTable,
+            SparseResidencyBuffer = sparseTable,
             TessellationShader = baseFeatures.TessellationShader,
             GeometryShader = baseFeatures.GeometryShader,
             OcclusionQueryPrecise = baseFeatures.OcclusionQueryPrecise,
@@ -597,6 +600,11 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             RobustBufferAccess2 = robustBufferAccess2,
             NativeFloat16Conversions = nativeFloat16,
         };
+        if (sparseTable)
+        {
+            result.DeviceInfo.SparseQueue = queue;
+            result.DeviceInfo.SparseQueueFamily = family;
+        }
         result.DeviceInfo.ConfigureResidency(usePriority);
         if (validation)
         {

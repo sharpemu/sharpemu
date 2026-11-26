@@ -183,6 +183,16 @@ public unsafe class GpuBuffer : IDisposable
         }
     }
 
+    // The sparse table owns its physical blocks. Buffer commands and descriptors use its stable virtual handle.
+    internal GpuBuffer(GpuDeviceInfo device, SubmissionScheduler scheduler, VkBuffer sparse, ulong size)
+    {
+        _device = device;
+        _scheduler = scheduler;
+        _handle = sparse;
+        Size = size;
+        Usage = GpuBufferUsage.DeviceLocal;
+    }
+
     public VkBuffer Handle => _handle;
 
     public ulong Size { get; }
@@ -598,7 +608,7 @@ public unsafe class GpuBuffer : IDisposable
         {
             _device.Slabs.Release(slab);
         }
-        else
+        else if (_memory.Handle != 0)
         {
             _device.FreeMemory(_memory);
         }

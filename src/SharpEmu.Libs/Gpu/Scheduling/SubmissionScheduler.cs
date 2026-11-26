@@ -148,6 +148,7 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
         }
     }
 
+    internal object QueueGate => _device.QueueGate;
     public ulong CurrentTick => _timeline.CurrentTick;
 
     public ulong CompletedTick => _timeline.CompletedTick;

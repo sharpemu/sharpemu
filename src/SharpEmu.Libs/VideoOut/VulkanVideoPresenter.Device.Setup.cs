@@ -857,8 +857,11 @@ internal static unsafe partial class VulkanVideoPresenter
             _supportsRectangleGeometry = supportedFeatures.GeometryShader;
             _supportsTessellation = supportedFeatures.TessellationShader;
             _supportsPreciseOcclusion = supportedFeatures.OcclusionQueryPrecise;
+            var sparseTable = SparseAddressTable.CanEnable(_vk, _physicalDevice, _queueFamilyIndex, supportedFeatures);
             var enabledFeatures = new PhysicalDeviceFeatures
             {
+                SparseBinding = sparseTable,
+                SparseResidencyBuffer = sparseTable,
                 TessellationShader = supportedFeatures.TessellationShader,
                 DepthBounds = supportedFeatures.DepthBounds,
                 GeometryShader = supportedFeatures.GeometryShader,
@@ -1624,6 +1627,8 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 ImageViewMinLodSupported = _supportsImageViewMinLod,
                 MemoryBudgetSupported = useMemoryBudget,
+                SparseQueueFamily = _queueFamilyIndex,
+                SparseQueue = sparseTable ? _queue : default,
             };
             _deviceInfo.ConfigureResidency(usePriority);
             if (_readbackQueueFamilyIndex is { } readbackQueueFamily)
