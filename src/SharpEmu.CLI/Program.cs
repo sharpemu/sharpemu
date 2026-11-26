@@ -366,6 +366,11 @@ internal static partial class Program
                 {
                     AdoptStartupAddressReservations = OperatingSystem.IsWindows() && isMitigatedChild,
                 });
+            if (isMitigatedChild && OperatingSystem.IsWindows())
+            {
+                // SHARPEMU_SANDBOX_SELFTEST=spawn: shows the launcher's blocked-launch warning (ignored outside the sandbox).
+                WindowsAppContainerSandbox.StartSelfTestIfRequested();
+            }
 
             OrbisGen2Result result;
             ConsoleCancelEventHandler? cancelHandler = null;
@@ -733,18 +738,39 @@ internal static partial class Program
             nint jobHandle = 0;
             SandboxJobMonitor? jobMonitor = null;
             Environment.SetEnvironmentVariable(MitigatedChildEnvironment, "1");
-            var created = CreateProcessW(
-                null,
-                cmdLineBuilder,
-                0,
-                0,
-                true,
-                EXTENDED_STARTUPINFO_PRESENT | WindowsGuestAddressReservation.CreateSuspended |
-                    (sandbox is null ? 0 : CREATE_UNICODE_ENVIRONMENT),
-                sandbox?.CreateEnvironmentBlock(gamepadBridge is null ? null : [gamepadBridge.ChildEnvironment]) ?? 0,
-                sandbox is null ? Environment.CurrentDirectory : AppContext.BaseDirectory,
-                ref startupInfoEx,
-                out var processInfo);
+            // The sandbox's handles are inheritable for this call only: any other CreateProcess of this process
+            // must not pass them on.
+            IDisposable? inheritScope = null;
+            bool created;
+            PROCESS_INFORMATION processInfo;
+            try
+            {
+                inheritScope = sandbox?.InheritListedHandles();
+                created = CreateProcessW(
+                    null,
+                    cmdLineBuilder,
+                    0,
+                    0,
+                    true,
+                    EXTENDED_STARTUPINFO_PRESENT | WindowsGuestAddressReservation.CreateSuspended |
+                        (sandbox is null ? 0 : CREATE_UNICODE_ENVIRONMENT),
+                    sandbox?.CreateEnvironmentBlock(gamepadBridge is null ? null : [gamepadBridge.ChildEnvironment]) ?? 0,
+                    sandbox is null ? Environment.CurrentDirectory : AppContext.BaseDirectory,
+                    ref startupInfoEx,
+                    out processInfo);
+            }
+            catch (InvalidOperationException exception)
+            {
+                Environment.SetEnvironmentVariable(MitigatedChildEnvironment, previousChildEnvironment);
+                childExitCode = 5;
+                Console.Error.WriteLine($"[ERROR] {exception.Message}");
+                return true;
+            }
+            finally
+            {
+                inheritScope?.Dispose();
+            }
+
             Environment.SetEnvironmentVariable(MitigatedChildEnvironment, previousChildEnvironment);
             if (!created)
             {

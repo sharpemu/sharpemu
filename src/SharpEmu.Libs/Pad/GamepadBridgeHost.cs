@@ -51,7 +51,7 @@ public sealed unsafe class GamepadBridgeHost : IDisposable
         };
     }
 
-    /// <summary>The inheritable handle of the shared section, for the child's handle list.</summary>
+    /// <summary>The handle of the shared section, for the child's handle list (inheritable only inside the launcher's InheritScope).</summary>
     public nint Handle => _section.Handle;
 
     /// <summary>The variable that tells the child which handle is the section.</summary>

@@ -236,10 +236,11 @@ internal sealed class EmulatorProcess : IDisposable
                     Environment.GetEnvironmentVariable));
             }
 
+            // The sandboxed child's pipe ends are not inheritable until the CreateProcessW call below (InheritListedHandles).
             var security = new SecurityAttributes
             {
                 Size = Marshal.SizeOf<SecurityAttributes>(),
-                InheritHandle = 1,
+                InheritHandle = sandbox is null ? 1 : 0,
             };
             if (!CreatePipe(out stdoutRead, out stdoutWrite, ref security, 0) ||
                 !CreatePipe(out stderrRead, out stderrWrite, ref security, 0))
@@ -309,9 +310,11 @@ internal sealed class EmulatorProcess : IDisposable
             lock (EnvironmentGate)
             {
                 var previousValue = Environment.GetEnvironmentVariable(MitigatedChildEnvironment);
+                IDisposable? inheritScope = null;
                 try
                 {
                     Environment.SetEnvironmentVariable(MitigatedChildEnvironment, "1");
+                    inheritScope = sandbox?.InheritListedHandles();
                     if (!CreateProcessW(
                             null,
                             commandLine,
@@ -332,6 +335,7 @@ internal sealed class EmulatorProcess : IDisposable
                 }
                 finally
                 {
+                    inheritScope?.Dispose();
                     Environment.SetEnvironmentVariable(MitigatedChildEnvironment, previousValue);
                 }
             }

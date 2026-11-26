@@ -33,10 +33,10 @@ internal sealed unsafe class GamepadBridgeSection : IDisposable
 
     public GamepadBridgeMemory Memory { get; }
 
-    /// <summary>A zeroed, initialized section whose handle the child can inherit.</summary>
+    /// <summary>A zeroed, initialized section; its handle is not inheritable until the launcher opens an InheritScope.</summary>
     public static GamepadBridgeSection Create()
     {
-        var attributes = new SecurityAttributes { Size = sizeof(SecurityAttributes), InheritHandle = 1 };
+        var attributes = new SecurityAttributes { Size = sizeof(SecurityAttributes), InheritHandle = 0 };
         var handle = CreateFileMappingW(InvalidHandleValue, ref attributes, PageReadWrite, 0, GamepadBridgeMemory.Size, null);
         if (handle == 0)
         {

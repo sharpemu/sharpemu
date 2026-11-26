@@ -12,6 +12,11 @@ public enum SandboxAccess
 {
     ReadExecute,
     ReadWrite,
+    /// <summary>
+    /// Read attributes of this one folder, nothing below it and no listing. It makes a folder that only holds
+    /// granted subfolders (user/savedata) answer "exists" instead of "access denied" when the runtime creates it.
+    /// </summary>
+    AttributesOnly = -1,
 }
 
 /// <summary>One path the sandboxed emulator may touch and how. A file entry covers that file alone.</summary>
@@ -19,7 +24,14 @@ public sealed record SandboxFolder(
     string Path, SandboxAccess Access, string Purpose, bool IsFile = false, bool IsGame = false)
 {
     public string Describe() =>
-        $"{(Access == SandboxAccess.ReadWrite ? "RW+Low" : "RX")} {Path} ({Purpose})";
+        $"{Label(Access)} {Path} ({Purpose})";
+
+    private static string Label(SandboxAccess access) => access switch
+    {
+        SandboxAccess.ReadWrite => "RW+Low",
+        SandboxAccess.AttributesOnly => "attrs",
+        _ => "RX",
+    };
 }
 
 /// <summary>What the launcher knows about this launch; the plan is derived from it alone.</summary>
@@ -91,11 +103,14 @@ public sealed record SandboxPlan(
 
         var inheritedFiles = new List<string>();
         builder.Add(executableDirectory, SandboxAccess.ReadExecute, "emulator folder");
-        AddGame(builder, inputs, executableDirectory, inheritedFiles);
+        var game = AddGame(builder, inputs, executableDirectory, inheritedFiles);
 
         // Everything the emulator keeps (settings read, saves, caches, logs, mods, temp) lives under user/. The data
         // root itself is not granted: it may be the emulator folder (read-only here) or a folder of the user's own.
-        builder.Add(userDirectory, SandboxAccess.ReadWrite, "user data: saves, caches, logs, mods, temp");
+        // The folders keyed by title id are granted for the launched game only, so a game cannot read or damage the
+        // saves of another one; without a title id the whole folder is granted, as before.
+        var userWarnings = new List<string>();
+        AddUserFolders(builder, inputs, userDirectory, game, userWarnings);
         if (!string.Equals(dataRoot, executableDirectory, StringComparison.OrdinalIgnoreCase) &&
             System.IO.Path.Combine(dataRoot, "gui-settings.json") is { } settingsFile && File.Exists(settingsFile))
         {
@@ -150,6 +165,7 @@ public sealed record SandboxPlan(
         }
 
         var warnings = new List<string>(builder.Warnings);
+        warnings.AddRange(userWarnings);
         if (inputs.GetVariable("SHARPEMU_WRITABLE_APP0") == "1")
         {
             warnings.Add("SHARPEMU_WRITABLE_APP0=1: the game folder is read-only in the sandbox, guest writes under /app0 will fail");
@@ -181,10 +197,67 @@ public sealed record SandboxPlan(
         return text.ToString();
     }
 
-    private static void AddGame(
+    /// <summary>What the plan learned about the launched game: its title id and the folder name of its app0.</summary>
+    private sealed record GameInfo(string? TitleId, string? AppName);
+
+    // Folders of user/ the runtime writes (or reads) directly. Each one is created by the launcher when it is writable.
+    private static void AddUserFolders(
+        Builder builder, SandboxInputs inputs, string userDirectory, GameInfo game, List<string> warnings)
+    {
+        if (game.TitleId is not { } titleId)
+        {
+            builder.Add(userDirectory, SandboxAccess.ReadWrite, "user data: saves, caches, logs, mods, temp");
+            warnings.Add("The title id of the game could not be read (no sce_sys/param.json with a titleId): " +
+                "the whole user folder is writable, so the saves of other games are reachable");
+            return;
+        }
+
+        var saveSegment = SandboxTitleId.SaveDataSegment(titleId);
+        var cacheSegment = SandboxTitleId.CacheSegment(titleId);
+        string User(params string[] parts) => System.IO.Path.Combine([userDirectory, .. parts]);
+
+        // A configured save or pipeline cache location replaces the default one: the child never touches the
+        // default folder, and the configured folder is granted by the variables below.
+        if (string.IsNullOrWhiteSpace(inputs.GetVariable("SHARPEMU_SAVEDATA_DIR")))
+        {
+            builder.Add(User("savedata", saveSegment), SandboxAccess.ReadWrite, $"saves of {titleId}");
+            // sceSaveDataInitialize creates the save root; without this entry that fails with "access denied"
+            // inside the container even though the folder exists, and the entry reveals no title folder.
+            builder.Add(User("savedata"), SandboxAccess.AttributesOnly, "save root exists check");
+        }
+
+        if (string.IsNullOrWhiteSpace(inputs.GetVariable("SHARPEMU_VK_PIPELINE_CACHE_PATH")))
+        {
+            builder.Add(User("pipeline_cache", cacheSegment), SandboxAccess.ReadWrite, $"pipeline cache of {titleId}");
+        }
+
+        builder.Add(User("game_logs", cacheSegment), SandboxAccess.ReadWrite, $"game logs of {titleId}");
+        builder.Add(User("temp", game.AppName ?? "default"), SandboxAccess.ReadWrite, "per-game scratch (/download0)");
+        builder.Add(User("logs"), SandboxAccess.ReadWrite, "logs");
+        builder.Add(User("sandbox-temp"), SandboxAccess.ReadWrite, "sandbox temp");
+        builder.Add(User("ampr-index"), SandboxAccess.ReadWrite, "APR index cache");
+        builder.Add(User("redzone_cache"), SandboxAccess.ReadWrite, "patched code cache");
+
+        // Read by the runtime, written by the launcher.
+        foreach (var directory in new[] { User("mods"), User("patches") })
+        {
+            if (Directory.Exists(directory))
+            {
+                builder.Add(directory, SandboxAccess.ReadExecute, System.IO.Path.GetFileName(directory));
+            }
+        }
+
+        if (File.Exists(User("entitlements.json")))
+        {
+            builder.Add(User("entitlements.json"), SandboxAccess.ReadExecute, "add-on entitlements", isFile: true);
+        }
+    }
+
+    private static GameInfo AddGame(
         Builder builder, SandboxInputs inputs, string executableDirectory, List<string> inheritedFiles)
     {
         string? app0Root = null;
+        string? archiveName = null;
         if (!string.IsNullOrWhiteSpace(inputs.EbootPath))
         {
             var ebootPath = System.IO.Path.GetFullPath(inputs.EbootPath);
@@ -193,6 +266,7 @@ public sealed record SandboxPlan(
                 // The launcher opens the archive and the child reads it through the inherited handle: no ACE, so it
                 // works on any drive. The runtime mounts it at a folder under user/zar-cache beside the executable.
                 inheritedFiles.Add(ebootPath);
+                archiveName = System.IO.Path.GetFileNameWithoutExtension(ebootPath);
                 builder.Add(System.IO.Path.Combine(executableDirectory, "user", "zar-cache"), SandboxAccess.ReadWrite, "archive cache");
             }
             else if (System.IO.Path.GetDirectoryName(ebootPath) is { Length: > 0 } gameDirectory)
@@ -227,6 +301,20 @@ public sealed record SandboxPlan(
         {
             builder.Add(sibling, SandboxAccess.ReadExecute, "add-on content");
         }
+
+        // The runtime names the per-game scratch folder after the app0 folder, invalid characters replaced.
+        var appName = archiveName ?? (app0Root is null ? null : System.IO.Path.GetFileName(System.IO.Path.TrimEndingDirectorySeparator(app0Root)));
+        if (!string.IsNullOrWhiteSpace(appName))
+        {
+            var invalid = System.IO.Path.GetInvalidFileNameChars();
+            appName = new string([.. appName.Select(character => Array.IndexOf(invalid, character) >= 0 ? '_' : character)]);
+        }
+        else
+        {
+            appName = null;
+        }
+
+        return new GameInfo(SandboxTitleId.Read(inputs.EbootPath, app0Root), appName);
     }
 
     private static string Normalize(string path) =>
@@ -258,12 +346,18 @@ public sealed record SandboxPlan(
                         _folders[_folders.IndexOf(existing)] = new SandboxFolder(path, access, purpose, isFile, existing.IsGame || isGame);
                         _warnings.Add($"{path} is both read-only and writable: it is writable");
                     }
+                    else if (access > existing.Access)
+                    {
+                        _folders[_folders.IndexOf(existing)] = new SandboxFolder(path, access, purpose, isFile, existing.IsGame || isGame);
+                    }
 
                     return;
                 }
 
-                if (!existing.IsFile && IsUnder(existing.Path, path) &&
-                    (existing.Access == SandboxAccess.ReadWrite || access == SandboxAccess.ReadExecute))
+                // A folder grant covers what lies inside it when it gives the same or more; an attributes-only entry
+                // covers nothing below it.
+                if (!existing.IsFile && existing.Access != SandboxAccess.AttributesOnly && IsUnder(existing.Path, path) &&
+                    (existing.Access == SandboxAccess.ReadWrite || access != SandboxAccess.ReadWrite))
                 {
                     if (existing.Access == SandboxAccess.ReadWrite && access == SandboxAccess.ReadExecute)
                     {
@@ -277,8 +371,8 @@ public sealed record SandboxPlan(
             if (!isFile)
             {
                 foreach (var inside in _folders
-                    .Where(folder => IsUnder(path, folder.Path) &&
-                        (access == SandboxAccess.ReadWrite || folder.Access == SandboxAccess.ReadExecute))
+                    .Where(folder => IsUnder(path, folder.Path) && access != SandboxAccess.AttributesOnly &&
+                        (access == SandboxAccess.ReadWrite || folder.Access != SandboxAccess.ReadWrite))
                     .ToArray())
                 {
                     _folders.Remove(inside);
@@ -317,6 +411,13 @@ public sealed record SandboxGrantRecord(string ProfileName, IReadOnlyList<Sandbo
     public static SandboxGrantRecord FromJson(string json) =>
         JsonSerializer.Deserialize<SandboxGrantRecord>(json, JsonOptions)
             ?? throw new JsonException("The sandbox grant record is empty.");
+
+    /// <summary>The record without the folder entry at this path (revoked by a launch that no longer needs it).</summary>
+    public SandboxGrantRecord Without(string path) =>
+        this with
+        {
+            Entries = [.. Entries.Where(entry => entry.IsFile || !string.Equals(entry.Path, path, StringComparison.OrdinalIgnoreCase))],
+        };
 
     /// <summary>Adds entries; a path already recorded keeps the wider access and any label.</summary>
     public SandboxGrantRecord Merge(IEnumerable<SandboxGrantEntry> added)

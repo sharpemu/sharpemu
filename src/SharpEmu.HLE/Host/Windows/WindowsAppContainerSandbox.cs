@@ -33,6 +33,7 @@ public sealed unsafe class WindowsAppContainerSandbox : IDisposable
     private const nint ProcThreadAttributeHandleList = 0x00020002;
     private const uint ReadExecuteMask = 0x1200A9;  // FILE_GENERIC_READ | FILE_GENERIC_EXECUTE
     private const uint ReadWriteMask = 0x1301BF;    // FILE_GENERIC_READ | FILE_GENERIC_WRITE | DELETE | FILE_DELETE_CHILD
+    private const uint AttributesMask = 0x100080;   // FILE_READ_ATTRIBUTES | SYNCHRONIZE
     private const int AlreadyExists = unchecked((int)0x800700B7);
     private const uint JobObjectLimitActiveProcess = 0x00000008;
     private const uint JobObjectLimitKillOnJobClose = 0x00002000;
@@ -44,6 +45,7 @@ public sealed unsafe class WindowsAppContainerSandbox : IDisposable
     private nint _capabilities;
     private nint _handleList;
     private nint _environment;
+    private nint[] _listedHandles = [];
     // The plan's inherited files, opened by the launcher; closed with the sandbox.
     private readonly List<(SafeFileHandle Handle, string Path)> _inheritedFiles;
 
@@ -87,6 +89,45 @@ public sealed unsafe class WindowsAppContainerSandbox : IDisposable
         }
     }
 
+    /// <summary>Opt-in self-test of the blocked-launch warning, honoured by the sandboxed child only.</summary>
+    public const string SelfTestVariable = "SHARPEMU_SANDBOX_SELFTEST";
+
+    /// <summary>
+    /// <c>SHARPEMU_SANDBOX_SELFTEST=spawn</c>: five seconds after it is called (once the window exists), the sandboxed
+    /// child tries to start <c>cmd.exe /c exit 0</c> once, so the launcher's warning (log line, balloon, sheet) can be
+    /// seen on screen. Does nothing outside the AppContainer.
+    /// </summary>
+    public static void StartSelfTestIfRequested()
+    {
+        if (!string.Equals(Environment.GetEnvironmentVariable(SelfTestVariable), "spawn", StringComparison.Ordinal) ||
+            !IsCurrentProcessAppContainer())
+        {
+            return;
+        }
+
+        new Thread(() =>
+        {
+            Thread.Sleep(TimeSpan.FromSeconds(5));
+            Console.Error.WriteLine("[SANDBOX][INFO] self-test: tried to start a process");
+            try
+            {
+                using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", "/c exit 0")
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                });
+            }
+            catch (Exception exception) when (exception is System.ComponentModel.Win32Exception or InvalidOperationException)
+            {
+                Console.Error.WriteLine($"[SANDBOX][INFO] self-test: the start failed: {exception.Message}");
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "SharpEmu sandbox self-test",
+        }.Start();
+    }
+
     /// <summary>
     /// Creates (or reuses) the profile and gives it the plan's folders. Throws when any part fails: a launch that
     /// asked for the sandbox must not fall back to running unconfined.
@@ -114,11 +155,12 @@ public sealed unsafe class WindowsAppContainerSandbox : IDisposable
             Directory.CreateDirectory(plan.TempDirectory);
             var granted = new List<SandboxGrantEntry>();
             var failures = new List<string>();
+            RevokeBroaderGrants(plan, dataRoot, identity, failures);
             foreach (var folder in plan.Folders)
             {
                 try
                 {
-                    if (folder.Access == SandboxAccess.ReadWrite)
+                    if (folder.Access != SandboxAccess.ReadExecute)
                     {
                         Directory.CreateDirectory(folder.Path);
                     }
@@ -150,16 +192,12 @@ public sealed unsafe class WindowsAppContainerSandbox : IDisposable
                 throw new InvalidOperationException("Could not prepare the sandbox folders: " + string.Join(" | ", failures));
             }
 
-            // Files the container cannot be granted are opened here and inherited: access is checked at open time only.
+            // Files the container cannot be granted are opened here and handed down: access is checked at open time only.
             foreach (var path in plan.InheritedFiles)
             {
                 var handle = File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.RandomAccess);
+                // Not inheritable: only InheritListedHandles makes it so, for the CreateProcessW call alone.
                 inheritedFiles.Add((handle, path));
-                if (!SetHandleInformation(handle.DangerousGetHandle(), HandleFlagInherit, HandleFlagInherit))
-                {
-                    throw new InvalidOperationException(
-                        $"Could not make the handle of {path} inheritable (Win32 error {Marshal.GetLastWin32Error()}).");
-                }
             }
 
             return new WindowsAppContainerSandbox(plan, sid, sidText, inheritedFiles);
@@ -199,6 +237,7 @@ public sealed unsafe class WindowsAppContainerSandbox : IDisposable
     public void AddHandleList(nint attributeList, params nint[] handles)
     {
         handles = [.. handles, .. _inheritedFiles.Select(file => file.Handle.DangerousGetHandle())];
+        _listedHandles = handles;
         if (_handleList == 0)
         {
             _handleList = Marshal.AllocHGlobal(sizeof(nint) * handles.Length);
@@ -217,9 +256,54 @@ public sealed unsafe class WindowsAppContainerSandbox : IDisposable
     }
 
     /// <summary>
+    /// Makes the handles given to <see cref="AddHandleList"/> (and the opened archives) inheritable until the scope is
+    /// disposed. They are created non-inheritable, so no other CreateProcess of the launcher passes them on; wrap the
+    /// sandboxed CreateProcessW call in this scope.
+    /// </summary>
+    public IDisposable InheritListedHandles() => new HandleInheritScope(_listedHandles);
+
+    /// <summary>Makes these handles inheritable until the scope is disposed (see <see cref="InheritListedHandles"/>).</summary>
+    public static IDisposable InheritScope(params nint[] handles) => new HandleInheritScope(handles);
+
+    /// <summary>True when the handle has HANDLE_FLAG_INHERIT set.</summary>
+    public static bool IsInheritable(nint handle) =>
+        GetHandleInformation(handle, out var flags) && (flags & HandleFlagInherit) != 0;
+
+    private sealed class HandleInheritScope : IDisposable
+    {
+        private readonly List<nint> _set = [];
+
+        public HandleInheritScope(IEnumerable<nint> handles)
+        {
+            foreach (var handle in handles)
+            {
+                if (!SetHandleInformation(handle, HandleFlagInherit, HandleFlagInherit))
+                {
+                    var error = Marshal.GetLastWin32Error();
+                    Dispose();
+                    throw new InvalidOperationException($"Could not make a handle inheritable for the sandboxed child (Win32 error {error}).");
+                }
+
+                _set.Add(handle);
+            }
+        }
+
+        public void Dispose()
+        {
+            foreach (var handle in _set)
+            {
+                _ = SetHandleInformation(handle, HandleFlagInherit, 0);
+            }
+
+            _set.Clear();
+        }
+    }
+
+    /// <summary>
     /// The child's environment: the launcher's current one, the plan's folders, and the launch report. Call it when
     /// the other variables for the child are set; the block is freed with the sandbox. The extra variables are the
-    /// launcher's per-launch values for the child (the gamepad bridge's section handle).
+    /// launcher's per-launch values for the child (the gamepad bridge's section handle). Every variable of the
+    /// launcher reaches the child, <c>SHARPEMU_SANDBOX_SELFTEST</c> included.
     /// </summary>
     public nint CreateEnvironmentBlock(IEnumerable<KeyValuePair<string, string>>? extraVariables = null)
     {
@@ -312,10 +396,13 @@ public sealed unsafe class WindowsAppContainerSandbox : IDisposable
         return job;
     }
 
-    /// <summary>An inheritable pipe for the child's output: the write end goes to the child.</summary>
+    /// <summary>
+    /// A pipe for the child's output: the write end goes to the child. Neither end is inheritable until
+    /// <see cref="InheritListedHandles"/> covers the CreateProcessW call.
+    /// </summary>
     public static bool TryCreateOutputPipe(out nint readHandle, out nint writeHandle)
     {
-        var attributes = new SecurityAttributes { Size = sizeof(SecurityAttributes), InheritHandle = 1 };
+        var attributes = new SecurityAttributes { Size = sizeof(SecurityAttributes), InheritHandle = 0 };
         if (!CreatePipe(out readHandle, out writeHandle, ref attributes, 0))
         {
             return false;
@@ -449,6 +536,65 @@ public sealed unsafe class WindowsAppContainerSandbox : IDisposable
         return failed ? 1 : 0;
     }
 
+    // A grant of a whole folder from an earlier launch (the user folder, before saves were granted per game) would
+    // still expose everything this plan keeps out of the child's reach: revoke the ones that contain a folder the
+    // plan grants separately, and forget them in the record.
+    private static void RevokeBroaderGrants(
+        SandboxPlan plan, string dataRoot, SecurityIdentifier identity, List<string> failures)
+    {
+        var candidates = new List<string> { Path.Combine(dataRoot, "user") };
+        var recordPath = SandboxGrantRecord.FilePath(dataRoot);
+        if (File.Exists(recordPath))
+        {
+            try
+            {
+                candidates.AddRange(SandboxGrantRecord.FromJson(File.ReadAllText(recordPath)).Entries
+                    .Where(entry => !entry.IsFile && entry.Access == SandboxAccess.ReadWrite)
+                    .Select(entry => entry.Path));
+            }
+            catch (System.Text.Json.JsonException)
+            {
+            }
+        }
+
+        foreach (var candidate in candidates.Select(path => Path.TrimEndingDirectorySeparator(Path.GetFullPath(path)))
+            .Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (plan.Folders.Any(folder => !folder.IsFile && string.Equals(folder.Path, candidate, StringComparison.OrdinalIgnoreCase)) ||
+                !plan.Folders.Any(folder => folder.Access == SandboxAccess.ReadWrite && SandboxPlan.IsUnder(candidate, folder.Path)) ||
+                !Directory.Exists(candidate))
+            {
+                continue;
+            }
+
+            try
+            {
+                var revoked = false;
+                if (HasEntry(candidate, false, identity, 0))
+                {
+                    var entry = new SandboxGrantEntry(candidate, SandboxAccess.ReadWrite, false, true);
+                    Revoke(entry, identity);
+                    ClearLabel(entry);
+                    revoked = true;
+                }
+
+                if (File.Exists(recordPath))
+                {
+                    File.WriteAllText(recordPath, SandboxGrantRecord.FromJson(File.ReadAllText(recordPath)).Without(candidate).ToJson());
+                }
+
+                if (revoked)
+                {
+                    Console.Error.WriteLine($"[SANDBOX][INFO] Revoked the earlier grant of the whole folder {candidate}");
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException or System.Text.Json.JsonException)
+            {
+                failures.Add($"{candidate} (earlier whole-folder grant): {exception.Message}");
+            }
+        }
+    }
+
     private static void SaveRecord(string dataRoot, IReadOnlyList<SandboxGrantEntry> added)
     {
         var path = SandboxGrantRecord.FilePath(dataRoot);
@@ -491,13 +637,19 @@ public sealed unsafe class WindowsAppContainerSandbox : IDisposable
     // it, which on a game dump or a cache of gigabytes takes a while.
     private static void Grant(SandboxFolder folder, SecurityIdentifier identity, nint sid)
     {
-        var mask = folder.Access == SandboxAccess.ReadWrite ? ReadWriteMask : ReadExecuteMask;
-        if (HasEntry(folder.Path, folder.IsFile, identity, mask))
+        var mask = folder.Access switch
+        {
+            SandboxAccess.ReadWrite => ReadWriteMask,
+            SandboxAccess.AttributesOnly => AttributesMask,
+            _ => ReadExecuteMask,
+        };
+        var inherit = folder.Access != SandboxAccess.AttributesOnly;
+        if (HasEntry(folder.Path, folder.IsFile, identity, mask, inherit))
         {
             return;
         }
 
-        ModifyDacl(folder.Path, folder.IsFile, sid, mask, grant: true);
+        ModifyDacl(folder.Path, folder.IsFile, sid, mask, grant: true, inherit);
     }
 
     private static void Revoke(SandboxGrantEntry entry, SecurityIdentifier identity)
@@ -518,7 +670,7 @@ public sealed unsafe class WindowsAppContainerSandbox : IDisposable
         }
     }
 
-    private static bool HasEntry(string path, bool isFile, SecurityIdentifier identity, uint mask)
+    private static bool HasEntry(string path, bool isFile, SecurityIdentifier identity, uint mask, bool inherit = true)
     {
         FileSystemSecurity security = isFile
             ? new FileInfo(path).GetAccessControl(AccessControlSections.Access)
@@ -536,8 +688,10 @@ public sealed unsafe class WindowsAppContainerSandbox : IDisposable
             }
 
             var inherits = isFile ||
-                (rule.InheritanceFlags == (InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit) &&
-                    rule.PropagationFlags == PropagationFlags.None);
+                (inherit
+                    ? rule.InheritanceFlags == (InheritanceFlags.ContainerInherit | InheritanceFlags.ObjectInherit) &&
+                        rule.PropagationFlags == PropagationFlags.None
+                    : rule.InheritanceFlags == InheritanceFlags.None);
             if (inherits && ((uint)rule.FileSystemRights & mask) == mask)
             {
                 return true;
@@ -547,7 +701,7 @@ public sealed unsafe class WindowsAppContainerSandbox : IDisposable
         return false;
     }
 
-    private static void ModifyDacl(string path, bool isFile, nint sid, uint mask, bool grant)
+    private static void ModifyDacl(string path, bool isFile, nint sid, uint mask, bool grant, bool inherit = true)
     {
         const int SeFileObject = 1;
         const uint DaclSecurityInformation = 4;
@@ -564,7 +718,7 @@ public sealed unsafe class WindowsAppContainerSandbox : IDisposable
             {
                 Permissions = mask,
                 Mode = grant ? 1 /* GRANT_ACCESS */ : 4 /* REVOKE_ACCESS */,
-                Inheritance = isFile ? 0u : 3u /* SUB_CONTAINERS_AND_OBJECTS_INHERIT */,
+                Inheritance = isFile || !inherit ? 0u : 3u /* SUB_CONTAINERS_AND_OBJECTS_INHERIT */,
                 Trustee = new Trustee { Form = 0 /* TRUSTEE_IS_SID */, Name = sid },
             };
             error = SetEntriesInAclW(1, ref access, oldDacl, out var newDacl);
@@ -784,6 +938,10 @@ public sealed unsafe class WindowsAppContainerSandbox : IDisposable
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetHandleInformation(nint handle, uint mask, uint flags);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetHandleInformation(nint handle, out uint flags);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
