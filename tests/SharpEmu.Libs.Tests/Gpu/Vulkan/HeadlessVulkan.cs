@@ -688,6 +688,8 @@ internal sealed class LoggingTickDevice : IGpuTickDevice
 
     public IGpuCommandBufferSource CreateBufferSource() => _inner.CreateBufferSource();
 
+    public void ReleaseBufferSource(IGpuCommandBufferSource source) => _inner.ReleaseBufferSource(source);
+
     public bool TrySubmit(ReadOnlySpan<nint> buffers, SubmitBundle bundle, out string failure)
     {
         for (var i = 0; i < bundle.SignalCount; i++)

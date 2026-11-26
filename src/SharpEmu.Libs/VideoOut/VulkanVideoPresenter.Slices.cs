@@ -429,7 +429,7 @@ internal static unsafe partial class VulkanVideoPresenter
             SubmissionScheduler.MarkReadOnlyThread(static operation => new SerialRequiredException("unguarded " + operation));
             while (true)
             {
-                _available.Wait();
+                if (!host.WaitForWork(_available)) continue;
                 if (!_urgent.TryDequeue(out var slice) && !_queue.TryDequeue(out slice))
                 {
                     if (_stopping)
@@ -1004,6 +1004,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private RecordingBuffer? _workerBuffer;
         private long _itemSequence;
         private readonly ConcurrentBag<RecordingBuffer>? _spareBuffers;
+        private WorkerCommandPools? _workerPools;
         private readonly SliceArena? _arena;
         private readonly SliceDescriptorHeap? _sliceDescriptors;
         private readonly SliceHazards? _hazards;
@@ -1169,6 +1170,18 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
+        internal bool WaitForWork(SemaphoreSlim available)
+        {
+            if (_workerPools?.NeedsSweep != true)
+            {
+                available.Wait();
+                return true;
+            }
+            if (available.Wait(1000)) return true;
+            _workerPools.Sweep(_spareBuffers!, Environment.TickCount64);
+            return false;
+        }
+
         private SliceSegment BeginSegment(int first)
         {
             var segment = new SliceSegment { First = first };
@@ -1177,7 +1190,8 @@ internal static unsafe partial class VulkanVideoPresenter
             segment.Requests.LookupGeneration = _imageCache.LookupGeneration;
             segment.Requests.MetadataGeneration = _imageCache.MetadataGeneration;
             _segment = segment;
-            _workerBuffer = _spareBuffers!.TryTake(out var buffer) ? buffer : _scheduler.CreateRecordingBuffer(this);
+            _workerPools ??= new WorkerCommandPools(_scheduler, this);
+            _workerBuffer = _workerPools.Take(_spareBuffers!, Environment.TickCount64);
             _scheduler.BeginRecording(_workerBuffer);
             _workerBuffer.RequestMemoryBarrier(GlobalMemoryBarrier);
             _hazards!.Reset();

@@ -7,6 +7,9 @@ public interface IGpuCommandBufferSource
 {
     nint[] AllocateBuffers(int count);
 
+    void FreeBuffer(nint buffer) => throw new NotSupportedException();
+    void Trim() { }
+
     void BeginBuffer(nint buffer);
 
     void EndBuffer(nint buffer, bool hostRead);
@@ -25,6 +28,7 @@ public interface IGpuTickDevice : IGpuCommandBufferSource, IDisposable
     bool TryWaitTimeline(ulong tick, out string failure);
 
     IGpuCommandBufferSource CreateBufferSource();
+    void ReleaseBufferSource(IGpuCommandBufferSource source) => throw new NotSupportedException();
 
     bool TrySubmit(ReadOnlySpan<nint> buffers, SubmitBundle bundle, out string failure);
 }

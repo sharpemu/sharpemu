@@ -62,6 +62,42 @@ public sealed class TickedBufferRingTests
     }
 
     [Fact]
+    public void WorkerPoolsOnlyFreeCompletedHandles()
+    {
+        var device = new FakeTickDevice { CompleteOnSubmit = true };
+        var rendering = new RecordingRenderingState();
+        using var scheduler = new SubmissionScheduler(device, rendering);
+        var workers = new WorkerCommandPools(scheduler, rendering);
+        var spare = new System.Collections.Concurrent.ConcurrentBag<RecordingBuffer>();
+        var a = workers.Take(spare, 1000);
+        var b = workers.Take(spare, 1000);
+        Assert.Same(a.Source, b.Source);
+        Assert.DoesNotContain("release pool", device.Log);
+        var first = a.Ring.AcquireWorkerHandle();
+        a.Ring.Submitted(first, 3);
+        var second = a.Ring.AcquireWorkerHandle();
+        Assert.NotEqual(first, second);
+        a.Ring.Submitted(second, 0);
+        Assert.Equal(second, a.Ring.AcquireWorkerHandle());
+        a.Ring.Submitted(second, 0);
+        Assert.Equal(2, a.Ring.Count);
+        Assert.Equal(1, a.Ring.TrimIdle(long.MaxValue));
+        Assert.Equal(0, a.Ring.TrimIdle(long.MaxValue));
+        Assert.DoesNotContain($"free {device.Name(first)}", device.Log);
+        spare.Add(a);
+        spare.Add(b);
+        device.Complete(2);
+        workers.Sweep(spare, 7000);
+        Assert.DoesNotContain("release pool", device.Log);
+        Assert.DoesNotContain($"free {device.Name(first)}", device.Log);
+        device.Complete(3);
+        workers.Sweep(spare, 8000);
+        Assert.False(workers.NeedsSweep);
+        Assert.Contains($"free {device.Name(first)}", device.Log);
+        Assert.Single(device.Log, entry => entry == "release pool");
+    }
+
+    [Fact]
     public void SubmittingABufferThatIsNotInUseIsFatal()
     {
         using var fatal = new FatalScope();

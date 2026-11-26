@@ -13,6 +13,45 @@ public sealed class TickedBufferRing
     private readonly List<nint> _buffers = new();
     private readonly List<ulong> _ticks = new();
     private int _hint;
+    internal bool Compact { get; init; }
+    private List<long>? _usedAt;
+    internal int TrimIdle(long cutoff)
+    {
+        if (_usedAt is null) return 0;
+        var removed = 0;
+        var complete = _timeline.CompletedTick;
+        // Retain the first slot so steady single-buffer recordings stay allocation-free.
+        for (var i = _buffers.Count - 1; i > 0; i--)
+        {
+            if (_ticks[i] > complete || _usedAt[i] > cutoff) continue;
+            _source.FreeBuffer(_buffers[i]);
+            _buffers.RemoveAt(i);
+            _ticks.RemoveAt(i);
+            _usedAt.RemoveAt(i);
+            removed++;
+        }
+        return removed;
+    }
+    internal bool Completed
+    {
+        get
+        {
+            var completed = _timeline.CompletedTick;
+            foreach (var tick in _ticks)
+                if (tick > completed) return false;
+            return true;
+        }
+    }
+
+    internal void FreeCompleted()
+    {
+        if (!Completed) throw new InvalidOperationException("Command buffers are still pending.");
+        foreach (var buffer in _buffers) _source.FreeBuffer(buffer);
+        _buffers.Clear();
+        _ticks.Clear();
+        _usedAt?.Clear();
+        _hint = 0;
+    }
 
     public TickedBufferRing(IGpuCommandBufferSource source, TickTimeline timeline)
     {
@@ -53,6 +92,27 @@ public sealed class TickedBufferRing
         }
 
         return _buffers[found];
+    }
+
+    internal nint AcquireWorkerHandle()
+    {
+        if (!Compact) return AcquireBuffer();
+        var slot = FindReusableBuffer(0, Count, _timeline.CompletedTick);
+        if (slot < 0)
+        {
+            _timeline.RefreshCompletedTick();
+            slot = FindReusableBuffer(0, Count, _timeline.CompletedTick);
+        }
+        if (slot < 0)
+        {
+            slot = Count;
+            _buffers.Add(_source.AllocateBuffers(1)[0]);
+            _ticks.Add(0);
+            (_usedAt ??= []).Add(0);
+        }
+        _ticks[slot] = InUse;
+        _usedAt![slot] = Environment.TickCount64;
+        return _buffers[slot];
     }
 
     public void Submitted(nint buffer, ulong tick)

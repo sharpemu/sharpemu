@@ -745,12 +745,14 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
         return _command;
     }
 
+    internal IGpuTickDevice RecordingDevice => _device;
+
     public RecordingBuffer CreateRecordingBuffer(IRenderingState rendering) => new(this, _device.CreateBufferSource(), rendering);
 
     public void BeginRecording(RecordingBuffer buffer)
     {
         buffer.Bind(_context ?? throw Fatal("The scheduler requires a submission context."));
-        buffer.Acquire();
+        buffer.AcquireWorker();
     }
 
     public void EndRecording(RecordingBuffer buffer) => buffer.End();
