@@ -36,7 +36,7 @@ public partial class GameVersionDialog : SheetView
             row.Children.Add(details);
             var size = new TextBlock
             {
-                Text = game.IsArchive ? $"ZAR · {game.SizeText}" : game.SizeText,
+                Text = game.IsArchive ? $"{(game.IsPackage ? "PKG" : "ZAR")} · {game.SizeText}" : game.SizeText,
                 Classes = { "versionPath" },
                 VerticalAlignment = VerticalAlignment.Center,
             };

@@ -77,7 +77,10 @@ public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
     public string Path { get; }
 
     // Keep an archive's type while the library watcher catches up with a moved or removed file.
-    public bool IsArchive => Path.EndsWith(".zar", StringComparison.OrdinalIgnoreCase);
+    // A .pkg is run in place like an archive: one file holds the whole game.
+    public bool IsArchive => Path.EndsWith(".zar", StringComparison.OrdinalIgnoreCase) || IsPackage;
+
+    public bool IsPackage => Path.EndsWith(".pkg", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Total size of the game. Initially the eboot's own size from the scan;

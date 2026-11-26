@@ -16,13 +16,17 @@ SPDX-License-Identifier: GPL-2.0-or-later
     <TextBlock x:Name="MessageText"
                TextWrapping="Wrap" />
 
+    <TextBlock Text="{Binding [Library.Pkg.ConfirmPlayHint], Source={x:Static local:Localization.Instance}}"
+               Opacity="0.7"
+               TextWrapping="Wrap" />
+
     <StackPanel Margin="0,8,0,0"
                 Orientation="Horizontal"
                 HorizontalAlignment="Right"
                 Spacing="10">
       <Button x:Name="SkipButton"
               Classes="ghost"
-              Content="{Binding [Library.Pkg.ConfirmSkip], Source={x:Static local:Localization.Instance}}" />
+              Content="{Binding [Library.Pkg.ConfirmPlay], Source={x:Static local:Localization.Instance}}" />
       <Button x:Name="InstallButton"
               Content="{Binding [Library.Pkg.ConfirmInstall], Source={x:Static local:Localization.Instance}}" />
     </StackPanel>

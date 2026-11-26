@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.FileSystem;
+using HLEPkg = SharpEmu.HLE.FileSystem.Pkg;
 using Xunit;
 
 namespace SharpEmu.Libs.Tests.FileSystem;
@@ -147,5 +148,36 @@ public sealed class App0ArchiveTests : IDisposable
         var plain = Path.Combine(_directory, "plain.zar");
         File.WriteAllBytes(plain, Bytes(4096, 5));
         Assert.Null(ZArchiveCache.ExtractMetadata(plain, cacheParent));
+    }
+
+    [Fact]
+    public void APackageMountedAsApp0ServesTheSameFilesAsItsInstall()
+    {
+        var (bytes, files) = Ps5PkgTests.BuildSamplePackage();
+        var packagePath = Path.Combine(_directory, "game.pkg");
+        File.WriteAllBytes(packagePath, bytes);
+        var root = Path.Combine(_directory, "pkgcache");
+        Directory.CreateDirectory(root);
+        App0Archive.Mount(HLEPkg.Ps5PackageSource.Open(packagePath), root);
+
+        Assert.True(App0Archive.IsMounted);
+        Assert.Equal(files.Keys.Order(StringComparer.Ordinal), App0Archive.ListAllFiles().Order(StringComparer.Ordinal));
+        foreach (var (name, expected) in files)
+        {
+            var host = Path.Combine(root, name.Replace('/', Path.DirectorySeparatorChar));
+            Assert.True(App0Archive.TryGetFile(host, out var size), name);
+            Assert.Equal((ulong)expected.Length, size);
+            using var stream = App0Archive.OpenRead(host)!;
+            var read = new byte[expected.Length];
+            stream.ReadExactly(read);
+            Assert.True(expected.AsSpan().SequenceEqual(read), name);
+        }
+
+        Assert.True(App0Archive.IsDirectory(Path.Combine(root, "assets")));
+        Assert.Contains(App0Archive.List(Path.Combine(root, "assets")), entry => entry.Name == "sub" && entry.IsDirectory);
+
+        var extracted = Path.Combine(root, "eboot.bin");
+        Assert.True(App0Archive.Extract(extracted));
+        Assert.True(files["eboot.bin"].AsSpan().SequenceEqual(File.ReadAllBytes(extracted)));
     }
 }

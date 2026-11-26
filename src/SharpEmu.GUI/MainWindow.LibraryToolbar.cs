@@ -115,6 +115,21 @@ public partial class MainWindow
             return;
         }
 
+        await InstallPkgFileAsync(pkgPath);
+    }
+
+    // Installs a package the library lists as playable in place: "Install PKG" from its context menu.
+    private async Task InstallSelectedPkgAsync()
+    {
+        if (!_isRunning && GameList.SelectedItem is GameEntry { IsPackage: true } game)
+        {
+            await InstallPkgFileAsync(game.Path);
+        }
+    }
+
+    private async Task InstallPkgFileAsync(string pkgPath)
+    {
+        var loc = Localization.Instance;
         if (!TryReadPackageInfo(pkgPath, out var titleId, out var folderName, out var isGame, out var category))
         {
             return;

@@ -255,7 +255,12 @@ internal sealed class Ps5InnerImage
         return low;
     }
 
-    private int FindBlock(long logical)
+    // Number of blocks; indexes run 0..BlockCount-1 in logical order.
+    internal int BlockCount => _blocks.Length;
+
+    internal UBlock GetBlock(int index) => _blocks[index];
+
+    internal int FindBlock(long logical)
     {
         var index = PartitionPoint(block => block.Logical + block.Uncompressed <= logical);
         if (index >= _blocks.Length || _blocks[index].Logical > logical)
@@ -312,37 +317,48 @@ internal sealed class Ps5InnerImage
                 _decoded = new byte[block.Uncompressed];
             }
 
+            DecodeBlock(index, _decoded);
+            _cachedIndex = index;
+        }
+
+        // Decodes one block into `destination` (exactly the block's uncompressed size); a sparse
+        // block reads as zeros. It leaves the CopyTo state alone, so a caller with its own block
+        // cache can decode on any thread with that thread's reader.
+        internal void DecodeBlock(int index, byte[] destination)
+        {
+            var block = _owner._blocks[index];
+            if (destination.Length != block.Uncompressed)
+            {
+                throw new ArgumentException("The destination does not match the block size.", nameof(destination));
+            }
+
             if (block.Compressed == 0)
             {
-                Array.Clear(_decoded);
+                Array.Clear(destination);
+                return;
             }
-            else
+
+            if (_payload.Length != block.Compressed)
             {
-                if (_payload.Length != block.Compressed)
-                {
-                    _payload = new byte[block.Compressed];
-                }
-
-                _owner._image.ReadExactAt(_payload, block.OnDisk);
-                if (_payload.Length == _decoded.Length)
-                {
-                    _payload.CopyTo(_decoded, 0);
-                }
-                else
-                {
-                    try
-                    {
-                        Kraken.DecodeBlock(_payload, block.Flags, block.EvenComp, _decoded);
-                    }
-                    catch (InvalidDataException exception)
-                    {
-                        throw new InvalidDataException(
-                            $"{exception.Message} (block at logical 0x{block.Logical:X}, stored at 0x{block.OnDisk:X}, {block.Compressed} -> {block.Uncompressed} bytes, flags 0x{block.Flags:X}).");
-                    }
-                }
+                _payload = new byte[block.Compressed];
             }
 
-            _cachedIndex = index;
+            _owner._image.ReadExactAt(_payload, block.OnDisk);
+            if (_payload.Length == destination.Length)
+            {
+                _payload.CopyTo(destination, 0);
+                return;
+            }
+
+            try
+            {
+                Kraken.DecodeBlock(_payload, block.Flags, block.EvenComp, destination);
+            }
+            catch (InvalidDataException exception)
+            {
+                throw new InvalidDataException(
+                    $"{exception.Message} (block at logical 0x{block.Logical:X}, stored at 0x{block.OnDisk:X}, {block.Compressed} -> {block.Uncompressed} bytes, flags 0x{block.Flags:X}).");
+            }
         }
     }
 

@@ -9,6 +9,7 @@ using SharpEmu.Core.Mods;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
 using SharpEmu.HLE.FileSystem;
+using SharpEmu.HLE.FileSystem.Pkg;
 using SharpEmu.HLE.Host;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.VideoOut;
@@ -437,19 +438,28 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         return result;
     }
 
-    // A .zar holds the whole application folder. Mount it at a cache folder that gets the files host
+    // A .zar, or a PS5 .pkg read in place, holds the whole application folder. Mount it at a cache folder that gets the files host
     // code reads by path (the executable, its modules and sce_sys); everything else is read from the
     // archive when the guest asks for it. The path becomes the cached executable.
     private static ArchiveMountScope? MountArchive(ref string ebootPath)
     {
-        if (!ZArchive.IsArchivePath(ebootPath))
+        IApp0Source archive;
+        var archivePath = Path.GetFullPath(ebootPath);
+        if (ZArchive.IsArchivePath(ebootPath))
+        {
+            archive = ZArchive.Open(archivePath) ??
+                throw new InvalidDataException($"'{archivePath}' is not a valid .zar archive.");
+        }
+        else if (ZArchiveCache.IsPackageFile(ebootPath))
+        {
+            // Refuses PS4 packages, patches and DLC with a message to install them.
+            archive = Ps5PackageSource.Open(archivePath);
+        }
+        else
         {
             return null;
         }
 
-        var archivePath = Path.GetFullPath(ebootPath);
-        var archive = ZArchive.Open(archivePath) ??
-            throw new InvalidDataException($"'{archivePath}' is not a valid .zar archive.");
         if (!archive.IsFile(archive.LookUp("eboot.bin")))
         {
             archive.Dispose();

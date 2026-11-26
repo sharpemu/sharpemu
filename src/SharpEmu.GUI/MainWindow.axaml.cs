@@ -21,6 +21,7 @@ using SharpEmu.Core.Runtime;
 using SharpEmu.GnmMode;
 using SharpEmu.GnmMode.Libraries.Np;
 using SharpEmu.HLE.FileSystem;
+using SharpEmu.HLE.FileSystem.Pkg;
 using SharpEmu.HLE.Host;
 using SharpEmu.Libs.Pad;
 using SharpEmu.Libs.VideoOut;
@@ -455,6 +456,7 @@ public partial class MainWindow : Window
         InitializeTrophies();
         CtxRemove.Click += (_, _) => RemoveSelectedFromLibrary();
         CtxPackZar.Click += async (_, _) => await PackSelectedAsZarAsync();
+        CtxInstallPkg.Click += async (_, _) => await InstallSelectedPkgAsync();
 
         Opened += async (_, _) => await OnOpenedAsync();
         Closing += (_, _) => BeginWindowClosing();
@@ -2018,8 +2020,8 @@ public partial class MainWindow : Window
     /// </summary>
     private static long ComputeInstallSize(string ebootPath)
     {
-        // An archive is the whole game; the folder it sits in may hold other games.
-        if (ZArchive.IsArchivePath(ebootPath))
+        // An archive or package is the whole game; the folder it sits in may hold other games.
+        if (ZArchiveCache.IsMountablePath(ebootPath))
         {
             try
             {
@@ -2079,11 +2081,17 @@ public partial class MainWindow : Window
 
             try
             {
-                // A game is a folder with eboot.bin or a .zar archive of one.
+                // A game is a folder with eboot.bin, a .zar archive of one, or a PS5 .pkg run in place.
                 foreach (var file in Directory.EnumerateFiles(folder, "eboot.bin", enumeration)
-                    .Concat(Directory.EnumerateFiles(folder, "*.zar", enumeration)))
+                    .Concat(Directory.EnumerateFiles(folder, "*.zar", enumeration))
+                    .Concat(Directory.EnumerateFiles(folder, "*.pkg", enumeration)))
                 {
                     var fullPath = Path.GetFullPath(file);
+                    if (file.EndsWith(".pkg", StringComparison.OrdinalIgnoreCase) && !Ps5PackageSource.IsPackagePath(fullPath))
+                    {
+                        continue;
+                    }
+
                     if (!seen.Add(fullPath) || excludedPaths.Contains(fullPath))
                     {
                         continue;
@@ -2129,9 +2137,9 @@ public partial class MainWindow : Window
                 $"[GUI][WARN] Could not inspect executable '{fullPath}': {exception.Message}");
         }
 
-        // An archive's metadata is read from its cache folder, which stands in for the game folder.
+        // An archive's or package's metadata is read from its cache folder, which stands in for the game folder.
         var metadataPath = fullPath;
-        if (ZArchive.IsArchivePath(fullPath))
+        if (ZArchiveCache.IsMountablePath(fullPath))
         {
             try
             {
@@ -2574,6 +2582,8 @@ public partial class MainWindow : Window
         CtxCopyTitleId.IsEnabled = game.TitleId is not null;
         CtxGameSettings.IsEnabled = true;
         CtxPackZar.IsEnabled = GameVersions.PackableForGame(_allGames, game).Count > 0;
+        CtxInstallPkg.IsVisible = game.IsPackage;
+        CtxInstallPkg.IsEnabled = !_isRunning;
         CtxTrophies.IsEnabled = !string.IsNullOrWhiteSpace(game.TitleId);
         CtxPatches.IsEnabled = !string.IsNullOrWhiteSpace(game.TitleId);
     }
@@ -2881,7 +2891,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var directory = ZArchive.IsArchivePath(game.Path)
+        var directory = ZArchiveCache.IsMountablePath(game.Path)
             ? ZArchiveCache.GetCacheRoot(game.Path,
                 Path.Combine(SharpEmu.Libs.SharpEmuPaths.DataRoot, "user", "zar-cache"))
             : Path.GetDirectoryName(game.Path);
@@ -3031,7 +3041,7 @@ public partial class MainWindow : Window
             FileTypeFilter = new[]
             {
                 new FilePickerFileType(Localization.Instance.Get("Dialog.PsExecutables"))
-                    { Patterns = new[] { "eboot.bin", "*.bin", "*.self", "*.elf", "*.zar" } },
+                    { Patterns = new[] { "eboot.bin", "*.bin", "*.self", "*.elf", "*.zar", "*.pkg" } },
                 FilePickerFileTypes.All,
             },
         });

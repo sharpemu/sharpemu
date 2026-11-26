@@ -11,7 +11,7 @@ namespace SharpEmu.Libs.Tests.FileSystem;
 // Synthetic data only: nothing here comes from a real package. The builder writes a tiny but
 // complete FIH package: FIH header, a signed 32-bit outer PFS (plain seed, encrypted mode bit set)
 // holding pfs_image.dat and naps_pkg_layout.dat, an inner flat PFS, and an embedded CNT.
-public sealed class Ps5PkgTests
+public sealed partial class Ps5PkgTests
 {
     private const string DefaultContentId = "UP9000-PPSA01234_00-TESTGAME00000000";
 

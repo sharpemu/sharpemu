@@ -272,6 +272,12 @@ SPDX-License-Identifier: GPL-2.0-or-later
                     <TextBlock Classes="materialSymbol compact" Text="tag" />
                   </MenuItem.Icon>
                 </MenuItem>
+                <MenuItem x:Name="CtxInstallPkg"
+                          Header="{Binding [Library.Context.InstallPkg], Source={x:Static local:Localization.Instance}}">
+                  <MenuItem.Icon>
+                    <TextBlock Classes="materialSymbol compact" Text="download" />
+                  </MenuItem.Icon>
+                </MenuItem>
                 <MenuItem x:Name="CtxPackZar"
                           Header="{Binding [Library.Context.PackZar], Source={x:Static local:Localization.Instance}}">
                   <MenuItem.Icon>

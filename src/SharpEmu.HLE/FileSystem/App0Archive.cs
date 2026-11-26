@@ -12,14 +12,14 @@ namespace SharpEmu.HLE.FileSystem;
 public static class App0Archive
 {
     private static readonly object Gate = new();
-    private static ZArchive? _archive;
+    private static IApp0Source? _archive;
     private static string? _root;
 
     public static bool IsMounted => Volatile.Read(ref _archive) is not null;
 
     public static string? Root => Volatile.Read(ref _root);
 
-    public static void Mount(ZArchive archive, string root)
+    public static void Mount(IApp0Source archive, string root)
     {
         lock (Gate)
         {
@@ -40,7 +40,7 @@ public static class App0Archive
     }
 
     // The archive and the node a host path names, when it lies under the mount and the archive has it.
-    public static bool TryResolve(string hostPath, out ZArchive archive, out int node)
+    public static bool TryResolve(string hostPath, out IApp0Source archive, out int node)
     {
         archive = Volatile.Read(ref _archive)!;
         node = ZArchive.InvalidNode;
@@ -171,7 +171,7 @@ public static class App0Archive
         return files;
     }
 
-    private static void AddFiles(ZArchive archive, int directory, string prefix, List<string> files)
+    private static void AddFiles(IApp0Source archive, int directory, string prefix, List<string> files)
     {
         foreach (var entry in archive.GetEntries(directory))
         {
@@ -243,12 +243,12 @@ public static class App0Archive
 // block cache. Name is the host path it was opened as.
 public sealed class ZArchiveFileStream : Stream
 {
-    private readonly ZArchive _archive;
+    private readonly IApp0Source _archive;
     private readonly int _node;
     private readonly long _length;
     private long _position;
 
-    public ZArchiveFileStream(ZArchive archive, int node, string name)
+    public ZArchiveFileStream(IApp0Source archive, int node, string name)
     {
         _archive = archive;
         _node = node;

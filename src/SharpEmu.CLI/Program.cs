@@ -728,7 +728,7 @@ internal static partial class Program
 
         try
         {
-            var directory = ZArchive.IsArchivePath(ebootPath)
+            var directory = ZArchiveCache.IsMountablePath(ebootPath)
                 ? ZArchiveCache.ExtractMetadata(ebootPath)
                 : Path.GetDirectoryName(Path.GetFullPath(ebootPath));
             if (string.IsNullOrEmpty(directory))
@@ -1055,7 +1055,7 @@ internal static partial class Program
 
     private static void PrintUsage()
     {
-        Log.Info("Usage: SharpEmu.CLI [--strict[=on|off]] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--no-log-file] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin|path-to-game.zar>");
+        Log.Info("Usage: SharpEmu.CLI [--strict[=on|off]] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--no-log-file] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin|path-to-game.zar|path-to-ps5-game.pkg>");
         Log.Info("Install a fake PS4 or PS5 package: SharpEmu.CLI --install-pkg <path-to-game.pkg> [destination-folder]");
         Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
         Log.Info("Debug server: --debug-server starts a live debug listener (default 127.0.0.1:5714); connect with SharpEmu.DebugClient.");
