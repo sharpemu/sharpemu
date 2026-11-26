@@ -1391,6 +1391,13 @@ internal static unsafe partial class VulkanVideoPresenter
             var windowed = !bounded && ReadsOnlyWindowedRanges(preparation) && CollectWindows(preparation, _bdaWindows);
             if (_worker)
             {
+                if ((bounded || !windowed) &&
+                    (!ReferenceEquals(_plannedBuffers, _buffers) || !ReferenceEquals(_plannedSpans, spans)))
+                {
+                    _buffers.PrepareTouches(spans);
+                    _plannedBuffers = _buffers;
+                    _plannedSpans = spans;
+                }
                 if (bounded)
                 {
                     Requests.NeedsBdaTouch = true;
@@ -1538,6 +1545,8 @@ internal static unsafe partial class VulkanVideoPresenter
             return any;
         }
 
+        private BufferSnapshot? _plannedBuffers;
+        private List<GuestSpan>? _plannedSpans;
         private List<GuestSpan>? _bdaSpans;
         private GuestGpuMemory? _bdaSpanMemory;
         private long _bdaSpanVersion = -1;

@@ -487,7 +487,10 @@ public sealed class PageGuard : IDisposable
 
     private bool ExtendAcrossGap(PageCounts[] pages, ref BlockUpdate update, int start)
     {
-        if (start - update.UniformEnd > MergeGapPages)
+        // A sweep already holds this block and has taken its dirty mask. Bound the extra
+        // permission scan to 512 KiB and prove every intervening page has the final access.
+        var limit = update.Cause == ProtectionCause.SweepReprotect ? 2 * MergeGapPages : MergeGapPages;
+        if (start - update.UniformEnd > limit)
         {
             return false;
         }

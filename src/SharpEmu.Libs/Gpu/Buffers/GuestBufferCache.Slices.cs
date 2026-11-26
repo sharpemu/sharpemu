@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.Diagnostics;
+using SharpEmu.HLE.GpuMemory;
 
 namespace SharpEmu.Libs.Gpu.Buffers;
 
@@ -30,6 +31,45 @@ public sealed class BufferSnapshot
     public long Serial { get; }
 
     public int Count => _addresses.Length;
+
+    // Recording workers can resolve the immutable mapping to an ordered list of owners.
+    // A newer registry snapshot owns a different plan. A mutable caller must still match every span.
+    private sealed record TouchPlan(GuestSpan[] Spans, ResourceSlotIdentifier[] Owners);
+    private TouchPlan? _touchPlan;
+
+    internal void PrepareTouches(List<GuestSpan> spans)
+    {
+        if (TryGetTouches(spans, out _)) return;
+        var copy = spans.ToArray();
+        var owners = new List<ResourceSlotIdentifier>();
+        var index = 0;
+        ulong previousEnd = 0;
+        foreach (var span in copy)
+        {
+            if (!span.IsValid || span.Size == 0 || span.Address < previousEnd) return;
+            previousEnd = span.End;
+            while (index < Count && _ends[index] <= span.Address) index++;
+            for (var next = index; next < Count && _addresses[next] < span.End; next++)
+            {
+                if (owners.Count == 0 || owners[^1] != _identifiers[next])
+                    owners.Add(_identifiers[next]);
+            }
+        }
+        Volatile.Write(ref _touchPlan, new TouchPlan(copy, owners.ToArray()));
+    }
+
+    internal bool TryGetTouches(IReadOnlyList<GuestSpan> spans, out ResourceSlotIdentifier[] owners)
+    {
+        var plan = Volatile.Read(ref _touchPlan);
+        if (plan is not null && spans is List<GuestSpan> list &&
+            System.Runtime.InteropServices.CollectionsMarshal.AsSpan(list).SequenceEqual(plan.Spans))
+        {
+            owners = plan.Owners;
+            return true;
+        }
+        owners = [];
+        return false;
+    }
 
     public bool TryFind(ulong address, ulong size, out GpuBuffer buffer, out ResourceSlotIdentifier identifier)
     {

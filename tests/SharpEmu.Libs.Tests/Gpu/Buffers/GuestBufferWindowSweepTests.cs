@@ -98,5 +98,53 @@ public sealed class GuestBufferWindowSweepTests : IClassFixture<HeadlessVulkanFi
         harness.Shutdown();
     }
 
+    [Fact]
+    public void WorkerPlanDeduplicatesSpanningOwnersAndRejectsChangedSpans()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x40000, ReadWrite);
+        harness.Worker.Run(() =>
+        {
+            _ = harness.Cache.ObtainBuffer(address, 0x8000, false, allowStream: false);
+            var snapshot = harness.Cache.RefreshSnapshot();
+            var spans = new List<GuestSpan> { new(address, 0x1000), new(address + 0x4000, 0x1000) };
+            snapshot.PrepareTouches(spans);
+            Assert.True(snapshot.TryFind(address, 0x1000, out _, out var id));
+            Assert.True(snapshot.TryGetTouches(spans, out var owners));
+            Assert.Equal(id, Assert.Single(owners));
+            harness.Cache.PrepareBoundedBda(spans, GuestBufferCache.MappingKey(spans));
+            spans[1] = new GuestSpan(address + 0x20000, 0x1000);
+            Assert.False(snapshot.TryGetTouches(spans, out _));
+            _ = harness.Cache.ObtainBuffer(address + 0x20000, 0x1000, false, allowStream: false);
+            Assert.NotEqual(snapshot.Serial, harness.Cache.RegistrationSerial);
+            Assert.False(harness.Cache.RefreshSnapshot().TryGetTouches(spans, out _));
+        });
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void BatchedRangeSyncObservesACpuWriteAfterACleanProof()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        var (buffer, offset) = harness.Worker.Run(() => harness.Cache.ObtainBuffer(address, 0x8000, false, allowStream: false));
+        void Sync() => harness.Worker.Run(() =>
+        {
+            harness.Cache.BeginUploadBatch();
+            try { harness.Cache.SynchronizeBuffersInRange(address, 0x8000); }
+            finally { harness.Cache.EndUploadBatch(); }
+        });
+        Sync();
+        Sync();
+        var data = Pattern(16, 41);
+        Assert.True(harness.Store.MarkCpuWrite(address, 16));
+        harness.Write(address, data);
+        Sync();
+        Assert.Equal(data, harness.ReadBack(buffer, offset, 16));
+        harness.Shutdown();
+    }
+
     private static byte[] Pattern(int size, byte seed) => Enumerable.Range(0, size).Select(index => (byte)(seed * 37 + index)).ToArray();
 }

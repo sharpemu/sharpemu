@@ -1159,12 +1159,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         }
         else
         {
-            if (_retirementPolicy.CurrentTick != state.TouchTick)
-            {
-                for (var index = 0; index < spans.Count; index++)
-                    TouchBuffersInRange(spans[index].Address, spans[index].Size);
-                state.TouchTick = _retirementPolicy.CurrentTick;
-            }
+            TouchDeviceAddressBuffers(spans, state);
 
             var epoch = _tracker.CpuDirtyEpoch;
             var registrations = _registrationGeneration;
@@ -1241,12 +1236,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         }
 
         var state = FullBdaState(mapping);
-        if (_retirementPolicy.CurrentTick != state.TouchTick)
-        {
-            for (var index = 0; index < spans.Count; index++)
-                TouchBuffersInRange(spans[index].Address, spans[index].Size);
-            state.TouchTick = _retirementPolicy.CurrentTick;
-        }
+        TouchDeviceAddressBuffers(spans, state);
 
         _faultProcessPending = true;
         Interlocked.Increment(ref BdaBoundedPreparations);
@@ -1413,6 +1403,23 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
     // A sweep that stages more bytes stages each buffer on its own; tests lower it.
     internal ulong SweepStagingLimit { get; set; } = ulong.MaxValue;
+
+    private void TouchDeviceAddressBuffers(IReadOnlyList<GuestSpan> spans, BdaSweepState state)
+    {
+        var tick = _retirementPolicy.CurrentTick;
+        if (state.TouchTick == tick) return;
+        var snapshot = Snapshot;
+        if (snapshot.Serial == RegistrationSerial && snapshot.TryGetTouches(spans, out var owners))
+        {
+            foreach (var owner in owners) TouchBuffer(owner);
+        }
+        else
+        {
+            for (var index = 0; index < spans.Count; index++)
+                TouchBuffersInRange(spans[index].Address, spans[index].Size);
+        }
+        state.TouchTick = tick;
+    }
 
     private void TouchBuffersInRange(ulong guestAddress, ulong size)
     {
@@ -1595,11 +1602,28 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         }
     }
 
+    private readonly record struct CleanSync(ulong Address, ulong Size, long Serial, long Epoch, ulong Tick);
+    private CleanSync[]? _cleanSyncs;
+
     public void SynchronizeBuffersInRange(ulong guestAddress, ulong size)
     {
         if (SubmissionScheduler.ReadOnlyThread)
         {
             throw SubmissionScheduler.ReadOnlyViolation("buffer sync");
+        }
+
+        var remember = _uploadBatchDepth != 0 && size != 0 && GuestGpuMemoryHook.TraceAddress == 0;
+        var proof = default(CleanSync);
+        var slot = 0;
+        if (remember)
+        {
+            _cleanSyncs ??= new CleanSync[64];
+            slot = (int)(((guestAddress >> 4) ^ (guestAddress >> 12) ^ size) & 63);
+            proof = new CleanSync(guestAddress, size, RegistrationSerial, _tracker.CpuDirtyEpoch, _retirementPolicy.CurrentTick);
+            if (_cleanSyncs[slot] == proof)
+            {
+                return;
+            }
         }
 
         var end = guestAddress + size;
@@ -1622,9 +1646,13 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                 // SynchronizeBuffer takes for this read-only call), and the block summary
                 // answers that without a lock for the common all-clean case.
                 if (_tracker.HasCpuDirtyPages(start, finish - start))
+                {
+                    remember = false;
                     _ = SynchronizeBuffer(buffer, start, finish - start, false, false, preserveCpuWriteHotPages: false);
+                }
             }
         }
+        if (remember) _cleanSyncs![slot] = proof;
     }
 
     // Tests use lower thresholds to check collection without large allocations.
