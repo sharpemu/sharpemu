@@ -143,6 +143,11 @@ public static class SaveDataStorage
             }
             catch (Exception exception) when (exception is JsonException or IOException or UnauthorizedAccessException)
             {
+                if (exception is UnauthorizedAccessException)
+                {
+                    SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked((UnauthorizedAccessException)exception);
+                }
+
                 // Fall through to defaults on a corrupt or unreadable metadata file.
             }
         }

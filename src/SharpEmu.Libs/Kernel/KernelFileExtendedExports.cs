@@ -440,6 +440,11 @@ public static partial class KernelMemoryCompatExports
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
         }
+        catch (UnauthorizedAccessException)
+        {
+            SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(hostPath);
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
+        }
         catch (IOException)
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
@@ -497,6 +502,12 @@ public static partial class KernelMemoryCompatExports
         catch (DirectoryNotFoundException)
         {
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(fromHost);
+            SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(toHost);
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
         }
         catch (IOException)
         {
