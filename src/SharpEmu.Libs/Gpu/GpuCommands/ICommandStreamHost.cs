@@ -96,7 +96,16 @@ public readonly record struct EndOfPipeWrite(
     ulong FlipRequestId = 0,
     bool WaitForGpu = false,
     // SHARPEMU_END_OF_PIPE_SOFT_WAITS: the host names the GPU tick that completes this write.
-    EndOfPipeLanding? Landing = null);
+    EndOfPipeLanding? Landing = null,
+    // The packet asked for the reference clock; Value is only the clock the stream saw when it
+    // read the packet. The interrupt kinds carry this flag too, as they have no clock kind.
+    bool ClockAtCompletion = false)
+{
+    // Hardware samples the clock when the end-of-pipe event fires, after all earlier work finished.
+    // A host that completes the write later replaces Value with the clock read at that moment.
+    public bool SamplesClockAtCompletion =>
+        ClockAtCompletion || Kind is EndOfPipeWriteKind.ClockWrite or EndOfPipeWriteKind.ClockWriteBack;
+}
 
 // Everything a packet handler needs from the renderer, the caches, the scheduler and video out.
 public interface ICommandStreamHost

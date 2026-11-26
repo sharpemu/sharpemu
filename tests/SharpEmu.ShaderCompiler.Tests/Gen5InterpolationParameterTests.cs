@@ -263,11 +263,13 @@ public sealed class Gen5InterpolationParameterTests
     [InlineData(ShaderStage.Vertex, 64u)]
     public void LaneSpills_AreReadBackWithoutTheHostSubgroup(ShaderStage stage, uint waveSize)
     {
+        // Lane bits above the wave size are ignored: 37 would alias lane 5 in a wave32.
+        var second = waveSize == 32 ? 21u : 37u;
         var program = ResourceTestProgram.Program(
             ResourceTestProgram.WriteLane(0, vectorRegister: 18, scalarRegister: 84, lane: 5),
-            ResourceTestProgram.WriteLane(8, vectorRegister: 18, scalarRegister: 85, lane: 37),
+            ResourceTestProgram.WriteLane(8, vectorRegister: 18, scalarRegister: 85, lane: second),
             ResourceTestProgram.ReadLane(16, scalarRegister: 86, vectorRegister: 18, lane: 5),
-            ResourceTestProgram.ReadLane(24, scalarRegister: 87, vectorRegister: 18, lane: 37),
+            ResourceTestProgram.ReadLane(24, scalarRegister: 87, vectorRegister: 18, lane: second),
             ResourceTestProgram.EndProgram(32));
         var (plan, resources, layout) = ResourceTestProgram.Prepare(program, stage, userDataCount: 0);
         var request = new ShaderCompileRequest(plan, resources, layout) { WaveSize = waveSize, EnableGraphicsSubgroupOperations = true };
@@ -275,7 +277,7 @@ public sealed class Gen5InterpolationParameterTests
         Assert.DoesNotContain(Instructions(shader.Spirv), instruction => instruction.Opcode == SpirvOp.GroupNonUniformBroadcast);
         var text = System.Text.Encoding.ASCII.GetString(shader.Spirv);
         Assert.Contains("v18_lane5", text, StringComparison.Ordinal);
-        Assert.Contains("v18_lane37", text, StringComparison.Ordinal);
+        Assert.Contains($"v18_lane{second}", text, StringComparison.Ordinal);
         ValidateWhenAvailable(shader.Spirv);
     }
 
@@ -295,6 +297,36 @@ public sealed class Gen5InterpolationParameterTests
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
         Assert.Equal(broadcasts, Instructions(shader.Spirv).Count(instruction => instruction.Opcode == SpirvOp.GroupNonUniformBroadcast));
         ValidateWhenAvailable(shader.Spirv);
+    }
+
+    [Theory]
+    [InlineData(ShaderStage.Pixel)]
+    [InlineData(ShaderStage.Vertex)]
+    public void ReadlaneInAWave32GraphicsShader_ShufflesFromThePresentSelectedLane(ShaderStage stage)
+    {
+        var program = ResourceTestProgram.Program(
+            ResourceTestProgram.ReadLane(0, scalarRegister: 86, vectorRegister: 19, lane: 63),
+            ResourceTestProgram.EndProgram(8));
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, stage, userDataCount: 0);
+        var request = new ShaderCompileRequest(plan, resources, layout) { WaveSize = 32, EnableGraphicsSubgroupOperations = true };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        var instructions = Instructions(shader.Spirv);
+        Assert.Contains(instructions, instruction => instruction.Opcode == SpirvOp.GroupNonUniformShuffle);
+        Assert.Contains(instructions, instruction => instruction.Opcode == SpirvOp.GroupNonUniformBallot);
+        Assert.DoesNotContain(instructions, instruction => instruction.Opcode == SpirvOp.GroupNonUniformBroadcast);
+        ValidateWhenAvailable(shader.Spirv);
+    }
+
+    [Fact]
+    public void ReadlaneWithoutGraphicsSubgroups_StaysOnTheCurrentLane()
+    {
+        var program = ResourceTestProgram.Program(
+            ResourceTestProgram.ReadLane(0, scalarRegister: 86, vectorRegister: 19, lane: 31),
+            ResourceTestProgram.EndProgram(8));
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, ShaderStage.Pixel, userDataCount: 0);
+        var request = new ShaderCompileRequest(plan, resources, layout) { WaveSize = 32, EnableGraphicsSubgroupOperations = false };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Assert.DoesNotContain(Instructions(shader.Spirv), instruction => instruction.Opcode == SpirvOp.GroupNonUniformShuffle);
     }
 
     private static ShaderCompileRequest Request(

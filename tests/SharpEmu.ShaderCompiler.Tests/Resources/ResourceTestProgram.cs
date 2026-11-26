@@ -167,6 +167,14 @@ internal static class ResourceTestProgram
 
     public static Gen5ShaderProgram Program(params Gen5ShaderInstruction[] instructions) => new(0, instructions);
 
+    // A GDS access is relative to the window M0 gives (base in M0[31:16], size in M0[15:0]); this sets the window of the
+    // whole share, at base 0, before the program, whose instructions move 8 bytes later.
+    public static Gen5ShaderProgram WithWholeGdsWindow(Gen5ShaderProgram program) =>
+        program with
+        {
+            Instructions = [MoveScalar(0, 124, 0xFFFF), .. program.Instructions.Select(instruction => instruction with { Pc = instruction.Pc + 8 })],
+        };
+
     // The helpers plan scalar data reads into the host-flattened table unless a test asks for device reads, whatever the
     // process default (ScalarDataReadPolicy).
     public static ShaderResourcePlan Extract(Gen5ShaderProgram program, uint userDataBase = 0, uint userDataCount = 64, ShaderStage stage = ShaderStage.Compute,

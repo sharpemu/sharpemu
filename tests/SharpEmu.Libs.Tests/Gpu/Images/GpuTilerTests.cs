@@ -249,6 +249,89 @@ public sealed class GpuTilerTests : IClassFixture<HeadlessVulkanFixture>
         harness.AssertNoValidationMessages();
     }
 
+    [Theory]
+    [InlineData(1u)]
+    [InlineData(2u)]
+    [InlineData(4u)]
+    [InlineData(8u)]
+    [InlineData(16u)]
+    public void ExpandedSourceOffset_MapsEveryByteOfABlockToItsFirstElement(uint bytes)
+    {
+        for (ulong block = 0; block < 3; block++)
+        {
+            for (ulong offset = block * 256; offset < (block + 1) * 256; offset++)
+            {
+                Assert.Equal(block * 256 + offset % bytes, GpuTiler.ExpandedSourceOffset(offset, bytes));
+                Assert.True(GpuTiler.ExpandedSourceOffset(offset, bytes) < block * 256 + bytes);
+            }
+        }
+    }
+
+    [Fact]
+    public void TileTransferArguments_MatchTheShaderArgumentBlock()
+    {
+        Assert.Equal(TileTransferArguments.Size, (uint)System.Runtime.InteropServices.Marshal.SizeOf<TileTransferArguments>());
+        Assert.Equal((uint)SharpEmu.ShaderCompiler.Vulkan.TilerShaders.ArgumentCount * 4, TileTransferArguments.Size);
+        Assert.Equal(SharpEmu.ShaderCompiler.Vulkan.TilerShaders.ExpandBlocksArgument * 4,
+            (uint)System.Runtime.InteropServices.Marshal.OffsetOf<TileTransferArguments>(nameof(TileTransferArguments.ExpandBlocks)));
+    }
+
+    [Fact]
+    public void CanExpandBlocks_RequiresWholeBlocksOnABlockBoundary()
+    {
+        var transfer = new TileTransfer { BytesPerElement = 4, TiledOffset = 0x10000 };
+        Assert.True(GpuTiler.CanExpandBlocks(transfer));
+        Assert.False(GpuTiler.CanExpandBlocks(transfer with { TiledOffset = 0x10080 }));
+        Assert.False(GpuTiler.CanExpandBlocks(transfer with { Tail = true }));
+        Assert.False(GpuTiler.CanExpandBlocks(transfer with { BytesPerElement = 3 }));
+    }
+
+    // DCC key 0x10: a detile with expansion equals a plain detile of a source whose every 256-byte block
+    // repeats its first element.
+    [Fact]
+    public void Detile_WithBlockExpansionReadsEveryElementAsItsBlocksFirst()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        var failures = new List<string>();
+        var checkedCases = 0;
+        foreach (var tilerCase in TilerCases.All())
+        {
+            var transfer = tilerCase.Transfer;
+            if (tilerCase.Tiled.Length == 0 || !GpuTiler.CanExpandBlocks(transfer) || transfer.TiledSize % 256 != 0 ||
+                transfer.Kind is not (TileBlockKind.Standard256B or TileBlockKind.Standard64KB or TileBlockKind.RenderTarget64KB))
+            {
+                continue;
+            }
+
+            var expanded = new byte[tilerCase.Tiled.Length];
+            for (var index = 0; index < expanded.Length; index++)
+            {
+                expanded[index] = tilerCase.Tiled[GpuTiler.ExpandedSourceOffset((ulong)index, transfer.BytesPerElement)];
+            }
+
+            var transfers = new[] { transfer };
+            var source = harness.Upload(tilerCase.Tiled, transfer.TiledSize);
+            var reference = harness.Upload(expanded, transfer.TiledSize);
+            var viaFlag = harness.Run(() => harness.Tiler.Detile(source.Handle, 0, transfer.TiledSize, transfer.LinearSize, transfers, expandBlocks: true));
+            var viaReference = harness.Run(() => harness.Tiler.Detile(reference.Handle, 0, transfer.TiledSize, transfer.LinearSize, transfers));
+            var actual = harness.ReadBack(viaFlag.Buffer, viaFlag.Offset, transfer.LinearSize);
+            var expected = harness.ReadBack(viaReference.Buffer, viaReference.Offset, transfer.LinearSize);
+            MaskPadding(actual, transfer);
+            MaskPadding(expected, transfer);
+            if (!actual.AsSpan().SequenceEqual(expected))
+            {
+                failures.Add(tilerCase.Name);
+            }
+
+            checkedCases++;
+        }
+
+        Assert.True(checkedCases > 0);
+        Assert.True(failures.Count == 0, string.Join(Environment.NewLine, failures));
+        harness.AssertNoValidationMessages();
+    }
+
     // A 4 KiB tiled view may start half a block into an allocation (a T# is only 256-byte aligned);
     // the swizzle is relative to the view base, so the bytes match the aligned CPU twin.
     [Fact]

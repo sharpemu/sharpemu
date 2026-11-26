@@ -189,21 +189,36 @@ public sealed partial class ResourceTracker
             _graph.HasNonZeroBitScanInput(key))
             return 32;
 
-        if (!_uses.TryGetValue(key, out var uses))
-            return 0;
-
-        foreach (var use in uses)
+        if (_uses.TryGetValue(key, out var uses))
         {
-            if (use.Kind != ScalarValueKind.Operation || use.Operation != ScalarOperation.ULessThan32 || use.Operands.Length != 2 ||
-                !ReferenceEquals(use.Operands[0], key) || !use.Operands[1].IsConstant)
-                continue;
+            foreach (var use in uses)
+            {
+                if (use.Kind != ScalarValueKind.Operation || use.Operation != ScalarOperation.ULessThan32 || use.Operands.Length != 2 ||
+                    !ReferenceEquals(use.Operands[0], key) || !use.Operands[1].IsConstant)
+                    continue;
 
-            var limit = use.Operands[1].ConstantU32;
-            if (limit is > 0 and <= MaxDenseIndirectImageEntries)
-                return limit;
+                var limit = use.Operands[1].ConstantU32;
+                if (limit is > 0 and <= MaxDenseIndirectImageEntries)
+                    return limit;
+            }
         }
 
-        return 0;
+        return InductionKeyBound(key);
+    }
+
+    // A counted loop 0, 1, ... N-1 whose key is the induction phi (or an invariant phi
+    // standing for it in an inner loop), bounded by a guard on the phi or its next value.
+    private uint InductionKeyBound(ScalarValue key)
+    {
+        var induction = BufferCandidateTablePlanner.ResolveForwardingPhi(_plan, key);
+        if (!BufferCandidateTablePlanner.TryProveInductionBound(_plan, induction, out var initial, out var step,
+                out var limit, out var inclusive, allowSigned: true) ||
+            step != 1 || !initial.IsConstant || initial.ConstantU32 > int.MaxValue || limit is null || !limit.IsConstant)
+            return 0;
+
+        var count = (ulong)limit.ConstantU32 + (inclusive ? 1u : 0u);
+        // Signed compares are only sound for a non-negative constant limit.
+        return limit.ConstantU32 <= int.MaxValue && count is > 0 and <= MaxDenseIndirectImageEntries ? (uint)count : 0;
     }
 
     // Post-process kernels can select a descriptor per active bit in a scalar mask:

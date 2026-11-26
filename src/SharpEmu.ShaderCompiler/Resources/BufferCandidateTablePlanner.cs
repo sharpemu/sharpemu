@@ -189,13 +189,16 @@ internal static class BufferCandidateTablePlanner
     // A canonical unsigned induction: the value is a phi with a constant initial and an
     // add-recurrence, and a branch guarded by an unsigned comparison against the phi
     // lives at the loop header or one of its predecessors.
-    private static bool TryProveInductionBound(
+    // allowSigned additionally accepts signed comparisons; the caller must then know the
+    // induction starts non-negative and cannot wrap before reaching the limit.
+    internal static bool TryProveInductionBound(
         ShaderResourcePlan plan,
         ScalarValue index,
         out ScalarValue initial,
         out uint step,
         out ScalarValue? limit,
-        out bool inclusive)
+        out bool inclusive,
+        bool allowSigned = false)
     {
         initial = null!;
         step = 0;
@@ -212,11 +215,13 @@ internal static class BufferCandidateTablePlanner
         {
             if (operand.Kind == ScalarValueKind.Operation && operand.Operation == ScalarOperation.IAdd32)
             {
-                if (ReferenceEquals(operand.Operands[0], index) && operand.Operands[1].IsConstant)
+                // The increment may read an invariant phi that stands for the induction
+                // itself (an inner loop that does not redefine the register).
+                if (IsInduction(plan, operand.Operands[0], index) && operand.Operands[1].IsConstant)
                 {
                     step = operand.Operands[1].ConstantU32;
                 }
-                else if (ReferenceEquals(operand.Operands[1], index) && operand.Operands[0].IsConstant)
+                else if (IsInduction(plan, operand.Operands[1], index) && operand.Operands[0].IsConstant)
                 {
                     step = operand.Operands[0].ConstantU32;
                 }
@@ -269,6 +274,22 @@ internal static class BufferCandidateTablePlanner
                     bound = condition.Operands[0];
                     boundInclusive = true;
                     break;
+                case ScalarOperation.SLessThan32 when allowSigned && MatchesIndex(plan, condition.Operands[0], index, step):
+                    bound = condition.Operands[1];
+                    boundInclusive = false;
+                    break;
+                case ScalarOperation.SLessThanEqual32 when allowSigned && MatchesIndex(plan, condition.Operands[0], index, step):
+                    bound = condition.Operands[1];
+                    boundInclusive = true;
+                    break;
+                case ScalarOperation.SGreaterThan32 when allowSigned && MatchesIndex(plan, condition.Operands[1], index, step):
+                    bound = condition.Operands[0];
+                    boundInclusive = false;
+                    break;
+                case ScalarOperation.SGreaterThanEqual32 when allowSigned && MatchesIndex(plan, condition.Operands[1], index, step):
+                    bound = condition.Operands[0];
+                    boundInclusive = true;
+                    break;
                 default:
                     continue;
             }
@@ -305,11 +326,53 @@ internal static class BufferCandidateTablePlanner
         return limit is not null && guardBlock is not null;
     }
 
+    private static bool IsInduction(ShaderResourcePlan plan, ScalarValue value, ScalarValue index) =>
+        ResolveForwardingPhi(plan, value) is var resolved && (ReferenceEquals(resolved, index) || plan.Graph.Equivalent(resolved, index));
+
+    // A phi that only merges one outer value with itself (the register is untouched by an
+    // inner loop) stands for that outer value, even when it is itself an induction phi,
+    // which ResolveInvariantPhi does not see through.
+    internal static ScalarValue ResolveForwardingPhi(ShaderResourcePlan plan, ScalarValue value)
+    {
+        for (var depth = 0; depth < 8 && value.Kind == ScalarValueKind.Phi; depth++)
+        {
+            if (plan.Graph.ResolveInvariantPhi(value) is { } invariant)
+            {
+                return invariant;
+            }
+
+            ScalarValue? other = null;
+            foreach (var operand in value.Operands)
+            {
+                if (ReferenceEquals(operand, value))
+                {
+                    continue;
+                }
+
+                if (other is not null && !ReferenceEquals(other, operand))
+                {
+                    return value;
+                }
+
+                other = operand;
+            }
+
+            if (other is null)
+            {
+                return value;
+            }
+
+            value = other;
+        }
+
+        return value;
+    }
+
     // The guard compares either the induction value itself or its next value; both bound
     // the same executed set, so a one-step add of the phi is accepted.
     private static bool MatchesIndex(ShaderResourcePlan plan, ScalarValue operand, ScalarValue index, uint step)
     {
-        if (plan.Graph.Equivalent(operand, index))
+        if (plan.Graph.Equivalent(operand, index) || IsInduction(plan, operand, index))
         {
             return true;
         }
@@ -319,12 +382,12 @@ internal static class BufferCandidateTablePlanner
             return false;
         }
 
-        if (plan.Graph.Equivalent(operand.Operands[0], index) && operand.Operands[1].IsConstant)
+        if ((plan.Graph.Equivalent(operand.Operands[0], index) || IsInduction(plan, operand.Operands[0], index)) && operand.Operands[1].IsConstant)
         {
             return operand.Operands[1].ConstantU32 == step;
         }
 
-        if (plan.Graph.Equivalent(operand.Operands[1], index) && operand.Operands[0].IsConstant)
+        if ((plan.Graph.Equivalent(operand.Operands[1], index) || IsInduction(plan, operand.Operands[1], index)) && operand.Operands[0].IsConstant)
         {
             return operand.Operands[0].ConstantU32 == step;
         }

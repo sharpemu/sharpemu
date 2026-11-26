@@ -418,6 +418,59 @@ public sealed class DirectImageTableTests
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out _, out var spirvError), spirvError);
     }
 
+    // Six face textures read by a nested counted loop: the T# table index is the face
+    // induction (s16, 0..5) shifted left by five, guarded by a signed s_cmp_lt_i32 on its next value.
+    private static Gen5ShaderProgram CreateFaceLoopProgram(string compare = "SCmpLtI32", uint limit = 6)
+    {
+        return Program(
+            MoveScalar(0, 16, 0),
+            MoveScalar(4, 17, 0),
+            Sop2(8, "SLshlB32", 106, Gen5Operand.Scalar(16), Operand(5)),
+            ScalarLoad(12, 0, 4, 8, dynamicOffsetRegister: 106),
+            Image(20, "ImageLoad", 4, dmask: 1, vectorAddress: 1),
+            Sop2(28, "SAddI32", 17, Gen5Operand.Scalar(17), Operand(1)),
+            Sopc(32, "SCmpLtI32", Gen5Operand.Scalar(17), Operand(4)),
+            Branch(36, "SCbranchScc1", -8),
+            Sop2(40, "SAddI32", 16, Gen5Operand.Scalar(16), Operand(1)),
+            Sopc(44, compare, Gen5Operand.Scalar(16), Operand(limit)),
+            Branch(48, "SCbranchScc1", -12),
+            MoveScalar(52, 20, 0), MoveScalar(56, 21, 0), MoveScalar(60, 22, 64), MoveScalar(64, 23, 0),
+            BufferAccess(68, "BufferStoreDword", 20, vectorData: 4),
+            EndProgram(76));
+    }
+
+    [Theory]
+    [InlineData("SCmpLtI32", 6u, 6u)]
+    [InlineData("SCmpLtU32", 6u, 6u)]
+    [InlineData("SCmpLeI32", 5u, 6u)]
+    public void CountedFaceLoopBoundsTheDenseImageTable(string compare, uint limit, uint expectedBound)
+    {
+        var plan = ShaderResourcePlan.Extract(CreateFaceLoopProgram(compare, limit), ShaderStage.Compute, Hash, 0, 2);
+        var selector = plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage!;
+        Assert.True(selector.Dense);
+        Assert.Equal(expectedBound, selector.KeyBound);
+        Assert.Equal(0u, selector.TableOffset);
+
+        var highest = 0ul;
+        bool Read(ulong address, out uint word)
+        {
+            highest = Math.Max(highest, address);
+            return ReadDescriptor(address + 312, out word);
+        }
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        Assert.True(ResourceMaterializer.Materialize(plan, Inputs([0x1000, 0], Read, Read), ref snapshot, ref specialization, out var failure), $"materialize {failure}");
+        Assert.True(highest < 0x1000 + expectedBound * 32, $"read 0x{highest:X} beyond the table");
+    }
+
+    [Fact]
+    public void FaceLoopWithAnOversizedLimitIsNotDense()
+    {
+        var plan = ShaderResourcePlan.Extract(CreateFaceLoopProgram(limit: 100000), ShaderStage.Compute, Hash, 0, 2);
+        var selector = plan.DescriptorSources[(int)plan.Info.Images[0].Source].IndirectImage;
+        Assert.True(selector is null || !selector.Dense || selector.KeyBound == 0);
+    }
+
     [Theory]
     [InlineData(600u, 8u)]
     [InlineData(444u, 3u)]

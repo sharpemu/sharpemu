@@ -759,7 +759,8 @@ internal sealed partial class ShaderProgramCache
                     outcome = MaterializationTally.Outcome.Full;
                 }
 
-                if (!materialized && materializationFailure is ResourceMaterializationFailure.IncompatibleImageCandidates or ResourceMaterializationFailure.ImageCapacityExceeded &&
+                if (!materialized && materializationFailure is ResourceMaterializationFailure.IncompatibleImageCandidates or ResourceMaterializationFailure.ImageCapacityExceeded
+                        or ResourceMaterializationFailure.OversizedImageTable &&
                     preparation is null && PreferHeapRecords(source, options, entry))
                 {
                     // The table binds every image it can select, and this one selects more than a draw may bind. The
@@ -769,7 +770,7 @@ internal sealed partial class ShaderProgramCache
                         captureIndirectImageFailure);
                 }
 
-                if (!materialized && materializationFailure == ResourceMaterializationFailure.IncompatibleImageCandidates &&
+                if (!materialized && materializationFailure is ResourceMaterializationFailure.IncompatibleImageCandidates or ResourceMaterializationFailure.OversizedImageTable &&
                     !entry.Plan.NullIncompatibleImageCandidates)
                 {
                     // No heap record serves the table, and an image of another kind cannot share its binding. That image
@@ -794,7 +795,8 @@ internal sealed partial class ShaderProgramCache
                     }
 
                     var message = $"The shader resources could not be materialized: stage={source.Label} hash=0x{source.Hash:X16} shader=0x{source.Address:X16} reason={materializationFailure}.";
-                    if (materializationFailure is ResourceMaterializationFailure.IncompatibleImageCandidates or ResourceMaterializationFailure.ImageCapacityExceeded)
+                    if (materializationFailure is ResourceMaterializationFailure.IncompatibleImageCandidates or ResourceMaterializationFailure.ImageCapacityExceeded
+                        or ResourceMaterializationFailure.OversizedImageTable)
                         throw new ShaderProgramRejectedException(message);
                     throw SubmissionScheduler.Fatal(message);
                 }
@@ -1534,6 +1536,7 @@ internal sealed partial class ShaderProgramCache
                     state.Add(output.ExportTarget);
                     state.Add(output.Index);
                     state.Add(output.DualSourceAlpha ? 1u : 0u);
+                    state.Add((uint)output.ObjectId);
                 }
                 break;
             case ShaderStage.Mesh:
@@ -1566,8 +1569,9 @@ internal sealed partial class ShaderProgramCache
     }
 
     private ShaderResourcePlan ExtractPlan(ShaderSource source, StageCompileOptions options, Gen5ShaderProgram program,
-        EmbeddedVertexFetchPlan? fetch, bool preferHeapRecords, bool dumpPlanning) =>
-        ShaderResourcePlan.Extract(program, source.Stage, source.Hash, source.UserDataBase, (uint)source.UserData.Length,
+        EmbeddedVertexFetchPlan? fetch, bool preferHeapRecords, bool dumpPlanning)
+    {
+        var plan = ShaderResourcePlan.Extract(program, source.Stage, source.Hash, source.UserDataBase, (uint)source.UserData.Length,
             fetch?.Loads.Select(load => load.Pc).ToHashSet(),
             beforeResourceTracking: dumpPlanning ? resourcePlan => ShaderPlanningDump.WriteGraph(source, resourcePlan) : null,
             // Resource planning must use the guest wave size of shader compilation.
@@ -1584,6 +1588,10 @@ internal sealed partial class ShaderProgramCache
             normalizeImageDescriptor: ImageNormalizer(source.Registered.Frontend),
             imageNormalizationVersion: source.Registered.Frontend?.ImageNormalizationVersion,
             preferHeapRecords: preferHeapRecords);
+        // An image table too large to enumerate is replanned with heap records (see PreferHeapRecords) before it reads as null.
+        plan.ReplanOversizedImageTables = _host.SupportsBindlessHeap;
+        return plan;
+    }
 
     // A program an earlier session had to replan (PreferHeapRecords) is planned so from the start, as its prewarm record is.
     private bool PrefersHeapRecords(ShaderSource source) =>
@@ -1933,7 +1941,8 @@ internal sealed partial class ShaderProgramCache
                     usesMeshDrawParameters: source.Stage == ShaderStage.Mesh, pushDataAtTop: PushDataAtTop(source.Stage),
                     tableBlocks: UsesTableBlocks(source.Stage),
                     usesBufferLengths: source.Registered.Frontend?.RequiresExplicitBufferLengths ?? false,
-                    usesTessellationData: options.Tessellation is not null || options.TessellationHull is not null);
+                    usesTessellationData: options.Tessellation is not null || options.TessellationHull is not null,
+                    usesObjectId: source.Stage == ShaderStage.Pixel && options.PixelOutputs.Any(static output => output.ObjectId != Gen5PixelObjectId.None));
             }
             catch (ResourcePlanException exception)
             {
@@ -2315,7 +2324,8 @@ internal sealed partial class ShaderProgramCache
 
     private static BindingLayout AllocateLayout(Gen5ShaderProgram program, ShaderResourcePlan plan, SpecializedResourceInfo resources,
         uint userDataBase, uint userDataCount, uint pushDataCursor, bool usesDispatchThreadLimits, bool usesMeshDrawParameters = false,
-        bool pushDataAtTop = false, bool usesBufferLengths = false, bool usesTessellationData = false, bool tableBlocks = false) =>
+        bool pushDataAtTop = false, bool usesBufferLengths = false, bool usesTessellationData = false, bool tableBlocks = false,
+        bool usesObjectId = false) =>
         BindingLayout.Allocate(
             resources.Info,
             BindingLayout.CollectUserDataRegisters(program, userDataBase, userDataCount, plan.Graph.ExcludedUserDataRegisters),
@@ -2329,7 +2339,7 @@ internal sealed partial class ShaderProgramCache
             callTargetCount: BindingLayout.CountCallTargets(program),
             pushDataAtTop: pushDataAtTop,
             usesBufferLengths: usesBufferLengths,
-            usesTessellationData: usesTessellationData, tableBlock: tableBlocks);
+            usesTessellationData: usesTessellationData, tableBlock: tableBlocks, usesObjectId: usesObjectId);
 
     private static ShaderCompileRequest BuildComputeRequest(ShaderResourcePlan plan, SpecializedResourceInfo resources, BindingLayout layout,
         ComputeInputInfo info, Gen5ComputeSystemRegisters? systemRegisters, bool sharedInt64Atomics, bool execGuardElision,
@@ -2517,7 +2527,8 @@ internal sealed partial class ShaderProgramCache
             var resources = ResourceMaterializer.ApplyTo(plan, specialization);
             layout = AllocateLayout(program, plan, resources, record.UserDataBase, record.UserDataCount, record.PushDataCursor, false,
                 usesBufferLengths: frontend?.RequiresExplicitBufferLengths ?? false,
-                tableBlocks: UsesTableBlocks(host, ShaderStage.Pixel));
+                tableBlocks: UsesTableBlocks(host, ShaderStage.Pixel),
+                usesObjectId: record.Outputs.Any(static output => output.ObjectId != Gen5PixelObjectId.None));
             var options = new StageCompileOptions
             {
                 PixelInfo = record.Info,

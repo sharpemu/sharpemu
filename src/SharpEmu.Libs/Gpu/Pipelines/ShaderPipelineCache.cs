@@ -808,6 +808,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         uint? unwrittenExportMasks, Span<byte> outputModes, Span<ColorComponentMap> outputMappings)
     {
         Span<Gen5PixelOutputBinding> outputs = stackalloc Gen5PixelOutputBinding[ContextRegisters.ColorTargetCount];
+        var objectIdSlot = ObjectIdOutput.SlotFor(context);
+        var objectId = ObjectIdOutput.AddsPrimitiveId(context) ? Gen5PixelObjectId.ObjectIdAndPrimitiveId : Gen5PixelObjectId.ObjectId;
         var outputCount = 0;
         var location = 0u;
         for (var slot = 0u; slot < ContextRegisters.ColorTargetCount; slot++)
@@ -840,10 +842,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
             outputModes[(int)slot] = (byte)(((uint)kind + 1) | (uint)((exportTarget + 1) << 4));
             outputMappings[(int)slot] = new ColorComponentMap(mapping.Packed);
             // No EXP target reaches 8 and above, so an unfed slot is declared but never written.
+            // The ObjPrimID slot has no export: the program stores its value at entry.
+            var isObjectId = slot == objectIdSlot;
             outputs[outputCount++] = new Gen5PixelOutputBinding(slot, location++, kind, mapping)
             {
-                ExportTarget = exportTarget >= 0 ? (uint)exportTarget : ContextRegisters.ColorTargetCount + slot,
+                ExportTarget = exportTarget >= 0 && !isObjectId ? (uint)exportTarget : ContextRegisters.ColorTargetCount + slot,
                 ExportFormat = ExportFormatOf(context.ShaderInterface, exportTarget),
+                ObjectId = isObjectId ? objectId : Gen5PixelObjectId.None,
             };
         }
 
@@ -1800,7 +1805,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 (context.ColorTargets[0].Info & (1u << 16)) == 0
                 ? 0 : PixelExportRouting.ExportForSlot(context.ShaderInterface, color.Slot);
             var exported = pixelStage is not null &&
-                (exportTarget >= 0 && ((pixelStage.PixelColorExportMasks >> (exportTarget * 4)) & 0xFu) != 0);
+                ((exportTarget >= 0 && ((pixelStage.PixelColorExportMasks >> (exportTarget * 4)) & 0xFu) != 0) ||
+                 color.Slot == ObjectIdOutput.SlotFor(context));
             var colorMask = exported ? color.Resolution.ExportMapping.ApplyMask(context.RenderTargetMaskForSlot(color.Slot)) : 0;
             parameters.SetColorMask(index, colorMask);
             if (RenderTrace.Enabled && RenderTrace.Pipeline())

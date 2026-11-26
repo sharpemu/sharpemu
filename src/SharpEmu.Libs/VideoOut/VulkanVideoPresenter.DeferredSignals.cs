@@ -5,6 +5,7 @@ using System.Buffers.Binary;
 using System.Collections.Concurrent;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.Gpu.Vulkan;
 
 namespace SharpEmu.Libs.VideoOut;
 
@@ -216,7 +217,9 @@ internal static unsafe partial class VulkanVideoPresenter
                 if (OnCommandThread) _commandThread!.Run(() => _scheduler.Finish());
                 else _scheduler.Finish();
             }
-            var entry = _guestPublications.AddAfterPending(queueId, write.Destination, size, write.Value, write.WaitForGpu);
+            // A clock is only right once the GPU reached it, so even an idle queue defers it.
+            var entry = _guestPublications.AddAfterPending(queueId, write.Destination, size, write.Value,
+                write.WaitForGpu || write.SamplesClockAtCompletion);
             if (entry is null) return false;
             var captured = write;
             try
@@ -232,6 +235,17 @@ internal static unsafe partial class VulkanVideoPresenter
             return true;
         }
 
+        // The stamp taken at the event's place in the stream when there was room, else the busy time at the end of
+        // the submission that holds it.
+        private static ulong ResolveGpuClock(VirtualGpuClock.StampHandle? stamp, ulong dependency)
+        {
+            if (VirtualGpuClock.Active is not { } clock)
+                return EndOfPipe.ReadReferenceClock();
+            if (stamp is { } handle && clock.ValueAt(handle) is { } value)
+                return value;
+            return clock.ValueAt(dependency);
+        }
+
         private void RecordDeferredSignal(PendingGuestPublications.Entry entry, EndOfPipeWrite write)
         {
             try
@@ -243,11 +257,18 @@ internal static unsafe partial class VulkanVideoPresenter
                     EndOfPipeWriteKind.FlipWithWrite32 or EndOfPipeWriteKind.FlipWithInterruptWriteBack32;
                 _ = CurrentRecording();
                 var dependency = _guestPublications.PredecessorTick(entry);
-                if (hasSignal || write.WaitForGpu)
+                // Like a signal, a clock event belongs to the tick that holds the work before it.
+                var samplesClock = write.SamplesClockAtCompletion;
+                if (hasSignal || write.WaitForGpu || samplesClock)
                 {
                     EnsureBatchedGuestCommands();
                     dependency = _scheduler.CurrentTick;
                 }
+                // The stamp goes into the buffer that the tick submits, at this event's place in the stream. The state
+                // handle neither flushes nor defers a barrier.
+                VirtualGpuClock.StampHandle? clockStamp = null;
+                if (samplesClock && VirtualGpuClock.Active is { } clock)
+                    clockStamp = clock.Stamp(new Silk.NET.Vulkan.CommandBuffer(_scheduler.Current.StateHandle));
                 var isFlip = write.FlipRequestId != 0;
                 Action publication = () => PublishDeferredSignal(entry, isFlip, () =>
                 {
@@ -256,7 +277,9 @@ internal static unsafe partial class VulkanVideoPresenter
                         if (entry.Size != 0)
                         {
                             Span<byte> bytes = stackalloc byte[8];
-                            BinaryPrimitives.WriteUInt64LittleEndian(bytes, write.Value);
+                            // The hardware samples the clock when the end-of-pipe event fires, after the
+                            // earlier work finished. The value read with the packet is far too early.
+                            BinaryPrimitives.WriteUInt64LittleEndian(bytes, samplesClock ? ResolveGpuClock(clockStamp, dependency) : write.Value);
                             if (!_guestMemory.TryWrite(write.Destination, bytes[..(int)entry.Size]))
                                 throw SubmissionScheduler.Fatal("Cannot publish a deferred end-of-pipe label.");
                         }

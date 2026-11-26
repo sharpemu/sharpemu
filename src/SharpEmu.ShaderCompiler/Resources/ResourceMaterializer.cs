@@ -1450,6 +1450,12 @@ public static partial class ResourceMaterializer
         {
             offsets = Enumerable.Range(0, (int)probeCount).Select(index => residue + (ulong)index * step);
         }
+        else if (plan.ReplanOversizedImageTables && !plan.NullIncompatibleImageCandidates)
+        {
+            // The heap can read the descriptor of the record each lane picks, which no binding enumeration can.
+            failure = ResourceMaterializationFailure.OversizedImageTable;
+            return false;
+        }
         else
         {
             // A table this large cannot be enumerated into bindings. The access reads the null image, as a heap record at

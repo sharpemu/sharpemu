@@ -113,6 +113,9 @@ public readonly record struct ShaderStageResources(ShaderProgramInfo? Program, R
 
     public MeshDrawParameters? MeshDraw { get; init; }
 
+    // The draw's VGT_OBJECT_ID, for a pixel program that writes the ObjPrimID output.
+    public uint ObjectId { get; init; }
+
     public uint[]? TessellationData { get; init; }
 
     public void WriteTessellationData(Span<uint> shaderData)
@@ -172,6 +175,17 @@ public readonly record struct ShaderStageResources(ShaderProgramInfo? Program, R
             shaderData[offset++] = (uint)address;
             shaderData[offset++] = (uint)(address >> 32);
         }
+    }
+
+    public void WriteObjectId(Span<uint> shaderData)
+    {
+        if (Program?.Bindings is not { UsesObjectId: true } layout) return;
+        if (shaderData.Length != layout.ShaderDataDwordCount)
+        {
+            throw SubmissionScheduler.Fatal("The pixel stage has invalid shader data for its object id.");
+        }
+
+        shaderData[(int)layout.ObjectIdDword] = ObjectId;
     }
 
     public void WriteMeshDrawParameters(Span<uint> shaderData)

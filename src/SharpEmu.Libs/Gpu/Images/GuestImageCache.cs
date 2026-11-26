@@ -472,7 +472,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
     // name memory it has unmapped since.
     public bool IsBackedImageRange(GuestSpan data) => ImageDescription.IsValidRange(data) && _backing.IsBackedRange(data.Address, 1);
 
-    // The registered depth image that owns the stencil plane starting at this span, with the
+    // The registered depth image whose stencil aspect holds the plane starting at this span, with the
     // newest GPU write when several do (a copied depth buffer shares its source's plane).
     public bool TryFindStencilOwner(GuestSpan plane, out ResourceSlotIdentifier owner)
     {
@@ -481,12 +481,13 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         long bestWrite = -1;
         _slots.ForEach((identifier, image) =>
         {
-            if (image.Registered && !image.DepthOwner.IsValid && image.Description.IsDepth && image.Description.HasStencil &&
-                image.Description.Stencil.Address == plane.Address && image.Description.Stencil.Size >= plane.Size &&
-                image.GpuWriteSequence > bestWrite)
+            if (image.DepthOwner.IsValid && image.Description.Data.Address == plane.Address &&
+                image.Description.Data.Size >= plane.Size &&
+                _slots.TryGet(image.DepthOwner) is { Registered: true, DepthOwner.IsValid: false } depth &&
+                depth.GpuWriteSequence > bestWrite)
             {
-                best = identifier;
-                bestWrite = image.GpuWriteSequence;
+                best = image.DepthOwner;
+                bestWrite = depth.GpuWriteSequence;
             }
         });
         owner = best;
@@ -645,20 +646,35 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             throw SubmissionScheduler.Fatal($"The depth-target role is invalid: role={request.Role}.");
         }
 
-        using var held = _lock.Hold();
-        var image = _slots[imageIdentifier];
-        if (!image.Registered || image.DepthOwner.IsValid || image.Binding.NeedsRebind)
+        _preparedStencilBuffers = PrepareStencilBuffers(imageIdentifier, in request);
+        try
         {
-            throw SubmissionScheduler.Fatal($"A depth target must be found again before its view is acquired: address=0x{image.Description.Data.Address:X16} registered={image.Registered} proxy={image.DepthOwner.IsValid} rebind={image.Binding.NeedsRebind}.");
-        }
+            using var held = _lock.Hold();
+            var image = _slots[imageIdentifier];
+            if (!image.Registered || image.DepthOwner.IsValid || image.Binding.NeedsRebind)
+            {
+                throw SubmissionScheduler.Fatal($"A depth target must be found again before its view is acquired: address=0x{image.Description.Data.Address:X16} registered={image.Registered} proxy={image.DepthOwner.IsValid} rebind={image.Binding.NeedsRebind}.");
+            }
 
-        TouchImage(image);
-        AcquireDepthTargetCore(imageIdentifier, image, in request);
-        return image.GetOrCreateView(request.View);
+            TouchImage(image);
+            AcquireDepthTargetCore(imageIdentifier, image, in request);
+            return image.GetOrCreateView(request.View);
+        }
+        finally
+        {
+            _preparedStencilBuffers = null;
+        }
     }
 
     private void AcquireDepthTargetCore(ResourceSlotIdentifier imageIdentifier, CachedImage image, in ImageRequest request)
     {
+        // Before the sequence below moves on, and before the new plane's bytes replace the aspect.
+        if (request.Description.HasStencil && image.Description.HasStencil &&
+            !image.Description.Stencil.Equals(StencilPlaneOfImage(image.Description, request.Description)))
+        {
+            ReleaseLeftStencilPlane(imageIdentifier, image.Description.Stencil);
+        }
+
         image.MarkGpuModified();
         image.Uses.DepthTarget = true;
         TraceVolumeState("depth-acquire", image, request);
@@ -805,20 +821,29 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
             throw SubmissionScheduler.ReadOnlyViolation("gpu written");
         }
 
-        using var held = _lock.Hold();
-        var image = _slots[imageIdentifier];
-        RecordResourceHistory("gpu-image-written", image.Description.Data.Address, image.Description.Data.Size,
-            image.Description.PixelFormat, image.Description.Extent);
-        if (!image.Registered || image.DepthOwner.IsValid)
+        // The depth may take its plane from another depth: that one's bytes are saved with a buffer obtained before the lock.
+        _preparedStencilBuffers = PrepareStencilBuffers(imageIdentifier);
+        try
         {
-            throw SubmissionScheduler.Fatal($"An image that is not available cannot be marked GPU-written: address=0x{image.Description.Data.Address:X16} registered={image.Registered} proxy={image.DepthOwner.IsValid}.");
-        }
+            using var held = _lock.Hold();
+            var image = _slots[imageIdentifier];
+            RecordResourceHistory("gpu-image-written", image.Description.Data.Address, image.Description.Data.Size,
+                image.Description.PixelFormat, image.Description.Extent);
+            if (!image.Registered || image.DepthOwner.IsValid)
+            {
+                throw SubmissionScheduler.Fatal($"An image that is not available cannot be marked GPU-written: address=0x{image.Description.Data.Address:X16} registered={image.Registered} proxy={image.DepthOwner.IsValid}.");
+            }
 
-        WatchImage(imageIdentifier);
-        TakeGpuOwnership(image);
-        if (image.Description.HasStencil)
+            WatchImage(imageIdentifier);
+            TakeGpuOwnership(image);
+            if (image.Description.HasStencil)
+            {
+                TakeStencilOwnership(imageIdentifier, image);
+            }
+        }
+        finally
         {
-            TakeStencilOwnership(imageIdentifier, image);
+            _preparedStencilBuffers = null;
         }
     }
 

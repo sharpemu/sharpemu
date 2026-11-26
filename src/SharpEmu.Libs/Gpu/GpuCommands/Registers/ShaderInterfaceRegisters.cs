@@ -26,6 +26,9 @@ public sealed class ShaderInterfaceRegisters
     public uint GeometryMaxVerticesOut;
     public uint GeometryOutputPrimitiveType;
     public uint PrimitiveIdEnable;
+    // VGT_DRAW_PAYLOAD_CNTL and PA_CL_OBJPRIM_ID_CNTL: the ObjPrimID write (ObjectIdOutput).
+    public uint DrawPayloadControl;
+    public uint ObjectPrimitiveIdControl;
     public uint VertexReuseOff;
     public uint TessellationDistribution;
     public uint LocalHullConfiguration;

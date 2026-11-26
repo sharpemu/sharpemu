@@ -14,12 +14,14 @@ internal sealed unsafe class VulkanCommandPool : IGpuCommandBufferSource, IDispo
     private readonly Device _device;
     private readonly CommandPool _pool;
     private readonly VulkanCommandProfile? _profile;
+    private readonly VirtualGpuClock? _clock;
 
-    public VulkanCommandPool(Vk vk, Device device, uint queueFamilyIndex, VulkanCommandProfile? profile)
+    public VulkanCommandPool(Vk vk, Device device, uint queueFamilyIndex, VulkanCommandProfile? profile, VirtualGpuClock? clock = null)
     {
         _vk = vk;
         _device = device;
         _profile = profile;
+        _clock = clock;
         var poolInfo = new CommandPoolCreateInfo
         {
             SType = StructureType.CommandPoolCreateInfo,
@@ -62,6 +64,7 @@ internal sealed unsafe class VulkanCommandPool : IGpuCommandBufferSource, IDispo
         };
         VulkanTickDevice.RequireSuccess(_vk.BeginCommandBuffer(new CommandBuffer(buffer), &beginInfo), "vkBeginCommandBuffer(scheduler)");
         _profile?.BeginBuffer(new CommandBuffer(buffer));
+        _clock?.BeginBuffer(new CommandBuffer(buffer));
     }
 
     public void EndBuffer(nint buffer, bool hostRead)
@@ -80,6 +83,8 @@ internal sealed unsafe class VulkanCommandPool : IGpuCommandBufferSource, IDispo
                 1, &barrier, 0, null, 0, null, BarrierSource.HostRead);
         }
 
+        // Last command of the buffer, so the end stamp covers the host-read barrier too.
+        _clock?.EndBuffer(command);
         VulkanTickDevice.RequireSuccess(_vk.EndCommandBuffer(command), "vkEndCommandBuffer(scheduler)");
     }
 
@@ -96,8 +101,9 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
     private readonly VulkanCommandPool _pool;
     private readonly List<VulkanCommandPool> _pools = new();
     private readonly VkSemaphore _timeline;
+    private readonly VirtualGpuClock? _clock;
 
-    public VulkanTickDevice(Vk vk, Device device, Queue queue, uint queueFamilyIndex, object queueGate, PhysicalDevice profilePhysicalDevice = default)
+    public VulkanTickDevice(Vk vk, Device device, Queue queue, uint queueFamilyIndex, object queueGate, PhysicalDevice profilePhysicalDevice = default, PhysicalDevice clockPhysicalDevice = default)
     {
         _vk = vk;
         _device = device;
@@ -118,7 +124,8 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
         RequireSuccess(_vk.CreateSemaphore(_device, &createInfo, null, out _timeline), "vkCreateSemaphore(scheduler timeline)");
         if (profilePhysicalDevice.Handle != 0)
             CommandProfile = new VulkanCommandProfile(vk, profilePhysicalDevice, device, queueFamilyIndex);
-        _pool = new VulkanCommandPool(vk, device, queueFamilyIndex, CommandProfile);
+        _clock = VirtualGpuClock.TryCreate(vk, clockPhysicalDevice, device, queueFamilyIndex, ReadTimeline);
+        _pool = new VulkanCommandPool(vk, device, queueFamilyIndex, CommandProfile, _clock);
     }
 
     public VulkanCommandProfile? CommandProfile { get; }
@@ -171,7 +178,7 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
 
     public IGpuCommandBufferSource CreateBufferSource()
     {
-        var pool = new VulkanCommandPool(_vk, _device, _queueFamilyIndex, null);
+        var pool = new VulkanCommandPool(_vk, _device, _queueFamilyIndex, null, _clock);
         lock (_pools)
         {
             _pools.Add(pool);
@@ -247,6 +254,19 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
                 }
             }
 
+            if (result == Result.Success && _clock is { } clock)
+            {
+                // The tick this submission signals on the scheduler timeline is when its stamps become readable.
+                for (var index = 0; index < bundle.SignalCount; index++)
+                {
+                    if (bundle.SignalSemaphores[index] == _timeline.Handle)
+                    {
+                        clock.Submitted(buffers, bundle.SignalTicks[index]);
+                        break;
+                    }
+                }
+            }
+
             failure = result.ToString();
             return result == Result.Success;
         }
@@ -255,6 +275,7 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
     public void Dispose()
     {
         CommandProfile?.Dispose();
+        _clock?.Dispose();
         _vk.DestroySemaphore(_device, _timeline, null);
         _pool.Dispose();
         lock (_pools)

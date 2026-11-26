@@ -242,6 +242,11 @@ public sealed partial class ShaderResourcePlan
     // cannot be read from the bindless heap; tables of one kind materialize the same either way.
     public bool NullIncompatibleImageCandidates { get; set; }
 
+    // A lane-chosen indirect image table too large to enumerate fails the materialization (OversizedImageTable) instead of
+    // reading as null, so the program cache can plan it again with heap records, which read the descriptor at run time.
+    // Set by the cache for a host with a bindless heap; NullIncompatibleImageCandidates then restores the null read.
+    public bool ReplanOversizedImageTables { get; set; }
+
     public static ShaderResourcePlan Extract(Gen5ShaderProgram program, ShaderStage stage, ulong hash, uint userDataBase, uint userDataCount,
         IReadOnlySet<uint>? fixedFunctionVertexLoads = null, Action<ShaderResourcePlan>? beforeResourceTracking = null, uint waveSize = 64,
         bool bindlessNullDescriptors = false, bool bindlessHeap = false, bool callRecords = false, bool callMarks = false,

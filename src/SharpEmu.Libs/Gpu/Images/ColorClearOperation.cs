@@ -5,8 +5,17 @@ using Silk.NET.Vulkan;
 
 namespace SharpEmu.Libs.Gpu.Images;
 
+internal enum ColorClearKind
+{
+    // The key code names one color; the image is cleared to it.
+    Fill,
+    // DCC key 0x10: each 256-byte block reads as its first element; the image is filled from guest memory expanded per block.
+    BlockFirstElement,
+}
+
 internal readonly record struct ColorClearOperation(
-    uint ImageLayer, ulong MetadataAddress, ulong MetadataSize, byte MetadataCode, ClearColorValue Color);
+    uint ImageLayer, ulong MetadataAddress, ulong MetadataSize, byte MetadataCode, ClearColorValue Color,
+    ColorClearKind Kind = ColorClearKind.Fill);
 
 internal struct UniformMetadataScan(byte expectedCode, ulong expectedBytes)
 {

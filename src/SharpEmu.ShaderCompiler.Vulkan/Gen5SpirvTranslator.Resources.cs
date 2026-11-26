@@ -94,6 +94,11 @@ public static partial class Gen5SpirvTranslator
                 error = "pixel outputs must contain at most eight guest slots in the 0..7 range";
                 return false;
             }
+            if (request.PixelOutputs.Any(output => output.ObjectId != Gen5PixelObjectId.None) != request.Bindings.UsesObjectId)
+            {
+                error = "the object id output and the layout's object id dword must come together";
+                return false;
+            }
 
             // A dual-source second output shares location 0 with index 1; every other output
             // has index 0 and its own location.
@@ -1203,11 +1208,31 @@ public static partial class Gen5SpirvTranslator
             return LoadMappedDeviceDword(pointer, LogicalAnd(allowed, valid));
         }
 
+        // A store through the page table changes the cache buffer behind the entry and leaves guest memory stale; the
+        // host learns of it only from the page's bit in the store bitmap, which follows the fault bitmap (see
+        // DeviceAddressPaging). Call it where the store is made, so a lane that does not store marks nothing.
+        // The trace record holds the buffer's last 16 dwords; a buffer without room for the bitmap gets no mark.
+        private void MarkDeviceStore(uint address64)
+        {
+            var masked = And64(address64, ULong(DeviceAddressMask));
+            var pageIndex = Narrow(_module.AddInstruction(SpirvOp.ShiftRightLogical, _ulongType, masked, ULong(DeviceAddressPageBits)));
+            var tableLength = _module.AddInstruction(SpirvOp.ArrayLength, _uintType, _pageTable, 0);
+            var word = IAdd(
+                _module.AddInstruction(SpirvOp.IMul, _uintType, ShiftRightLogical(tableLength, UInt(5)), UInt(DeviceAddressPaging.StoreBitmap)),
+                ShiftRightLogical(pageIndex, UInt(5)));
+            var bit = ShiftLeftLogical(UInt(1), BitwiseAnd(pageIndex, UInt(31)));
+            var inBitmap = _module.AddInstruction(SpirvOp.ULessThan, _boolType, word,
+                _module.AddInstruction(SpirvOp.ISub, _uintType, StorageBlockLength(_faultBuffer), UInt(16)));
+            EmitConditional(inBitmap, () =>
+                _module.AddInstruction(SpirvOp.AtomicOr, _uintType, BlockWordPointer(_faultBuffer, word), UInt(1), UInt(0), bit));
+        }
+
         private void StoreDeviceDword(uint address64, uint value, uint allowed)
         {
             var (pointer, valid) = ResolveDeviceAddress(address64);
             EmitConditional(LogicalAnd(allowed, valid), () =>
             {
+                MarkDeviceStore(address64);
                 _module.AddStatement(SpirvOp.Store, DeviceWordPointer(pointer), value, 2u, 4u);
             });
         }
@@ -1220,6 +1245,7 @@ public static partial class Gen5SpirvTranslator
                 var (pointer, valid) = ResolveDeviceAddress(address64);
                 EmitConditional(valid, () =>
                 {
+                    MarkDeviceStore(address64);
                     var wordPointer = DeviceWordPointer(pointer);
                     var full = _module.AddInstruction(SpirvOp.IEqual, _boolType, mask, UInt(uint.MaxValue));
                     EmitConditional(
@@ -1776,6 +1802,7 @@ public static partial class Gen5SpirvTranslator
                         var (pointer, valid) = ResolveDeviceAddress(address);
                         EmitConditional(valid, () =>
                         {
+                            MarkDeviceStore(address);
                             var original = EmitAtomic(
                                 atomicOp,
                                 _uintType,
@@ -2660,7 +2687,12 @@ public static partial class Gen5SpirvTranslator
             var atField = _module.AddInstruction(SpirvOp.IEqual, _boolType,
                 _module.AddInstruction(SpirvOp.ISub, _uintType, offset, _module.AddInstruction(SpirvOp.IMul, _uintType, record, stride)), fieldOffset);
             var inView = LogicalAnd(atField, _module.AddInstruction(SpirvOp.ULessThan, _boolType, record, records));
-            return _module.AddInstruction(SpirvOp.Select, _uintType, inView, IAdd(first, record), UInt(BindlessHeap.CallRecordNullIndex));
+            // Whatever the view's words hold, the element stays inside set 1's arrays (a descriptor index past an array is
+            // undefined and can lose the device): an element at or past BindlessHeap.Capacity reads the null element.
+            var element = IAdd(first, record);
+            var inArray = _module.AddInstruction(SpirvOp.IEqual, _boolType,
+                ShiftRightLogical(element, UInt((uint)System.Numerics.BitOperations.Log2(BindlessHeap.Capacity))), UInt(0));
+            return _module.AddInstruction(SpirvOp.Select, _uintType, LogicalAnd(inView, inArray), element, UInt(BindlessHeap.CallRecordNullIndex));
         }
 
         // One runtime array of set 1, declared at its first use. The integer declarations of an image array share its binding.
@@ -3078,9 +3110,10 @@ public static partial class Gen5SpirvTranslator
                 case "DsWriteB64":
                     EmitExecConditional(() =>
                     {
-                        var index = GlobalDataShareIndex(GetRawSource(instruction, 0), control.SingleOffsetBytes);
-                        StoreGlobalDataShareWord(index, GetRawSource(instruction, 1));
-                        StoreGlobalDataShareWord(IAdd(index, UInt(1)), GetRawSource(instruction, 2));
+                        // Each dword checks the window on its own, so a pair straddling M0's size keeps only its first.
+                        var address = GetRawSource(instruction, 0);
+                        StoreGlobalDataShareWord(GlobalDataShareIndex(address, control.SingleOffsetBytes), GetRawSource(instruction, 1));
+                        StoreGlobalDataShareWord(GlobalDataShareIndex(address, control.SingleOffsetBytes + sizeof(uint)), GetRawSource(instruction, 2));
                     });
                     return true;
                 case "DsWrite2B64":
@@ -3117,9 +3150,11 @@ public static partial class Gen5SpirvTranslator
                 }
                 case "DsReadB64":
                 {
-                    var index = GlobalDataShareIndex(GetRawSource(instruction, 0), control.SingleOffsetBytes);
-                    StoreV(instruction.Destinations[0].Value, LoadBlockWord(_globalDataShare, index));
-                    StoreV(instruction.Destinations[1].Value, LoadBlockWord(_globalDataShare, IAdd(index, UInt(1))));
+                    var address = GetRawSource(instruction, 0);
+                    var low = LoadBlockWord(_globalDataShare, GlobalDataShareIndex(address, control.SingleOffsetBytes));
+                    var high = LoadBlockWord(_globalDataShare, GlobalDataShareIndex(address, control.SingleOffsetBytes + sizeof(uint)));
+                    StoreV(instruction.Destinations[0].Value, low);
+                    StoreV(instruction.Destinations[1].Value, high);
                     return true;
                 }
                 case "DsRead2B64":
@@ -3203,7 +3238,18 @@ public static partial class Gen5SpirvTranslator
             return true;
         }
 
-        private uint GlobalDataShareIndex(uint address, uint offsetBytes) =>
+        // A GDS access addresses the window M0 gives: M0[31:16] is its base and M0[15:0] its size in bytes. An access past
+        // the size gets an index outside the buffer, so the store is dropped and the load reads 0.
+        private uint GlobalDataShareIndex(uint address, uint offsetBytes)
+        {
+            var m0 = LoadS(M0ScalarRegister);
+            var relative = offsetBytes == 0 ? address : IAdd(address, UInt(offsetBytes));
+            var inWindow = _module.AddInstruction(SpirvOp.ULessThan, _boolType, relative, BitwiseAnd(m0, UInt(0xFFFF)));
+            var index = GlobalDataShareWordIndex(IAdd(ShiftRightLogical(m0, UInt(16)), relative), 0);
+            return _module.AddInstruction(SpirvOp.Select, _uintType, inWindow, index, UInt(uint.MaxValue));
+        }
+
+        private uint GlobalDataShareWordIndex(uint address, uint offsetBytes) =>
             ShiftRightLogical(offsetBytes == 0 ? address : IAdd(address, UInt(offsetBytes)), UInt(2));
 
         private void StoreGlobalDataShareWord(uint index, uint value) =>
@@ -3306,7 +3352,7 @@ public static partial class Gen5SpirvTranslator
             var m0 = GetRawSource(instruction, 0);
             var baseAddress = ShiftRightLogical(m0, UInt(16));
             var sizeBytes = BitwiseAnd(m0, UInt(0xFFFF));
-            var index = GlobalDataShareIndex(baseAddress, offset);
+            var index = GlobalDataShareWordIndex(baseAddress, offset);
             if (ordered && (control.Offset1 & 4) != 0)
             {
                 index = IAdd(index, BitwiseAnd(m0, UInt(3)));

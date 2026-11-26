@@ -246,9 +246,9 @@ public sealed class ShaderPrewarmListTests : IDisposable
     public void TheSchemaFingerprintsKeepTheValuesOfTheRecordedLists()
     {
         Assert.Equal(0x24DB2A98u, ShaderPrewarmList.SchemaFingerprint);
-        Assert.Equal(0x31C0D60Du, ShaderPrewarmList.PixelSchemaFingerprint);
+        Assert.Equal(0x09254A77u, ShaderPrewarmList.PixelSchemaFingerprint);
         Assert.Equal(0x31C5863Bu, ShaderPrewarmList.VertexSchemaFingerprint);
-        Assert.Equal(0x25C0DD56u, ShaderPrewarmList.GraphicsSchemaFingerprint);
+        Assert.Equal(0x4AAD0D5Fu, ShaderPrewarmList.GraphicsSchemaFingerprint);
     }
 
     private sealed class SchemaSample

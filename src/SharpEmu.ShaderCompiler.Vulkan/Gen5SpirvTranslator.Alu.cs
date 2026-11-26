@@ -2883,8 +2883,10 @@ public static partial class Gen5SpirvTranslator
             var opcode = instruction.Opcode;
             if (opcode is "VCmpClassF32" or "VCmpxClassF32")
             {
+                // The class is tested on the value after its abs/neg input modifiers, so the sign
+                // comes from the modified float and not from the register bits.
                 var source = GetFloatSource(instruction, 0);
-                var raw = GetRawSource(instruction, 0);
+                var raw = Bitcast(_uintType, source);
                 var mask = GetRawSource(instruction, 1);
                 var negative = IsNotZero(BitwiseAnd(raw, UInt(0x8000_0000)));
                 var positive = _module.AddInstruction(
@@ -5988,6 +5990,14 @@ public static partial class Gen5SpirvTranslator
                 var read = ReadGraphicsLane(sourceValue, selectedLane, out _);
                 StoreS(destination, ReadLaneSpillSlot(instruction, selectedLane, read));
             }
+            else if (_subgroupInvocationIdInput != 0 &&
+                _stage is not (Gen5SpirvStage.Compute or Gen5SpirvStage.Mesh) &&
+                _waveLowering is NativeWave32Lowering or NativeWave64Lowering)
+            {
+                // The host subgroup holds the whole guest wave: every lane gets the selected lane's value.
+                var broadcast = ShuffleLane(sourceValue, PresentLaneAtOrBelow(selectedLane));
+                StoreS(destination, ReadLaneSpillSlot(instruction, selectedLane, broadcast));
+            }
             else
             {
                 // Fallback: no subgroup ops, read current lane's value, or the
@@ -5996,6 +6006,59 @@ public static partial class Gen5SpirvTranslator
             }
 
             return true;
+        }
+
+        // A partial fragment subgroup (quads never launched) has no invocation for some lanes, and
+        // shuffling from an absent one is undefined. Picks the highest present lane at or below
+        // the selected one, else the lowest present lane. Uniform when selectedLane is.
+        private uint PresentLaneAtOrBelow(uint selectedLane)
+        {
+            var wave64 = _waveLowering is NativeWave64Lowering;
+            var ballot = _module.AddInstruction(
+                SpirvOp.GroupNonUniformBallot, _uvec4Type, UInt(3), _module.ConstantBool(true));
+            var low = _module.AddInstruction(SpirvOp.CompositeExtract, _uintType, ballot, 0);
+            var allOnes = UInt(0xFFFF_FFFFu);
+            var zero = UInt(0);
+
+            if (!wave64)
+            {
+                var candidates = BitwiseAnd(low, ShiftRightLogical(allOnes, _module.AddInstruction(
+                    SpirvOp.ISub, _uintType, UInt(31), selectedLane)));
+                return _module.AddInstruction(
+                    SpirvOp.Select,
+                    _uintType,
+                    IsNotZero(candidates),
+                    Ext(75, _uintType, candidates),
+                    Ext(73, _uintType, low));
+            }
+
+            var high = _module.AddInstruction(SpirvOp.CompositeExtract, _uintType, ballot, 1);
+            var inHigh = _module.AddInstruction(SpirvOp.UGreaterThanEqual, _boolType, selectedLane, UInt(32));
+            var lowShift = _module.AddInstruction(
+                SpirvOp.Select, _uintType, inHigh, zero,
+                _module.AddInstruction(SpirvOp.ISub, _uintType, UInt(31), BitwiseAnd(selectedLane, UInt(31))));
+            var highShift = _module.AddInstruction(
+                SpirvOp.ISub, _uintType, UInt(31), BitwiseAnd(selectedLane, UInt(31)));
+            var lowMask = _module.AddInstruction(
+                SpirvOp.Select, _uintType, inHigh, allOnes, ShiftRightLogical(allOnes, lowShift));
+            var highMask = _module.AddInstruction(
+                SpirvOp.Select, _uintType, inHigh, ShiftRightLogical(allOnes, highShift), zero);
+            var lowCandidates = BitwiseAnd(low, lowMask);
+            var highCandidates = BitwiseAnd(high, highMask);
+            var lowest = _module.AddInstruction(
+                SpirvOp.Select,
+                _uintType,
+                IsNotZero(low),
+                Ext(73, _uintType, low),
+                IAdd(Ext(73, _uintType, high), UInt(32)));
+            var belowInLow = _module.AddInstruction(
+                SpirvOp.Select, _uintType, IsNotZero(lowCandidates), Ext(75, _uintType, lowCandidates), lowest);
+            return _module.AddInstruction(
+                SpirvOp.Select,
+                _uintType,
+                IsNotZero(highCandidates),
+                IAdd(Ext(75, _uintType, highCandidates), UInt(32)),
+                belowInLow);
         }
 
         private bool TryGetFixedLane(Gen5Operand operand, out uint lane)
@@ -6088,26 +6151,49 @@ public static partial class Gen5SpirvTranslator
                         : LoadV(instruction.Destinations[0].Value));
             }
 
-            var shuffled = ShuffleLane(value, targetLane);
-            if (fetchInactive)
+            if (_subgroupInvocationIdInput == 0)
             {
-                return shuffled;
+                var plain = ShuffleLane(value, targetLane);
+                return fetchInactive
+                    ? plain
+                    : _module.AddInstruction(
+                        SpirvOp.Select, _uintType, IsNotZero(ShuffleLane(_module.AddInstruction(SpirvOp.Select, _uintType, Load(_boolType, _exec), UInt(1), UInt(0)), targetLane)), plain, UInt(0));
             }
 
+            // A target lane absent from a partial fragment subgroup holds the reduction identity on
+            // hardware, which the nearest present lane below it in the row carries after a prefix scan.
+            var present = _module.AddInstruction(
+                SpirvOp.GroupNonUniformBallot, _uvec4Type, UInt(3), _module.ConstantBool(true));
+            uint PresentWord(uint laneIndex) => _waveLowering is NativeWave64Lowering
+                ? _module.AddInstruction(
+                    SpirvOp.VectorExtractDynamic, _uintType, present, ShiftRightLogical(laneIndex, UInt(5)))
+                : _module.AddInstruction(SpirvOp.CompositeExtract, _uintType, present, 0);
+            var targetInRow = BitwiseAnd(targetLane, UInt(15));
+            var targetRowBase = BitwiseAnd(targetLane, UInt(0xFFFF_FFF0));
+            var rowBits = BitwiseAnd(
+                ShiftRightLogical(PresentWord(targetLane), BitwiseAnd(targetRowBase, UInt(31))), UInt(0xFFFF));
+            var targetPresent = IsNotZero(BitwiseAnd(ShiftRightLogical(rowBits, targetInRow), UInt(1)));
+            var candidates = BitwiseAnd(
+                rowBits,
+                ShiftRightLogical(UInt(0xFFFF), _module.AddInstruction(SpirvOp.ISub, _uintType, UInt(15), targetInRow)));
+            var hasCandidate = IsNotZero(candidates);
+            var redirected = IAdd(targetRowBase, Ext(75, _uintType, candidates));
+            var sourceLane = BitwiseAnd(
+                _module.AddInstruction(SpirvOp.Select, _uintType, targetPresent, targetLane, redirected),
+                UInt(NativeLaneMask));
+            var hasSource = _module.AddInstruction(SpirvOp.LogicalOr, _boolType, targetPresent, hasCandidate);
+            var shuffled = ShuffleLane(value, sourceLane);
             var activeWord = _module.AddInstruction(
                 SpirvOp.Select,
                 _uintType,
                 Load(_boolType, _exec),
                 UInt(1),
                 UInt(0));
-            var sourceActive = IsNotZero(
-                ShuffleLane(activeWord, targetLane));
-            return _module.AddInstruction(
-                SpirvOp.Select,
-                _uintType,
-                sourceActive,
-                shuffled,
-                UInt(0));
+            var fetched = fetchInactive
+                ? shuffled
+                : _module.AddInstruction(
+                    SpirvOp.Select, _uintType, IsNotZero(ShuffleLane(activeWord, sourceLane)), shuffled, UInt(0));
+            return _module.AddInstruction(SpirvOp.Select, _uintType, hasSource, fetched, value);
         }
 
         private uint GetInt16Source(Gen5ShaderInstruction instruction, int sourceIndex, bool signed)

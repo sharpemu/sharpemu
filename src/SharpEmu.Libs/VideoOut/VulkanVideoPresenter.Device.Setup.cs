@@ -815,6 +815,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private const string ShaderClockExtensionName = "VK_KHR_shader_clock";
         private const string UnifiedImageLayoutsExtensionName = "VK_KHR_unified_image_layouts";
         private bool _supportsImageViewMinLod;
+        private bool _supportsSamplerFilterMinmax;
         private const string MeshShaderExtensionName = "VK_EXT_mesh_shader";
         private bool _supportsUnifiedImageLayouts;
 
@@ -1168,6 +1169,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _nativeFloat16Conversions &= vulkan12Features.ShaderFloat16;
             Console.Error.WriteLine($"[LOADER][INFO] Vulkan native f16 conversions: {(_nativeFloat16Conversions ? "on" : "off")}");
             _supportsShaderLayer = vulkan12Features.ShaderOutputLayer;
+            _supportsSamplerFilterMinmax = vulkan12Features.SamplerFilterMinmax;
             var supportsViewportIndexLayer = IsDeviceExtensionAvailable("VK_EXT_shader_viewport_index_layer") &&
                 vulkan12Features.ShaderOutputViewportIndex && vulkan12Features.ShaderOutputLayer;
             _supportsShaderDrawParameters = drawParametersFeatures.ShaderDrawParameters;
@@ -1354,6 +1356,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     ShaderBufferInt64Atomics = supportsBufferInt64Atomics,
                     ShaderFloat16 = _nativeFloat16Conversions,
                     ShaderOutputLayer = _supportsShaderLayer,
+                    SamplerFilterMinmax = _supportsSamplerFilterMinmax,
                     ShaderOutputViewportIndex = supportsViewportIndexLayer,
                     DescriptorIndexing = _bindlessHeapSupported,
                     RuntimeDescriptorArray = _bindlessHeapSupported,
@@ -1592,7 +1595,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _vk.GetDeviceQueue(_device, _queueFamilyIndex, 0, out _queue);
-            _deviceInfo = new GpuDeviceInfo(_vk, _physicalDevice, _device) { ImageViewMinLodSupported = _supportsImageViewMinLod };
+            _deviceInfo = new GpuDeviceInfo(_vk, _physicalDevice, _device) { ImageViewMinLodSupported = _supportsImageViewMinLod, SamplerFilterMinmaxSupported = _supportsSamplerFilterMinmax };
             if (_readbackQueueFamilyIndex is { } readbackQueueFamily)
             {
                 _vk.GetDeviceQueue(_device, readbackQueueFamily, 0, out _readbackQueue);

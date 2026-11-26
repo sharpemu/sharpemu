@@ -184,6 +184,30 @@ public sealed class BindlessHeapTests
         }
     }
 
+    // The element a heap read takes never reaches past set 1's arrays, whatever the words of its view hold: a descriptor index
+    // past an array lost the device. A view the host built stays inside; one that does not reads the null element.
+    [Fact]
+    public void AHeapReadNeverTakesAnElementPastTheArrays()
+    {
+        var program = ResourceTrackerTests.LaneIndexedImageProgram();
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(Request(program, ShaderStage.Pixel, bindlessHeap: true), out var shader, out var error), error);
+        var module = new Expressions(shader.Spirv);
+        var inside = new HeapView(First: BindlessHeap.Capacity - 100, Stride: 32, FieldOffset: 0, Records: 100);
+        var past = new HeapView(First: BindlessHeap.Capacity - 50, Stride: 32, FieldOffset: 0, Records: 100);
+        foreach (var index in module.ElementIndexes(Assert.Single(module.Arrays(0)).Array))
+        {
+            var (offset, word0, word1) = module.HeapViewInputs(index);
+            var values = new Dictionary<uint, uint> { [module.HeapClassInput(index)] = 0 };
+            uint Element(HeapView view, uint record) =>
+                module.Evaluate(index, new Dictionary<uint, uint>(values) { [offset] = record * 32, [word0] = view.Word0, [word1] = view.Word1 });
+
+            Assert.Equal(BindlessHeap.Capacity - 1, Element(inside, 99));
+            Assert.Equal(BindlessHeap.Capacity - 50, Element(past, 0));
+            Assert.Equal(BindlessHeap.CallRecordNullIndex, Element(past, 50));
+            Assert.Equal(BindlessHeap.CallRecordNullIndex, Element(past, 99));
+        }
+    }
+
     // A table of records that hold more than a descriptor, read at a record the shader picks (a terrain
     // pass reads each tile's height and mask textures from a table of 440-byte tile records): each descriptor of the
     // record is a heap view of the program, and each draw evaluates the table V# for both, with the offset of the view's

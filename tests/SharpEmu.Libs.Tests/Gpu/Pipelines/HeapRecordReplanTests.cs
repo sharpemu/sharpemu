@@ -161,4 +161,31 @@ public sealed class HeapRecordReplanTests : IDisposable
         WriteScene(materialCount: 8);
         Assert.True(TryCompile(out _, out rejection), rejection);
     }
+
+    // A pool V# declares far more records than a draw can enumerate (the Ghost of Yotei fog cards pick their record per lane
+    // from such a table). The table used to read as the null image without asking the heap; a host that has one reads it.
+    [Fact]
+    public void ATableTooLargeToEnumerateIsReadFromTheHeapWhenTheHostHasOne()
+    {
+        _guest.Host.SupportsBindlessHeap = true;
+        WriteScene(materialCount: 4, declaredCount: 0x40000);
+
+        Assert.True(TryCompile(out _, out var rejection), rejection);
+
+        var request = Assert.Single(_guest.Compiler.Requests);
+        Assert.True(request.Resources.Info.UsesBindlessHeap);
+        Assert.NotEmpty(request.HeapImageByMemoryIndex);
+    }
+
+    [Fact]
+    public void ATableTooLargeToEnumerateStillReadsAsNullWithoutTheHeap()
+    {
+        _guest.Host.SupportsBindlessHeap = false;
+        WriteScene(materialCount: 4, declaredCount: 0x40000);
+
+        Assert.True(TryCompile(out _, out var rejection), rejection);
+
+        var request = Assert.Single(_guest.Compiler.Requests);
+        Assert.False(request.Resources.Info.UsesBindlessHeap);
+    }
 }

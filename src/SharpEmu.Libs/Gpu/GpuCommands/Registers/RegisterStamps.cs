@@ -106,7 +106,7 @@ public static class RegisterStamps
 
         Range(SpiPsInputCntl0, SpiShaderColFormat, RegisterStamp.ShaderInterface);
         One(RegisterStamp.ShaderInterface, CbShaderMask, GeMaxOutputPerSubgroup, DbShaderControl, PaClClipCntl, PaClVsOutCntl,
-            VgtHosMaxTessLevel, VgtHosMinTessLevel, VgtGsOnchipCntl, VgtGsOutPrimType, VgtPrimitiveIdEn, VgtEsgsRingItemSize, VgtReuseOff,
+            VgtHosMaxTessLevel, VgtHosMinTessLevel, VgtGsOnchipCntl, VgtGsOutPrimType, VgtPrimitiveIdEn, VgtDrawPayloadCntl, PaClObjPrimIdCntl, VgtEsgsRingItemSize, VgtReuseOff,
             VgtGsMaxVertOut, GeNggSubgroupCntl, VgtTessDistribution, VgtShaderStagesEn, VgtLsHsConfig, VgtTfParam, VgtGsInstanceCnt,
             PaScShaderControl);
 

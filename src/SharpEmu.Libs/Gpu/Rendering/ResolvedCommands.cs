@@ -86,6 +86,7 @@ internal sealed class ResolvedDraw
     public PrimitiveTopology Topology;
     public bool PrimitiveRestart;
     public GuestPrimitiveType PrimitiveType;
+    public uint ObjectId;
     public DrawEmission Emission;
     public uint[]? IndirectOffsets;
     public uint IndirectBytes;
@@ -181,6 +182,7 @@ internal sealed class ResolvedDraw
         Topology = default;
         PrimitiveRestart = false;
         PrimitiveType = default;
+        ObjectId = 0;
         Emission = default;
         IndirectOffsets = null;
         IndirectBytes = 0;
