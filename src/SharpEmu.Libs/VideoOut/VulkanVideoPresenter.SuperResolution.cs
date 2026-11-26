@@ -1,9 +1,11 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Diagnostics;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Upscaling;
+using SharpEmu.Libs.Psml;
 using SharpEmu.Libs.VideoOut.Upscaling;
 using Silk.NET.Vulkan;
 using VkSemaphore = Silk.NET.Vulkan.Semaphore;
@@ -217,17 +219,28 @@ internal static unsafe partial class VulkanVideoPresenter
             };
 
             var outputImage = bindings[0].Image;
-            var passThrough = (dispatch.Flags & SuperResolutionFlags.PassThrough) != 0;
-            var recorded = false;
-            if (!passThrough && frame.Depth.IsValid && frame.MotionVectors.IsValid)
+            var capture = PsmlExports.BeginCaptureFrame(dispatch.ContextId);
+            if (capture is { } captureFrame)
             {
-                recorded = service.TryDlss(BeginBatchedGuestCommands(), frame);
-                if (recorded)
+                Debug.Assert(!_worker);
+                for (var index = 1; index < bindings.Length; index++)
                 {
-                    ForgetNativeShadow();
+                    if (bindings[index].View.Handle != 0)
+                    {
+                        _imageCache.SaveDiagnosticImage(bindings[index].Image, $"{captureFrame.Path}-{inputs[index].Input}", pssrCapture: true);
+                    }
                 }
             }
 
+            var passThrough = (dispatch.Flags & SuperResolutionFlags.PassThrough) != 0;
+            var dlss = !passThrough && frame.Depth.IsValid && frame.MotionVectors.IsValid &&
+                service.TryDlss(BeginBatchedGuestCommands(), frame);
+            if (dlss)
+            {
+                ForgetNativeShadow();
+            }
+
+            var recorded = dlss;
             if (!recorded)
             {
                 var command = BeginBatchedGuestCommands();
@@ -239,6 +252,19 @@ internal static unsafe partial class VulkanVideoPresenter
             if (recorded)
             {
                 _imageCache.MarkGpuWritten(bindings[0].Identifier);
+            }
+
+            if (capture is { } finishedCapture)
+            {
+                if (recorded)
+                {
+                    _imageCache.SaveDiagnosticImage(outputImage, $"{finishedCapture.Path}-OutputColor", pssrCapture: true);
+                }
+
+                // The image callbacks for this dispatch are already ahead of this completion.
+                _scheduler.QueueCompletionAction(finishedCapture.Complete);
+                Console.Error.WriteLine(FormattableString.Invariant(
+                    $"[PSSR][INFO] Capture context={dispatch.ContextId} backend={(dlss ? "DLSS" : recorded ? "Basic" : "none")} render={renderWidth}x{renderHeight}+{renderX},{renderY} output={outputWidth}x{outputHeight} jitter={dispatch.JitterX},{dispatch.JitterY} path={finishedCapture.Path}"));
             }
         }
 

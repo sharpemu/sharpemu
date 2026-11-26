@@ -18,14 +18,42 @@ public static class PsmlExports
     private const int ContextOutputSizeOffset = 0x18;
     private const int ContextNameOffset = 0x30;
     private const uint MaxSurfaceSide = 16384;
+    private const int InvalidCaptureContext = unchecked((int)0x8A810005);
 
     private static readonly Lock Gate = new();
     private static readonly Dictionary<ulong, uint> SharedResources = new();
     private static readonly Dictionary<ulong, ContextState> Contexts = new();
     private static uint _nextContextId;
     private static int _dispatchesTraced;
+    private static CaptureRequest? _capture;
 
     private sealed record ContextState(uint Id, uint OutputWidth, uint OutputHeight, string Name);
+
+    private sealed class CaptureRequest(uint? contextId, int frames, string directory)
+    {
+        private int _sequence;
+
+        public uint? ContextId { get; } = contextId;
+        public int Remaining { get; set; } = frames;
+        public int Pending { get; set; }
+
+        public string BeginFrame()
+        {
+            Pending++;
+            Remaining--;
+            _sequence++;
+            return Path.Combine(directory, $"frame-{_sequence:D2}");
+        }
+
+        public void CompleteFrame()
+        {
+            lock (Gate)
+            {
+                Pending--;
+                FinishCaptureIfIdle(this);
+            }
+        }
+    }
 
     [SysAbiExport(
         Nid = "3WVD91e12ZQ",
@@ -145,7 +173,11 @@ public static class PsmlExports
         var handle = ctx[CpuRegister.Rdi];
         lock (Gate)
         {
-            Contexts.Remove(handle);
+            if (Contexts.Remove(handle, out var state) && _capture is { } capture && capture.ContextId == state.Id)
+            {
+                capture.Remaining = 0;
+                FinishCaptureIfIdle(capture);
+            }
         }
 
         Trace($"release_context handle=0x{handle:X16}");
@@ -230,14 +262,102 @@ public static class PsmlExports
         ExportName = "scePsmlMfsrRequestCapture",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libScePsml")]
-    public static int PsmlMfsrRequestCapture(CpuContext ctx) => ctx.SetReturn(0);
+    public static int PsmlMfsrRequestCapture(CpuContext ctx)
+    {
+        if (ctx.TargetGeneration != Generation.Gen5 || !CaptureEnabled)
+        {
+            return ctx.SetReturn(0);
+        }
+
+        var frames = unchecked((byte)ctx[CpuRegister.Rsi]);
+        lock (Gate)
+        {
+            if (!Contexts.TryGetValue(ctx[CpuRegister.Rdi], out var state))
+            {
+                return ctx.SetReturn(InvalidCaptureContext);
+            }
+
+            return ctx.SetReturn(frames == 0
+                ? (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT
+                : RequestCapture(state.Id, frames));
+        }
+    }
 
     [SysAbiExport(
         Nid = "LXq+6mIxpCw",
         ExportName = "scePsmlMfsrIsCaptureInProgress",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libScePsml")]
-    public static int PsmlMfsrIsCaptureInProgress(CpuContext ctx) => ctx.SetReturn(0);
+    public static int PsmlMfsrIsCaptureInProgress(CpuContext ctx)
+    {
+        if (ctx.TargetGeneration != Generation.Gen5 || !CaptureEnabled)
+        {
+            return ctx.SetReturn(0);
+        }
+
+        lock (Gate)
+        {
+            return ctx.SetReturn(Contexts.TryGetValue(ctx[CpuRegister.Rdi], out var state) &&
+                _capture?.ContextId == state.Id ? 1 : 0);
+        }
+    }
+
+    internal static bool CaptureEnabled => ConsoleHardware.IsPro &&
+        Environment.GetEnvironmentVariable("SHARPEMU_PSSR_CAPTURE") == "1";
+
+    internal static void RequestCaptureFromWindow()
+    {
+        if (!CaptureEnabled)
+        {
+            return;
+        }
+
+        lock (Gate)
+        {
+            _ = RequestCapture(contextId: null, frames: 4);
+        }
+    }
+
+    private static int RequestCapture(uint? contextId, int frames)
+    {
+        if (_capture is not null)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
+        }
+
+        var directory = Path.Combine(SharpEmuPaths.DataRoot, "user", "logs", "pssr-captures",
+            $"{DateTime.UtcNow:yyyyMMdd-HHmmss-fff}-{Guid.NewGuid():N}");
+        Volatile.Write(ref _capture, new CaptureRequest(contextId, frames, directory));
+        Console.Error.WriteLine($"[PSSR][INFO] Capture requested for the next {frames} dispatches. path={directory}");
+        return 0;
+    }
+
+    internal static (string Path, Action Complete)? BeginCaptureFrame(uint contextId)
+    {
+        if (Volatile.Read(ref _capture) is null)
+        {
+            return null;
+        }
+
+        lock (Gate)
+        {
+            if (_capture is not { Remaining: > 0 } capture ||
+                (capture.ContextId is uint requested && requested != contextId))
+            {
+                return null;
+            }
+
+            return (capture.BeginFrame(), capture.CompleteFrame);
+        }
+    }
+
+    private static void FinishCaptureIfIdle(CaptureRequest capture)
+    {
+        if (capture is { Remaining: 0, Pending: 0 } && ReferenceEquals(_capture, capture))
+        {
+            Volatile.Write(ref _capture, null);
+        }
+    }
 
     [SysAbiExport(
         Nid = "FSGaTQze0UY",
