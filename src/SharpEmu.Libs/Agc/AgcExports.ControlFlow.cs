@@ -22,6 +22,18 @@ public static partial class AgcExports
         return (int)ctx[CpuRegister.Rax];
     }
 
+    // The ACB rewind writes the same 2-dword REWIND packet as the DCB one.
+    [SysAbiExport(
+        Nid = "0ZOG0jc9nRg",
+        ExportName = "sceAgcAcbRewindGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int AcbRewindGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 2u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
     // Writes IT_REWIND. When valid=0 the submit parser suspends until
     // sceAgcRewindPatchSetRewindState sets bit 31 on the body dword.
     [SysAbiExport(
@@ -222,6 +234,37 @@ public static partial class AgcExports
         }
 
         return ReturnPointer(ctx, cmd);
+    }
+
+    [SysAbiExport(
+        Nid = "qyM2bxYFPAk",
+        ExportName = "sceAgcAcbCondExec",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int AcbCondExec(CpuContext ctx) => DcbCondExec(ctx);
+
+    // Matches the 5-dword COND_EXEC packet DcbCondExec writes.
+    [SysAbiExport(
+        Nid = "ou16V5hh5sg",
+        ExportName = "sceAgcDcbCondExecGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbCondExecGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 5u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
+    // The ACB conditional execution writes the same 5-dword packet.
+    [SysAbiExport(
+        Nid = "ozKzBP4aki4",
+        ExportName = "sceAgcAcbCondExecGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int AcbCondExecGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 5u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
     }
 
     // How a title continues a frame whose command arena filled: it branches from

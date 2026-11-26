@@ -94,14 +94,30 @@ public static partial class AgcExports
         LibraryName = "libSceAgc")]
     public static int DcbEventWriteGetSize(CpuContext ctx)
     {
-        ctx[CpuRegister.Rax] = (uint)(ctx[CpuRegister.Rdi] & 0xFF) switch
-        {
-            0x38 or 0x39 => 4u * sizeof(uint),
-            <= 0x3F => 2u * sizeof(uint),
-            _ => 0,
-        };
+        ctx[CpuRegister.Rax] = EventWriteSize((uint)(ctx[CpuRegister.Rdi] & 0xFF));
         return (int)ctx[CpuRegister.Rax];
     }
+
+    // Matches the packet AcbEventWrite writes, which uses the same sizes as the DCB one.
+    [SysAbiExport(
+        Nid = "Y-5vneiBtzk",
+        ExportName = "sceAgcAcbEventWriteGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int AcbEventWriteGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = EventWriteSize((uint)(ctx[CpuRegister.Rdi] & 0xFF));
+        return (int)ctx[CpuRegister.Rax];
+    }
+
+    // EVENT_WRITE: 4 dwords when the event carries an address, 2 otherwise, nothing for a type AGC
+    // does not accept.
+    private static uint EventWriteSize(uint eventType) => eventType switch
+    {
+        0x38 or 0x39 => 4u * sizeof(uint),
+        <= 0x3F => 2u * sizeof(uint),
+        _ => 0,
+    };
 
     [SysAbiExport(
         Nid = "MWiElSNE8j8",

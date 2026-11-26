@@ -539,6 +539,31 @@ public static partial class AgcExports
         return (int)ctx[CpuRegister.Rax];
     }
 
+    // ATOMIC_MEM is a 9-dword packet: the PM4 header plus the eight dwords AtomicMemoryPacket
+    // decodes (control, address, source, compare, loop control). Both queue flavours write the same
+    // hardware packet, so the sizes match.
+    [SysAbiExport(
+        Nid = "da1Sm8-QDoU",
+        ExportName = "sceAgcAcbAtomicMemGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int AcbAtomicMemGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 9u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
+    [SysAbiExport(
+        Nid = "oz6zQq1JwCE",
+        ExportName = "sceAgcDcbAtomicMemGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbAtomicMemGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 9u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
     [SysAbiExport(
         Nid = "i1jyy49AjXU",
         ExportName = "sceAgcDcbWriteData",
