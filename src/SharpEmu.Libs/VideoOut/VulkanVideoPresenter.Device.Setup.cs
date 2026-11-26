@@ -8,6 +8,8 @@ using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.VideoOut.Upscaling;
+using SharpEmu.Libs.VideoOut.Upscaling.Fsr;
 using SharpEmu.Libs.VideoOut.Upscaling.Streamline;
 using Silk.NET.Core;
 using Silk.NET.Core.Native;
@@ -118,7 +120,10 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             FinishStreamlineAttach();
-            _superResolution = new SharpEmu.Libs.VideoOut.Upscaling.SuperResolutionService(_vk, _physicalDevice, _streamline);
+            var fsr = WantsFsr
+                ? FsrRuntime.Start(_vk, _instance, _physicalDevice, _device, FsrRuntimeFiles.DefaultDirectory)
+                : null;
+            _superResolution = new SuperResolutionService(_vk, _physicalDevice, _streamline, fsr);
             CreateSwapchain();
             CreateCommandResources();
             CreateGuestDrawResources();
@@ -132,6 +137,9 @@ internal static unsafe partial class VulkanVideoPresenter
         private SharpEmu.Libs.VideoOut.Upscaling.Streamline.StreamlineRuntime? _streamline;
         private Task<bool>? _streamlineAttach;
         internal SharpEmu.Libs.VideoOut.Upscaling.SuperResolutionService? _superResolution;
+
+        private static bool WantsFsr => SharpEmu.Libs.Kernel.ConsoleHardware.IsPro && SuperResolutionSettings.WantsFsr;
+        internal bool FsrSeparateDepthStencilLayouts { get; private set; }
 
         private void BeginStreamlineAttach()
         {
@@ -1379,10 +1387,10 @@ internal static unsafe partial class VulkanVideoPresenter
             var graphicsPipelineLibraryExtension = (byte*)SilkMarshal.StringToPtr(GraphicsPipelineLibraryExtensionName);
             var deviceFaultExtension = (byte*)SilkMarshal.StringToPtr("VK_EXT_device_fault");
             var streamlineDeviceExtensions = _streamline?.DeviceExtensions ?? [];
-            var streamlineDeviceExtensionPointers = new List<nint>();
+            var dynamicExtensionPointers = new List<nint>();
             try
             {
-                var extensions = stackalloc byte*[26 + streamlineDeviceExtensions.Count];
+                var extensions = stackalloc byte*[26 + FsrDeviceFeatures.ExtensionCount + streamlineDeviceExtensions.Count];
                 var extensionCount = 0u;
                 extensions[extensionCount++] = swapchainExtension;
                 if (useMemoryBudget)
@@ -1683,6 +1691,13 @@ internal static unsafe partial class VulkanVideoPresenter
                     ComputeFullSubgroups = _supportsMeshShader,
                     PNext = renderingChain,
                 };
+                FsrDeviceFeatures fsrFeatures = default;
+                if (WantsFsr)
+                {
+                    FsrDeviceFeatures.Enable(&fsrFeatures, _vk, _physicalDevice, IsDeviceExtensionAvailable, ref enabledFeatures,
+                        ref vulkan12Features, ref vulkan13Features, extensions, ref extensionCount, dynamicExtensionPointers);
+                    FsrSeparateDepthStencilLayouts = vulkan12Features.SeparateDepthStencilLayouts;
+                }
                 if (_streamline is not null)
                 {
                     StreamlineDeviceFeatures.Enable(ref vulkan12Features, in supportedVulkan12Features, _streamline.Features12);
@@ -1701,7 +1716,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         if (enabledNames.Add(name) && IsDeviceExtensionAvailable(name))
                         {
                             var pointer = SilkMarshal.StringToPtr(name);
-                            streamlineDeviceExtensionPointers.Add(pointer);
+                            dynamicExtensionPointers.Add(pointer);
                             extensions[extensionCount++] = (byte*)pointer;
                         }
                         else if (!IsDeviceExtensionAvailable(name))
@@ -1777,7 +1792,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 SilkMarshal.Free((nint)barycentricExtension);
                 SilkMarshal.Free((nint)viewportIndexLayerExtension);
                 SilkMarshal.Free((nint)meshExtension);
-                foreach (var pointer in streamlineDeviceExtensionPointers)
+                foreach (var pointer in dynamicExtensionPointers)
                 {
                     SilkMarshal.Free(pointer);
                 }

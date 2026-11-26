@@ -533,7 +533,7 @@ internal sealed unsafe class StreamlineRuntime : IDisposable
     private static bool DepthIsInverted(SuperResolutionDispatch dispatch, in Matrix4x4 projection, bool hasProjection)
     {
         var flagged = (dispatch.Flags & SuperResolutionFlags.ReverseDepth) != 0;
-        var inferred = hasProjection ? InferReverseDepth(projection) : null;
+        var inferred = hasProjection ? SuperResolutionTuning.InferReverseDepth(projection) : null;
         var inverted = flagged || inferred == true;
         if (Interlocked.Exchange(ref _depthReported, 1) == 0)
         {
@@ -543,52 +543,11 @@ internal sealed unsafe class StreamlineRuntime : IDisposable
         return inverted;
     }
 
-    private static bool? InferReverseDepth(in Matrix4x4 projection)
-    {
-        bool? result = null;
-        var columnDistance = MathF.Abs(MathF.Abs(projection.M43) - 1f);
-        var rowDistance = MathF.Abs(MathF.Abs(projection.M34) - 1f);
-        bool[] conventions = columnDistance < rowDistance ? [true] : rowDistance < columnDistance ? [false] : [true, false];
-        foreach (var column in conventions)
-        {
-            foreach (var forward in new[] { 1f, -1f })
-            {
-                var near = ClipDepth(projection, column, forward, out var nearW);
-                var far = ClipDepth(projection, column, forward * 1000f, out var farW);
-                if (nearW <= 0 || farW <= 0 || !float.IsFinite(near) || !float.IsFinite(far) || near == far)
-                {
-                    continue;
-                }
-
-                var reverse = near > far;
-                if (result is { } previous && previous != reverse)
-                {
-                    return null;
-                }
-
-                result = reverse;
-            }
-        }
-
-        return result;
-    }
-
-    private static float ClipDepth(in Matrix4x4 projection, bool column, float z, out float w)
-    {
-        var clipZ = column ? projection.M33 * z + projection.M34 : projection.M33 * z + projection.M43;
-        w = column ? projection.M43 * z + projection.M44 : projection.M34 * z + projection.M44;
-        return clipZ / w;
-    }
-
     private static SlConstants BuildConstants(SuperResolutionFrame frame)
     {
         var dispatch = frame.Dispatch;
         var constants = new SlConstants { Header = new SlHeader(SlConstants.TypeId, 2) };
-        var projection = new Matrix4x4(
-            dispatch.Projection(0, 0), dispatch.Projection(0, 1), dispatch.Projection(0, 2), dispatch.Projection(0, 3),
-            dispatch.Projection(1, 0), dispatch.Projection(1, 1), dispatch.Projection(1, 2), dispatch.Projection(1, 3),
-            dispatch.Projection(2, 0), dispatch.Projection(2, 1), dispatch.Projection(2, 2), dispatch.Projection(2, 3),
-            dispatch.Projection(3, 0), dispatch.Projection(3, 1), dispatch.Projection(3, 2), dispatch.Projection(3, 3));
+        var projection = SuperResolutionTuning.Projection(dispatch);
         var inverse = Matrix4x4.Identity;
         var hasProjection = projection != default && Matrix4x4.Invert(projection, out inverse);
         if (!hasProjection)

@@ -33,7 +33,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void ReleaseIdleSuperResolution()
         {
-            if (_superResolution is not { } service || !service.DlssWentIdle())
+            if (_superResolution is not { } service || !service.WentIdle())
             {
                 return;
             }
@@ -41,7 +41,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _ = CurrentRecordingBuffer();
             _scheduler.Finish();
             CollectCompletedGuestSubmissions(waitForOldest: false);
-            service.ReleaseDlss();
+            service.ReleaseResources();
         }
 
         private static (ulong Address, ulong Size) SuperResolutionOutputRange(SuperResolutionDispatch dispatch)
@@ -122,6 +122,25 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
+            var passThrough = (dispatch.Flags & SuperResolutionFlags.PassThrough) != 0;
+            var fsrRuntime = passThrough ? null : service.Fsr;
+            if (fsrRuntime is not null)
+            {
+                Debug.Assert(!_worker);
+                _scheduler.Timeline.RefreshCompletedTick();
+                var waitTick = fsrRuntime.WaitTick(_scheduler.CompletedTick);
+                if (waitTick != 0)
+                {
+                    if (waitTick == _scheduler.CurrentTick)
+                    {
+                        FlushBatchedGuestCommands();
+                    }
+
+                    _scheduler.Wait(waitTick);
+                    fsrRuntime.WaitTick(_scheduler.CompletedTick);
+                }
+            }
+
             var inputs = new List<(SuperResolutionInput Input, bool Storage)>
             {
                 (SuperResolutionInput.OutputColor, true),
@@ -133,6 +152,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 {
                     inputs.Add((optional, false));
                 }
+            }
+
+            if (fsrRuntime is not null && dispatch.Has(SuperResolutionInput.ReactiveMask))
+            {
+                inputs.Add((SuperResolutionInput.ReactiveMask, false));
             }
 
             EnsureBatchedGuestCommands();
@@ -175,17 +199,27 @@ internal static unsafe partial class VulkanVideoPresenter
 
                 var image = bindings[index].Image;
                 var depth = image.Description.IsDepth;
+                var view = bindings[index].Description;
+                var backing = image.Backing;
+                var fsrView = fsrRuntime is not null && backing.ImageType == ImageType.Type2D && backing.Layers == 1 && backing.Samples == 1 &&
+                    view.Type == ImageViewType.Type2D && view.BaseLevel == 0 && view.BaseLayer == 0 && view.MinLod == 0 &&
+                    UsesNativeFsrChannels(input, view.Mapping) &&
+                    (depth
+                        ? view.Aspect == ImageAspectFlags.DepthBit && (_presenter.FsrSeparateDepthStencilLayouts ||
+                            (ViewFormatRules.FullAspects(backing.Format) & ImageAspectFlags.StencilBit) == 0)
+                        : view.Format == backing.Format);
                 return new SuperResolutionImage(
-                    image.Backing.Handle.Handle,
+                    backing.Handle.Handle,
                     bindings[index].View.Handle,
-                    (uint)(depth ? image.Backing.Format : bindings[index].ViewFormat),
-                    image.Backing.Extent.Width,
-                    image.Backing.Extent.Height,
-                    image.Backing.MipLevels,
-                    image.Backing.Layers,
-                    (uint)image.Backing.Usage,
-                    (uint)image.Backing.Flags,
-                    depth);
+                    (uint)(depth ? backing.Format : fsrRuntime is not null ? view.Format : bindings[index].RequestedFormat),
+                    backing.Extent.Width,
+                    backing.Extent.Height,
+                    backing.MipLevels,
+                    backing.Layers,
+                    (uint)backing.Usage,
+                    (uint)backing.Flags,
+                    depth,
+                    fsrView);
             }
 
             var output = ImageOf(SuperResolutionInput.OutputColor);
@@ -210,6 +244,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 Depth = ImageOf(SuperResolutionInput.Depth),
                 MotionVectors = ImageOf(SuperResolutionInput.MotionVectors),
                 Exposure = ImageOf(SuperResolutionInput.Exposure),
+                Reactive = fsrRuntime is not null ? ImageOf(SuperResolutionInput.ReactiveMask) : default,
                 RenderX = renderX,
                 RenderY = renderY,
                 RenderWidth = renderWidth,
@@ -232,15 +267,16 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
             }
 
-            var passThrough = (dispatch.Flags & SuperResolutionFlags.PassThrough) != 0;
             var dlss = !passThrough && frame.Depth.IsValid && frame.MotionVectors.IsValid &&
                 service.TryDlss(BeginBatchedGuestCommands(), frame);
-            if (dlss)
+            var fsr = fsrRuntime is not null &&
+                service.TryFsr(BeginBatchedGuestCommands(), frame, _scheduler.CurrentTick, _scheduler.CompletedTick);
+            if (dlss || fsrRuntime is not null)
             {
                 ForgetNativeShadow();
             }
 
-            var recorded = dlss;
+            var recorded = dlss || fsr;
             if (!recorded)
             {
                 var command = BeginBatchedGuestCommands();
@@ -264,11 +300,24 @@ internal static unsafe partial class VulkanVideoPresenter
                 // The image callbacks for this dispatch are already ahead of this completion.
                 _scheduler.QueueCompletionAction(finishedCapture.Complete);
                 Console.Error.WriteLine(FormattableString.Invariant(
-                    $"[PSSR][INFO] Capture context={dispatch.ContextId} backend={(dlss ? "DLSS" : recorded ? "Basic" : "none")} render={renderWidth}x{renderHeight}+{renderX},{renderY} output={outputWidth}x{outputHeight} jitter={dispatch.JitterX},{dispatch.JitterY} path={finishedCapture.Path}"));
+                    $"[PSSR][INFO] Capture context={dispatch.ContextId} backend={(dlss ? "DLSS" : fsr ? "FSR" : recorded ? "Basic" : "none")} render={renderWidth}x{renderHeight}+{renderX},{renderY} output={outputWidth}x{outputHeight} jitter={dispatch.JitterX},{dispatch.JitterY} path={finishedCapture.Path}"));
             }
         }
 
-        private readonly record struct SuperResolutionBinding(ResourceSlotIdentifier Identifier, CachedImage Image, ImageView View, Format ViewFormat);
+        private static bool UsesNativeFsrChannels(SuperResolutionInput input, ComponentMapping mapping)
+        {
+            // FSR rebuilds the image view and reads only the channels required by this input.
+            return (mapping.R is ComponentSwizzle.Identity or ComponentSwizzle.R) && (input switch
+            {
+                SuperResolutionInput.Color => (mapping.G is ComponentSwizzle.Identity or ComponentSwizzle.G) &&
+                    (mapping.B is ComponentSwizzle.Identity or ComponentSwizzle.B),
+                SuperResolutionInput.MotionVectors => mapping.G is ComponentSwizzle.Identity or ComponentSwizzle.G,
+                _ => true,
+            });
+        }
+
+        private readonly record struct SuperResolutionBinding(
+            ResourceSlotIdentifier Identifier, CachedImage Image, ImageView View, Format RequestedFormat, ImageViewDescription Description);
 
         private SuperResolutionBinding ResolveSuperResolutionImage(ReadOnlySpan<uint> words, bool storage)
         {
@@ -288,11 +337,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 request = request with { View = request.View with { LevelCount = 1 } };
             }
 
-            var view = _imageCache.AcquireTextureView(identifier, request);
+            var view = _imageCache.AcquireTextureView(identifier, request, out var description);
             var image = Image(identifier);
             image.Uses.Storage |= storage;
             image.Uses.Texture |= !storage;
-            return new SuperResolutionBinding(identifier, image, view, request.View.Format);
+            return new SuperResolutionBinding(identifier, image, view, request.View.Format, description);
         }
 
         private void ForgetNativeShadow() => _shadowCommand = 0;

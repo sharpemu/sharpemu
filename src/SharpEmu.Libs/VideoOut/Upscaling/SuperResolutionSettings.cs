@@ -8,6 +8,7 @@ public enum SuperResolutionUpscaler
     Auto,
     Dlss,
     Basic,
+    Fsr,
 }
 
 public enum SuperResolutionBackend
@@ -26,6 +27,7 @@ public static class SuperResolutionSettings
     public static SuperResolutionUpscaler Parse(string? value) => value?.Trim().ToLowerInvariant() switch
     {
         "dlss" => SuperResolutionUpscaler.Dlss,
+        "fsr" => SuperResolutionUpscaler.Fsr,
         "basic" or "off" => SuperResolutionUpscaler.Basic,
         _ => SuperResolutionUpscaler.Auto,
     };
@@ -33,6 +35,7 @@ public static class SuperResolutionSettings
     public static SuperResolutionBackend Choose(SuperResolutionUpscaler requested, SharpEmu.Logging.HostGpuVendor vendor) => requested switch
     {
         SuperResolutionUpscaler.Dlss => SuperResolutionBackend.Dlss,
+        SuperResolutionUpscaler.Fsr => SuperResolutionBackend.Fsr,
         SuperResolutionUpscaler.Basic => SuperResolutionBackend.Basic,
         _ => vendor is SharpEmu.Logging.HostGpuVendor.Amd or SharpEmu.Logging.HostGpuVendor.Intel
             ? SuperResolutionBackend.Fsr
@@ -42,6 +45,8 @@ public static class SuperResolutionSettings
     public static SuperResolutionBackend Backend => Choose(Requested, SharpEmu.Logging.HostSystemInfo.GpuVendor);
 
     public static bool WantsDlss => Backend == SuperResolutionBackend.Dlss;
+
+    public static bool WantsFsr => Backend == SuperResolutionBackend.Fsr;
 }
 
 public static class SuperResolutionStartup
@@ -61,7 +66,7 @@ public static class SuperResolutionStartup
                 Streamline.StreamlineRuntime.BeginStart(DlssRuntimeFiles.DefaultDirectory);
                 break;
             case SuperResolutionBackend.Fsr:
-                Console.Error.WriteLine($"[PSSR][INFO] PSSR upscaler: FSR for {gpu}. FSR is not available yet, so the basic upscaler runs.");
+                Console.Error.WriteLine($"[PSSR][INFO] PSSR upscaler: FSR ({SuperResolutionSettings.Requested}, GPU: {gpu}).");
                 break;
             default:
                 Console.Error.WriteLine("[PSSR][INFO] PSSR upscaler: basic (set in the PSSR settings).");
@@ -99,4 +104,20 @@ public static class DlssRuntimeFiles
 
     public static IReadOnlyList<DlssRuntimeFile> Missing(string directory) =>
         Required.Where(file => !File.Exists(Path.Combine(directory, file.Name))).ToArray();
+}
+
+public static class FsrRuntimeFiles
+{
+    public const string SdkReleaseUrl = "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/releases/tag/v2.4.0";
+    public const string Loader = "amd_fidelityfx_loader_vk.dll";
+    public const string Upscaler = "amd_fidelityfx_upscaler_vk.dll";
+
+    public static IReadOnlyList<string> Required { get; } = [Loader, Upscaler];
+
+    public static string DirectoryFor(string executableDirectory) => UpscalerFolders.For(executableDirectory, "fsr");
+
+    public static string DefaultDirectory => DirectoryFor(AppContext.BaseDirectory);
+
+    public static IReadOnlyList<string> Missing(string directory) =>
+        Required.Where(file => !File.Exists(Path.Combine(directory, file))).ToArray();
 }

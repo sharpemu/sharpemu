@@ -679,10 +679,12 @@ public sealed unsafe partial class CachedImage : IDisposable
     }
 
     // Returns the cached view for the normalized description, creating it on first use.
-    public ImageView GetOrCreateView(in ImageViewDescription requested)
+    public ImageView GetOrCreateView(in ImageViewDescription requested) => GetOrCreateView(requested, out _);
+
+    internal ImageView GetOrCreateView(in ImageViewDescription requested, out ImageViewDescription normalized)
     {
         var image = Backing;
-        var normalized = requested;
+        normalized = requested;
         var isStorage = (normalized.Usage & ImageUsageFlags.StorageBit) != 0;
         var imageAspect = ViewFormatRules.FullAspects(image.Format);
         if ((imageAspect & ImageAspectFlags.DepthBit) != 0 && ViewFormatRules.IsDepthCompatible(normalized.Format))

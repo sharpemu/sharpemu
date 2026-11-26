@@ -511,10 +511,14 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
         Assert.All(fatal.Messages, message => Assert.Contains("image view is invalid", message));
 
         var depth = harness.CreateImage(Color2D(16, 16, format: Format.D32Sfloat));
-        var depthView = depth.GetOrCreateView(ImageViewDescription.Default with { Format = Format.R32Sfloat, Aspect = ImageAspectFlags.ColorBit });
+        var depthRequest = ImageViewDescription.Default with { Format = Format.R32Sfloat, Aspect = ImageAspectFlags.ColorBit };
+        var depthView = depth.GetOrCreateView(depthRequest, out var actualDepthView);
         var cached = Assert.Single(depth.Views);
         Assert.Equal((Format.D32Sfloat, ImageAspectFlags.DepthBit), (cached.Description.Format, cached.Description.Aspect));
         Assert.Equal(depthView, cached.View);
+        Assert.Equal(cached.Description, actualDepthView);
+        Assert.Equal(depthView, depth.GetOrCreateView(depthRequest, out var reusedDepthView));
+        Assert.Equal(actualDepthView, reusedDepthView);
 
         var volume = harness.CreateImage(Volume(16, 16, 8));
         var slice = volume.GetOrCreateView(ImageViewDescription.Default with { Format = Format.R8G8B8A8Unorm, Type = ImageViewType.Type2DArray, BaseLayer = 2, LayerCount = 4 });

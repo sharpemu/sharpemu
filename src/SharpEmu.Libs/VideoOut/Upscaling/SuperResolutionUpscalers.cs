@@ -2,8 +2,10 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Globalization;
+using System.Numerics;
 using Silk.NET.Vulkan;
 using SharpEmu.Libs.Gpu.Upscaling;
+using SharpEmu.Libs.VideoOut.Upscaling.Fsr;
 using SharpEmu.Libs.VideoOut.Upscaling.Streamline;
 
 namespace SharpEmu.Libs.VideoOut.Upscaling;
@@ -18,7 +20,8 @@ internal readonly record struct SuperResolutionImage(
     uint ArrayLayers,
     uint Usage,
     uint CreateFlags,
-    bool IsDepth)
+    bool IsDepth,
+    bool FsrCompatibleView)
 {
     public bool IsValid => Image != 0 && View != 0;
 }
@@ -36,6 +39,8 @@ internal sealed class SuperResolutionFrame
     public SuperResolutionImage MotionVectors { get; init; }
 
     public SuperResolutionImage Exposure { get; init; }
+
+    public SuperResolutionImage Reactive { get; init; }
 
     public uint RenderX { get; init; }
 
@@ -62,6 +67,49 @@ internal static class SuperResolutionTuning
     public static bool IsHdrFormat(uint format) => (Format)format is
         Format.R16G16B16A16Sfloat or Format.R32G32B32A32Sfloat or Format.B10G11R11UfloatPack32 or
         Format.E5B9G9R9UfloatPack32 or Format.R16G16B16Sfloat or Format.R32G32B32Sfloat;
+
+    public static Matrix4x4 Projection(SuperResolutionDispatch dispatch) => new(
+        dispatch.Projection(0, 0), dispatch.Projection(0, 1), dispatch.Projection(0, 2), dispatch.Projection(0, 3),
+        dispatch.Projection(1, 0), dispatch.Projection(1, 1), dispatch.Projection(1, 2), dispatch.Projection(1, 3),
+        dispatch.Projection(2, 0), dispatch.Projection(2, 1), dispatch.Projection(2, 2), dispatch.Projection(2, 3),
+        dispatch.Projection(3, 0), dispatch.Projection(3, 1), dispatch.Projection(3, 2), dispatch.Projection(3, 3));
+
+    public static bool? InferReverseDepth(in Matrix4x4 projection)
+    {
+        bool? result = null;
+        var columnDistance = MathF.Abs(MathF.Abs(projection.M43) - 1f);
+        var rowDistance = MathF.Abs(MathF.Abs(projection.M34) - 1f);
+        ReadOnlySpan<bool> conventions = columnDistance < rowDistance ? [true] : rowDistance < columnDistance ? [false] : [true, false];
+        foreach (var column in conventions)
+        {
+            foreach (var forward in (ReadOnlySpan<float>)[1f, -1f])
+            {
+                var near = ClipDepth(projection, column, forward, out var nearW);
+                var far = ClipDepth(projection, column, forward * 1000f, out var farW);
+                if (nearW <= 0 || farW <= 0 || !float.IsFinite(near) || !float.IsFinite(far) || near == far)
+                {
+                    continue;
+                }
+
+                var reverse = near > far;
+                if (result is { } previous && previous != reverse)
+                {
+                    return null;
+                }
+
+                result = reverse;
+            }
+        }
+
+        return result;
+    }
+
+    private static float ClipDepth(in Matrix4x4 projection, bool column, float z, out float w)
+    {
+        var clipZ = column ? projection.M33 * z + projection.M34 : projection.M33 * z + projection.M43;
+        w = column ? projection.M43 * z + projection.M44 : projection.M34 * z + projection.M44;
+        return clipZ / w;
+    }
 
     private static float Sign(string variable, int component)
     {
@@ -131,16 +179,18 @@ internal sealed unsafe class BlitUpscaler(Vk vk, PhysicalDevice physicalDevice)
     }
 }
 
-internal sealed class SuperResolutionService(Vk vk, PhysicalDevice physicalDevice, StreamlineRuntime? streamline) : IDisposable
+internal sealed class SuperResolutionService(Vk vk, PhysicalDevice physicalDevice, StreamlineRuntime? streamline, FsrRuntime? fsr) : IDisposable
 {
     private const int IdleFramesBeforeRelease = 120;
 
     private readonly BlitUpscaler _basic = new(vk, physicalDevice);
     private long _dlssFrames;
     private long _basicFrames;
-    private int _framesWithoutDlss;
+    private int _idleFrames;
 
     public StreamlineRuntime? Streamline => streamline;
+
+    public FsrRuntime? Fsr => fsr;
 
     public bool PrefersDlss => streamline is { IsActive: true } &&
         SuperResolutionSettings.Requested is SuperResolutionUpscaler.Auto or SuperResolutionUpscaler.Dlss;
@@ -152,7 +202,7 @@ internal sealed class SuperResolutionService(Vk vk, PhysicalDevice physicalDevic
             return false;
         }
 
-        Volatile.Write(ref _framesWithoutDlss, 0);
+        Volatile.Write(ref _idleFrames, 0);
         if (Interlocked.Increment(ref _dlssFrames) == 1)
         {
             Console.Error.WriteLine("[PSSR][INFO] Upscaling with DLSS.");
@@ -161,26 +211,41 @@ internal sealed class SuperResolutionService(Vk vk, PhysicalDevice physicalDevic
         return true;
     }
 
-    public bool DlssWentIdle()
+    public bool TryFsr(CommandBuffer command, SuperResolutionFrame frame, ulong tick, ulong completedTick)
     {
-        if (streamline is not { HoldsResources: true })
+        if (fsr is null || !fsr.Evaluate(command, frame, tick, completedTick))
         {
-            Volatile.Write(ref _framesWithoutDlss, 0);
             return false;
         }
 
-        return Interlocked.Increment(ref _framesWithoutDlss) == IdleFramesBeforeRelease;
+        Volatile.Write(ref _idleFrames, 0);
+        return true;
     }
 
-    public void ReleaseDlss()
+    public bool WentIdle()
     {
-        if (streamline is not { HoldsResources: true })
+        if (streamline is not { HoldsResources: true } && fsr is not { HoldsResources: true })
         {
-            return;
+            Volatile.Write(ref _idleFrames, 0);
+            return false;
         }
 
-        streamline.FreeResources();
-        Console.Error.WriteLine("[DLSS][INFO] The game stopped using PSSR; DLSS resources are released until it upscales again.");
+        return Interlocked.Increment(ref _idleFrames) == IdleFramesBeforeRelease;
+    }
+
+    public void ReleaseResources()
+    {
+        if (streamline is { HoldsResources: true })
+        {
+            streamline.FreeResources();
+            Console.Error.WriteLine("[DLSS][INFO] The game stopped using PSSR; DLSS resources are released until it upscales again.");
+        }
+
+        if (fsr is { HoldsResources: true })
+        {
+            fsr.ReleaseResources();
+            Console.Error.WriteLine("[FSR][INFO] The game stopped using PSSR; FSR resources are released until it upscales again.");
+        }
     }
 
     public bool TryBasic(CommandBuffer command, SuperResolutionFrame frame)
@@ -198,5 +263,9 @@ internal sealed class SuperResolutionService(Vk vk, PhysicalDevice physicalDevic
         return true;
     }
 
-    public void Dispose() => streamline?.Dispose();
+    public void Dispose()
+    {
+        fsr?.Dispose();
+        streamline?.Dispose();
+    }
 }
