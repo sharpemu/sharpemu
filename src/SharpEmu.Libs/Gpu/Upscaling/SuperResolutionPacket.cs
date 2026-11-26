@@ -40,6 +40,7 @@ public static class SuperResolutionPacket
     public const int ParameterOffset = 0x58;
     public const int ParameterBytes = 0x100;
     public const int DispatchParameterBytes = ParameterOffset + ParameterBytes;
+    private const uint MotionVectorsJitteredBit = 1u << 16;
     private const int HeaderDwords = 6;
     private const int TextureBlockDwords = TextureCount * TextureDwords;
     public const int Dwords = HeaderDwords + TextureBlockDwords + ParameterBytes / sizeof(uint);
@@ -52,6 +53,7 @@ public static class SuperResolutionPacket
         uint outputWidth,
         uint outputHeight,
         uint textureMask,
+        bool motionVectorsJittered,
         ReadOnlySpan<uint> textures,
         ReadOnlySpan<byte> parameters)
     {
@@ -64,7 +66,8 @@ public static class SuperResolutionPacket
         destination[0] = PacketHeader.Make(Dwords, PacketOpcode.Nop);
         destination[1] = MarkerMagic | MarkerId;
         destination[2] = Tag;
-        destination[3] = Version | ((textureMask & 0xFFu) << 8);
+        destination[3] = Version | ((textureMask & 0xFFu) << 8) |
+            (motionVectorsJittered ? MotionVectorsJitteredBit : 0);
         destination[4] = contextId;
         destination[5] = (outputWidth & 0xFFFFu) | ((outputHeight & 0xFFFFu) << 16);
         textures[..TextureBlockDwords].CopyTo(destination[HeaderDwords..]);
@@ -86,6 +89,7 @@ public static class SuperResolutionPacket
             OutputWidth: payload[4] & 0xFFFFu,
             OutputHeight: payload[4] >> 16,
             TextureMask: (payload[2] >> 8) & 0xFFu,
+            MotionVectorsJittered: (payload[2] & MotionVectorsJitteredBit) != 0,
             Textures: textures,
             Parameters: parameters);
         return true;
@@ -97,6 +101,7 @@ public sealed record SuperResolutionDispatch(
     uint OutputWidth,
     uint OutputHeight,
     uint TextureMask,
+    bool MotionVectorsJittered,
     uint[] Textures,
     byte[] Parameters)
 {

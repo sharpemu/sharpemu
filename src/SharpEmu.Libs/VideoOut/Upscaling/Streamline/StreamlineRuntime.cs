@@ -304,7 +304,7 @@ internal sealed unsafe class StreamlineRuntime : IDisposable
                 $"[DLSS][INFO] Context {viewport.Value}: mode={options.Mode} render={frame.RenderWidth}x{frame.RenderHeight} " +
                 $"output={frame.OutputWidth}x{frame.OutputHeight} exposure={(useExposure ? "texture" : "auto")} hdr={hdr} " +
                 $"color={(Format)frame.Color.Format} {frame.Color.Width}x{frame.Color.Height} depth={(Format)frame.Depth.Format} " +
-                $"motion={(Format)frame.MotionVectors.Format} exposure_texture={(Format)frame.Exposure.Format} {frame.Exposure.Width}x{frame.Exposure.Height} " +
+                $"motion={(Format)frame.MotionVectors.Format} motion_jittered={dispatch.MotionVectorsJittered} exposure_texture={(Format)frame.Exposure.Format} {frame.Exposure.Width}x{frame.Exposure.Height} " +
                 $"output_texture={(Format)frame.Output.Format} pre_exposure={dispatch.PreExposure:0.###} color_space={dispatch.InputColorSpace}.");
         }
 
@@ -641,7 +641,7 @@ internal sealed unsafe class StreamlineRuntime : IDisposable
         constants.Reset = dispatch.Reset ? SlBoolean.True : SlBoolean.False;
         constants.OrthographicProjection = SlBoolean.False;
         constants.MotionVectorsDilated = SlBoolean.False;
-        constants.MotionVectorsJittered = SlBoolean.False;
+        constants.MotionVectorsJittered = dispatch.MotionVectorsJittered ? SlBoolean.True : SlBoolean.False;
         constants.MinRelativeLinearDepthObjectSeparation = 40f;
         return constants;
     }

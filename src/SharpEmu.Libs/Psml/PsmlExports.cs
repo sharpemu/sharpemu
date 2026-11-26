@@ -509,6 +509,7 @@ public static class PsmlExports
             state?.OutputWidth ?? 0,
             state?.OutputHeight ?? 0,
             mask,
+            motionVectorsJittered: variant == "900",
             textures,
             block[SuperResolutionPacket.ParameterOffset..]);
         if (!ctx.Memory.TryWrite(packetAddress, MemoryMarshal.AsBytes(packet)))
