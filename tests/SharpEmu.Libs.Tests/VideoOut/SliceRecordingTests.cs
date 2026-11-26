@@ -212,6 +212,29 @@ public sealed class SliceRecordingTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public void SliceTableReuseRequiresExactBytesAndStopsAtHandoff()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        harness.Run(() =>
+        {
+            using var pool = new SliceArenaPool(harness.Device, harness.Scheduler);
+            var arena = new SliceArena(pool, harness.Device.NonCoherentAtomSize);
+            byte[] bytes = [1, 2, 3, 4];
+            Assert.True(arena.TryUploadTable(bytes, 16, out var first));
+            Assert.True(arena.TryUploadTable(bytes.ToArray(), 16, out var repeat));
+            Assert.True(first == repeat);
+            bytes[3]++;
+            Assert.True(arena.TryUploadTable(bytes, 16, out var other));
+            Assert.NotEqual(first.Offset, other.Offset);
+            var held = arena.TakeChunks();
+            Assert.True(arena.TryUploadTable(bytes, 16, out var fresh));
+            Assert.NotSame(other.Chunk, fresh.Chunk);
+            foreach (var chunk in held.Concat(arena.TakeChunks())) pool.Return(chunk);
+        });
+    }
+
+    [Fact]
     public void SliceArena_PacksAlignedReservationsAndHandsItsChunksOver()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;

@@ -1784,13 +1784,11 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             if (_worker)
             {
-                if (!_arena!.TryReserve((ulong)bytes.Length, TableBlockAlignment, out var reservation))
+                if (!_arena!.TryUploadTable(bytes, TableBlockAlignment, out var reservation))
                 {
                     throw Serial("arena", resumable: true);
                 }
 
-                bytes.CopyTo(reservation.Destination);
-                _arena.Commit(in reservation);
                 return reservation.Chunk.Buffer.DeviceAddress + reservation.Offset;
             }
 

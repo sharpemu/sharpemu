@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Collections.Concurrent;
+using System.IO.Hashing;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
 using VkBuffer = Silk.NET.Vulkan.Buffer;
@@ -106,6 +107,38 @@ internal sealed class SliceArena(SliceArenaPool pool, ulong nonCoherentAtomSize)
     private readonly List<SliceArenaChunk> _chunks = new();
     private SliceArenaChunk? _current;
 
+    private (byte[]? Bytes, SliceArenaReservation Upload)[]? _tables;
+
+    public bool TryUploadTable(ReadOnlySpan<byte> data, ulong alignment, out SliceArenaReservation result)
+    {
+        var cache = data.Length is > 0 and <= 2048;
+        var slot = 0;
+        if (cache)
+        {
+            _tables ??= new (byte[]?, SliceArenaReservation)[16];
+            slot = (int)(XxHash3.HashToUInt64(data) & 15);
+            var (bytes, upload) = _tables[slot];
+            if (upload.Size == (ulong)data.Length && upload.Offset % Math.Max(1UL, alignment) == 0 &&
+                data.SequenceEqual(bytes.AsSpan(0, data.Length)))
+            {
+                result = upload;
+                return true;
+            }
+        }
+        if (!TryReserve((ulong)data.Length, alignment, out result)) return false;
+        data.CopyTo(result.Destination);
+        Commit(in result);
+        if (cache)
+        {
+            ref var entry = ref _tables![slot];
+            if (entry.Bytes is null || entry.Bytes.Length < data.Length)
+                entry.Bytes = GC.AllocateUninitializedArray<byte>(data.Length);
+            data.CopyTo(entry.Bytes);
+            entry.Upload = result;
+        }
+        return true;
+    }
+
     public bool TryReserve(ulong size, ulong alignment, out SliceArenaReservation reservation)
     {
         reservation = default;
@@ -164,6 +197,8 @@ internal sealed class SliceArena(SliceArenaPool pool, ulong nonCoherentAtomSize)
     {
         var taken = new List<SliceArenaChunk>(_chunks);
         _chunks.Clear();
+        if (_tables is not null)
+            foreach (ref var entry in _tables.AsSpan()) entry.Upload = default;
         _current = null;
         return taken;
     }
