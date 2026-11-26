@@ -461,7 +461,23 @@ public partial class MainWindow : Window
         CtxInstallPkg.Click += async (_, _) => await InstallSelectedPkgAsync();
 
         Opened += async (_, _) => await OnOpenedAsync();
-        Closing += (_, _) => BeginWindowClosing();
+        Closing += async (_, args) =>
+        {
+            if (Sheets.Top is UpscalerInstallDialog installer && !installer.Installation.IsCompleted)
+            {
+                args.Cancel = true;
+                installer.RequestCancel();
+                await installer.Installation;
+                if (!_isClosing)
+                {
+                    Close();
+                }
+
+                return;
+            }
+
+            BeginWindowClosing();
+        };
         Closed += (_, _) => CompleteWindowClosing();
 
         SdlLauncherGamepad.EnsureStarted();
@@ -3144,7 +3160,7 @@ public partial class MainWindow : Window
         string? titleId = null,
         IReadOnlyList<string>? oneOffVariables = null)
     {
-        if (_isRunning)
+        if (_isRunning || Sheets.Top is UpscalerInstallDialog)
         {
             return;
         }
@@ -3420,6 +3436,7 @@ public partial class MainWindow : Window
         LaunchVariablesButton.IsVisible = !_isRunning;
         LaunchVariablesButton.IsEnabled = GameList.SelectedItem is GameEntry;
         _libraryMenu.OpenFileButton.IsEnabled = !_isRunning;
+        UpdateUpscalerInstallButtons();
     }
 
     // ---- Console ----

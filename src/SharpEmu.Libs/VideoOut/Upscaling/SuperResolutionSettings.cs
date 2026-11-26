@@ -86,7 +86,8 @@ public readonly record struct DlssRuntimeFile(string Name, string Source, string
 
 public static class DlssRuntimeFiles
 {
-    public const string StreamlineReleasesUrl = "https://github.com/NVIDIA-RTX/Streamline/releases/tag/v2.14.16";
+    public const string StreamlineVersion = "2.14.16";
+    public const string StreamlineReleasesUrl = "https://github.com/NVIDIA-RTX/Streamline/releases/tag/v" + StreamlineVersion;
     public const string Interposer = "sl.interposer.dll";
     public const string FolderName = "streamline";
 
@@ -108,7 +109,8 @@ public static class DlssRuntimeFiles
 
 public static class FsrRuntimeFiles
 {
-    public const string SdkReleaseUrl = "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/releases/tag/v2.4.0";
+    public const string SdkVersion = "2.4.0";
+    public const string SdkReleaseUrl = "https://github.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/releases/tag/v" + SdkVersion;
     public const string Loader = "amd_fidelityfx_loader_vk.dll";
     public const string Upscaler = "amd_fidelityfx_upscaler_vk.dll";
 

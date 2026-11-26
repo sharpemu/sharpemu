@@ -38,6 +38,7 @@ public partial class MainWindow
             UpdatePssrAutoChoice();
             ScheduleSettingsSave();
         };
+        DlssInstallButton.Click += async (_, _) => await InstallUpscalerAsync(SuperResolutionBackend.Dlss);
         StreamlineDownloadButton.Click += (_, _) => OpenWebPage(DlssRuntimeFiles.StreamlineReleasesUrl);
         DlssFolderButton.Click += (_, _) => OpenFolder(DlssDirectory());
         DlssRefreshButton.Click += (_, _) =>
@@ -45,6 +46,7 @@ public partial class MainWindow
             _dlssFilesCheckedAt = DateTime.Now;
             UpdateDlssFilesStatus();
         };
+        FsrInstallButton.Click += async (_, _) => await InstallUpscalerAsync(SuperResolutionBackend.Fsr);
         FsrDownloadButton.Click += (_, _) => OpenWebPage(FsrRuntimeFiles.SdkReleaseUrl);
         FsrFolderButton.Click += (_, _) => OpenFolder(FsrDirectory());
         FsrRefreshButton.Click += (_, _) =>
@@ -52,6 +54,8 @@ public partial class MainWindow
             _fsrFilesCheckedAt = DateTime.Now;
             UpdateFsrFilesStatus();
         };
+        DlssInstallButton.IsVisible = FsrInstallButton.IsVisible = UpscalerInstaller.IsSupported;
+        UpdateUpscalerInstallButtons();
     }
 
     private DateTime? _dlssFilesCheckedAt;
@@ -112,12 +116,46 @@ public partial class MainWindow
 
     private string FsrDirectory() => FsrRuntimeFiles.DirectoryFor(UpscalerExecutableDirectory());
 
+    private void UpdateUpscalerInstallButtons()
+    {
+        DlssInstallButton.IsEnabled = !_isRunning && DlssRuntimeFiles.Missing(DlssDirectory()).Count != 0;
+        FsrInstallButton.IsEnabled = !_isRunning && FsrRuntimeFiles.Missing(FsrDirectory()).Count != 0;
+    }
+
+    private async Task InstallUpscalerAsync(SuperResolutionBackend backend)
+    {
+        if (_isRunning || !UpscalerInstaller.IsSupported || Sheets.Top is UpscalerInstallDialog)
+        {
+            return;
+        }
+
+        var dlss = backend == SuperResolutionBackend.Dlss;
+        var sdk = dlss ? $"Streamline SDK {DlssRuntimeFiles.StreamlineVersion}" : $"AMD FSR SDK {FsrRuntimeFiles.SdkVersion}";
+        var destination = dlss ? DlssDirectory() : FsrDirectory();
+        if (await Sheets.ShowAsync(new UpscalerInstallDialog(sdk, backend, destination)) is not true)
+        {
+            return;
+        }
+
+        if (dlss)
+        {
+            _dlssFilesCheckedAt = DateTime.Now;
+            UpdateDlssFilesStatus();
+        }
+        else
+        {
+            _fsrFilesCheckedAt = DateTime.Now;
+            UpdateFsrFilesStatus();
+        }
+    }
+
     private void UpdateDlssFilesStatus()
     {
         var directory = DlssDirectory();
         var missing = DlssRuntimeFiles.Missing(directory);
         var localization = Localization.Instance;
         var found = missing.Count == 0;
+        DlssInstallButton.IsEnabled = !_isRunning && !found;
         var brush = found ? SuccessLineBrush : ErrorLineBrush;
         DlssFilesStatusIcon.Text = found ? "check_circle" : "error";
         DlssFilesStatusIcon.Foreground = brush;
@@ -141,6 +179,7 @@ public partial class MainWindow
         var missing = FsrRuntimeFiles.Missing(directory);
         var localization = Localization.Instance;
         var found = missing.Count == 0;
+        FsrInstallButton.IsEnabled = !_isRunning && !found;
         var brush = found ? SuccessLineBrush : ErrorLineBrush;
         FsrFilesStatusIcon.Text = found ? "check_circle" : "error";
         FsrFilesStatusIcon.Foreground = brush;

@@ -1602,6 +1602,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                         Label="{Binding [Options.Pssr.DlssFiles.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.Pssr.DlssFiles.Hint], Source={x:Static local:Localization.Instance}}">
                         <WrapPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                          <Button x:Name="DlssInstallButton" Classes="accent" MinWidth="160" Margin="0,0,8,8"
+                                  Content="{Binding [Options.Pssr.Install.Action], Source={x:Static local:Localization.Instance}}" />
                           <Button x:Name="StreamlineDownloadButton"
                                   Classes="optionAction"
                                   Margin="0,0,8,8">
@@ -1654,6 +1656,8 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                         Label="{Binding [Options.Pssr.Fsr.Label], Source={x:Static local:Localization.Instance}}"
                                         Description="{Binding [Options.Pssr.FsrFiles.Hint], Source={x:Static local:Localization.Instance}}">
                         <WrapPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                          <Button x:Name="FsrInstallButton" Classes="accent" MinWidth="160" Margin="0,0,8,8"
+                                  Content="{Binding [Options.Pssr.Install.Action], Source={x:Static local:Localization.Instance}}" />
                           <Button x:Name="FsrDownloadButton" Classes="optionAction" Margin="0,0,8,8"
                                   Content="AMD FSR SDK" />
                           <Button x:Name="FsrFolderButton" Classes="optionAction" Margin="0,0,8,8">
