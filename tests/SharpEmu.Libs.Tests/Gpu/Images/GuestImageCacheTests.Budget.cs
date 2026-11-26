@@ -1,0 +1,111 @@
+// Copyright (C) 2026 SharpEmu Emulator Project
+// SPDX-License-Identifier: GPL-2.0-or-later
+
+using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Tests.Gpu.Buffers;
+using Silk.NET.Vulkan;
+using Xunit;
+using static SharpEmu.Libs.Tests.Gpu.Images.ImageCacheTestSupport;
+
+namespace SharpEmu.Libs.Tests.Gpu.Images;
+
+public sealed partial class GuestImageCacheTests
+{
+    [Theory]
+    [InlineData(4096, 256)]
+    [InlineData(8192, 512)]
+    [InlineData(24576, 512)]
+    public void BudgetPressureRecoversWithHeadroom(int budgetMiB, int marginMiB)
+    {
+        var budget = (ulong)budgetMiB << 20;
+        var margin = (ulong)marginMiB << 20;
+        var near = false;
+        Assert.Equal(0UL, GuestImageCache.BudgetReclaimTarget(budget, budget - margin, ref near));
+        Assert.False(near);
+        Assert.Equal(margin + 1, GuestImageCache.BudgetReclaimTarget(budget, budget - margin + 1, ref near));
+        Assert.True(near);
+        Assert.Equal(1UL, GuestImageCache.BudgetReclaimTarget(budget, budget - 2 * margin + 1, ref near));
+        Assert.Equal(0UL, GuestImageCache.BudgetReclaimTarget(budget, budget - 2 * margin, ref near));
+        Assert.False(near);
+        Assert.Equal(3 * margin, GuestImageCache.BudgetReclaimTarget(budget, budget + margin, ref near));
+        Assert.Equal(0UL, GuestImageCache.BudgetReclaimTarget(0, budget, ref near));
+        Assert.False(near);
+    }
+
+    [Fact]
+    public void BudgetHeadroomCoalescesOnlyUnchangedSubmissions()
+    {
+        ulong last = 0;
+        Assert.True(GuestImageCache.NeedsRecencyScan(true, false, false, 1, ref last));
+        Assert.False(GuestImageCache.NeedsRecencyScan(true, false, false, 1, ref last));
+        Assert.True(GuestImageCache.NeedsRecencyScan(true, false, false, 2, ref last));
+        Assert.True(GuestImageCache.NeedsRecencyScan(true, true, false, 2, ref last));
+        Assert.True(GuestImageCache.NeedsRecencyScan(true, false, true, 2, ref last));
+        Assert.True(GuestImageCache.NeedsRecencyScan(false, false, false, 2, ref last));
+    }
+
+    [Fact]
+    public void BudgetTrimsOnlyCompletedTilerScratch()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        var device = harness.Device;
+        var baseline = device.LiveAllocations;
+        harness.Run(() =>
+        {
+            harness.Tiler.GetScratchBuffer(64);
+            harness.Tiler.GetScratchBuffer(64);
+            for (uint heap = 0; heap < device.MemoryHeapCount; heap++)
+                Assert.Equal(0UL, harness.Tiler.TrimIdleScratch(heap, 1, long.MaxValue));
+            harness.Scheduler.Finish();
+            for (uint heap = 0; heap < device.MemoryHeapCount; heap++)
+            {
+                Assert.Equal(0UL, harness.Tiler.TrimIdleScratch(heap, 1, long.MinValue));
+                if (harness.Tiler.TrimIdleScratch(heap, 1, long.MaxValue) > 0)
+                    break;
+            }
+            Assert.Equal(baseline + 1, device.LiveAllocations);
+        });
+        harness.AssertNoValidationMessages();
+    }
+
+    [Fact]
+    public void BudgetRetirementStopsAtTheTargetAndPreservesOwners()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var modified = Color32(address);
+        modified.Description.TileMode = GuestTileMode.Standard4KB;
+        var dirty = harness.Find(ref modified);
+        harness.MarkGpuWritten(dirty);
+        var held = Color32(address + 0x4000);
+        var bound = harness.Acquire(ref held);
+        var first = Color32(address + 0x8000);
+        var second = Color32(address + 0xC000);
+        harness.Write(first.Description.Data.Address, Bytes(0x12345678u));
+        var clean = harness.Acquire(ref first);
+        var other = harness.Acquire(ref second);
+        var backing = harness.Image(clean);
+        harness.Worker.Run(() =>
+        {
+            var cache = harness.Images;
+            var heap = backing.Backing.MemoryHeap;
+            harness.Image(bound).HeapChanged = static _ => { };
+            cache.ResetRecency([dirty, bound, clean, other], 100);
+            Assert.Equal(0UL, cache.RetireColdTextures(heap, 1, 1));
+            Assert.Equal(0UL, cache.RetireColdTextures(uint.MaxValue, 1, 100));
+            Assert.Equal(backing.Backing.AllocationSize, cache.RetireColdTextures(heap, 1, 100));
+            Assert.True(cache.Contains(dirty) && harness.Image(dirty).IsGpuModified);
+            Assert.True(cache.Contains(bound) && cache.Contains(other));
+            Assert.False(cache.Contains(clean));
+            Assert.True(backing.Backing.Exists);
+            harness.Image(bound).HeapChanged = null;
+        });
+        harness.Finish();
+        Assert.False(backing.Backing.Exists);
+        var replacement = harness.Acquire(ref first);
+        Assert.Equal(Bytes(0x12345678u), harness.ReadImageBytes(harness.Image(replacement)));
+        _vulkan.AssertNoValidationMessages();
+    }
+}

@@ -1221,6 +1221,9 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var swapchainExtension = (byte*)SilkMarshal.StringToPtr("VK_KHR_swapchain");
+            const string memoryBudgetName = "VK_EXT_memory_budget";
+            var useMemoryBudget = IsDeviceExtensionAvailable(memoryBudgetName);
+            var memoryBudgetExtension = useMemoryBudget ? (byte*)SilkMarshal.StringToPtr(memoryBudgetName) : null;
             var pushDescriptorExtension = (byte*)SilkMarshal.StringToPtr(PushDescriptorExtensionName);
             var maintenance8Extension = (byte*)SilkMarshal.StringToPtr("VK_KHR_maintenance8");
             var robustness2Extension = (byte*)SilkMarshal.StringToPtr("VK_EXT_robustness2");
@@ -1246,6 +1249,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 var extensions = stackalloc byte*[24];
                 var extensionCount = 0u;
                 extensions[extensionCount++] = swapchainExtension;
+                if (useMemoryBudget)
+                    extensions[extensionCount++] = memoryBudgetExtension;
                 extensions[extensionCount++] = pushDescriptorExtension;
                 if (supportsViewportIndexLayer)
                 {
@@ -1569,6 +1574,8 @@ internal static unsafe partial class VulkanVideoPresenter
             finally
             {
                 SilkMarshal.Free((nint)swapchainExtension);
+                if (useMemoryBudget)
+                    SilkMarshal.Free((nint)memoryBudgetExtension);
                 SilkMarshal.Free((nint)maintenance8Extension);
                 SilkMarshal.Free((nint)maintenance5Extension);
                 SilkMarshal.Free((nint)imageViewMinLodExtension);
@@ -1592,7 +1599,11 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _vk.GetDeviceQueue(_device, _queueFamilyIndex, 0, out _queue);
-            _deviceInfo = new GpuDeviceInfo(_vk, _physicalDevice, _device) { ImageViewMinLodSupported = _supportsImageViewMinLod };
+            _deviceInfo = new GpuDeviceInfo(_vk, _physicalDevice, _device)
+            {
+                ImageViewMinLodSupported = _supportsImageViewMinLod,
+                MemoryBudgetSupported = useMemoryBudget,
+            };
             if (_readbackQueueFamilyIndex is { } readbackQueueFamily)
             {
                 _vk.GetDeviceQueue(_device, readbackQueueFamily, 0, out _readbackQueue);

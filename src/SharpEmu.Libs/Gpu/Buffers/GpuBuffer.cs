@@ -136,6 +136,7 @@ public unsafe class GpuBuffer : IDisposable
         RequireSuccess(result, $"vkAllocateMemory({usage}, 0x{size:X} bytes)");
         RequireSuccess(vk.BindBufferMemory(device.Device, _handle, _memory, _memoryOffset), "vkBindBufferMemory");
         _allocationSize = _slab?.Size ?? requirements.Size;
+        MemoryTypeIndex = allocateInfo.MemoryTypeIndex;
         var properties = device.GetMemoryTypeFlags(allocateInfo.MemoryTypeIndex);
         IsCoherent = (properties & MemoryPropertyFlags.HostCoherentBit) != 0;
         NotePlacement(usage, allocateInfo.MemoryTypeIndex, properties);
@@ -173,6 +174,9 @@ public unsafe class GpuBuffer : IDisposable
     public VkBuffer Handle => _handle;
 
     public ulong Size { get; }
+
+    internal uint MemoryTypeIndex { get; }
+    internal ulong AllocationSize => _allocationSize;
 
     public Span<byte> Mapped => _mapped == null ? Span<byte>.Empty : new Span<byte>(_mapped, checked((int)Size));
 

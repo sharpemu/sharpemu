@@ -152,7 +152,7 @@ public sealed unsafe class GpuTiler : IDisposable
             _scratchDisposed = true;
             foreach (var pooled in _scratchPool.Values)
             {
-                foreach (var buffer in pooled)
+                foreach (var (buffer, _) in pooled)
                 {
                     buffer.Dispose();
                 }
@@ -194,7 +194,7 @@ public sealed unsafe class GpuTiler : IDisposable
     private const int ScratchBuffersPerSize = 8;
     private const ulong ScratchPoolBudget = 512UL << 20;
     private readonly object _scratchGate = new();
-    private readonly Dictionary<int, Stack<GpuBuffer>> _scratchPool = new();
+    private readonly Dictionary<int, List<(GpuBuffer Buffer, long ReturnedAt)>> _scratchPool = new();
     private ulong _scratchPooledBytes;
 
     // The scratch stays alive through the current tick; the caller sees exactly `size` bytes.
@@ -209,9 +209,10 @@ public sealed unsafe class GpuTiler : IDisposable
         GpuBuffer? buffer = null;
         lock (_scratchGate)
         {
-            if (_scratchPool.TryGetValue(shift, out var pooled) && pooled.TryPop(out var reused))
+            if (_scratchPool.TryGetValue(shift, out var pooled) && pooled.Count != 0)
             {
-                buffer = reused;
+                buffer = pooled[^1].Buffer;
+                pooled.RemoveAt(pooled.Count - 1);
                 _scratchPooledBytes -= buffer.Size;
             }
         }
@@ -231,13 +232,13 @@ public sealed unsafe class GpuTiler : IDisposable
             {
                 if (!_scratchPool.TryGetValue(shift, out var pooled))
                 {
-                    pooled = new Stack<GpuBuffer>();
+                    pooled = [];
                     _scratchPool[shift] = pooled;
                 }
 
                 if (pooled.Count < ScratchBuffersPerSize)
                 {
-                    pooled.Push(buffer);
+                    pooled.Add((buffer, Environment.TickCount64));
                     _scratchPooledBytes += buffer.Size;
                     return;
                 }
@@ -245,6 +246,37 @@ public sealed unsafe class GpuTiler : IDisposable
         }
 
         buffer.Dispose();
+    }
+
+    internal ulong TrimIdleScratch(uint heap, ulong target, long returnedThrough, int limit = int.MaxValue)
+    {
+        if (target == 0 || limit <= 0)
+            return 0;
+        ulong freed = 0;
+        lock (_scratchGate)
+        {
+            foreach (var pooled in _scratchPool.Values)
+            {
+                for (var i = 0; i < pooled.Count;)
+                {
+                    var (buffer, returnedAt) = pooled[i];
+                    if (returnedAt > returnedThrough)
+                        break;
+                    if (_device.GetMemoryHeapIndex(buffer.MemoryTypeIndex) != heap)
+                    {
+                        i++;
+                        continue;
+                    }
+                    pooled.RemoveAt(i);
+                    _scratchPooledBytes -= buffer.Size;
+                    freed += buffer.AllocationSize;
+                    buffer.Dispose();
+                    if (freed >= target || --limit == 0)
+                        return freed;
+                }
+            }
+        }
+        return freed;
     }
 
     private bool _scratchDisposed;

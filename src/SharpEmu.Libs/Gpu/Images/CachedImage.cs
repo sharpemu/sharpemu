@@ -76,6 +76,7 @@ public sealed class ImageBacking
     public List<ImageAccessState>? SubresourceStates;
     public DeviceMemory Memory;
     public ulong AllocationSize;
+    internal uint MemoryHeap = uint.MaxValue;
 
     public bool Exists => Handle.Handle != 0;
 }
@@ -86,7 +87,7 @@ public sealed unsafe partial class CachedImage : IDisposable
     private readonly GpuDeviceInfo _device;
     private readonly SubmissionScheduler _scheduler;
     private readonly IGuestBackedSpace _guestBacking;
-    private readonly ImageBackingPool? _pool;
+    private ImageBackingPool? _pool;
     private ImageBackingPool.Key _poolKey;
     private ulong _maybeCpuHash;
     private bool _cpuDirty;
@@ -177,7 +178,7 @@ public sealed unsafe partial class CachedImage : IDisposable
         Backing.Usage = create.Usage;
 
         _poolKey = ImageBackingPool.KeyOf(create);
-        if (_pool is not null && _pool.TryTake(_poolKey, out Backing.Handle, out Backing.Memory, out Backing.AllocationSize))
+        if (_pool is not null && _pool.TryTake(_poolKey, out Backing.Handle, out Backing.Memory, out Backing.AllocationSize, out Backing.MemoryHeap))
         {
             return;
         }
@@ -215,6 +216,7 @@ public sealed unsafe partial class CachedImage : IDisposable
                 allocated = device.AllocateMemory(allocateInfo, out Backing.Memory);
                 if (allocated == Result.Success)
                 {
+                    Backing.MemoryHeap = device.GetMemoryHeapIndex(index);
                     if (!deviceLocal)
                     {
                         ReportSystemMemoryImage(create, requirements.Size, index);
@@ -744,6 +746,8 @@ public sealed unsafe partial class CachedImage : IDisposable
         return view;
     }
 
+    internal void DiscardBackingOnRetirement() => _pool = null;
+
     // Immediate destruction; the owner waits for GPU work before disposing.
     public void Dispose()
     {
@@ -756,7 +760,7 @@ public sealed unsafe partial class CachedImage : IDisposable
         Views.Clear();
         if (Backing.Exists)
         {
-            if (_pool is null || !_pool.TryReturn(_poolKey, Backing.Handle, Backing.Memory, Backing.AllocationSize))
+            if (_pool is null || !_pool.TryReturn(_poolKey, Backing.Handle, Backing.Memory, Backing.AllocationSize, Backing.MemoryHeap))
             {
                 _device.Vk.DestroyImage(_device.Device, Backing.Handle, null);
                 _device.FreeMemory(Backing.Memory);

@@ -139,7 +139,8 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
     }
 
     // One shared instance so the live allocation counter spans every buffer and image of a test.
-    public GpuDeviceInfo DeviceInfo => _deviceInfo ??= new GpuDeviceInfo(Vk, Physical, Device);
+    private bool MemoryBudgetSupported { get; init; }
+    public GpuDeviceInfo DeviceInfo => _deviceInfo ??= new GpuDeviceInfo(Vk, Physical, Device) { MemoryBudgetSupported = MemoryBudgetSupported };
 
     public string DeviceName
     {
@@ -512,6 +513,9 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             vulkan13Features.PNext = &robustness2Features;
         }
         var extensionNames = new List<string>();
+        const string memoryBudget = "VK_EXT_memory_budget";
+        var useMemoryBudget = HasDeviceExtensions(vk, physical, [memoryBudget]);
+        if (useMemoryBudget) extensionNames.Add(memoryBudget);
         if (meshShaders)
         {
             meshFeatures = new PhysicalDeviceMeshShaderFeaturesEXT
@@ -569,6 +573,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         vk.GetDeviceQueue(device, family, 0, out var queue);
         var result = new HeadlessVulkan(vk, instance, physical, device, queue, family, apiVersion, enabledFeatures, dynamicRendering)
         {
+            MemoryBudgetSupported = useMemoryBudget,
             SupportsFragmentShaderBarycentric = barycentric,
             SupportsFillRectangle = fillRectangle,
             SupportsMeshShaders = meshShaders,

@@ -17,6 +17,9 @@ public sealed unsafe class GpuDeviceInfo : IImageFormatSupport
     private int _liveAllocations;
     private int _peakAllocations;
 
+    internal bool MemoryBudgetSupported { get; init; }
+    internal uint LocalBudgetHeap { get; } = uint.MaxValue;
+
     // VK_EXT_image_view_min_lod is enabled, so a view can clamp to a texture descriptor's MIN_LOD.
     public bool ImageViewMinLodSupported { get; init; }
 
@@ -27,6 +30,16 @@ public sealed unsafe class GpuDeviceInfo : IImageFormatSupport
         Device = device;
         vk.GetPhysicalDeviceMemoryProperties(physicalDevice, out _memoryProperties);
         vk.GetPhysicalDeviceProperties(physicalDevice, out var properties);
+        if (properties.DeviceType == PhysicalDeviceType.DiscreteGpu)
+        {
+            for (uint heap = 0; heap < MemoryHeapCount; heap++)
+            {
+                if (IsDeviceLocalHeap(heap) && (LocalBudgetHeap == uint.MaxValue || GetMemoryHeapSize(heap) > GetMemoryHeapSize(LocalBudgetHeap)))
+                {
+                    LocalBudgetHeap = heap;
+                }
+            }
+        }
         MinUniformBufferOffsetAlignment = Math.Max(properties.Limits.MinUniformBufferOffsetAlignment, 1);
         MinStorageBufferOffsetAlignment = Math.Max(properties.Limits.MinStorageBufferOffsetAlignment, 1);
         NonCoherentAtomSize = Math.Max(properties.Limits.NonCoherentAtomSize, 1);
@@ -177,6 +190,17 @@ public sealed unsafe class GpuDeviceInfo : IImageFormatSupport
 
     // Tests: memory types whose allocations fail as when their heap is exhausted.
     internal Func<uint, bool>? SimulateExhaustedMemoryType { get; set; }
+
+    // A small BAR heap and system memory cannot supply an allocation from the main local heap.
+    internal (ulong Budget, ulong Usage) ReadLocalBudget()
+    {
+        if (!MemoryBudgetSupported || LocalBudgetHeap == uint.MaxValue)
+            return default;
+        var budget = new PhysicalDeviceMemoryBudgetPropertiesEXT { SType = StructureType.PhysicalDeviceMemoryBudgetPropertiesExt };
+        var properties = new PhysicalDeviceMemoryProperties2 { SType = StructureType.PhysicalDeviceMemoryProperties2, PNext = &budget };
+        Vk.GetPhysicalDeviceMemoryProperties2(PhysicalDevice, &properties);
+        return (budget.HeapBudget[(int)LocalBudgetHeap], budget.HeapUsage[(int)LocalBudgetHeap]);
+    }
 
     // Every device-memory allocation goes through here so the live count stays exact.
     public Result AllocateMemory(in MemoryAllocateInfo info, out DeviceMemory memory)
