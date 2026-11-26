@@ -515,8 +515,6 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             _workers?.Dispose();
             _workers = null;
-            _arenaPool?.Dispose();
-            _arenaPool = null;
         }
 
         internal bool SlicesEnabled => _workers is not null && !_deviceLost;

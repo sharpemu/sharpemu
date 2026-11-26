@@ -169,6 +169,7 @@ internal sealed class PresenterUnderTest : IDisposable
                 }
 
                 InvokeMethod("WaitForAllGuestSubmissions");
+                GetField<SliceArenaPool?>("_arenaPool")?.Dispose();
                 GetField<SharpEmu.Libs.Gpu.Vulkan.VulkanOcclusionQueries?>("_occlusionQueries")?.Dispose();
                 DestroyPipelineResources();
                 Samplers.Dispose();

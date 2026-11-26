@@ -33,6 +33,50 @@ public sealed class SliceRecordingTests : IClassFixture<HeadlessVulkanFixture>
     public SliceRecordingTests(HeadlessVulkanFixture fixture) => _vulkan = fixture.Vulkan;
 
     [Fact]
+    public unsafe void StoppingWorkersKeepsSliceUploadsUntilTheirSubmissionCompletes()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var presenter = new PresenterUnderTest(_vulkan);
+        presenter.Run(() =>
+        {
+            var scheduler = presenter.Harness.Scheduler;
+            var pool = new SliceArenaPool(_vulkan.DeviceInfo, scheduler);
+            presenter.SetField("_arenaPool", pool);
+            // Oversized chunks are destroyed on return, making both ends of their lifetime observable.
+            var chunk = pool.Rent(SliceArenaPool.ChunkBytes + 1);
+            var slice = Activator.CreateInstance(SliceType, nonPublic: true)!;
+            SliceType.GetField("Chunks")!.SetValue(slice, new List<SliceArenaChunk> { chunk });
+            SliceType.GetField("Submitted")!.SetValue(slice, true);
+            ((ManualResetEventSlim)SliceType.GetField("Done")!.GetValue(slice)!).Set();
+            presenter.InvokeMethod("FinishSlice", slice);
+
+            var gate = _vulkan.CreateTimelineSemaphore();
+            var wait = new SubmitBundle();
+            wait.AddWait(gate);
+            var tick = scheduler.Flush(wait);
+            ulong handleWhilePending;
+            try
+            {
+                presenter.InvokeMethod("StopRenderWorkers");
+                Assert.False(scheduler.IsTickComplete(tick));
+                handleWhilePending = chunk.Buffer.Handle.Handle;
+            }
+            finally
+            {
+                var signal = new SemaphoreSignalInfo { SType = StructureType.SemaphoreSignalInfo, Semaphore = new(gate), Value = 1 };
+                Assert.Equal(Result.Success, _vulkan.Vk.SignalSemaphore(_vulkan.Device, &signal));
+                scheduler.Wait(tick);
+                _vulkan.DestroySemaphore(gate);
+            }
+
+            var retirementError = Record.Exception(scheduler.RunCompletedOperations);
+            Assert.NotEqual(0UL, handleWhilePending);
+            Assert.Null(retirementError);
+            Assert.Equal(0UL, chunk.Buffer.Handle.Handle);
+        });
+    }
+
+    [Fact]
     public void SliceSurplusRetainsRentedChunksAndRecentBursts()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
