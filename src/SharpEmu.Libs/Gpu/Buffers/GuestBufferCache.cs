@@ -369,6 +369,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                 var publications = PublicationOrdinal?.Invoke() ?? 0;
                 if (ObservationGated && _streamCopyShares.TryShare(guestAddress, size, _observation, tick, publications, out var sharedOffset))
                 {
+                    _stream.TouchResidency();
                     return (_stream, sharedOffset);
                 }
 
@@ -383,6 +384,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                         _streamCopyShares.Remember(guestAddress, size, _observation, tick, publications, streamOffset);
                     }
 
+                    _stream.TouchResidency();
                     return (_stream, streamOffset);
                 }
             }
@@ -2723,8 +2725,11 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         }
     }
 
-    private void TouchBuffer(ResourceSlotIdentifier identifier) =>
+    private void TouchBuffer(ResourceSlotIdentifier identifier)
+    {
+        if (_device.Residency is not null) _registry.GetBuffer(identifier).TouchResidency();
         _registry.MarkBufferUsed(identifier, _retirementPolicy.CurrentTick);
+    }
 
     private void DeleteBuffer(ResourceSlotIdentifier bufferIdentifier)
     {

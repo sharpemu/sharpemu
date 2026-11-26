@@ -15,7 +15,8 @@ internal readonly record struct VulkanHostBufferAllocation(
     VkBuffer Buffer,
     DeviceMemory Memory,
     VulkanHostBufferPoolKey Key,
-    nint Mapped);
+    nint Mapped,
+    GpuResidency.Entry? Residency = null);
 
 internal sealed class VulkanHostBufferPool : IDisposable
 {
@@ -54,6 +55,7 @@ internal sealed class VulkanHostBufferPool : IDisposable
             }
 
             allocation = available[^1];
+            allocation.Residency?.Use(GpuResidency.PresenterBufferRole(key.Usage));
             available.RemoveAt(available.Count - 1);
             _cachedHandles.Remove(allocation.Buffer.Handle);
             _idleSpills.Remove(allocation.Buffer.Handle);
@@ -105,6 +107,7 @@ internal sealed class VulkanHostBufferPool : IDisposable
                     _available.Add(allocation.Key, available);
                 }
 
+                allocation.Residency?.Use(GpuResidency.Role.IdleBuffer);
                 available.Add(allocation);
                 if (spillReturnedAt.HasValue) _idleSpills.Add(buffer.Handle, spillReturnedAt.Value);
                 CachedBytes += allocation.Key.Capacity;

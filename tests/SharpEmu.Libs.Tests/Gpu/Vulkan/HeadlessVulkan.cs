@@ -191,6 +191,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
     {
         Vk.DeviceWaitIdle(Device);
         _deviceInfo?.Slabs.Destroy();
+        _deviceInfo?.DxgiBudget?.Dispose();
         Vk.DestroyDevice(Device, null);
         if (_debugUtils is { } debugUtils)
         {
@@ -547,6 +548,17 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         const string fillRectangleExtension = "VK_NV_fill_rectangle";
         var fillRectangle = HasDeviceExtensions(vk, physical, [fillRectangleExtension]);
         if (fillRectangle) extensionNames.Add(fillRectangleExtension);
+        PhysicalDevicePageableDeviceLocalMemoryFeaturesEXT pageable = default;
+        PhysicalDeviceMemoryPriorityFeaturesEXT memoryPriority = default;
+        var usePriority = HasDeviceExtensions(vk, physical, [GpuResidency.PriorityExtension, GpuResidency.PageableExtension]) &&
+            GpuResidency.QueryFeatures(vk, physical, &memoryPriority, &pageable);
+        if (usePriority)
+        {
+            pageable.PNext = vulkan13Features.PNext;
+            vulkan13Features.PNext = &memoryPriority;
+            extensionNames.Add(GpuResidency.PriorityExtension);
+            extensionNames.Add(GpuResidency.PageableExtension);
+        }
         var deviceExtensions = extensionNames.Count > 0 ? SilkMarshal.StringArrayToPtr(extensionNames.ToArray()) : 0;
         var deviceInfo = new DeviceCreateInfo
         {
@@ -585,6 +597,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             RobustBufferAccess2 = robustBufferAccess2,
             NativeFloat16Conversions = nativeFloat16,
         };
+        result.DeviceInfo.ConfigureResidency(usePriority);
         if (validation)
         {
             result.RegisterDebugMessenger();

@@ -87,6 +87,7 @@ public sealed unsafe class ImageBackingPool : IDisposable
         }
 
         var entry = new Entry(handle, memory, size, heap, Environment.TickCount64);
+        _device.Residency?.Find(memory)?.Use(GpuResidency.Role.IdleImage);
         stack.Push(entry);
         _order.AddLast((key, entry));
         _pooledBytes += size;

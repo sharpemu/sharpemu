@@ -16,12 +16,13 @@ public sealed partial class GuestImageCache
 
     private bool ShouldScanImages(ulong tick, bool endsFrame)
     {
+        _device.Residency?.Advance((long)tick);
         var now = Environment.TickCount64;
         var sampled = now >= _nextBudgetSample;
         if (sampled)
         {
             _nextBudgetSample = now + 500;
-            var (budget, usage) = _device.ReadLocalBudget();
+            var (budget, usage) = SelectBudget(_device.ReadLocalBudget(), _device.DxgiBudget?.Read() ?? default);
             _hasBudget = budget != 0;
             var target = BudgetReclaimTarget(budget, usage, ref _nearBudget);
             var heap = _device.LocalBudgetHeap;
@@ -31,13 +32,22 @@ public sealed partial class GuestImageCache
                 var pending = (ulong)Volatile.Read(ref _pendingBudgetBytes);
                 target -= Math.Min(target, pending);
                 target = Math.Min(target, 64 * MiB);
-                var freed = target != 0 ? ReleaseIdleMemory(heap, target, now - 1000, 16) : 0;
+                var freed = target != 0 ? ReleaseIdleMemory(heap, target, now - 100, 16) : 0;
                 if (freed < target)
                     RetireColdTextures(heap, target - freed, tick);
             }
         }
 
         return NeedsRecencyScan(_hasBudget && !_nearBudget, endsFrame, sampled, _createdImageCount, ref _lastCollectionCreation);
+    }
+
+    // Compare headroom to the near-budget watermark for each API's own usage and budget.
+    internal static (ulong Budget, ulong Usage) SelectBudget((ulong Budget, ulong Usage) vk,
+        (ulong Budget, ulong Usage) dxgi)
+    {
+        static double Headroom((ulong Budget, ulong Usage) sample) =>
+            (double)(sample.Budget - Math.Min(512 * MiB, sample.Budget / 16)) - sample.Usage;
+        return dxgi.Budget != 0 && (vk.Budget == 0 || Headroom(dxgi) < Headroom(vk)) ? dxgi : vk;
     }
 
     // Submissions in one frame have the same recency cutoff. Respond to growth even before the next flip.

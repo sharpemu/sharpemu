@@ -38,6 +38,12 @@ public unsafe class GpuBuffer : IDisposable
     private readonly ulong _deviceAddress;
     private VkBuffer _handle;
     private DeviceMemory _memory;
+    internal GpuResidency.Entry? Residency { get; }
+    internal void TouchResidency()
+    {
+        if (Usage is not (GpuBufferUsage.Upload or GpuBufferUsage.Download))
+            Residency?.Use(_slab.HasValue ? GpuResidency.Role.Slab : GpuResidency.Role.BoundBuffer);
+    }
     private readonly ulong _memoryOffset;
     private readonly GpuMemorySlabs.Block? _slab;
 
@@ -119,7 +125,12 @@ public unsafe class GpuBuffer : IDisposable
             for (var index = 0; index < candidates.Length; index++)
             {
                 allocateInfo.MemoryTypeIndex = candidates[index];
-                result = device.AllocateMemory(allocateInfo, out _memory);
+                result = device.AllocateMemory(allocateInfo, out _memory, usage switch
+                {
+                    GpuBufferUsage.Upload => GpuResidency.Role.Upload,
+                    GpuBufferUsage.Download => GpuResidency.Role.Readback,
+                    _ => GpuResidency.Role.Buffer,
+                });
                 if (result == Result.Success)
                 {
                     chosen = index;
@@ -135,6 +146,7 @@ public unsafe class GpuBuffer : IDisposable
 
         RequireSuccess(result, $"vkAllocateMemory({usage}, 0x{size:X} bytes)");
         RequireSuccess(vk.BindBufferMemory(device.Device, _handle, _memory, _memoryOffset), "vkBindBufferMemory");
+        Residency = device.Residency?.Find(_memory);
         _allocationSize = _slab?.Size ?? requirements.Size;
         MemoryTypeIndex = allocateInfo.MemoryTypeIndex;
         var properties = device.GetMemoryTypeFlags(allocateInfo.MemoryTypeIndex);
@@ -238,6 +250,7 @@ public unsafe class GpuBuffer : IDisposable
 
     public void NoteGpuWrite(ulong offset, ulong size)
     {
+        TouchResidency();
         GpuWrites++;
         var tick = _scheduler.CurrentTick;
         if (tick > LastGpuWriteTick)

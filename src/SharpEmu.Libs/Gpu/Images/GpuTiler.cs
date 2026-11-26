@@ -220,6 +220,7 @@ public sealed unsafe class GpuTiler : IDisposable
         buffer ??= new GpuBuffer(_device, _scheduler, GpuBufferUsage.DeviceLocal, 0,
             BufferUsageFlags.StorageBufferBit | BufferUsageFlags.TransferSrcBit | BufferUsageFlags.TransferDstBit,
             shift >= 63 ? size : 1UL << shift);
+        buffer.Residency?.Use(GpuResidency.Role.Scratch);
         _scheduler.QueueCompletionAction(() => ReturnScratch(shift, buffer));
         return new TilerBufferSpan(buffer.Handle, 0, size);
     }
@@ -238,6 +239,7 @@ public sealed unsafe class GpuTiler : IDisposable
 
                 if (pooled.Count < ScratchBuffersPerSize)
                 {
+                    buffer.Residency?.Use(GpuResidency.Role.IdleScratch);
                     pooled.Add((buffer, Environment.TickCount64));
                     _scratchPooledBytes += buffer.Size;
                     return;

@@ -855,6 +855,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
 
                 snapshot = available.Pop();
+                _deviceInfo?.Residency?.Find(snapshot.Memory)?.Use(Gpu.Buffers.GpuResidency.Role.Flip);
                 _pooledFlipSnapshots--;
             }
 
@@ -882,6 +883,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
                 resource.Address = 0;
                 resource.FlipVersion = 0;
+                _deviceInfo?.Residency?.Find(resource.Memory)?.Use(Gpu.Buffers.GpuResidency.Role.IdleImage);
                 available.Push(resource);
                 _pooledFlipSnapshots++;
                 return true;
@@ -943,7 +945,7 @@ internal static unsafe partial class VulkanVideoPresenter
             DeviceMemory memory = default;
             try
             {
-                Check(_deviceInfo.AllocateMemory(allocationInfo, out memory), "vkAllocateMemory(flip snapshot)");
+                Check(_deviceInfo.AllocateMemory(allocationInfo, out memory, Gpu.Buffers.GpuResidency.Role.Flip), "vkAllocateMemory(flip snapshot)");
                 Check(_vk.BindImageMemory(_device, image, memory, 0), "vkBindImageMemory(flip snapshot)");
             }
             catch

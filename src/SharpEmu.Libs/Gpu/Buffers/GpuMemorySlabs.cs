@@ -126,7 +126,11 @@ internal sealed unsafe class GpuMemorySlabs
         {
             var chunk = _chunks[released.Memory];
             chunk.Bucket.Free.Add((chunk, released.Offset, released.MappedAddress, true));
-            if (--chunk.Outstanding == 0) KeepOneEmptyChunk(chunk);
+            if (--chunk.Outstanding == 0)
+            {
+                _device.Residency?.Find(chunk.Memory)?.Use(GpuResidency.Role.EmptySlab);
+                KeepOneEmptyChunk(chunk);
+            }
         }
         _quarantine.Clear();
     }
@@ -174,7 +178,7 @@ internal sealed unsafe class GpuMemorySlabs
             AllocationSize = ChunkSize,
             MemoryTypeIndex = memoryType,
         };
-        if (_device.AllocateMemory(allocateInfo, out var memory) != Result.Success)
+        if (_device.AllocateMemory(allocateInfo, out var memory, GpuResidency.Role.Slab) != Result.Success)
         {
             return false;
         }

@@ -77,6 +77,7 @@ public sealed class ImageBacking
     public DeviceMemory Memory;
     public ulong AllocationSize;
     internal uint MemoryHeap = uint.MaxValue;
+    internal GpuResidency.Entry? Residency;
 
     public bool Exists => Handle.Handle != 0;
 }
@@ -180,6 +181,8 @@ public sealed unsafe partial class CachedImage : IDisposable
         _poolKey = ImageBackingPool.KeyOf(create);
         if (_pool is not null && _pool.TryTake(_poolKey, out Backing.Handle, out Backing.Memory, out Backing.AllocationSize, out Backing.MemoryHeap))
         {
+            Backing.Residency = device.Residency?.Find(Backing.Memory);
+            TouchResidency();
             return;
         }
 
@@ -213,7 +216,7 @@ public sealed unsafe partial class CachedImage : IDisposable
 
                 allocateInfo.MemoryTypeIndex = index;
                 allocationAttempted = true;
-                allocated = device.AllocateMemory(allocateInfo, out Backing.Memory);
+                allocated = device.AllocateMemory(allocateInfo, out Backing.Memory, GpuResidency.Role.Texture);
                 if (allocated == Result.Success)
                 {
                     Backing.MemoryHeap = device.GetMemoryHeapIndex(index);
@@ -243,7 +246,12 @@ public sealed unsafe partial class CachedImage : IDisposable
         }
 
         Backing.AllocationSize = requirements.Size;
+        Backing.Residency = device.Residency?.Find(Backing.Memory);
     }
+
+    internal void TouchResidency() => Backing.Residency?.Use(Uses.DepthTarget || (Description.IsDepth && IsGpuModified)
+        ? GpuResidency.Role.Depth : Uses.RenderTarget ? GpuResidency.Role.Color :
+        IsGpuModified ? GpuResidency.Role.WrittenImage : GpuResidency.Role.Texture);
 
     private static int _systemMemoryImageReports;
 
@@ -506,6 +514,7 @@ public sealed unsafe partial class CachedImage : IDisposable
     {
         RawWriteAfterGpuWrite = false;
         _gpuModified = true;
+        TouchResidency();
         if (DimensionTwin is { } twin)
         {
             twin.DimensionTwinStale = true;
@@ -768,6 +777,7 @@ public sealed unsafe partial class CachedImage : IDisposable
 
             Backing.Handle = default;
             Backing.Memory = default;
+            Backing.Residency = null;
         }
     }
 }

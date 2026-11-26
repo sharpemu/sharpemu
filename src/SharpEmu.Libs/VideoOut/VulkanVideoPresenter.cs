@@ -426,7 +426,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     memoryFlags,
                     preferredMemoryFlags),
             };
-            Check(_deviceInfo.AllocateMemory(memoryInfo, out memory), "vkAllocateMemory");
+            Check(_deviceInfo.AllocateMemory(memoryInfo, out memory, Gpu.Buffers.GpuResidency.PresenterBufferRole(usage)), "vkAllocateMemory");
             Check(_vk.BindBufferMemory(_device, buffer, memory, 0), "vkBindBufferMemory");
             return buffer;
         }

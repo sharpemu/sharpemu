@@ -896,6 +896,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _feedbackSnapshotPoolBytes -= snapshot.Backing.AllocationSize;
+            snapshot.TouchResidency();
             if (entries.Count == 0)
             {
                 _feedbackSnapshotPool.Remove(key);
@@ -926,6 +927,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 _feedbackSnapshotPoolBytes + allocation <= FeedbackSnapshotPoolMaxBytes)
             {
                 entries.Push(snapshot);
+                snapshot.Backing.Residency?.Use(Gpu.Buffers.GpuResidency.Role.IdleImage);
                 _feedbackSnapshotPoolBytes += allocation;
                 return;
             }

@@ -1223,6 +1223,12 @@ internal static unsafe partial class VulkanVideoPresenter
             var swapchainExtension = (byte*)SilkMarshal.StringToPtr("VK_KHR_swapchain");
             const string memoryBudgetName = "VK_EXT_memory_budget";
             var useMemoryBudget = IsDeviceExtensionAvailable(memoryBudgetName);
+            PhysicalDevicePageableDeviceLocalMemoryFeaturesEXT pageable = default;
+            PhysicalDeviceMemoryPriorityFeaturesEXT memoryPriority = default;
+            var usePriority = IsDeviceExtensionAvailable(GpuResidency.PriorityExtension) &&
+                IsDeviceExtensionAvailable(GpuResidency.PageableExtension) && GpuResidency.QueryFeatures(_vk, _physicalDevice, &memoryPriority, &pageable);
+            var priorityExtension = usePriority ? (byte*)SilkMarshal.StringToPtr(GpuResidency.PriorityExtension) : null;
+            var pageableExtension = usePriority ? (byte*)SilkMarshal.StringToPtr(GpuResidency.PageableExtension) : null;
             var memoryBudgetExtension = useMemoryBudget ? (byte*)SilkMarshal.StringToPtr(memoryBudgetName) : null;
             var pushDescriptorExtension = (byte*)SilkMarshal.StringToPtr(PushDescriptorExtensionName);
             var maintenance8Extension = (byte*)SilkMarshal.StringToPtr("VK_KHR_maintenance8");
@@ -1246,11 +1252,16 @@ internal static unsafe partial class VulkanVideoPresenter
             var deviceFaultExtension = (byte*)SilkMarshal.StringToPtr("VK_EXT_device_fault");
             try
             {
-                var extensions = stackalloc byte*[24];
+                var extensions = stackalloc byte*[26];
                 var extensionCount = 0u;
                 extensions[extensionCount++] = swapchainExtension;
                 if (useMemoryBudget)
                     extensions[extensionCount++] = memoryBudgetExtension;
+                if (usePriority)
+                {
+                    extensions[extensionCount++] = priorityExtension;
+                    extensions[extensionCount++] = pageableExtension;
+                }
                 extensions[extensionCount++] = pushDescriptorExtension;
                 if (supportsViewportIndexLayer)
                 {
@@ -1507,6 +1518,11 @@ internal static unsafe partial class VulkanVideoPresenter
                     renderingChain = &graphicsPipelineLibraryFeatures;
                 }
                 var faultFeatures = new PhysicalDeviceFaultFeaturesEXT { SType = StructureType.PhysicalDeviceFaultFeaturesExt };
+                if (usePriority)
+                {
+                    pageable.PNext = renderingChain;
+                    renderingChain = &memoryPriority;
+                }
                 var reportDeviceFaults = false;
                 if (SharpEmu.Libs.Gpu.Vulkan.DeviceFaultReport.Requested && IsDeviceExtensionAvailable("VK_EXT_device_fault"))
                 {
@@ -1576,6 +1592,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 SilkMarshal.Free((nint)swapchainExtension);
                 if (useMemoryBudget)
                     SilkMarshal.Free((nint)memoryBudgetExtension);
+                if (usePriority)
+                {
+                    SilkMarshal.Free((nint)priorityExtension);
+                    SilkMarshal.Free((nint)pageableExtension);
+                }
                 SilkMarshal.Free((nint)maintenance8Extension);
                 SilkMarshal.Free((nint)maintenance5Extension);
                 SilkMarshal.Free((nint)imageViewMinLodExtension);
@@ -1604,6 +1625,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 ImageViewMinLodSupported = _supportsImageViewMinLod,
                 MemoryBudgetSupported = useMemoryBudget,
             };
+            _deviceInfo.ConfigureResidency(usePriority);
             if (_readbackQueueFamilyIndex is { } readbackQueueFamily)
             {
                 _vk.GetDeviceQueue(_device, readbackQueueFamily, 0, out _readbackQueue);

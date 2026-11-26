@@ -47,7 +47,8 @@ internal static unsafe partial class VulkanVideoPresenter
                     buffer,
                     allocatedMemory,
                     key,
-                    (nint)persistentMapping);
+                    (nint)persistentMapping,
+                    _deviceInfo.Residency?.Find(allocatedMemory));
                 _hostBufferPool.Register(allocation);
             }
 

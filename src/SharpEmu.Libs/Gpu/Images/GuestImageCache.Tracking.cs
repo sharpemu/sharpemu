@@ -261,6 +261,7 @@ public sealed partial class GuestImageCache
 
     private void TouchImage(CachedImage image)
     {
+        image.TouchResidency();
         if (image.Registered)
         {
             // The first use in a frame keeps the frame of the use before it: an image used in each of the two frames before

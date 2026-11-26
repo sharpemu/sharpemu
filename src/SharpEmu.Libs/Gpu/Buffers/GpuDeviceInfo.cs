@@ -21,6 +21,18 @@ public sealed unsafe class GpuDeviceInfo : IImageFormatSupport
     internal uint LocalBudgetHeap { get; } = uint.MaxValue;
     internal Func<uint, ulong, ulong>? ReleaseIdleMemory { get; set; }
 
+    internal GpuResidency? Residency { get; private set; }
+    internal DxgiLocalBudget? DxgiBudget { get; private set; }
+
+    internal void ConfigureResidency(bool supported)
+    {
+        var proc = supported ? (nint)Vk.GetDeviceProcAddr(Device, "vkSetDeviceMemoryPriorityEXT").Handle : 0;
+        if (supported && proc == 0) throw new InvalidOperationException("vkSetDeviceMemoryPriorityEXT is missing on the enabled device.");
+        if (supported) Residency = new GpuResidency((memory, priority) =>
+            ((delegate* unmanaged<Device, DeviceMemory, float, void>)proc)(Device, memory, priority));
+        if (LocalBudgetHeap != uint.MaxValue) DxgiBudget = DxgiLocalBudget.Open(Vk, PhysicalDevice);
+    }
+
     // VK_EXT_image_view_min_lod is enabled, so a view can clamp to a texture descriptor's MIN_LOD.
     public bool ImageViewMinLodSupported { get; init; }
 
@@ -214,32 +226,39 @@ public sealed unsafe class GpuDeviceInfo : IImageFormatSupport
     }
 
     // Every device-memory allocation goes through here so the live count stays exact.
-    public Result AllocateMemory(in MemoryAllocateInfo info, out DeviceMemory memory)
-    {
-        fixed (MemoryAllocateInfo* pointer = &info)
-        {
-            var result = AllocateOnce(pointer, out memory);
-            if (result == Result.ErrorOutOfDeviceMemory && ReleaseIdleMemory is { } release)
-            {
-                var heap = GetMemoryHeapIndex(info.MemoryTypeIndex);
-                var freed = release(heap, info.AllocationSize);
-                if (freed != 0)
-                {
-                    result = AllocateOnce(pointer, out memory);
-                }
-            }
-            if (result == Result.Success)
-            {
-                var live = Interlocked.Increment(ref _liveAllocations);
-                int peak;
-                while ((peak = Volatile.Read(ref _peakAllocations)) < live &&
-                       Interlocked.CompareExchange(ref _peakAllocations, live, peak) != peak)
-                {
-                }
-            }
+    public Result AllocateMemory(in MemoryAllocateInfo info, out DeviceMemory memory) =>
+        AllocateMemory(info, out memory, GpuResidency.Role.Other);
 
-            return result;
+    internal Result AllocateMemory(in MemoryAllocateInfo info, out DeviceMemory memory, GpuResidency.Role role)
+    {
+        var local = Residency is not null && IsDeviceLocalHeap(GetMemoryHeapIndex(info.MemoryTypeIndex)) ? Residency : null;
+        var initial = local?.Initial(role) ?? GpuResidency.Band.Default;
+        var priority = new MemoryPriorityAllocateInfoEXT { SType = StructureType.MemoryPriorityAllocateInfoExt,
+            Priority = GpuResidency.Value(initial), PNext = info.PNext };
+        var allocation = info;
+        if (initial != GpuResidency.Band.Default) allocation.PNext = &priority;
+        var result = AllocateOnce(&allocation, out memory);
+        if (result == Result.ErrorOutOfDeviceMemory && ReleaseIdleMemory is { } release)
+        {
+            var heap = GetMemoryHeapIndex(info.MemoryTypeIndex);
+            var freed = release(heap, info.AllocationSize);
+            if (freed != 0)
+            {
+                result = AllocateOnce(&allocation, out memory);
+            }
         }
+        if (result == Result.Success)
+        {
+            local?.Add(memory, role, initial);
+            var live = Interlocked.Increment(ref _liveAllocations);
+            int peak;
+            while ((peak = Volatile.Read(ref _peakAllocations)) < live &&
+                   Interlocked.CompareExchange(ref _peakAllocations, live, peak) != peak)
+            {
+            }
+        }
+
+        return result;
     }
 
     public void FreeMemory(DeviceMemory memory)
@@ -249,6 +268,7 @@ public sealed unsafe class GpuDeviceInfo : IImageFormatSupport
             return;
         }
 
+        Residency?.Remove(memory);
         Vk.FreeMemory(Device, memory, null);
         Interlocked.Decrement(ref _liveAllocations);
     }
