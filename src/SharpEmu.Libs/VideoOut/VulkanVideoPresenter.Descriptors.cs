@@ -2299,7 +2299,8 @@ internal static unsafe partial class VulkanVideoPresenter
             var writeIndex = 0;
             var pixelWriteStart = -1;
             var uploadStage = bindPoint == PipelineBindPoint.Compute ? PipelineStageFlags.ComputeShaderBit : PipelineStageFlags.FragmentShaderBit;
-            var textures = textureCount == 0 ? [] : System.Buffers.ArrayPool<TextureResource>.Shared.Rent(textureCount);
+            var pack = textureCount <= 64 && preparation.FeedbackSnapshots is not { Count: > 0 } && preparation.OverflowBuffers.Count == 0;
+            var textures = pack || textureCount == 0 ? [] : System.Buffers.ArrayPool<TextureResource>.Shared.Rent(textureCount);
             var textureIndex = 0;
             fixed (DescriptorBufferInfo* bufferInfoPointer = bufferInfos)
             fixed (DescriptorImageInfo* imageInfoPointer = imageInfos)
@@ -2343,9 +2344,10 @@ internal static unsafe partial class VulkanVideoPresenter
                         _presenter.RecordHostMovieUploads(stage.Textures, uploadStage);
                     }
 
-                    foreach (var texture in stage.Textures)
+                    if (!pack)
                     {
-                        textures[textureIndex++] = texture;
+                        stage.Textures.AsSpan().CopyTo(textures.AsSpan(textureIndex));
+                        textureIndex += stage.Textures.Length;
                     }
 
                     if (shaderStage == ShaderStage.Pixel)
@@ -2547,19 +2549,36 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var spare = _worker ? null : _presenter._spareSubmissionResources ??= new Stack<SubmissionUploadResources>();
-            var uploads = spare is { Count: not 0 } ? spare.Pop() : new SubmissionUploadResources();
-            uploads.DebugName = bindPoint == PipelineBindPoint.Compute ? "SharpEmu dispatch" : "SharpEmu draw";
-            uploads.Textures = textures;
-            uploads.TextureCount = textureCount;
-            uploads.FeedbackSnapshots = preparation.FeedbackSnapshots?.ToArray() ?? [];
-            uploads.OverflowBuffers = preparation.OverflowBuffers.Count == 0 ? null : preparation.OverflowBuffers.ToArray();
-            if (_worker)
+            var batch = _worker ? Requests.Resources : _presenter._batchResources;
+            var uploads = SubmissionUploadResources.BeginPacket(batch, spare,
+                bindPoint == PipelineBindPoint.Compute ? "SharpEmu dispatch" : "SharpEmu draw", textureCount, pack, _worker);
+            if (pack)
             {
-                Requests.Resources.Add(uploads);
+                foreach (var prepared in stages)
+                {
+                    var refs = ((PreparedStageBindings)prepared).Textures;
+                    refs.AsSpan().CopyTo(uploads.Textures.AsSpan(uploads.TextureCount));
+                    uploads.TextureCount += refs.Length;
+                }
+
+                // Recording the stage textures above can add depth feedback snapshots and overflow buffers after `pack`
+                // was decided; they retire with the packet like an unpacked draw's, or each snapshot image leaks.
+                if (preparation.FeedbackSnapshots is { Count: > 0 } snapshots)
+                {
+                    uploads.FeedbackSnapshots = [.. uploads.FeedbackSnapshots, .. snapshots];
+                }
+
+                if (preparation.OverflowBuffers.Count > 0)
+                {
+                    uploads.OverflowBuffers = [.. uploads.OverflowBuffers ?? [], .. preparation.OverflowBuffers];
+                }
             }
             else
             {
-                _presenter._batchResources.Add(uploads);
+                uploads.Textures = textures;
+                uploads.TextureCount = textureCount;
+                uploads.FeedbackSnapshots = preparation.FeedbackSnapshots?.ToArray() ?? [];
+                uploads.OverflowBuffers = preparation.OverflowBuffers.Count == 0 ? null : preparation.OverflowBuffers.ToArray();
             }
 
             preparation.OverflowBuffers.Clear();

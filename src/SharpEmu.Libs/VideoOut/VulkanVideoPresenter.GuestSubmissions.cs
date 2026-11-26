@@ -229,6 +229,7 @@ internal static unsafe partial class VulkanVideoPresenter
             foreach (var resources in submission.Resources)
             {
                 RecycleSubmissionUploads(resources);
+                resources.Packed = false;
                 resources.FeedbackSnapshots = [];
                 resources.OverflowBuffers = null;
                 var spare = _spareSubmissionResources ??= new Stack<SubmissionUploadResources>();
