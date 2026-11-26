@@ -7,6 +7,8 @@ using System.Text.RegularExpressions;
 
 namespace SharpEmu.Logging;
 
+public readonly record struct HostMemoryAvailability(long AvailableCommitBytes, long AvailablePhysicalBytes, long TotalPhysicalBytes);
+
 /// <summary>Provides best-effort information about the host system.</summary>
 public static class HostSystemInfo
 {
@@ -122,23 +124,27 @@ public static class HostSystemInfo
         return 1;
     }
 
-    // The commit the process can still make (physical memory plus page file), or -1 when it cannot be read.
-    public static long AvailableCommitBytes()
+    // ullAvailPhys includes reclaimable standby pages. ullAvailPageFile is the commit available to this process.
+    public static HostMemoryAvailability GetMemoryAvailability()
     {
-        if (!OperatingSystem.IsWindows())
+        if (OperatingSystem.IsWindows())
         {
-            return -1;
+            try
+            {
+                var status = new MemoryStatusEx { dwLength = (uint)Marshal.SizeOf<MemoryStatusEx>() };
+                if (GlobalMemoryStatusEx(ref status))
+                {
+                    return new(long.CreateSaturating(status.ullAvailPageFile), long.CreateSaturating(status.ullAvailPhys),
+                        long.CreateSaturating(status.ullTotalPhys));
+                }
+            }
+            catch (Exception)
+            {
+                // The host could not report memory availability.
+            }
         }
 
-        try
-        {
-            var status = new MemoryStatusEx { dwLength = (uint)Marshal.SizeOf<MemoryStatusEx>() };
-            return GlobalMemoryStatusEx(ref status) ? (long)Math.Min(status.ullAvailPageFile, long.MaxValue) : -1;
-        }
-        catch (Exception)
-        {
-            return -1;
-        }
+        return new(-1, -1, -1);
     }
 
     private static string GetMemoryDescription()

@@ -1915,17 +1915,19 @@ internal static unsafe partial class VulkanVideoPresenter
         // the linked compiles already running, one large one at a time). Until then the fallback that serves a pending
         // linked program keeps serving it. Shutdown abandons the ones still waiting.
         private static readonly LinkedCompileAdmission _linkedCompileAdmission =
-            new(SharpEmu.Logging.HostSystemInfo.AvailableCommitBytes);
+            new(SharpEmu.Logging.HostSystemInfo.GetMemoryAvailability);
         private volatile bool _linkedAdmissionClosed;
 
-        // Waits until the compile is admitted; false when shutdown abandons it. Without mayWait it answers at once (the
-        // prewarm's linked records). An admitted compile calls ReleaseLinkedAdmission when it ends.
-        private bool WaitForLinkedAdmission(ulong hash, long spirvBytes, bool mayWait = true)
+        // Boot prewarm asks once. Demand and background work retry until admitted or shutdown closes admission.
+        private bool WaitForLinkedAdmission(ulong hash, long spirvBytes, LinkedCompileAdmission.Source source = LinkedCompileAdmission.Source.Demand)
         {
             var reported = false;
+            var reportedRam = false;
             while (!_linkedAdmissionClosed)
             {
-                if (_linkedCompileAdmission.TryAdmit(spirvBytes, out var available, out var reserved))
+                var result = _linkedCompileAdmission.Admit(spirvBytes, out var memory, out var reserved, source);
+                var available = memory.AvailableCommitBytes;
+                if (result == LinkedCompileAdmission.Result.Admitted)
                 {
                     if (reported)
                     {
@@ -1944,20 +1946,26 @@ internal static unsafe partial class VulkanVideoPresenter
                     return true;
                 }
 
-                if (!mayWait)
+                if (source == LinkedCompileAdmission.Source.BootPrewarm)
                 {
                     return false;
                 }
 
-                if (!reported)
+                if (result == LinkedCompileAdmission.Result.WaitForRam && !reportedRam)
                 {
-                    reported = true;
+                    reportedRam = true;
+                    Console.Error.WriteLine($"[GPU][LINKED_ADMISSION] background waiting hash=0x{hash:X16} reason=low_ram " +
+                        $"available_ram_mib={memory.AvailablePhysicalBytes >> 20} reserved_mib={reserved >> 20}");
+                }
+                else if (!reported)
+                {
                     var needed = LinkedCompileAdmission.Estimate(spirvBytes) + LinkedCompileAdmission.MarginBytes;
                     Console.Error.WriteLine($"[GPU][LINKED_ADMISSION] waiting hash=0x{hash:X16} spirv_mb={spirvBytes / 1048576.0:F1} " +
                         $"needed_gb={needed / (double)(1L << 30):F1} available_gb={available / (double)(1L << 30):F1} " +
                         $"reserved_gb={reserved / (double)(1L << 30):F1}");
                 }
 
+                reported = true;
                 Thread.Sleep(500);
             }
 
