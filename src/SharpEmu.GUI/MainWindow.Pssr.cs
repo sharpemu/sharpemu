@@ -18,6 +18,7 @@ public partial class MainWindow
     [
         LocalizedChoice.FromKey("Auto", "Options.Pssr.Upscaler.Auto"),
         LocalizedChoice.FromKey("Dlss", "Options.Pssr.Upscaler.Dlss"),
+        LocalizedChoice.FromKey("Fsr", "Options.Pssr.Upscaler.Fsr"),
         LocalizedChoice.FromKey("Basic", "Options.Pssr.Upscaler.Basic"),
     ];
 
@@ -44,9 +45,17 @@ public partial class MainWindow
             _dlssFilesCheckedAt = DateTime.Now;
             UpdateDlssFilesStatus();
         };
+        FsrDownloadButton.Click += (_, _) => OpenWebPage(FsrRuntimeFiles.SdkReleaseUrl);
+        FsrFolderButton.Click += (_, _) => OpenFolder(FsrDirectory());
+        FsrRefreshButton.Click += (_, _) =>
+        {
+            _fsrFilesCheckedAt = DateTime.Now;
+            UpdateFsrFilesStatus();
+        };
     }
 
     private DateTime? _dlssFilesCheckedAt;
+    private DateTime? _fsrFilesCheckedAt;
 
     private void ApplyPssrSettingsToControls()
     {
@@ -54,6 +63,7 @@ public partial class MainWindow
         PssrUpscalerBox.SelectedIndex = ChoiceIndex(_settings.PssrUpscaler, _pssrUpscalerChoices.Select(choice => choice.Value).ToArray());
         UpdatePssrAvailability();
         UpdateDlssFilesStatus();
+        UpdateFsrFilesStatus();
     }
 
     private void RefreshPssrChoices()
@@ -61,6 +71,7 @@ public partial class MainWindow
         RefreshChoices(_consoleModelChoices);
         RefreshChoices(_pssrUpscalerChoices);
         UpdateDlssFilesStatus();
+        UpdateFsrFilesStatus();
     }
 
     private void UpdatePssrAutoChoice()
@@ -86,14 +97,20 @@ public partial class MainWindow
         PssrProOnlyNotice.IsVisible = !pro;
         PssrGeneralGroup.IsEnabled = pro;
         PssrDlssGroup.IsEnabled = pro;
+        PssrFsrGroup.IsEnabled = pro;
         PssrGeneralGroup.Opacity = pro ? 1 : 0.5;
         PssrDlssGroup.Opacity = pro ? 1 : 0.5;
+        PssrFsrGroup.Opacity = pro ? 1 : 0.5;
     }
 
-    private string DlssDirectory() =>
+    private string UpscalerExecutableDirectory() =>
         _emulatorExePath is { } executable && Path.GetDirectoryName(executable) is { Length: > 0 } directory
-            ? DlssRuntimeFiles.DirectoryFor(directory)
-            : DlssRuntimeFiles.DefaultDirectory;
+            ? directory
+            : AppContext.BaseDirectory;
+
+    private string DlssDirectory() => DlssRuntimeFiles.DirectoryFor(UpscalerExecutableDirectory());
+
+    private string FsrDirectory() => FsrRuntimeFiles.DirectoryFor(UpscalerExecutableDirectory());
 
     private void UpdateDlssFilesStatus()
     {
@@ -115,6 +132,26 @@ public partial class MainWindow
         if (_dlssFilesCheckedAt is { } checkedAt)
         {
             DlssFilesCheckedText.Text = localization.Format("Options.Pssr.DlssFiles.Checked", checkedAt.ToString("T", System.Globalization.CultureInfo.CurrentCulture));
+        }
+    }
+
+    private void UpdateFsrFilesStatus()
+    {
+        var directory = FsrDirectory();
+        var missing = FsrRuntimeFiles.Missing(directory);
+        var localization = Localization.Instance;
+        var found = missing.Count == 0;
+        var brush = found ? SuccessLineBrush : ErrorLineBrush;
+        FsrFilesStatusIcon.Text = found ? "check_circle" : "error";
+        FsrFilesStatusIcon.Foreground = brush;
+        FsrFilesStatusTitle.Foreground = brush;
+        FsrFilesStatusTitle.Text = localization.Get(found ? "Options.Pssr.FsrFiles.FoundTitle" : "Options.Pssr.FsrFiles.MissingTitle");
+        FsrFilesStatusDetails.Text = directory + Environment.NewLine +
+            string.Join(Environment.NewLine, found ? FsrRuntimeFiles.Required : missing);
+        FsrFilesCheckedText.IsVisible = _fsrFilesCheckedAt is not null;
+        if (_fsrFilesCheckedAt is { } checkedAt)
+        {
+            FsrFilesCheckedText.Text = localization.Format("Options.Pssr.DlssFiles.Checked", checkedAt.ToString("T", System.Globalization.CultureInfo.CurrentCulture));
         }
     }
 

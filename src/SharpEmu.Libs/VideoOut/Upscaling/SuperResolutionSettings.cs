@@ -86,7 +86,7 @@ public readonly record struct DlssRuntimeFile(string Name, string Source, string
 
 public static class DlssRuntimeFiles
 {
-    public const string StreamlineReleasesUrl = "https://github.com/NVIDIA-RTX/Streamline/releases";
+    public const string StreamlineReleasesUrl = "https://github.com/NVIDIA-RTX/Streamline/releases/tag/v2.14.16";
     public const string Interposer = "sl.interposer.dll";
     public const string FolderName = "streamline";
 

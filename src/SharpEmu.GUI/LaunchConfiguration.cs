@@ -92,7 +92,7 @@ public sealed record LaunchConfiguration(EffectiveLaunchSettings Settings, IRead
             "guest" => "guest", "skip" => "skip", _ => "native",
         };
         values[SharpEmu.Libs.VideoOut.Upscaling.SuperResolutionSettings.UpscalerVariable] =
-            GuiSettings.NormalizeChoice(launcher.PssrUpscaler, "Auto", "Dlss", "Basic").ToLowerInvariant();
+            GuiSettings.NormalizeChoice(launcher.PssrUpscaler, "Auto", "Dlss", "Fsr", "Basic").ToLowerInvariant();
         foreach (var entry in CustomEnvironment)
         {
             if (CustomEnvironmentVariables.TryParseEntry(entry, out var name, out var value)) values[name] = value;

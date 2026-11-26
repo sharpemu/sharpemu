@@ -1648,13 +1648,32 @@ SPDX-License-Identifier: GPL-2.0-or-later
                   </Border>
 
                   <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Pssr.Group.Fsr], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
-                  <Border Classes="optionsGroup">
+                  <Border x:Name="PssrFsrGroup" Classes="optionsGroup">
                     <StackPanel>
-                      <local:SettingRow x:Name="PssrFsrRow"
-                                        Classes="optionRow"
-                                        IsEnabled="False"
+                      <local:SettingRow Classes="optionRow"
                                         Label="{Binding [Options.Pssr.Fsr.Label], Source={x:Static local:Localization.Instance}}"
-                                        Description="{Binding [Options.Pssr.ComingSoon], Source={x:Static local:Localization.Instance}}" />
+                                        Description="{Binding [Options.Pssr.FsrFiles.Hint], Source={x:Static local:Localization.Instance}}">
+                        <WrapPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                          <Button x:Name="FsrDownloadButton" Classes="optionAction" Margin="0,0,8,8"
+                                  Content="AMD FSR SDK" />
+                          <Button x:Name="FsrFolderButton" Classes="optionAction" Margin="0,0,8,8">
+                            <TextBlock Text="{Binding [Options.Pssr.DlssFiles.Folder], Source={x:Static local:Localization.Instance}}"
+                                       VerticalAlignment="Center" />
+                          </Button>
+                          <Button x:Name="FsrRefreshButton" Classes="optionAction" Margin="0,0,0,8">
+                            <TextBlock Text="{Binding [Options.Pssr.DlssFiles.Refresh], Source={x:Static local:Localization.Instance}}"
+                                       VerticalAlignment="Center" />
+                          </Button>
+                        </WrapPanel>
+                      </local:SettingRow>
+                      <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12" Margin="18,4,18,16">
+                        <TextBlock x:Name="FsrFilesStatusIcon" Grid.Column="0" Classes="materialSymbol" VerticalAlignment="Top" />
+                        <StackPanel Grid.Column="1" Spacing="4">
+                          <TextBlock x:Name="FsrFilesStatusTitle" FontWeight="SemiBold" TextWrapping="Wrap" />
+                          <TextBlock x:Name="FsrFilesStatusDetails" Classes="optionsSectionDesc" TextWrapping="Wrap" />
+                          <TextBlock x:Name="FsrFilesCheckedText" Classes="optionsSectionDesc" IsVisible="False" TextWrapping="Wrap" />
+                        </StackPanel>
+                      </Grid>
                     </StackPanel>
                   </Border>
 
