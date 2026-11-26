@@ -860,7 +860,9 @@ internal static partial class VulkanVideoPresenter
             var slicing = _presenter.SlicesEnabled;
             var slicesAhead = _queuedSlices;
 
-            var limit = slicing ? SlicesAheadPerWorker * _presenter.WorkerCount : 0;
+            var workers = slicing ? _presenter.WorkerCount : 0;
+            var limit = SlicesAheadPerWorker * workers;
+            var waveSize = workers > 1 ? Math.Max(RestChunkItems, SliceItems / workers) : SliceItems;
             while (slicesAhead <= limit)
             {
                 if (_drainIndex == _draining.Count &&
@@ -874,7 +876,10 @@ internal static partial class VulkanVideoPresenter
                 if (slicing && item.Kind == Kind.Deferred)
                 {
                     (_cutting ??= new RenderSlice()).Items.Add(item);
-                    if (_cutting.Items.Count >= SliceItems)
+                    // Give the first wave to separate workers. Once each lane has a slice, use full
+                    // slices again to amortize validation, prologue recording and submission.
+                    var target = slicesAhead < workers ? waveSize : SliceItems;
+                    if (_cutting.Items.Count >= target)
                     {
                         CloseSlice();
                         slicesAhead++;
@@ -954,6 +959,7 @@ internal static partial class VulkanVideoPresenter
         private int JoinSlice(RenderSlice slice, Action betweenItems)
         {
             var ran = 0;
+            var suffixQueued = false;
             if (!slice.Dispatched)
             {
                 _presenter.DispatchSlice(slice);
@@ -1018,6 +1024,15 @@ internal static partial class VulkanVideoPresenter
 
                     if (segment.SerialReason is not null)
                     {
+                        // The worker published its final segment and will never touch the suffix.
+                        // Queue it before the serial item runs; its commands still join after that item.
+                        var suffix = end + 1;
+                        if (segment.StopsRecording && _presenter.SlicesEnabled &&
+                            slice.Items.Count - suffix >= MinimumSliceItems)
+                        {
+                            QueueRestChunks(slice, suffix);
+                            suffixQueued = true;
+                        }
                         RunInline(slice.Items[end], betweenItems);
                         ran++;
                     }
@@ -1029,7 +1044,7 @@ internal static partial class VulkanVideoPresenter
             }
 
             var remaining = slice.Items.Count - slice.Resume;
-            if (remaining == 0)
+            if (remaining == 0 || suffixQueued)
             {
                 return ran;
             }

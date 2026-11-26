@@ -358,6 +358,7 @@ internal static unsafe partial class VulkanVideoPresenter
         public int First;
         public int Count;
         public string? SerialReason;
+        public bool StopsRecording;
         public RecordingBuffer? Buffer;
         public List<VulkanOcclusionQueries.Block>? QueryBlocks;
         public int DrawCount;
@@ -1077,6 +1078,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         }
 
                         segment!.SerialReason = serial.Message;
+                        segment.StopsRecording = !serial.Resumable;
                         Interlocked.Increment(ref _serialReasons.GetOrAdd(serial.Message, static _ => new StrongBox<long>()).Value);
                         EndSegment(slice, segment);
                         segment = null;
