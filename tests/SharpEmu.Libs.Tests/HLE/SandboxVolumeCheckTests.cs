@@ -163,6 +163,12 @@ public sealed class SandboxVolumeCheckTests
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     public void TheRealVolumeOfTheTempFolderIsAnswered()
     {
+        // Windows handles and Windows path rules.
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         var volume = SandboxVolumeCheck.QueryVolume(Path.GetTempPath());
 
         Assert.NotNull(volume);

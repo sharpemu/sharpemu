@@ -19,6 +19,12 @@ public sealed class SandboxHandleInheritTests
     [Fact]
     public void OutputPipe_IsInheritableOnlyInsideTheScope()
     {
+        // Windows handles and Windows path rules.
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         Assert.True(WindowsAppContainerSandbox.TryCreateOutputPipe(out var read, out var write));
         try
         {
@@ -42,6 +48,12 @@ public sealed class SandboxHandleInheritTests
     [Fact]
     public void GamepadBridgeSection_IsInheritableOnlyInsideTheScope()
     {
+        // Windows handles and Windows path rules.
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         using var section = GamepadBridgeSection.Create();
 
         Assert.False(WindowsAppContainerSandbox.IsInheritable(section.Handle));
@@ -56,6 +68,12 @@ public sealed class SandboxHandleInheritTests
     [Fact]
     public void OpenedFile_IsInheritableOnlyInsideTheScope()
     {
+        // Windows handles and Windows path rules.
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         var path = Path.Combine(Path.GetTempPath(), $"sharpemu-inherit-{Guid.NewGuid():N}.bin");
         File.WriteAllText(path, "x");
         try
@@ -80,6 +98,12 @@ public sealed class SandboxHandleInheritTests
     [Fact]
     public void Scope_FailsAndRestoresTheOthersWhenAHandleIsInvalid()
     {
+        // Windows handles and Windows path rules.
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         Assert.True(WindowsAppContainerSandbox.TryCreateOutputPipe(out var read, out var write));
         try
         {

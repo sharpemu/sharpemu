@@ -38,6 +38,12 @@ public sealed class InheritedFilesTests : IDisposable
     [Fact]
     public void Format_UsesTheHandleValueAndTheFullPath()
     {
+        // Windows handles and Windows path rules.
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         Assert.Equal(@"4660|C:\games\x.zar", InheritedFiles.Format([(0x1234, @"C:\games\sub\..\x.zar")]));
     }
 
@@ -59,6 +65,12 @@ public sealed class InheritedFilesTests : IDisposable
     [Fact]
     public void Parse_KeepsGoodEntriesBesideBadOnes()
     {
+        // Windows handles and Windows path rules.
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         var parsed = InheritedFiles.Parse(@"junk*7|C:\games\ok.zar*x|C:\no.zar", Describe);
 
         Assert.Equal(@"C:\games\ok.zar", Assert.Single(parsed).Key);
@@ -74,6 +86,12 @@ public sealed class InheritedFilesTests : IDisposable
     [Fact]
     public void TryGet_ComparesFullPathsWithoutCase()
     {
+        // Windows handles and Windows path rules.
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
         var files = InheritedFiles.Parse(@"7|C:\Games\Sub\Game.zar", Describe);
 
         Assert.True(InheritedFiles.TryGet(files, @"c:\games\SUB\..\sub\game.ZAR", out var file));
