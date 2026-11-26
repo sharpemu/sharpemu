@@ -34,6 +34,20 @@ public sealed partial class DirectExecutionBackend
 
     private static int _bmiSoftwareFallbackAnnounced;
     private static long _bmiInstructionsEmulated;
+    private static int _unhandledIllegalInstructionLogs;
+
+    // The fatal dump names the RIP but not the opcode; this line says which instruction the host
+    // could not run, which is the part needed to extend the fallback. Logged a few times only, so a
+    // title that loops on the fault does not flood the log.
+    private static void LogUnhandledIllegalInstruction(ulong rip, in Instruction instruction)
+    {
+        if (Interlocked.Increment(ref _unhandledIllegalInstructionLogs) > 8)
+        {
+            return;
+        }
+
+        Console.Error.WriteLine($"[LOADER][WARN] Unhandled illegal instruction at 0x{rip:X16}: {instruction} (length {instruction.Length})");
+    }
 
     private unsafe bool TryRecoverIllegalInstruction(void* contextRecord, ulong rip)
     {
@@ -45,11 +59,13 @@ public sealed partial class DirectExecutionBackend
         if (instruction.Op0Kind != OpKind.Register ||
             !TryGetGprSlot(instruction.Op0Register, out var destOffset, out var size))
         {
+            LogUnhandledIllegalInstruction(rip, in instruction);
             return false;
         }
 
         if (!TryEvaluate(contextRecord, in instruction, size, out var result, out var flagsChanged, out var eflags))
         {
+            LogUnhandledIllegalInstruction(rip, in instruction);
             return false;
         }
 
