@@ -93,7 +93,10 @@ public sealed partial class GuestImageCache
         return _slots.TryGet(imageIdentifier);
     }
 
-    public bool TryFindImageForSlice(ref ImageRequest request, bool exactFormat, out ResourceSlotIdentifier result)
+    public bool TryFindImageForSlice(ref ImageRequest request, bool exactFormat, out ResourceSlotIdentifier result) =>
+        TryFindImageForSlice(ref request, exactFormat, out result, nativeClearFollows: false);
+
+    internal bool TryFindImageForSlice(ref ImageRequest request, bool exactFormat, out ResourceSlotIdentifier result, bool nativeClearFollows)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageLookup);
         result = ResourceSlotIdentifier.Invalid;
@@ -186,6 +189,14 @@ public sealed partial class GuestImageCache
             {
                 return SliceLookupFailed(SliceLookupFailure.TextureDccSync, request.Role);
             }
+        }
+
+        // MaterializeDccClear returns immediately for native metadata. These callers check the
+        // view-aware native clear next and record its ordered join validation or run the item inline.
+        if (nativeClearFollows && request.Description.Metadata.NativeColorClear &&
+            request.Description.Metadata.Kind == MetadataKind.Dcc)
+        {
+            return true;
         }
 
         return DccClearMaterializationIsNoop(image, in request) || SliceLookupFailed(SliceLookupFailure.DccClear, request.Role);

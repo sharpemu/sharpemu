@@ -354,6 +354,12 @@ internal static unsafe partial class VulkanVideoPresenter
             SynchronizeColorMetadata(request);
             if (_worker)
             {
+                if (request.Description.Metadata.NativeColorClear)
+                {
+                    var found = LookUpImage(ref request, exactFormat, nativeClearFollows: true);
+                    ApplyNativeColorClear(found, request);
+                    return found;
+                }
                 return LookUpImage(ref request, exactFormat);
             }
 
@@ -370,14 +376,14 @@ internal static unsafe partial class VulkanVideoPresenter
             return imageIdentifier;
         }
 
-        private ResourceSlotIdentifier LookUpImage(ref ImageRequest request, bool exactFormat = false)
+        private ResourceSlotIdentifier LookUpImage(ref ImageRequest request, bool exactFormat = false, bool nativeClearFollows = false)
         {
             if (!_worker)
             {
                 return _imageCache.FindImage(ref request, exactFormat);
             }
 
-            if (_imageCache.TryFindImageForSlice(ref request, exactFormat, out var found))
+            if (_imageCache.TryFindImageForSlice(ref request, exactFormat, out var found, nativeClearFollows))
             {
                 return found;
             }

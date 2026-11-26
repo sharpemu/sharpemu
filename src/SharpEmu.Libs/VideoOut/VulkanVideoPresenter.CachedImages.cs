@@ -277,7 +277,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _imageCache.TraceNativeColorMetadata(request);
             SynchronizeColorMetadata(request);
             EnsureBatchedGuestCommands();
-            var imageIdentifier = LookUpImage(ref request, exactFormat);
+            var imageIdentifier = LookUpImage(ref request, exactFormat, nativeClearFollows: true);
             ApplyNativeColorClear(imageIdentifier, request);
             BindRenderTarget(imageIdentifier);
             return new ColorAttachment { ImageIdentifier = imageIdentifier, Request = request, Resolution = resolution };
@@ -636,7 +636,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _imageCache.TraceTextureMetadata(request);
             SynchronizeColorMetadata(request);
             EnsureBatchedGuestCommands();
-            var imageIdentifier = LookUpImage(ref request, resolution.ExactFormat);
+            var imageIdentifier = LookUpImage(ref request, resolution.ExactFormat, nativeClearFollows: true);
             resolution = resolution with { Request = request };
             imageIdentifier = ImageRequestBuilders.ValidateTextureOwner(_imageCache, imageIdentifier, resolution);
             ApplyNativeColorClear(imageIdentifier, request);

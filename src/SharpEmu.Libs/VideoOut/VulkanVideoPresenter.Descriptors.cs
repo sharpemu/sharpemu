@@ -699,7 +699,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 resolution = originalResolution;
                 var request = resolution.Request;
                 var metadataBaseLayer = request.View.BaseLayer;
-                imageIdentifier = LookUpImage(ref request, resolution.ExactFormat);
+                imageIdentifier = LookUpImage(ref request, resolution.ExactFormat, nativeClearFollows: true);
                 resolution = resolution with { Request = request };
                 var nullImage = ImageDescription.IsEmptyRange(request.Description.Data);
                 if (keptPlaceholder.IsValid)
