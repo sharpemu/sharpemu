@@ -121,6 +121,10 @@ internal static partial class VulkanVideoPresenter
         private int _drainIndex;
         private long _drainedSequence;
         private int _queuedSlices;
+        private CommandHandoff<Item>? _handoff;
+        private long _lastHandoffSequence = -1;
+        private Item? _landingStore;
+        private int _landingThread, _landingWaiters;
         private int _outstanding;
         private long _enqueued;
         private long _executed;
@@ -538,6 +542,7 @@ internal static partial class VulkanVideoPresenter
 
             lock (_writeLock)
             {
+                AwaitLanding(address, destination.Length);
                 if (!_memory.TryRead(address, destination))
                 {
                     return false;
@@ -577,6 +582,7 @@ internal static partial class VulkanVideoPresenter
             }
             lock (_writeLock)
             {
+                AwaitLanding(address, destination.Length);
                 foreach (var pending in _pendingRanges)
                 {
                     if (pending.Sequence != 0 && pending.Sequence < sequence && address < pending.Address + pending.RangeSize && pending.Address < address + size)
@@ -648,7 +654,9 @@ internal static partial class VulkanVideoPresenter
             lock (_lock)
             {
                 item.Sequence = ++_enqueued;
-                _incoming.Add(item);
+                if (item.Kind != Kind.Deferred || _incoming.Count != 0 ||
+                    !(_handoff ??= new CommandHandoff<Item>()).TryPublish(item))
+                    _incoming.Add(item);
             }
 
             Interlocked.Increment(ref _outstanding);
@@ -930,8 +938,12 @@ internal static partial class VulkanVideoPresenter
         {
             _draining.Clear();
             _drainIndex = 0;
+            if (Volatile.Read(ref _enqueued) == _lastHandoffSequence) return false;
+            if (DrainHandoff()) return true;
             lock (_lock)
             {
+                // A producer may have published between the empty check and this lock.
+                if (DrainHandoff()) return true;
                 (_incoming, _draining) = (_draining, _incoming);
                 _drainedSequence = _enqueued;
             }
@@ -1243,28 +1255,79 @@ internal static partial class VulkanVideoPresenter
             lock (_writeLock)
             {
                 var data = item.Data.AsSpan(0, item.Length);
-                var written = (item.Kernel && _presenter.TryApplyKernelWriteOverGpuBytes(item.Address, data)) || _memory.TryWrite(item.Address, data);
-                if (!ReferenceEquals(_pendingWrites.Peek(), item))
+                if (item.Kernel && _presenter.TryApplyKernelWriteOverGpuBytes(item.Address, data))
                 {
-                    throw SubmissionScheduler.Fatal("The command stream stores ran out of order.");
+                    RetireStoreLocked(item, true);
+                    return;
                 }
-
-                _pendingWrites.Dequeue();
-                NotePendingStorePages(item, -1);
-                _pendingWriteCount = _pendingWrites.Count;
-                if (!written)
+                if (_memory is not IGuestBackedSpace { SupportsDisjointPageOffsetAccess: true })
                 {
-                    throw SubmissionScheduler.Fatal(
-                        $"The command stream cannot write guest memory: address=0x{item.Address:X16} size={item.Length}.");
+                    RetireStoreLocked(item, _memory.TryWrite(item.Address, data));
+                    return;
                 }
+                _landingStore = item;
+                _landingThread = Environment.CurrentManagedThreadId;
+            }
 
-                // No reader reaches the store once it left the queue and the index under this lock.
-                if (item.Pooled)
+            bool? written = null;
+            try
+            {
+                written = _memory.TryWrite(item.Address, item.Data.AsSpan(0, item.Length));
+            }
+            finally
+            {
+                lock (_writeLock)
                 {
-                    StoreBufferPool.Shared.Return(item.Data!);
-                    item.Data = null;
+                    _landingStore = null;
+                    if (_landingWaiters != 0) Monitor.PulseAll(_writeLock);
+                    if (written.HasValue) RetireStoreLocked(item, written.Value);
                 }
             }
+        }
+
+        private void AwaitLanding(ulong address, int length)
+        {
+            while (_landingStore is { } store && _landingThread != Environment.CurrentManagedThreadId)
+            {
+                if (CommandStoreLanding.DisjointOffsets(address, length, store.Address, store.Length))
+                {
+                    break;
+                }
+                _landingWaiters++;
+                try { Monitor.Wait(_writeLock); }
+                finally { _landingWaiters--; }
+            }
+        }
+
+        private void RetireStoreLocked(Item item, bool written)
+        {
+            if (!ReferenceEquals(_pendingWrites.Peek(), item))
+            {
+                throw SubmissionScheduler.Fatal("The command stream stores ran out of order.");
+            }
+
+            _pendingWrites.Dequeue();
+            NotePendingStorePages(item, -1);
+            _pendingWriteCount = _pendingWrites.Count;
+            if (!written)
+            {
+                throw SubmissionScheduler.Fatal(
+                    $"The command stream cannot write guest memory: address=0x{item.Address:X16} size={item.Length}.");
+            }
+
+            // No reader reaches the store once it left the queue and the index under this lock.
+            if (item.Pooled)
+            {
+                StoreBufferPool.Shared.Return(item.Data!);
+                item.Data = null;
+            }
+        }
+
+        private bool DrainHandoff()
+        {
+            if (Volatile.Read(ref _handoff)?.Drain(_draining) != true) return false;
+            _lastHandoffSequence = _draining[^1].Sequence;
+            return true;
         }
 
         public void ReportFailure(Exception exception) => Interlocked.CompareExchange(ref _failure, exception, null);

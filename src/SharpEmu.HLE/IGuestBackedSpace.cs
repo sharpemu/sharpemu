@@ -7,6 +7,9 @@ namespace SharpEmu.HLE;
 
 public interface IGuestBackedSpace
 {
+    // Concurrent reads and writes at disjoint offsets within 4 KiB pages cannot alias.
+    bool SupportsDisjointPageOffsetAccess => false;
+
     bool TryHoldRange(ulong address, ulong size);
     bool TryHoldRangeAtOrAbove(ulong searchStart, ulong size, ulong alignment, out ulong address);
     bool TryHoldAvailableRange(ulong searchStart, ulong size, ulong alignment, out ulong address) =>

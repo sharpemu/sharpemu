@@ -77,6 +77,7 @@ public sealed class ShaderHeaderRegistry
     private readonly Func<ulong, FusedProgramParts?> _fusedPartsOf;
     private readonly IShaderFrontend? _frontend;
     private readonly Dictionary<ulong, ShaderHeaderEntry> _entries = new();
+    private ShaderHeaderEntry?[]? _recent;
     private static long _registrations;
 
     public bool HasFrontend => _frontend is not null;
@@ -133,15 +134,25 @@ public sealed class ShaderHeaderRegistry
         var registrations = Registrations;
         if (_frontend is not null && _headerOf(codeAddress) == 0)
             return new ShaderHeaderEntry(Read(codeAddress, label, userData), registrations);
+
+        var slot = (int)(((codeAddress >> 8) ^ (codeAddress >> 16)) & 31);
+        if (Volatile.Read(ref _recent) is { } recent && Volatile.Read(ref recent[slot]) is { } hit &&
+            hit.Shader.CodeAddress == codeAddress && hit.Registrations == registrations)
+        {
+            return hit;
+        }
         lock (_entries)
         {
-            if (_entries.TryGetValue(codeAddress, out var entry) && entry.Registrations == registrations)
+            if (!_entries.TryGetValue(codeAddress, out var entry) || entry.Registrations != registrations)
             {
-                return entry;
+                entry = new ShaderHeaderEntry(Read(codeAddress, label), registrations);
+                _entries[codeAddress] = entry;
             }
-
-            entry = new ShaderHeaderEntry(Read(codeAddress, label), registrations);
-            _entries[codeAddress] = entry;
+            if (entry.Shader.CodeAddress == codeAddress)
+            {
+                _recent ??= new ShaderHeaderEntry?[32];
+                Volatile.Write(ref _recent[slot], entry);
+            }
             return entry;
         }
     }

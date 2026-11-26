@@ -31,6 +31,8 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
     private static CommittedRangeCache? _committedRangeCache;
 
     private long _mappingGeneration;
+    bool IGuestBackedSpace.SupportsDisjointPageOffsetAccess => true;
+
     private const ulong PageSize = 0x1000;
     private const ulong HostAllocationGranularity = 0x10000;
     private const ulong GuestAllocationArenaAddress = 0x00006000_0000_0000;
