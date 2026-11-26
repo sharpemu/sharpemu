@@ -19,6 +19,7 @@ public sealed unsafe class GpuDeviceInfo : IImageFormatSupport
 
     internal bool MemoryBudgetSupported { get; init; }
     internal uint LocalBudgetHeap { get; } = uint.MaxValue;
+    internal Func<uint, ulong, ulong>? ReleaseIdleMemory { get; set; }
 
     // VK_EXT_image_view_min_lod is enabled, so a view can clamp to a texture descriptor's MIN_LOD.
     public bool ImageViewMinLodSupported { get; init; }
@@ -202,18 +203,31 @@ public sealed unsafe class GpuDeviceInfo : IImageFormatSupport
         return (budget.HeapBudget[(int)LocalBudgetHeap], budget.HeapUsage[(int)LocalBudgetHeap]);
     }
 
-    // Every device-memory allocation goes through here so the live count stays exact.
-    public Result AllocateMemory(in MemoryAllocateInfo info, out DeviceMemory memory)
+    private Result AllocateOnce(MemoryAllocateInfo* info, out DeviceMemory memory)
     {
-        if (SimulateExhaustedMemoryType is { } exhausted && exhausted(info.MemoryTypeIndex))
+        if (SimulateExhaustedMemoryType?.Invoke(info->MemoryTypeIndex) == true)
         {
             memory = default;
             return Result.ErrorOutOfDeviceMemory;
         }
+        return Vk.AllocateMemory(Device, info, null, out memory);
+    }
 
+    // Every device-memory allocation goes through here so the live count stays exact.
+    public Result AllocateMemory(in MemoryAllocateInfo info, out DeviceMemory memory)
+    {
         fixed (MemoryAllocateInfo* pointer = &info)
         {
-            var result = Vk.AllocateMemory(Device, pointer, null, out memory);
+            var result = AllocateOnce(pointer, out memory);
+            if (result == Result.ErrorOutOfDeviceMemory && ReleaseIdleMemory is { } release)
+            {
+                var heap = GetMemoryHeapIndex(info.MemoryTypeIndex);
+                var freed = release(heap, info.AllocationSize);
+                if (freed != 0)
+                {
+                    result = AllocateOnce(pointer, out memory);
+                }
+            }
             if (result == Result.Success)
             {
                 var live = Interlocked.Increment(ref _liveAllocations);

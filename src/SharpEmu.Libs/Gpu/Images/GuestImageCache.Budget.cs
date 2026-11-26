@@ -56,6 +56,9 @@ public sealed partial class GuestImageCache
         return near ? usage - recoveryUsage : 0;
     }
 
+    // Allocation retries may run on other threads. These pools contain only completed GPU work.
+    private ulong ReleaseIdleMemoryOnAllocationFailure(uint heap, ulong bytes) => ReleaseIdleMemory(heap, bytes, long.MaxValue);
+
     private ulong ReleaseIdleMemory(uint heap, ulong bytes, long returnedThrough, int limitPerPool = int.MaxValue)
     {
         var freed = _backingPool?.Trim(heap, bytes, returnedThrough, limitPerPool) ?? 0;

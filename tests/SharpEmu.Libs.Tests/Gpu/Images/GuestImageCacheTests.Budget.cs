@@ -108,4 +108,52 @@ public sealed partial class GuestImageCacheTests
         Assert.Equal(Bytes(0x12345678u), harness.ReadImageBytes(harness.Image(replacement)));
         _vulkan.AssertNoValidationMessages();
     }
+
+    [Fact]
+    public void BudgetAllocationRetryRequiresImmediateReleaseFromTheFailedHeap()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        var device = harness.Device;
+        using var pool = new ImageBackingPool(device);
+        var description = CachedImageTests.Color2D(16, 16);
+        uint heap;
+        using (var idle = new CachedImage(device, harness.Scheduler, harness.Guest, description, pool))
+            heap = idle.Backing.MemoryHeap;
+        var before = device.LiveAllocations;
+        Assert.Equal(0UL, pool.Trim(uint.MaxValue, 1, long.MaxValue));
+        Assert.Equal(0UL, pool.Trim(heap, 1, long.MinValue));
+        var keys = Assert.IsAssignableFrom<System.Collections.IDictionary>(typeof(ImageBackingPool)
+            .GetField("_entries", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance)!.GetValue(pool));
+        Assert.Single(keys.Keys);
+        using (var reused = new CachedImage(device, harness.Scheduler, harness.Guest, description, pool))
+        {
+            Assert.Empty(keys.Keys);
+            Assert.Equal(before, device.LiveAllocations);
+        }
+        Assert.Single(keys.Keys);
+        var calls = new List<uint>();
+        var previous = device.ReleaseIdleMemory;
+        try
+        {
+            var info = new MemoryAllocateInfo { SType = StructureType.MemoryAllocateInfo, AllocationSize = 4096 };
+            info.MemoryTypeIndex = Enumerable.Range(0, (int)device.MemoryTypeCount).Select(i => (uint)i).First(i => device.GetMemoryHeapIndex(i) == heap);
+            device.ReleaseIdleMemory = (failedHeap, size) => pool.Trim(failedHeap, size, long.MaxValue);
+            device.SimulateExhaustedMemoryType = type => { calls.Add(type); return calls.Count == 1; };
+            Assert.Equal(Result.Success, device.AllocateMemory(info, out var memory));
+            device.FreeMemory(memory);
+            Assert.Equal(new[] { info.MemoryTypeIndex, info.MemoryTypeIndex }, calls);
+            Assert.Equal(before - 1, device.LiveAllocations);
+            Assert.Empty(keys.Keys);
+            calls.Clear();
+            Assert.Equal(Result.ErrorOutOfDeviceMemory, device.AllocateMemory(info, out _));
+            Assert.Single(calls);
+        }
+        finally
+        {
+            device.ReleaseIdleMemory = previous;
+            device.SimulateExhaustedMemoryType = null;
+        }
+        _vulkan.AssertNoValidationMessages();
+    }
 }
