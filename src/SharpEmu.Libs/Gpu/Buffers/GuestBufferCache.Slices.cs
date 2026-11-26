@@ -147,6 +147,7 @@ public sealed unsafe partial class GuestBufferCache
     }
 
     private static readonly bool HeldSliceUses = Environment.GetEnvironmentVariable("SHARPEMU_HELD_SLICE_USES") != "0";
+    private ObtainMemo[]? _sliceReadProofs;
     private static readonly ThreadCounter _heldSliceUses = new();
     private static readonly ThreadCounter _obtainedSliceUses = new();
 
@@ -161,13 +162,19 @@ public sealed unsafe partial class GuestBufferCache
         }
 
         CompleteGuestPublications?.Invoke(use.Address, use.Size, PublicationAccess.OverlaidRead);
-        var identifier = _registry.FindContainingBuffer(use.Address, use.Size);
         var buffer = use.Buffer;
-        if (!ReferenceEquals(_registry.TryGetRegisteredBuffer(identifier), buffer) || !buffer.IsInBounds(use.Address, use.Size) ||
-            _tracker.MayHaveCpuDirtyPages(use.Address, use.Size))
+        ResourceSlotIdentifier identifier;
+        _sliceReadProofs ??= new ObtainMemo[512];
+        // Page-aligned buffers often have equal low address bits.
+        var slot = ((ObtainMemoSet(use.Address, use.Size) >> 1) ^ (int)(use.Address >> 12)) & 511;
+        ref var proof = ref _sliceReadProofs[slot];
+        if (!proof.Holds(use.Address, use.Size) || !ReferenceEquals(proof.Buffer, buffer))
         {
-            return false;
+            identifier = _registry.FindContainingBuffer(use.Address, use.Size);
+            proof = new ObtainMemo(use.Address, use.Size, identifier, 0, buffer);
         }
+        if (!IsCleanOwner(ref proof, use.Address, use.Size)) return false;
+        identifier = proof.Identifier;
 
         TouchBuffer(identifier);
         OverlayGuestPublications?.Invoke(buffer, buffer.Offset(use.Address), use.Address, use.Size);

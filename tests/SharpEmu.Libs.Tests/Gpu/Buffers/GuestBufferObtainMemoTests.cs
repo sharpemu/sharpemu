@@ -60,6 +60,84 @@ public sealed class GuestBufferObtainMemoTests(HeadlessVulkanFixture fixture) : 
     }
 
     [Fact]
+    public void PublicationMayReplaceBothMemoWaysDuringARead()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        const int length = 512 * 1024;
+        var address = harness.MapBacked(length, ReadWrite);
+        var outer = address + Page;
+        var set = GuestBufferCache.ObtainMemoSet(outer, Size);
+        harness.Cache.ObtainMemoUse = GuestBufferCache.ObtainMemoMode.On;
+        harness.Worker.Run(() =>
+        {
+            var owner = harness.Cache.ObtainBuffer(address, length, isWritten: false, allowStream: false).Buffer;
+            var first = Read(harness, outer);
+            var colliding = 0;
+            harness.Cache.OverlayGuestPublications = (_, _, _, _) =>
+            {
+                harness.Cache.OverlayGuestPublications = null;
+                for (var next = outer + 16; colliding < 2 && next + Size <= address + length; next += 16)
+                {
+                    if (GuestBufferCache.ObtainMemoSet(next, Size) != set) continue;
+                    Assert.Same(owner, Read(harness, next).Buffer);
+                    colliding++;
+                }
+            };
+            var second = Read(harness, outer);
+            Assert.Equal(2, colliding);
+            Assert.Same(owner, second.Buffer);
+            Assert.Equal(first.Offset, second.Offset);
+        });
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void SliceReadProofRejectsChangedGuestBytesBeforeTheNextUse()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Cache.ObtainMemoUse = GuestBufferCache.ObtainMemoMode.On;
+        var use = harness.Worker.Run(() =>
+        {
+            var (buffer, _) = Read(harness, address);
+            var slice = new BufferSliceUse(address, Size, false, false, false, buffer);
+            harness.Cache.ApplySliceUse(slice);
+            harness.Cache.ApplySliceUse(slice);
+            return slice;
+        });
+        var bytes = Bytes(Size, 94);
+        Assert.True(harness.Store.MarkCpuWrite(address, Size));
+        harness.Write(address, bytes);
+        harness.Worker.Run(() => harness.Cache.ApplySliceUse(use));
+        Assert.Equal(bytes, harness.ReadBack(use.Buffer, use.Buffer.Offset(address), Size));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void VersionedReadRepeatsPublicationsAndRejectsADirtyEpoch()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Cache.ObtainMemoUse = GuestBufferCache.ObtainMemoMode.On;
+        var overlays = 0;
+        harness.Cache.OverlayGuestPublications = (_, _, _, _) => overlays++;
+        harness.Worker.Run(() =>
+        {
+            for (var i = 0; i < 4; i++) _ = Read(harness, address);
+        });
+        var bytes = Bytes(Size, 83);
+        Assert.True(harness.Store.MarkCpuWrite(address, Size));
+        harness.Write(address, bytes);
+        var current = harness.Worker.Run(() => Read(harness, address));
+        Assert.Equal(5, overlays);
+        Assert.Equal(bytes, harness.ReadBack(current.Buffer, current.Offset, Size));
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void TwoRangesOfOneSetAreBothServed()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
