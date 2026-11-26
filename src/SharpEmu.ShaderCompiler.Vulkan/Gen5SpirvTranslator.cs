@@ -2243,6 +2243,12 @@ public static partial class Gen5SpirvTranslator
             var continueLabel = _module.AllocateId();
             var mergeLabel = _module.AllocateId();
             _structuredLoopMerge = mergeLabel;
+            var loopGuard = _maxDispatcherSteps > 0 ? NewLoopGuard() : 0u;
+            if (loopGuard != 0)
+            {
+                Store(loopGuard, UInt(0));
+            }
+
             _module.AddStatement(SpirvOp.Branch, headerLabel);
             _module.DeclareLoopHeader(headerLabel);
             _module.AddLabel(headerLabel);
@@ -2265,8 +2271,8 @@ public static partial class Gen5SpirvTranslator
 
             if (_maxDispatcherSteps > 0)
             {
-                var steps = IAdd(Load(_uintType, IterationGuard()), UInt(1));
-                Store(IterationGuard(), steps);
+                var steps = IAdd(Load(_uintType, loopGuard), UInt(1));
+                Store(loopGuard, steps);
                 var withinLimit = _module.AddInstruction(SpirvOp.ULessThan, _boolType, steps, UInt((uint)_maxDispatcherSteps));
                 again = _module.AddInstruction(SpirvOp.LogicalAnd, _boolType, again, withinLimit);
             }
@@ -2394,15 +2400,31 @@ public static partial class Gen5SpirvTranslator
             var loopBody = _module.AllocateId();
             var loopContinue = _module.AllocateId();
             var loopMerge = _module.AllocateId();
+            // Each loop counts its own iterations from zero, so the budget neither carries from
+            // one loop to the next nor lets an inner loop reset its parent's count.
+            var loopGuard = _maxDispatcherSteps > 0 ? NewLoopGuard() : 0u;
             if (singleBlock)
             {
                 var enters = LogicalAnd(Load(_boolType, _programActive),
                     _module.AddInstruction(SpirvOp.IEqual, _boolType, Load(_uintType, _programCounter), UInt((uint)header)));
+                var enterLabel = _module.AllocateId();
                 _module.AddStatement(SpirvOp.SelectionMerge, entryMerge, 0);
-                _module.AddStatement(SpirvOp.BranchConditional, enters, loopHeader, skippedEntry);
+                _module.AddStatement(SpirvOp.BranchConditional, enters, enterLabel, skippedEntry);
+                _module.AddLabel(enterLabel);
+                if (loopGuard != 0)
+                {
+                    Store(loopGuard, UInt(0));
+                }
+
+                _module.AddStatement(SpirvOp.Branch, loopHeader);
             }
             else
             {
+                if (loopGuard != 0)
+                {
+                    Store(loopGuard, UInt(0));
+                }
+
                 _module.AddStatement(SpirvOp.Branch, loopHeader);
             }
             _module.DeclareLoopHeader(loopHeader);
@@ -2435,8 +2457,8 @@ public static partial class Gen5SpirvTranslator
             {
                 // The dispatcher's safety valve, counted per loop iteration: a mistranslated
                 // exit ends the invocation instead of wedging the GPU queue.
-                var steps = IAdd(Load(_uintType, IterationGuard()), UInt(1));
-                Store(IterationGuard(), steps);
+                var steps = IAdd(Load(_uintType, loopGuard), UInt(1));
+                Store(loopGuard, steps);
                 var withinLimit = _module.AddInstruction(SpirvOp.ULessThan, _boolType, steps, UInt((uint)_maxDispatcherSteps));
                 again = _module.AddInstruction(SpirvOp.LogicalAnd, _boolType, again, withinLimit);
             }
@@ -2447,12 +2469,8 @@ public static partial class Gen5SpirvTranslator
             {
                 _module.AddStatement(SpirvOp.Branch, entryMerge);
                 _module.AddLabel(skippedEntry);
-                // The previous guarded do-while still counted one iteration when
-                // the block was skipped. Preserve that diagnostic safety budget.
-                if (_maxDispatcherSteps > 0)
-                {
-                    Store(IterationGuard(), IAdd(Load(_uintType, IterationGuard()), UInt(1)));
-                }
+                // A skipped entry never runs the loop, so its own counter has nothing to count;
+                // the shared-budget increment that used to sit here is gone with the shared budget.
                 _module.AddStatement(SpirvOp.Branch, entryMerge);
                 _module.AddLabel(entryMerge);
             }
@@ -9624,6 +9642,20 @@ public static partial class Gen5SpirvTranslator
 
             return _iterationGuard;
         }
+
+        // One counter per loop, declared on first use and stored 0 on entry by the caller.
+        private uint NewLoopGuard()
+        {
+            var guard = _module.AddGlobalVariable(
+                _privateUintPointer,
+                SpirvStorageClass.Private,
+                _module.Constant(_uintType, 0));
+            _interfaces.Add(guard);
+            _module.AddName(guard, $"pcGuard{_loopGuardCount++}");
+            return guard;
+        }
+
+        private int _loopGuardCount;
 
         private static readonly bool TraceTitleShaderState =
             Environment.GetEnvironmentVariable("SHARPEMU_TRACE_TITLE_SHADER_STATE") == "1";
