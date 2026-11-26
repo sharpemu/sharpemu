@@ -144,6 +144,23 @@ Tile states:
     <Setter Property="CornerRadius" Value="13" />
   </Style>
 
+  <!-- Small label in a cover's bottom-left corner: "PKG" (runs from the package) or "To install". -->
+  <Style Selector="Border.pkgBadge">
+    <Setter Property="HorizontalAlignment" Value="Left" />
+    <Setter Property="VerticalAlignment" Value="Bottom" />
+    <Setter Property="Margin" Value="6" />
+    <Setter Property="Padding" Value="6,2" />
+    <Setter Property="CornerRadius" Value="6" />
+    <Setter Property="Background" Value="{StaticResource OverlayBrush}" />
+    <Setter Property="BorderBrush" Value="{StaticResource GlassRimBrush}" />
+    <Setter Property="BorderThickness" Value="1" />
+  </Style>
+  <Style Selector="TextBlock.pkgBadgeText">
+    <Setter Property="FontSize" Value="{StaticResource FontSizeCaption}" />
+    <Setter Property="FontWeight" Value="SemiBold" />
+    <Setter Property="Foreground" Value="{StaticResource SecondaryTextBrush}" />
+  </Style>
+
   <Style Selector="Border.addFolderTile">
     <Setter Property="CornerRadius" Value="{StaticResource RadiusLg}" />
     <Setter Property="Background" Value="{StaticResource CardBrush}" />

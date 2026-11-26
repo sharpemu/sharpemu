@@ -1803,8 +1803,6 @@ public partial class MainWindow : Window
             _settings.Save();
         }
 
-        // A downloaded folder often holds .pkg files rather than an extracted game.
-        await InstallPackagesInFolderAsync(path);
         await RescanLibraryAsync(addingFolder: true);
     }
 
@@ -2021,7 +2019,7 @@ public partial class MainWindow : Window
     private static long ComputeInstallSize(string ebootPath)
     {
         // An archive or package is the whole game; the folder it sits in may hold other games.
-        if (ZArchiveCache.IsMountablePath(ebootPath))
+        if (ZArchiveCache.IsMountablePath(ebootPath) || ebootPath.EndsWith(".pkg", StringComparison.OrdinalIgnoreCase))
         {
             try
             {
@@ -2087,7 +2085,9 @@ public partial class MainWindow : Window
                     .Concat(Directory.EnumerateFiles(folder, "*.pkg", enumeration)))
                 {
                     var fullPath = Path.GetFullPath(file);
-                    if (file.EndsWith(".pkg", StringComparison.OrdinalIgnoreCase) && !Ps5PackageSource.IsPackagePath(fullPath))
+                    var needsInstall = file.EndsWith(".pkg", StringComparison.OrdinalIgnoreCase)
+                        && !Ps5PackageSource.IsPackagePath(fullPath);
+                    if (needsInstall && !GamePackage.IsPackagePath(fullPath))
                     {
                         continue;
                     }
@@ -2097,7 +2097,12 @@ public partial class MainWindow : Window
                         continue;
                     }
 
-                    games.Add(CreateGameEntry(fullPath));
+                    // A PS4 package is listed dimmed, to install; patches, DLC and unreadable files stay hidden.
+                    var entry = needsInstall ? CreateInstallablePackageEntry(fullPath) : CreateGameEntry(fullPath);
+                    if (entry is not null)
+                    {
+                        games.Add(entry);
+                    }
                 }
             }
             catch (Exception exception)
@@ -2122,6 +2127,45 @@ public partial class MainWindow : Window
 
         games.RemoveAll(game => string.Equals(game.Path, demo, GameLibraryPath.Comparison));
         games.Insert(0, CreateGameEntry(demo));
+    }
+
+    // A PS4 .pkg cannot run in place. Its name and title id come from the package header; with
+    // none, the file name stands in. Returns null for a patch, DLC or unreadable package.
+    private static GameEntry? CreateInstallablePackageEntry(string fullPath)
+    {
+        string? title;
+        string? titleId;
+        try
+        {
+            using var package = GamePackage.Open(fullPath);
+            if (!package.IsGameApplication)
+            {
+                return null;
+            }
+
+            title = package.Title;
+            titleId = package.TitleId;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            Console.Error.WriteLine(
+                $"[GUI][WARN] Could not read package '{fullPath}': {exception.Message}");
+            return null;
+        }
+
+        long size = 0;
+        try
+        {
+            size = new FileInfo(fullPath).Length;
+        }
+        catch (IOException)
+        {
+        }
+
+        return new GameEntry(
+            string.IsNullOrWhiteSpace(title) ? Path.GetFileNameWithoutExtension(fullPath) : title,
+            string.IsNullOrWhiteSpace(titleId) ? null : titleId,
+            null, fullPath, size, null, null, needsInstall: true);
     }
 
     private static GameEntry CreateGameEntry(string fullPath)
@@ -3058,6 +3102,10 @@ public partial class MainWindow : Window
         if (GameList.SelectedItem is AddFolderTile)
         {
             StartAddFolderFromTile();
+        }
+        else if (!_isRunning && GameList.SelectedItem is GameEntry { NeedsInstall: true } package)
+        {
+            await OfferInstallPackageAsync(package);
         }
         else if (!_isRunning && GameList.SelectedItem is GameEntry selected &&
                  await SelectGameVersionAsync(selected) is { } game)

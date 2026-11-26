@@ -5,9 +5,8 @@ using Avalonia.Controls;
 
 namespace SharpEmu.GUI;
 
-// Asks whether the PKG files found in an added folder should be installed now. Returns true to
-// install; anything else (the other button, Escape) skips the installs, and the library then
-// lists the PS5 packages as games that run straight from the package.
+// Asks whether one package that cannot run in place (a PS4 .pkg) should be installed now. Returns
+// true to install; anything else (Cancel, Escape) leaves it alone.
 public partial class PkgConfirmDialog : SheetView
 {
     public PkgConfirmDialog()
