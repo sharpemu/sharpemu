@@ -43,6 +43,9 @@ public sealed partial class DirectExecutionBackend
     [ThreadStatic]
     private static nint _preparedContextTransferStub;
 
+	private string ImportDisplayName(int index) =>
+		(uint)index < (uint)_importEntries.Length ? _importEntries[index].Export?.Name ?? _importEntries[index].Nid : "?";
+
 	private static unsafe ulong ImportDispatchGatewayManaged(nint backendHandle, int importIndex, nint argPackPtr, nint transferStubAddress)
 	{
         *(nint*)transferStubAddress = 0;
@@ -66,7 +69,22 @@ public sealed partial class DirectExecutionBackend
 				return r;
 			}
 
+			if (ImportThreadCostProfile.Enabled)
+			{
+				var costStart = System.Diagnostics.Stopwatch.GetTimestamp();
+				var costResult = directExecutionBackend.DispatchImport(importIndex, argPackPtr);
+				ImportThreadCostProfile.Record(directExecutionBackend.ImportDisplayName, importIndex, System.Diagnostics.Stopwatch.GetTimestamp() - costStart);
+				directExecutionBackend.ClearActiveImportIndex();
+				CompleteImportContextTransfer(transferStubAddress);
+				return costResult;
+			}
+
+			var timelineStart = SharpEmu.HLE.Diagnostics.FrameTimeline.Begin();
 			var result = directExecutionBackend.DispatchImport(importIndex, argPackPtr);
+			if (timelineStart != 0)
+			{
+				SharpEmu.HLE.Diagnostics.FrameTimeline.End(timelineStart, directExecutionBackend.ImportDisplayName(importIndex), 15);
+			}
 			directExecutionBackend.ClearActiveImportIndex();
 			CompleteImportContextTransfer(transferStubAddress);
 			return result;
@@ -356,6 +374,10 @@ public sealed partial class DirectExecutionBackend
 			return 18446744071562199042uL;
 		}
 		ImportStubEntry importStubEntry = _importEntries[importIndex];
+		if (SharpEmu.HLE.Diagnostics.GuestImportCallSite.Enabled)
+		{
+			SharpEmu.HLE.Diagnostics.GuestImportCallSite.Enter(*(ulong*)(argPackPtr + 96), importStubEntry.Export?.Name ?? importStubEntry.Nid);
+		}
 		TraceImportAddressProbe(cpuContext, importStubEntry, argPackPtr);
 		using var registerPacketImport = SharpEmu.Libs.Diagnostics.AgcRegisterPacketProfile.MeasureImport(importStubEntry.Nid);
 		if (_perfHleHistogram)

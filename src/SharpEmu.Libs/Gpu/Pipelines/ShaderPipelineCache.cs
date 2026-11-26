@@ -1926,9 +1926,12 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var key = new ComputePipelineKey(program.Id);
         if (_computePipelines.TryGetValue(key, out var known))
         {
+            PipelineCacheStats.Lookup(PipelineCacheStats.Kind.ComputePipeline, hit: true);
             return known;
         }
 
+        PipelineCacheStats.Lookup(PipelineCacheStats.Kind.ComputePipeline, hit: false);
+        var missStarted = PipelineCacheStats.MissBegin();
         profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineSharedGateWait);
         lock (_pipelineGate)
         {
@@ -1949,6 +1952,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 _computePipelines.TryAdd(key, created);
             }
 
+            PipelineCacheStats.MissEnd(PipelineCacheStats.Kind.ComputePipeline, missStarted, $"program=0x{program.Id:X16} hash=0x{stage.Hash:X16}");
+
             ShaderCacheCounters.CountComputePipeline();
             return created;
         }
@@ -1967,10 +1972,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var key = new ComputePipelineKey(program.Id);
         if (_computePipelines.TryGetValue(key, out var known))
         {
+            PipelineCacheStats.Lookup(PipelineCacheStats.Kind.ComputePipeline, hit: true);
             handle = known;
             return true;
         }
 
+        PipelineCacheStats.Lookup(PipelineCacheStats.Kind.ComputePipeline, hit: false);
+        var missStarted = PipelineCacheStats.MissBegin();
         profileScope.SwitchPhase(RenderPhaseProfile.Phase.PipelineSharedGateWait);
         lock (_pipelineGate)
         {
@@ -1993,6 +2001,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
                 _computePipelines.TryAdd(key, created);
             }
 
+            PipelineCacheStats.MissEnd(PipelineCacheStats.Kind.ComputePipeline, missStarted, $"program=0x{program.Id:X16} hash=0x{stage.Hash:X16}");
             ShaderCacheCounters.CountComputePipeline();
             handle = created;
             return true;

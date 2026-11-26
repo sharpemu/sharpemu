@@ -73,6 +73,14 @@ public static partial class AgcExports
     // What the last draw decided about its retained geometry; tests read it.
     internal static GeometrySnapshotDecision LastGeometrySnapshotDecisionForTests { get; private set; }
 
+    // What the submit prepass keeps for a stream: null when it keeps nothing a draw could consume.
+    internal static object? CaptureGeometryForTests(CpuContext ctx, ulong commandAddress, uint dwordCount) =>
+        CaptureSubmittedGeometry(
+            ctx,
+            _submittedGpuStates.GetValue(CanonicalMemory(ctx.Memory), static _ => new SubmittedGpuState()),
+            commandAddress,
+            dwordCount);
+
     internal static IReadOnlyDictionary<uint, uint> GetGeometryCaptureRegistersForTests(ICpuMemory memory) =>
         new Dictionary<uint, uint>(_submittedGpuStates.GetValue(CanonicalMemory(memory), static _ => new SubmittedGpuState()).GeometryCapture.ShRegisters);
 

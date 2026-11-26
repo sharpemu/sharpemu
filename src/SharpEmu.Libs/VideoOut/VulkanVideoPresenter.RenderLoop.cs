@@ -50,6 +50,19 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void WaitForRenderWork()
         {
+            var timelineStart = SharpEmu.HLE.Diagnostics.FrameTimeline.Begin();
+            try
+            {
+                WaitForRenderWorkBody();
+            }
+            finally
+            {
+                SharpEmu.HLE.Diagnostics.FrameTimeline.End(timelineStart, "render:idle wait for work", 50);
+            }
+        }
+
+        private void WaitForRenderWorkBody()
+        {
             using var profileScope = RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Idle);
             var gpuWorkInFlight = _pendingGuestSubmissions.Count > 0 ||
                 Array.Exists(_frameInFlight, static pending => pending);
@@ -119,6 +132,19 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         private void RenderCore()
+        {
+            var timelineStart = SharpEmu.HLE.Diagnostics.FrameTimeline.Begin();
+            try
+            {
+                RenderCoreBody();
+            }
+            finally
+            {
+                SharpEmu.HLE.Diagnostics.FrameTimeline.End(timelineStart, "render:RenderCore pass", 50);
+            }
+        }
+
+        private void RenderCoreBody()
         {
             using var profileScope = RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Unattributed);
             RenderDocCapture.DiscardTimedOutFrame();

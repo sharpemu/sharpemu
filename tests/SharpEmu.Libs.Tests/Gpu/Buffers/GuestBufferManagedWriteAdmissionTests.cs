@@ -63,7 +63,10 @@ public sealed class GuestBufferManagedWriteAdmissionTests(HeadlessVulkanFixture 
         try
         {
             var readbacksBefore = harness.Cache.PendingReadbacksApplied;
-            cpu = Task.Run(() => harness.Memory.TryCopy(destination, source, size));
+            // The copy stops short of the end of the GPU data. A copy that replaced all of the GPU data on its pages would
+            // drop it without any readback, and this test is about the readback path.
+            const ulong copied = size - 0x100;
+            cpu = Task.Run(() => harness.Memory.TryCopy(destination, source, copied));
             await reserved.Task.WaitAsync(Deadline);
             Assert.True(premarkReturned.Task.IsCompletedSuccessfully);
             if (asynchronous)
@@ -85,7 +88,7 @@ public sealed class GuestBufferManagedWriteAdmissionTests(HeadlessVulkanFixture 
             Assert.True(harness.Cache.TrySynchronizeCpuRead(destination, size));
             var actual = new byte[(int)size];
             Assert.True(harness.Memory.TryReadBacking(destination, actual));
-            Assert.Equal(expected, actual);
+            Assert.Equal(expected[..(int)copied], actual[..(int)copied]);
         }
         finally
         {

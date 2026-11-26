@@ -168,6 +168,52 @@ public sealed class KernelEventQueueCompatExportsTests
         Assert.Equal(0UL, BinaryPrimitives.ReadUInt64LittleEndian(evt[0x10..]));
     }
 
+    // A title's main thread calls sceKernelWaitEqueue with no timeout right after submitting an
+    // APR read. The wait must block until the event arrives; returning with no events let the
+    // game free the destination buffer before the read ran.
+    [Fact]
+    public void WaitEqueue_WithNoTimeout_BlocksUntilAnEventIsTriggered()
+    {
+        const ulong id = 0x123;
+        const ulong triggerData = 0x77;
+        var handle = CreateEqueue();
+
+        var (addCtx, _) = NewContextWithOutSlot();
+        addCtx[CpuRegister.Rdi] = handle;
+        addCtx[CpuRegister.Rsi] = id;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, KernelEventQueueCompatExports.KernelAddUserEvent(addCtx));
+
+        var trigger = Task.Run(() =>
+        {
+            Thread.Sleep(300);
+            var (triggerCtx, _) = NewContextWithOutSlot();
+            triggerCtx[CpuRegister.Rdi] = handle;
+            triggerCtx[CpuRegister.Rsi] = id;
+            triggerCtx[CpuRegister.Rdx] = triggerData;
+            return KernelEventQueueCompatExports.KernelTriggerUserEvent(triggerCtx);
+        });
+
+        var memory = new FakeCpuMemory(MemoryBase, MemorySize);
+        var waitContext = new CpuContext(memory, Generation.Gen5);
+        const ulong eventsAddress = MemoryBase + 0x100;
+        const ulong outCountAddress = MemoryBase + 0x300;
+        waitContext[CpuRegister.Rdi] = handle;
+        waitContext[CpuRegister.Rsi] = eventsAddress;
+        waitContext[CpuRegister.Rdx] = 1;
+        waitContext[CpuRegister.Rcx] = outCountAddress;
+        waitContext[CpuRegister.R8] = 0;
+
+        var started = System.Diagnostics.Stopwatch.StartNew();
+        var result = KernelEventQueueCompatExports.KernelWaitEqueue(waitContext);
+        started.Stop();
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, result);
+        Assert.True(waitContext.TryReadUInt32(outCountAddress, out var delivered));
+        Assert.Equal(1u, delivered);
+        Assert.True(started.ElapsedMilliseconds >= 200, $"returned after {started.ElapsedMilliseconds} ms without waiting");
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, trigger.GetAwaiter().GetResult());
+    }
+
     private static ulong CreateEqueue()
     {
         var memory = new FakeCpuMemory(MemoryBase, MemorySize);

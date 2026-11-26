@@ -938,7 +938,29 @@ public static partial class AmprExports
 
     public static int CompleteCommandBuffer(CpuContext ctx, ulong commandBuffer)
     {
-        return CompleteCommandBuffer(ctx, commandBuffer, out _, out _);
+        // The APR engine runs a submitted buffer asynchronously. A wait that the submitting CPU releases after submit
+        // returns (It Takes Two and Mortal Kombat 11 post 0xCAFE to a word the buffer waits on) must not block this guest
+        // thread: the cooperative scheduler never runs the thread that would release it. Run up to the first unmet wait
+        // here and the rest on a host thread, where waiting holds up no guest thread.
+        var status = TryCaptureCommands(ctx, commandBuffer, out var captured);
+        if (status != (int)OrbisGen2Result.ORBIS_GEN2_OK)
+        {
+            return status;
+        }
+
+        var next = 0;
+        if (!RunCommands(ctx, captured!, ref next, stopAtUnmetWait: true, out _, out _))
+        {
+            var rest = next;
+            TraceAmpr(ctx, "deferred", commandBuffer, 0, (ulong)rest);
+            new Thread(() => RunCommands(ctx, captured!, ref rest, stopAtUnmetWait: false, out _, out _))
+            {
+                IsBackground = true,
+                Name = "AMPR deferred command buffer",
+            }.Start();
+        }
+
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
     public static int CompleteCommandBuffer(
@@ -1138,6 +1160,18 @@ public static partial class AmprExports
 
         return !ctx.TryReadUInt64(command.Address, out var value) ||
             IsWaitConditionSatisfied(value, command.Reference, command.Compare);
+    }
+
+    private static bool IsWaitAddressSatisfied(CpuContext ctx, WaitAddressCommand command)
+    {
+        if (command.Flush != 0)
+        {
+            Thread.MemoryBarrier();
+        }
+
+        // An unreadable address is reported by the inline path, so treat it as ready here.
+        return !ctx.TryReadUInt64(command.Address, out var value) ||
+               IsWaitConditionSatisfied(value, command.Reference, command.Compare);
     }
 
     private static int _unknownReadFileIdWarnings;
@@ -2093,5 +2127,10 @@ public static partial class AmprExports
         _ = ctx.TryReadUInt64(ctx[CpuRegister.Rsp], out returnRip);
         Console.Error.WriteLine(
             $"[LOADER][TRACE] ampr.read_file: cmd=0x{commandBuffer:X16} id=0x{fileId:X8} dst=0x{destination:X16} size=0x{size:X16} offset=0x{fileOffset:X16} read=0x{bytesRead:X16} result=0x{result:X8} path='{hostPath ?? string.Empty}' ret=0x{returnRip:X16}");
+        var head = new byte[32];
+        if (bytesRead != 0 && ctx.Memory.TryRead(destination, head))
+        {
+            Console.Error.WriteLine($"[LOADER][TRACE] ampr.read_head: {Convert.ToHexString(head)}");
+        }
     }
 }

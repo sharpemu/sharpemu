@@ -901,20 +901,24 @@ public static class KernelEventQueueCompatExports
             return (int)OrbisGen2Result.ORBIS_GEN2_OK;
         }
 
-        if (timeoutAddress != 0)
+        // A null timeout means wait forever. A thread that cannot be parked by the
+        // cooperative scheduler blocks here until an event arrives or the queue dies.
+        var infiniteWait = timeoutAddress == 0;
         {
-            var deadline = Environment.TickCount64 +
-                Math.Max(
-                    1L,
-                    (long)Math.Min(
-                        ((ulong)timeoutUsec + 999UL) / 1000UL,
-                        int.MaxValue));
+            var deadline = infiniteWait
+                ? long.MaxValue
+                : Environment.TickCount64 +
+                  Math.Max(
+                      1L,
+                      (long)Math.Min(
+                          ((ulong)timeoutUsec + 999UL) / 1000UL,
+                          int.MaxValue));
             lock (_eventQueueGate)
             {
                 while (IsLiveEventQueueLocked(state) &&
                        !HasPendingEventsLocked(handle))
                 {
-                    var remaining = deadline - Environment.TickCount64;
+                    var remaining = infiniteWait ? 100 : deadline - Environment.TickCount64;
                     if (remaining <= 0)
                     {
                         break;

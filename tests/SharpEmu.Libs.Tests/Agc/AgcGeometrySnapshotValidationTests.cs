@@ -79,6 +79,22 @@ public sealed class AgcGeometrySnapshotValidationTests
             instanceCount: 1,
             [(UserDataRegister, UserDataValue)]);
 
+    // Nothing reads a retained index copy, so the prepass must not pay for one per indexed draw.
+    [Fact]
+    public void IndexedDraw_InTheSubmitPrepass_RetainsNoIndexCopyButStillTracksTheDrawState()
+    {
+        var (memory, dwords, _) = WriteStream(
+            SetShaderRegister(UserDataRegister, UserDataValue),
+            IndexType(0),
+            DrawIndex2(IndexAddress));
+        var context = new CpuContext(memory, Generation.Gen5);
+
+        Assert.Null(AgcExports.CaptureGeometryForTests(context, CommandAddress, dwords));
+        Assert.Equal(
+            UserDataValue,
+            AgcExports.GetGeometryCaptureRegistersForTests(memory)[UserDataRegister]);
+    }
+
     [Fact]
     public void MatchingState_UsesTheSnapshot()
     {

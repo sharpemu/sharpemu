@@ -50,14 +50,14 @@ public sealed partial class RenderExecutor
         }
 
         var mode = context.RasterMode;
-        if (mode.FrontPolygonType is not (0 or 2))
+        // POLY_MODE 0 draws filled triangles whatever the per-face polygon types say. Point and line
+        // face types are drawn filled: the pipelines have no polygon mode state, and a wireframe or
+        // point pass (MK11 fights set front type 1) is cosmetic where a fatal ends the session.
+        if (mode.PolygonMode != 0 && (mode.FrontPolygonType is not (0 or 2) || mode.BackPolygonType is not (0 or 2)) &&
+            Interlocked.Exchange(ref _warnedPolygonTypes, 1) == 0)
         {
-            throw _host.Fatal($"The front polygon type is not supported: type={mode.FrontPolygonType}.");
-        }
-
-        if (mode.BackPolygonType is not (0 or 2))
-        {
-            throw _host.Fatal($"The back polygon type is not supported: type={mode.BackPolygonType}.");
+            Console.Error.WriteLine(
+                $"[GPU][WARN] Polygon types front={mode.FrontPolygonType} back={mode.BackPolygonType} are drawn filled.");
         }
 
         if (mode.ProvokingVertexLast)
@@ -70,6 +70,8 @@ public sealed partial class RenderExecutor
             throw _host.Fatal("Disabled perspective correction is not supported.");
         }
     }
+
+    private static int _warnedPolygonTypes;
 
     private void ValidateColorTarget(in ColorTargetWords target, uint slot)
     {
