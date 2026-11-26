@@ -21,7 +21,7 @@ namespace SharpEmu.HLE.Host.Windows;
 [SupportedOSPlatform("windows")]
 public sealed unsafe class WindowsAppContainerSandbox : IDisposable
 {
-    public const string EnableVariable = "SHARPEMU_SANDBOX";
+    public const string EnableVariable = SandboxLaunchPolicy.Variable;
     /// <summary>Carries the launch report to the child, which prints it into its own log.</summary>
     public const string ReportVariable = "SHARPEMU_SANDBOX_REPORT";
     public const string ProfileName = "SharpEmu.Sandbox";
@@ -66,7 +66,11 @@ public sealed unsafe class WindowsAppContainerSandbox : IDisposable
     /// <summary>The one launch line: profile, SID and every granted folder with its access.</summary>
     public string Report { get; }
 
-    /// <summary>True when the launcher sees <c>SHARPEMU_SANDBOX=1</c>.</summary>
+    /// <summary>
+    /// True when the launcher sees <c>SHARPEMU_SANDBOX=1</c>. This is the command line's switch and it stays opt-in
+    /// (unset = off) so scripted and development runs do not change; only the GUI defaults to the sandbox, through
+    /// <see cref="SandboxLaunchPolicy"/>.
+    /// </summary>
     public static bool IsRequested() =>
         string.Equals(Environment.GetEnvironmentVariable(EnableVariable), "1", StringComparison.Ordinal);
 
@@ -141,10 +145,7 @@ public sealed unsafe class WindowsAppContainerSandbox : IDisposable
 
         var plan = SandboxPlan.Build(inputs);
         // Before anything is created or granted: a volume without ACLs cannot be opened from the container at all.
-        if (SandboxVolumeCheck.Find(plan.Folders, SandboxVolumeCheck.QueryVolume) is { Count: > 0 } unusable)
-        {
-            throw new InvalidOperationException(SandboxVolumeCheck.Format(unusable));
-        }
+        SandboxVolumeCheck.ThrowIfUnusable(plan.Folders, SandboxVolumeCheck.QueryVolume);
 
         var dataRoot = Path.GetFullPath(inputs.DataRoot);
         var sid = EnsureProfile(out var sidText);

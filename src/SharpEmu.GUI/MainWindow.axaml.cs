@@ -227,7 +227,8 @@ public partial class MainWindow : Window
         string ConsoleLanguage,
         EffectiveLaunchSettings Settings,
         IReadOnlyDictionary<string, string?> Environment,
-        GnmLoadExecRequest? LoadExec = null);
+        GnmLoadExecRequest? LoadExec = null,
+        bool WithoutSandbox = false);
 
     public MainWindow()
     {
@@ -402,6 +403,8 @@ public partial class MainWindow : Window
             _settings.CheckForUpdatesOnStartup = AutoUpdateToggle.IsChecked == true;
             ScheduleSettingsSave();
         };
+        SandboxRow.IsVisible = OperatingSystem.IsWindows();
+        SandboxToggle.IsCheckedChanged += (_, _) => OnSandboxToggleChanged();
         InitializeThemeControls();
         ConsoleLanguageBox.SelectionChanged += (_, _) =>
         {
@@ -1561,6 +1564,7 @@ public partial class MainWindow : Window
         SetLibraryLayout(string.Equals(_settings.LibraryLayout, "Grid", StringComparison.OrdinalIgnoreCase));
         DiscordToggle.IsChecked = _settings.DiscordRichPresence;
         AutoUpdateToggle.IsChecked = _settings.CheckForUpdatesOnStartup;
+        SetSandboxToggle(_settings.RunInSandbox);
         SyncThemeControls();
         DefaultProfileBox.Text = _settings.DefaultProfile;
         GnmTrophyPackageReader.Configure(_settings.GnmTrophyKey);
@@ -2588,8 +2592,18 @@ public partial class MainWindow : Window
         }
 
         var versions = GameVersions.PackableForGame(_allGames, selected);
-        if (await SelectGameVersionAsync(versions, forPacking: selected.HasMultipleVersions) is not { } game ||
-            Path.GetDirectoryName(game.Path) is not { } gameFolder)
+        if (await SelectGameVersionAsync(versions, forPacking: selected.HasMultipleVersions) is not { } game)
+        {
+            return;
+        }
+
+        await PackGameAsZarAsync(game);
+    }
+
+    // Asks where to put the .zar, then packs the game's folder with the progress sheet.
+    private async Task PackGameAsZarAsync(GameEntry game)
+    {
+        if (Path.GetDirectoryName(game.Path) is not { } gameFolder)
         {
             return;
         }
@@ -3126,7 +3140,9 @@ public partial class MainWindow : Window
             _runningGameTitleId,
             _settings.ConsoleLanguage,
             effective,
-            configuration.BuildEnvironment(_settings));
+            configuration.BuildEnvironment(_settings),
+            WithoutSandbox: _launchWithoutSandboxOnce);
+        _launchWithoutSandboxOnce = false;
 
         StartPendingSession();
     }
@@ -3224,7 +3240,8 @@ public partial class MainWindow : Window
             return;
         }
 
-        var process = new EmulatorProcess();
+        // The setting, unless this launch was chosen to run without the sandbox once; SHARPEMU_SANDBOX=0/1 still wins.
+        var process = new EmulatorProcess { SandboxEnabled = _settings.RunInSandbox && !launch.WithoutSandbox };
         process.OutputReceived += OnEmulatorOutput;
         process.Exited += code => Dispatcher.UIThread.Post(() => OnEmulatorExited(code));
         process.SandboxActionBlocked += () => Dispatcher.UIThread.Post(ShowSandboxBlockedWarning);
@@ -3258,6 +3275,10 @@ public partial class MainWindow : Window
                 Localization.Instance.Format("Launch.StartFailed", exception.Message),
                 ErrorLineBrush);
             OnEmulatorExited(3);
+            if (exception is SandboxVolumeException { GameProblem: { } problem })
+            {
+                ShowSandboxVolumeDialog(launch, problem);
+            }
         }
     }
 

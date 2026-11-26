@@ -537,5 +537,15 @@
   "Overlay.Ime.Type": "Type with your keyboard",
   "Sandbox.BlockedTitle": "The sandbox stopped the game",
   "Sandbox.BlockedMessage": "This game tried to start another program. The sandbox blocked it and stopped the game. The dump has probably been modified. Only run dumps you made from your own console.",
-  "Sandbox.BlockedOk": "OK"
+  "Sandbox.BlockedOk": "OK",
+  "Sandbox.Cancel": "Cancel",
+  "Sandbox.OffTitle": "Turn off the sandbox?",
+  "Sandbox.OffMessage": "Without the sandbox, a modified game can read your files, use the internet and start programs. Only turn it off for a game whose source you trust.",
+  "Sandbox.OffConfirm": "Turn off",
+  "Sandbox.VolumeTitle": "This game is on an {0} drive",
+  "Sandbox.VolumeMessage": "The sandbox can't open games on exFAT drives (external drives, USB keys). Convert the game to .zar to play it from this drive.",
+  "Sandbox.VolumeConvert": "Convert to .zar",
+  "Sandbox.VolumePlayWithout": "Play without sandbox",
+  "Options.Sandbox.Label": "Run games in a sandbox (recommended)",
+  "Options.Sandbox.Desc": "Keeps a modified game from reading your files, using the internet or starting programs. Windows only."
 }

@@ -14,6 +14,24 @@ public sealed record SandboxVolume(string FileSystem, bool SupportsAcls);
 public sealed record SandboxVolumeProblem(SandboxFolder Folder, SandboxVolume Volume, string Message);
 
 /// <summary>
+/// The launch failure for folders on a volume without ACLs, typed so the launcher can recognise it (and offer a way
+/// out) without parsing the message. <see cref="Exception.Message"/> is the same text the command line prints.
+/// </summary>
+public sealed class SandboxVolumeException : InvalidOperationException
+{
+    public SandboxVolumeException(IReadOnlyList<SandboxVolumeProblem> problems)
+        : base(SandboxVolumeCheck.Format(problems))
+    {
+        Problems = problems;
+    }
+
+    public IReadOnlyList<SandboxVolumeProblem> Problems { get; }
+
+    /// <summary>The first problem on the game folder, or null when only other folders are affected.</summary>
+    public SandboxVolumeProblem? GameProblem => Problems.FirstOrDefault(problem => problem.Folder.IsGame);
+}
+
+/// <summary>
 /// An AppContainer is allowed into a folder only through an access control entry, and a volume without ACLs cannot
 /// hold one: nothing on it can be opened from inside the container. The launch must fail before the process exists,
 /// with a message that says why, rather than later with "file not found".
@@ -37,6 +55,15 @@ public static class SandboxVolumeCheck
         }
 
         return problems;
+    }
+
+    /// <summary>Throws <see cref="SandboxVolumeException"/> when any folder of the plan is on a volume without ACLs.</summary>
+    public static void ThrowIfUnusable(IEnumerable<SandboxFolder> folders, Func<string, SandboxVolume?> getVolume)
+    {
+        if (Find(folders, getVolume) is { Count: > 0 } problems)
+        {
+            throw new SandboxVolumeException(problems);
+        }
     }
 
     /// <summary>The single launch error for the problems found, one line each; empty when there are none.</summary>

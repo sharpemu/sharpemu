@@ -66,6 +66,12 @@ internal sealed class EmulatorProcess : IDisposable
         }
     }
 
+    /// <summary>
+    /// The launcher's choice for the next start: the "Run games in a sandbox" setting, or false for a one-off launch
+    /// without it. An explicit SHARPEMU_SANDBOX=0/1 in the environment overrides it (<see cref="SandboxLaunchPolicy"/>).
+    /// </summary>
+    public bool SandboxEnabled { get; set; } = SandboxLaunchPolicy.GuiDefault;
+
     public void Start(string exePath, IReadOnlyList<string> arguments, string? workingDirectory,
         IReadOnlyDictionary<string, string?>? environment = null)
     {
@@ -223,9 +229,10 @@ internal sealed class EmulatorProcess : IDisposable
 
         try
         {
-            // SHARPEMU_SANDBOX=1 runs the child in an AppContainer limited to the folders of this launch. Failing to
-            // set that up fails the launch: it never falls back to an unconfined child.
-            if (WindowsAppContainerSandbox.IsRequested())
+            // The child runs in an AppContainer limited to the folders of this launch when the GUI setting is on
+            // (default) or SHARPEMU_SANDBOX=1; SHARPEMU_SANDBOX=0 forces it off. Failing to set that up fails the
+            // launch: it never falls back to an unconfined child.
+            if (SandboxLaunchPolicy.ShouldSandbox(SandboxEnabled, Environment.GetEnvironmentVariable(SandboxLaunchPolicy.Variable)))
             {
                 sandbox = WindowsAppContainerSandbox.Create(new SandboxInputs(
                     Path.GetDirectoryName(exePath) ?? Environment.CurrentDirectory,

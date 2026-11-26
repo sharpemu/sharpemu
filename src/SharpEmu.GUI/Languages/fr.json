@@ -534,5 +534,15 @@
   "Overlay.Ime.Type": "Tapez avec votre clavier",
   "Sandbox.BlockedTitle": "Le bac à sable a arrêté le jeu",
   "Sandbox.BlockedMessage": "Ce jeu a tenté de lancer un autre programme. Le bac à sable l’a bloqué et a arrêté le jeu. Le dump a probablement été modifié. N’exécutez que des dumps faits depuis votre propre console.",
-  "Sandbox.BlockedOk": "OK"
+  "Sandbox.BlockedOk": "OK",
+  "Sandbox.Cancel": "Annuler",
+  "Sandbox.OffTitle": "Désactiver le bac à sable ?",
+  "Sandbox.OffMessage": "Sans bac à sable, un jeu modifié peut lire vos fichiers, utiliser internet et lancer des programmes. Ne le désactivez que pour un jeu dont vous êtes sûr de la provenance.",
+  "Sandbox.OffConfirm": "Désactiver",
+  "Sandbox.VolumeTitle": "Ce jeu est sur un disque {0}",
+  "Sandbox.VolumeMessage": "Le bac à sable ne peut pas ouvrir de jeu sur un disque exFAT (disque externe, clé USB). Convertissez le jeu en .zar pour y jouer depuis ce disque.",
+  "Sandbox.VolumeConvert": "Convertir en .zar",
+  "Sandbox.VolumePlayWithout": "Jouer sans bac à sable",
+  "Options.Sandbox.Label": "Exécuter les jeux dans un bac à sable (recommandé)",
+  "Options.Sandbox.Desc": "Empêche un jeu modifié de lire vos fichiers, d’utiliser internet ou de lancer des programmes. Windows uniquement."
 }
