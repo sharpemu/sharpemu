@@ -43,7 +43,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     private readonly GpuDeviceInfo _device;
     private readonly SubmissionScheduler _scheduler;
     private readonly IGpuQueueRelay _relay;
-    private readonly GuestBufferUploader _uploader;
+    private GuestBufferUploader _uploader;
     private readonly IGuestBackedSpace _backing;
     private readonly ICpuMemory _guest;
     private readonly BdaFaultProcessor _faults;
@@ -72,11 +72,15 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     private long _gpuModifiedVersion;
     private readonly GuestPageTracker _tracker;
     private readonly GuestWriteReservations _managedWrites;
-    private readonly GpuRingBuffer _staging;
+    private readonly TransferRing _stageCapacity;
+    private GpuRingBuffer _staging => _stageCapacity.Buffer;
     private readonly ParallelGuestCopy _sweepCopy;
-    private readonly GpuRingBuffer _stream;
-    private readonly GpuRingBuffer _download;
-    private readonly GpuRingBuffer _deviceRing;
+    private readonly TransferRing _streamCapacity;
+    private GpuRingBuffer _stream => _streamCapacity.Buffer;
+    private readonly TransferRing _downloadCapacity;
+    private readonly TransferRing _deviceCapacity;
+    private GpuRingBuffer _download => _downloadCapacity.Buffer;
+    private readonly List<GpuRingBuffer> _retiredRings = [];
     private readonly object _shutdownGate = new();
     private readonly BufferRetirementPolicy _retirementPolicy = new();
     private ShutdownOutcome _outcome;
@@ -103,13 +107,13 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         _bdaPageTable = new GpuBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 0, GpuBuffer.AllFlags, BdaPageTableSize);
         _tracker = new GuestPageTracker(pages);
         _managedWrites = pages.ManagedWrites;
-        _staging = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Upload, 512 * MiB);
+        _stageCapacity = new(this, GpuBufferUsage.Upload, 16 * MiB, 512 * MiB);
         // Up to three helper threads copy a large sweep's guest bytes with the render thread, and a large upload's.
         _sweepCopy = new ParallelGuestCopy(guest, Math.Clamp(Environment.ProcessorCount - 1, 0, 3));
         _uploader = new GuestBufferUploader(device, scheduler, guest, _staging, _sweepCopy);
-        _stream = new GpuRingBuffer(device, scheduler, GpuMemoryPlacement.StreamRing, 64 * MiB, GpuBuffer.AddressedFlags);
-        _download = new GpuRingBuffer(device, scheduler, GpuBufferUsage.Download, 64 * MiB);
-        _deviceRing = new GpuRingBuffer(device, scheduler, GpuBufferUsage.DeviceLocal, 128 * MiB);
+        _streamCapacity = new(this, GpuMemoryPlacement.StreamRing, 8 * MiB, 64 * MiB, GpuBuffer.AddressedFlags);
+        _downloadCapacity = new(this, GpuBufferUsage.Download, 4 * MiB, 64 * MiB);
+        _deviceCapacity = new(this, GpuBufferUsage.DeviceLocal, MiB, 128 * MiB);
         StreamOffsetAlignment = device.MinUniformBufferOffsetAlignment;
         MappedBudget = RenderDocCapture.IsAvailable ? 0 : device.MappedDeviceLocalBudget;
         AllocatesMappedBuffers = device.ResizableBar && MappedBudget != 0;
@@ -191,10 +195,10 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
     public GpuRingBuffer GetUtilityBuffer(GpuBufferUsage usage) => SubmissionScheduler.ReadOnlyThread ? throw SubmissionScheduler.ReadOnlyViolation("utility buffer") : usage switch
     {
-        GpuBufferUsage.Upload => _staging,
-        GpuBufferUsage.Stream => _stream,
-        GpuBufferUsage.Download => _download,
-        GpuBufferUsage.DeviceLocal => _deviceRing,
+        GpuBufferUsage.Upload => _stageCapacity.Export(),
+        GpuBufferUsage.Stream => _streamCapacity.Export(),
+        GpuBufferUsage.Download => _downloadCapacity.Export(),
+        GpuBufferUsage.DeviceLocal => _deviceCapacity.Export(),
         _ => throw SubmissionScheduler.Fatal("The utility buffer usage is invalid."),
     };
 
@@ -367,25 +371,26 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
                 using var streamProfile = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferStreamUpload);
                 var tick = _scheduler.CurrentTick;
                 var publications = PublicationOrdinal?.Invoke() ?? 0;
-                if (ObservationGated && _streamCopyShares.TryShare(guestAddress, size, _observation, tick, publications, out var sharedOffset))
+                if (ObservationGated && _streamCopyShares.TryShare(guestAddress, size, _observation, tick, publications, out var sharedOffset, _stream.Lap))
                 {
                     _stream.TouchResidency();
                     return (_stream, sharedOffset);
                 }
 
-                if (_stream.TryMap(size, out var streamOffset, StreamOffsetAlignment, allowWait: false) &&
-                    _backing.TryReadBacking(guestAddress, _stream.Mapped.Slice((int)streamOffset, (int)size)))
+                var stream = _streamCapacity.Request(size);
+                if (stream.TryMap(size, out var streamOffset, StreamOffsetAlignment, allowWait: false) &&
+                    _backing.TryReadBacking(guestAddress, stream.Mapped.Slice((int)streamOffset, (int)size)))
                 {
-                    _stream.Commit();
+                    stream.Commit();
                     if (MeshDrawTrace.Active) MeshDrawTrace.Range("buffer-stream-upload", guestAddress, size, $"offset=0x{streamOffset:X}");
-                    OverlayGuestPublications?.Invoke(_stream, streamOffset, guestAddress, size);
-                    if (ObservationGated)
+                    OverlayGuestPublications?.Invoke(stream, streamOffset, guestAddress, size);
+                    if (ObservationGated && ReferenceEquals(stream, _stream))
                     {
-                        _streamCopyShares.Remember(guestAddress, size, _observation, tick, publications, streamOffset);
+                        _streamCopyShares.Remember(guestAddress, size, _observation, tick, publications, streamOffset, stream.Lap);
                     }
 
-                    _stream.TouchResidency();
-                    return (_stream, streamOffset);
+                    stream.TouchResidency();
+                    return (stream, streamOffset);
                 }
             }
         }
@@ -461,7 +466,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     private const int StreamUseSlots = 1024;
     internal const int StreamUsesBeforeClean = 3;
     private readonly (ulong Address, ulong Size, int Uses)[] _streamUses = new (ulong, ulong, int)[StreamUseSlots];
-    private readonly StreamCopyShares _streamCopyShares = new();
+    private StreamCopyShares _streamCopyShares = new();
     public static long StreamCleaned;
     public static long StreamUses;
 
@@ -519,18 +524,19 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             throw SubmissionScheduler.Fatal("Cannot find the device buffer that owns the GPU-dirty image source.");
         }
 
-        if (!_staging.TryMap(size, out var stageOffset, 16))
+        var staging = _stageCapacity.Request(size);
+        if (!staging.TryMap(size, out var stageOffset, 16))
         {
             throw SubmissionScheduler.Fatal(
-                $"Cannot reserve image staging space: address=0x{guestAddress:X16} size=0x{size:X16} capacity=0x{_staging.Size:X16} tick={_scheduler.CurrentTick}.");
+                $"Cannot reserve image staging space: address=0x{guestAddress:X16} size=0x{size:X16} capacity=0x{staging.Size:X16} tick={_scheduler.CurrentTick}.");
         }
-        if (!ResidentImageBacking.TryRead(_backing, guestAddress, _staging.Mapped.Slice((int)stageOffset, (int)size)))
+        if (!ResidentImageBacking.TryRead(_backing, guestAddress, staging.Mapped.Slice((int)stageOffset, (int)size)))
         {
             throw SubmissionScheduler.Fatal(
                 $"Could not read the mapped guest image backing: address=0x{guestAddress:X16} size=0x{size:X16} range_backed={_backing.IsBackedRange(guestAddress, size)} first_byte_backed={_backing.IsBackedRange(guestAddress, 1)} last_byte_backed={_backing.IsBackedRange(guestAddress + size - 1, 1)} tick={_scheduler.CurrentTick}.");
         }
 
-        _staging.Commit();
+        staging.Commit();
         hasDirtyBufferSource = _gpuModifiedRanges.Overlaps(guestAddress, size);
         owner = FindOwner(guestAddress, size);
         if (hasDirtyBufferSource && owner == null)
@@ -540,7 +546,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
         if (owner == null || (_tracker.HasGpuDirtyPages(guestAddress, size) && !hasDirtyBufferSource))
         {
-            return (_staging, stageOffset);
+            return (staging, stageOffset);
         }
 
         TouchBuffer(owner);
@@ -1476,16 +1482,17 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             foreach (var upload in _sweepUploads)
                 total += upload.TotalSize;
 
-            if (total <= SweepStagingLimit && _staging.TryMap(total, out var baseOffset, 4) && StageSweep(copies, baseOffset, total))
+            var staging = total <= SweepStagingLimit ? _stageCapacity.Request(total) : null;
+            if (staging is not null && staging.TryMap(total, out var baseOffset, 4) && StageSweep(staging, copies, baseOffset, total))
             {
-                _staging.Commit();
+                staging.Commit();
                 var uploadBase = baseOffset;
                 foreach (var upload in _sweepUploads)
                 {
                     var regions = copies.Slice(upload.FirstCopy, upload.CopyCount);
                     foreach (ref var copy in regions)
                         copy.SrcOffset += uploadBase;
-                    RecordUpload(upload.Buffer, _staging, regions, upload.GuestAddress, upload.Size, upload.TotalSize);
+                    RecordUpload(upload.Buffer, staging, regions, upload.GuestAddress, upload.Size, upload.TotalSize);
                     uploadBase += upload.TotalSize;
                 }
 
@@ -1497,6 +1504,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
             foreach (var upload in _sweepUploads)
             {
                 var regions = copies.Slice(upload.FirstCopy, upload.CopyCount);
+                _stageCapacity.Request(upload.TotalSize);
                 if (_uploader.PrepareSource(upload.Buffer.CpuAddress, regions, upload.TotalSize, upload.GuestAddress, upload.Size) is { } source)
                     RecordUpload(upload.Buffer, source, regions, upload.GuestAddress, upload.Size, upload.TotalSize);
             }
@@ -1510,7 +1518,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
     // Copies the sweep's guest bytes into the reservation at baseOffset, each buffer's after the last;
     // helper threads take part once the sweep stages ParallelSweepCopyBytes. False when a read failed.
-    private bool StageSweep(Span<BufferCopy> copies, ulong baseOffset, ulong total)
+    private bool StageSweep(GpuRingBuffer staging, Span<BufferCopy> copies, ulong baseOffset, ulong total)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.BufferStagingUpload);
         var pieces = 0;
@@ -1521,7 +1529,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
         var count = 0;
         var uploadBase = baseOffset;
-        fixed (byte* mapped = _staging.Mapped)
+        fixed (byte* mapped = staging.Mapped)
         {
             foreach (var upload in _sweepUploads)
             {
@@ -1676,6 +1684,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     public void RunGarbageCollector()
     {
         using var foreignRead = _device.Slabs.BeginForeignRead();
+        MaintainTransferRings();
         ProcessPendingFaultBuffer();
         if (!_retirementPolicy.TryBeginCollection(_registry.RegisteredBytes, out var retirement))
         {
@@ -1804,7 +1813,9 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         _disposed = true;
         _tracker.ApplyPendingGpuProtections();
         _registry.Dispose();
-        _deviceRing.Dispose();
+        foreach (var ring in _retiredRings) ring.Dispose();
+        _retiredRings.Clear();
+        _deviceCapacity.Buffer.Dispose();
         _download.Dispose();
         _stream.Dispose();
         _staging.Dispose();
@@ -2655,11 +2666,12 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
     private void WriteDataBuffer(GpuBuffer buffer, ulong address, ReadOnlySpan<byte> source)
     {
+        var staging = _stageCapacity.Request((ulong)source.Length);
         while (!source.IsEmpty)
         {
-            var chunk = (int)Math.Min((ulong)source.Length, _staging.Size);
-            var offset = _staging.Copy(source[..chunk], 4);
-            buffer.CopyFrom(_scheduler.Current, _staging, offset, buffer.Offset(address), (ulong)chunk, AccessFlags.HostWriteBit);
+            var chunk = (int)Math.Min((ulong)source.Length, staging.Size);
+            var offset = staging.Copy(source[..chunk], 4);
+            buffer.CopyFrom(_scheduler.Current, staging, offset, buffer.Offset(address), (ulong)chunk, AccessFlags.HostWriteBit);
             source = source[chunk..];
             address += (ulong)chunk;
         }
@@ -2815,6 +2827,9 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         }
 
         var batch = new List<PlannedDownload>();
+        ulong required = 0;
+        foreach (var copy in copies) required = Math.Min(64 * MiB, required + Math.Min(copy.Size, 64 * MiB));
+        _downloadCapacity.Request(required);
         var planner = new BufferDownloadBatchPlanner(_download.Size);
         foreach (var piece in copies)
         {
@@ -3170,7 +3185,8 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
 
     private void FlushDownloads(List<PlannedDownload> batch, ulong packedSize)
     {
-        if (!_download.TryMap(packedSize, out var baseOffset, BufferDownloadBatchPlanner.Alignment))
+        var download = _download;
+        if (!download.TryMap(packedSize, out var baseOffset, BufferDownloadBatchPlanner.Alignment))
         {
             throw SubmissionScheduler.Fatal("The download ring could not map the batch.");
         }
@@ -3178,12 +3194,12 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         foreach (var copy in batch)
         {
             var placement = copy.Placement;
-            _download.CopyFrom(
+            download.CopyFrom(
                 _scheduler.Current, copy.Buffer, placement.SourceOffset, baseOffset + placement.DestinationOffset, placement.TransferSize,
                 AccessFlags.MemoryWriteBit, AccessFlags.None, AccessFlags.MemoryReadBit | AccessFlags.MemoryWriteBit, AccessFlags.HostReadBit);
         }
 
-        _download.Commit();
+        download.Commit();
         var completionTick = _scheduler.CurrentTick;
         _scheduler.Finish();
         _scheduler.WaitForPriorityOperations(completionTick);
@@ -3191,11 +3207,11 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         {
             var placement = copy.Placement;
             var offset = baseOffset + placement.DataOffset;
-            _download.Invalidate(offset, placement.DataSize);
+            download.Invalidate(offset, placement.DataSize);
             if (GpuCommands.VisibilityResultTrace.Enabled)
                 GpuCommands.VisibilityResultTrace.Download(copy.Address,
-                    _download.Mapped.Slice((int)offset, (int)placement.DataSize), _backing.TryReadBacking);
-            if (!_backing.TryWriteBacking(copy.Address, _download.Mapped.Slice((int)offset, (int)placement.DataSize)))
+                    download.Mapped.Slice((int)offset, (int)placement.DataSize), _backing.TryReadBacking);
+            if (!_backing.TryWriteBacking(copy.Address, download.Mapped.Slice((int)offset, (int)placement.DataSize)))
             {
                 throw SubmissionScheduler.Fatal($"Could not write the required direct backing: addr=0x{copy.Address:X16} size=0x{placement.DataSize:X16}");
             }
@@ -3423,6 +3439,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
     private GpuBuffer? StageCollectedUpload(UploadCollector collector, GpuBuffer buffer, ulong guestAddress, ulong size)
     {
         var copies = collector.Copies;
+        _stageCapacity.Request(collector.TotalSize);
         var pieceBytes = _staging.Size / 2;
         if (collector.TotalSize <= _staging.Size || pieceBytes == 0)
         {

@@ -227,7 +227,7 @@ public sealed partial class GuestImageCache
                 throw SubmissionScheduler.Fatal($"A cross-format multisample image copy is not supported: sourceFormat={(int)source.Backing.Format} destinationFormat={(int)destination.Backing.Format} samples={source.Backing.Samples}.");
             }
 
-            destination.CopyThroughBuffer(source, _bufferCache.GetUtilityBuffer(GpuBufferUsage.DeviceLocal));
+            destination.CopyThroughBuffer(source, _bufferCache.GetTransferRing(GpuBufferUsage.DeviceLocal, Math.Min(source.Description.Data.Size, destination.Description.Data.Size)));
         }
 
         if (source.IsGpuModified)
@@ -807,7 +807,7 @@ public sealed partial class GuestImageCache
             record.Backing.MipLevels == 1 && depth.Backing.MipLevels == 1 &&
             record.Backing.Layers == depth.Backing.Layers && SameExtent(record.Backing.Extent, depth.Backing.Extent))
         {
-            depth.CopyStencilStorage(record, _bufferCache.GetUtilityBuffer(GpuBufferUsage.DeviceLocal), writeBack: true);
+            depth.CopyStencilStorage(record, _bufferCache.GetTransferRing(GpuBufferUsage.DeviceLocal, record.Description.Data.Size), writeBack: true);
         }
 
         // Release the former image watch on conversion. Keep an active stencil watch on reuse.

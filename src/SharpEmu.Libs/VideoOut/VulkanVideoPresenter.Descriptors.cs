@@ -1806,7 +1806,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 return address;
             }
 
-            var stream = _bufferCache.GetUtilityBuffer(GpuBufferUsage.Stream);
+            var stream = _bufferCache.GetTransferRing(GpuBufferUsage.Stream, (ulong)bytes.Length);
             if (stream.TryMap((ulong)bytes.Length, out var offset, TableBlockAlignment))
             {
                 bytes.CopyTo(stream.Mapped[(int)offset..]);

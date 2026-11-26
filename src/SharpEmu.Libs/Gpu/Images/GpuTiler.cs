@@ -81,7 +81,7 @@ public sealed unsafe class GpuTiler : IDisposable
 
     private readonly GpuDeviceInfo _device;
     private readonly SubmissionScheduler _scheduler;
-    private readonly GpuRingBuffer _stream;
+    private readonly Func<ulong, GpuRingBuffer> _getStream;
     private readonly TickDescriptorPools _pools;
     private readonly Pipeline[] _pipelines = new Pipeline[PipelineCount];
     private DescriptorSetLayout _descriptorLayout;
@@ -93,10 +93,13 @@ public sealed unsafe class GpuTiler : IDisposable
     private Pipeline _swapBgra16;
 
     public GpuTiler(GpuDeviceInfo device, SubmissionScheduler scheduler, GpuRingBuffer stream)
+        : this(device, scheduler, _ => stream) { }
+
+    internal GpuTiler(GpuDeviceInfo device, SubmissionScheduler scheduler, Func<ulong, GpuRingBuffer> getStream)
     {
         _device = device;
         _scheduler = scheduler;
-        _stream = stream;
+        _getStream = getStream;
         var vk = device.Vk;
         var bindings = stackalloc DescriptorSetLayoutBinding[3];
         for (uint index = 0; index < 2; index++)
@@ -506,8 +509,9 @@ public sealed unsafe class GpuTiler : IDisposable
         }
 
         var total = (ulong)dispatches.Count * stride;
-        GpuBuffer argumentBuffer = _stream;
-        if (!_stream.TryMap(total, out var offset, uniformAlignment))
+        var stream = _getStream(total);
+        GpuBuffer argumentBuffer = stream;
+        if (!stream.TryMap(total, out var offset, uniformAlignment))
         {
             // Retained draw bindings can prevent wrapping; keep their bytes intact.
             argumentBuffer = new GpuBuffer(_device, _scheduler, GpuBufferUsage.Upload, 0,
@@ -526,9 +530,9 @@ public sealed unsafe class GpuTiler : IDisposable
             dispatches[index] = dispatch;
         }
 
-        if (ReferenceEquals(argumentBuffer, _stream))
+        if (ReferenceEquals(argumentBuffer, stream))
         {
-            _stream.Commit();
+            stream.Commit();
         }
         else
         {

@@ -24,6 +24,46 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
     private const ulong Page = GuestBufferCache.CachingPageSize;
 
     [Fact]
+    public void TransferRingCapacityFollowsReservationsAndKeepsPreviouslyRecordedSources()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var cache = harness.Cache;
+        const ulong mib = 1UL << 20;
+        Assert.Equal(8 * mib, cache.GetTransferRing(GpuBufferUsage.Stream, 0).Size);
+        Assert.Equal(4 * mib, cache.GetTransferRing(GpuBufferUsage.Download, 0).Size);
+        Assert.Equal(mib, cache.GetTransferRing(GpuBufferUsage.DeviceLocal, 0).Size);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Write(address, Pattern(256, 9));
+        var source = harness.Worker.Run(() => cache.ObtainBufferForImage(address, 4096));
+        harness.Worker.Run(() =>
+        {
+            var download = cache.GetTransferRing(GpuBufferUsage.Download, 25 * mib);
+            var scratch = cache.GetTransferRing(GpuBufferUsage.DeviceLocal, 9 * mib);
+            Assert.Equal(32 * mib, download.Size);
+            Assert.Equal(16 * mib, scratch.Size);
+            // Prepared bindings keep their stream generation while a larger request is outstanding.
+            var stream = cache.GetTransferRing(GpuBufferUsage.Stream, 1);
+            using (stream.RetainContents()) Assert.Same(stream, cache.GetTransferRing(GpuBufferUsage.Stream, 20 * mib));
+            Assert.True(cache.GetTransferRing(GpuBufferUsage.Stream, 20 * mib).Size >= 20 * mib);
+            var retained = cache.GetTransferRing(GpuBufferUsage.Stream, 0);
+            GpuBuffer exported;
+            using (retained.RetainContents())
+            {
+                exported = cache.GetUtilityBuffer(GpuBufferUsage.Stream);
+                Assert.Same(retained, exported);
+                Assert.Same(retained, cache.GetTransferRing(GpuBufferUsage.Stream, 0));
+            }
+            Assert.Same(exported, cache.GetTransferRing(GpuBufferUsage.Stream, 0));
+            var full = cache.GetUtilityBuffer(GpuBufferUsage.Upload);
+            Assert.Equal(512 * mib, full.Size);
+            Assert.Same(full, cache.GetUtilityBuffer(GpuBufferUsage.Upload));
+        });
+        Assert.Equal(Pattern(256, 9), harness.ReadBack(source.Buffer, source.Offset, 256));
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void DownloadRingAcceptsFiftyMiBReservation()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;

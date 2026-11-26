@@ -59,7 +59,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         _backing = backing;
         _readbackLinearImages = readbackLinearImages;
         _blit = new ColorToMultisampleDepthBlit(device, scheduler);
-        _tiler = new GpuTiler(device, scheduler, bufferCache.GetUtilityBuffer(GpuBufferUsage.Stream));
+        _tiler = new GpuTiler(device, scheduler, size => bufferCache.GetTransferRing(GpuBufferUsage.Stream, size));
         _backingPool = ImageBackingPool.Enabled ? new ImageBackingPool(device) : null;
         device.ReleaseIdleMemory = ReleaseIdleMemoryOnAllocationFailure;
     }

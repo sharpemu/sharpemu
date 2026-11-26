@@ -85,6 +85,17 @@ public sealed class GpuRingBuffer : GpuBuffer
         return retention;
     }
 
+    internal ulong Lap { get; private set; }
+
+    internal bool HasRetentions
+    {
+        get
+        {
+            if (Volatile.Read(ref _retainedContents) != 0) return true;
+            lock (_allocationRetentions) return _allocationRetentions.Count != 0;
+        }
+    }
+
     private bool HasRetainedContents()
     {
         if (Volatile.Read(ref _retainedContents) != 0) return true;
@@ -151,6 +162,7 @@ public sealed class GpuRingBuffer : GpuBuffer
 
         if (wrap)
         {
+            Lap++;
             _invalidationMark = invalidationMark;
             _currentWatchCursor = 0;
             (_previousWatches, _currentWatches) = (_currentWatches, _previousWatches);

@@ -806,7 +806,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 preparation.StencilStorageWriteBackImages ??= new();
                 preparation.StencilStorageWriteBackImages.Add(attachment);
             }
-            attachment.CopyStencilStorage(storage, _bufferCache.GetUtilityBuffer(GpuBufferUsage.DeviceLocal), writeBack: false);
+            attachment.CopyStencilStorage(storage, _bufferCache.GetTransferRing(GpuBufferUsage.DeviceLocal, storage.Description.Data.Size), writeBack: false);
             if (_hasBoundDepth && _boundDepth.Image == attachmentIdentifier)
             {
                 var writes = _boundDepthLoadState.AttachmentWriteAspects(attachment.Backing.Format);
