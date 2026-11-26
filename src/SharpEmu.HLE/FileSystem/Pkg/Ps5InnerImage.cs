@@ -234,6 +234,9 @@ internal sealed class Ps5InnerImage
     // A reader with its own decode buffers, for one thread of a parallel extraction.
     internal BlockReader CreateReader() => new(this);
 
+    // A read-only stream over one file of the image, decoding blocks as the reader asks for them.
+    internal Stream OpenFile(Ps5InnerFile file, string name) => new Ps5InnerFileStream(new BlockReader(this), file.Logical, file.Size, name);
+
     public delegate void SpanAction(ReadOnlySpan<byte> chunk);
 
     private int PartitionPoint(Func<UBlock, bool> predicate)
@@ -296,6 +299,37 @@ internal sealed class Ps5InnerImage
                 sink(_decoded.AsSpan(within, count));
                 position += count;
             }
+        }
+
+        // Fills `destination` with the logical bytes at `logical`, without a sink delegate: a
+        // mounted file's stream reads through here.
+        public int ReadAt(long logical, Span<byte> destination)
+        {
+            if (logical < 0)
+            {
+                throw new InvalidDataException("A logical offset of the inner image is negative.");
+            }
+
+            var position = logical;
+            var done = 0;
+            while (done < destination.Length)
+            {
+                var index = _owner.FindBlock(position);
+                var block = _owner._blocks[index];
+                var within = (int)(position - block.Logical);
+                var count = Math.Min((int)(block.Uncompressed - within), destination.Length - done);
+                if (count <= 0)
+                {
+                    break;
+                }
+
+                LoadBlock(index);
+                _decoded.AsSpan(within, count).CopyTo(destination[done..]);
+                done += count;
+                position += count;
+            }
+
+            return done;
         }
 
         private void LoadBlock(int index)
@@ -539,4 +573,97 @@ internal sealed class Ps5InnerImage
             return _tail.AsSpan((int)start, (int)size).ToArray();
         }
     }
+}
+
+// One file of the inner image as a read-only, seekable stream. Each stream carries its own
+// BlockReader, so several threads may read the same file at once; a read only decodes the blocks
+// it covers.
+public sealed class Ps5InnerFileStream : Stream, IApp0File
+{
+    private readonly Ps5InnerImage.BlockReader _reader;
+    private readonly long _baseOffset;
+    private readonly long _length;
+    private long _position;
+
+    internal Ps5InnerFileStream(Ps5InnerImage.BlockReader reader, long baseOffset, long length, string name)
+    {
+        _reader = reader;
+        _baseOffset = baseOffset;
+        _length = length;
+        Name = name;
+    }
+
+    public string Name { get; }
+
+    public override bool CanRead => true;
+
+    public override bool CanSeek => true;
+
+    public override bool CanWrite => false;
+
+    public override long Length => _length;
+
+    public override long Position
+    {
+        get => _position;
+        set => _position = value >= 0 ? value : throw new ArgumentOutOfRangeException(nameof(value));
+    }
+
+    // Reads at an offset without moving the position, like a positional read on a file handle.
+    public int ReadAt(Span<byte> buffer, long offset)
+    {
+        if (offset < 0 || offset >= _length)
+        {
+            return 0;
+        }
+
+        var count = (int)Math.Min(buffer.Length, _length - offset);
+        return _reader.ReadAt(_baseOffset + offset, buffer[..count]);
+    }
+
+    public override int Read(Span<byte> buffer)
+    {
+        var remaining = _length - _position;
+        if (remaining <= 0 || buffer.IsEmpty)
+        {
+            return 0;
+        }
+
+        if (buffer.Length > remaining)
+        {
+            buffer = buffer[..(int)remaining];
+        }
+
+        var read = _reader.ReadAt(_baseOffset + _position, buffer);
+        _position += read;
+        return read;
+    }
+
+    public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
+
+    public override long Seek(long offset, SeekOrigin origin)
+    {
+        var target = origin switch
+        {
+            SeekOrigin.Begin => offset,
+            SeekOrigin.Current => _position + offset,
+            SeekOrigin.End => _length + offset,
+            _ => throw new ArgumentOutOfRangeException(nameof(origin)),
+        };
+        if (target < 0)
+        {
+            throw new IOException("An attempt was made to move the position before the beginning of the stream.");
+        }
+
+        _position = target;
+        return target;
+    }
+
+    public override void Flush()
+    {
+    }
+
+    public override void SetLength(long value) => throw new NotSupportedException("A file inside a package is read-only.");
+
+    public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException("A file inside a package is read-only.");
 }

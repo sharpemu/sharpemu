@@ -66,6 +66,7 @@
   "Library.Pkg.Failed": "Installation fehlgeschlagen: {0}",
   "Library.Pkg.SkippedNotGame": "{0} übersprungen: Patches und DLC-Pakete werden noch nicht unterstützt ({1}).",
   "Library.Pkg.AlreadyInstalled": "{0} übersprungen: bereits in {1} installiert.",
+  "Library.Pkg.Mounted": "{0} wird direkt aus dem Paket gespielt; es wird nichts entpackt.",
   "Library.Pkg.ConfirmTitle": "PKG-Dateien installieren?",
   "Library.Pkg.ConfirmMessage": "{0} PKG-Datei(en) in diesem Ordner gefunden. Jetzt installieren? Dafür werden {1} GB freier Speicherplatz benötigt.",
   "Library.Pkg.ConfirmInstall": "Installieren",

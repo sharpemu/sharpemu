@@ -2018,8 +2018,8 @@ public partial class MainWindow : Window
     /// </summary>
     private static long ComputeInstallSize(string ebootPath)
     {
-        // An archive is the whole game; the folder it sits in may hold other games.
-        if (ZArchive.IsArchivePath(ebootPath))
+        // A container is the whole game; the folder it sits in may hold other games.
+        if (GameContainer.IsContainer(ebootPath))
         {
             try
             {
@@ -2079,9 +2079,10 @@ public partial class MainWindow : Window
 
             try
             {
-                // A game is a folder with eboot.bin or a .zar archive of one.
+                // A game is a folder with eboot.bin, a .zar archive of one, or a fake PS5 .pkg.
                 foreach (var file in Directory.EnumerateFiles(folder, "eboot.bin", enumeration)
-                    .Concat(Directory.EnumerateFiles(folder, "*.zar", enumeration)))
+                    .Concat(Directory.EnumerateFiles(folder, "*.zar", enumeration))
+                    .Concat(Directory.EnumerateFiles(folder, "*.pkg", enumeration)))
                 {
                     var fullPath = Path.GetFullPath(file);
                     if (!seen.Add(fullPath) || excludedPaths.Contains(fullPath))
@@ -2129,7 +2130,7 @@ public partial class MainWindow : Window
                 $"[GUI][WARN] Could not inspect executable '{fullPath}': {exception.Message}");
         }
 
-        // An archive's metadata is read from its cache folder, which stands in for the game folder.
+        // A container's metadata is read from its cache folder, which stands in for the game folder.
         var metadataPath = fullPath;
         if (ZArchive.IsArchivePath(fullPath))
         {
@@ -2144,6 +2145,21 @@ public partial class MainWindow : Window
             {
                 Console.Error.WriteLine(
                     $"[GUI][WARN] Could not read archive '{fullPath}': {exception.Message}");
+            }
+        }
+        else if (GameContainer.IsPackage(fullPath))
+        {
+            try
+            {
+                if (SharpEmu.HLE.FileSystem.PkgArchiveCache.ExtractMetadata(fullPath) is { } cacheRoot)
+                {
+                    metadataPath = Path.Combine(cacheRoot, "eboot.bin");
+                }
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
+            {
+                Console.Error.WriteLine(
+                    $"[GUI][WARN] Could not read package '{fullPath}': {exception.Message}");
             }
         }
 
@@ -2881,10 +2897,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var directory = ZArchive.IsArchivePath(game.Path)
-            ? ZArchiveCache.GetCacheRoot(game.Path,
-                Path.Combine(SharpEmu.Libs.SharpEmuPaths.DataRoot, "user", "zar-cache"))
-            : Path.GetDirectoryName(game.Path);
+        var directory = GameContainer.CacheRoot(game.Path) ?? Path.GetDirectoryName(game.Path);
         var sndPath = directory is null ? null : Path.Combine(directory, "sce_sys", "snd0.at9");
         if (sndPath is not null && File.Exists(sndPath))
         {
@@ -3031,7 +3044,7 @@ public partial class MainWindow : Window
             FileTypeFilter = new[]
             {
                 new FilePickerFileType(Localization.Instance.Get("Dialog.PsExecutables"))
-                    { Patterns = new[] { "eboot.bin", "*.bin", "*.self", "*.elf", "*.zar" } },
+                    { Patterns = new[] { "eboot.bin", "*.bin", "*.self", "*.elf", "*.zar", "*.pkg" } },
                 FilePickerFileTypes.All,
             },
         });

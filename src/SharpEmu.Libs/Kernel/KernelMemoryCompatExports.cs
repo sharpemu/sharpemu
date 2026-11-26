@@ -7167,7 +7167,7 @@ public static partial class KernelMemoryCompatExports
     private static string OpenFileName(Stream stream) => stream switch
     {
         FileStream file => file.Name,
-        ZArchiveFileStream archived => archived.Name,
+        IApp0File archived => archived.Name,
         _ => string.Empty,
     };
 

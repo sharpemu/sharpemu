@@ -123,10 +123,7 @@ public sealed class Ps5Package : IGamePackage
         var total = _filesSize;
 
         // Resolve every destination first: an unsafe name must fail before anything is written.
-        var metadataRoot = Path.Combine(destination, "sce_sys");
-        var metadata = _cnt.Files
-            .Select(file => (Path: PkgPackage.ResolveSafe(metadataRoot, file.Name.Split('/')), file.Bytes))
-            .ToList();
+        var metadata = ResolveMetadata(destination);
         var targets = files
             .Select(file => (Path: PkgPackage.ResolveSafe(destination, file.Components), File: file))
             .ToList();
@@ -285,6 +282,36 @@ public sealed class Ps5Package : IGamePackage
                 progress.Report(new PkgExtractProgress(current, total, file));
             }
         }
+    }
+
+    // The files of the inner image, listed once; the mounted package serves them without extracting.
+    internal (Ps5InnerImage Image, List<Ps5InnerFile> Files) Tree => LoadTree();
+
+    internal Stream OpenFile(Ps5InnerFile file, string name) => LoadTree().Image.OpenFile(file, name);
+
+    // Writes the sce_sys metadata (param.json, icons, trophy data) into destination/sce_sys. A file
+    // already there with the right size is left alone, so a mount's cache folder is not rewritten.
+    public void ExtractMetadata(string destination)
+    {
+        foreach (var (path, bytes) in ResolveMetadata(destination))
+        {
+            if (File.Exists(path) && new FileInfo(path).Length == bytes.Length)
+            {
+                continue;
+            }
+
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            File.WriteAllBytes(path, bytes);
+        }
+    }
+
+    // The sce_sys files with their resolved destination paths; an unsafe name throws before any write.
+    private List<(string Path, byte[] Bytes)> ResolveMetadata(string destination)
+    {
+        var metadataRoot = Path.Combine(destination, "sce_sys");
+        return _cnt.Files
+            .Select(file => (Path: PkgPackage.ResolveSafe(metadataRoot, file.Name.Split('/')), file.Bytes))
+            .ToList();
     }
 
     // Opens the inner image and lists its files once; both GetInstalledSize and Extract need them.

@@ -6,6 +6,7 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.FileSystem;
 
+[Collection(App0MountCollection.Name)]
 public sealed class App0ArchiveTests : IDisposable
 {
     private readonly string _directory = Directory.CreateTempSubdirectory("sharpemu-app0-").FullName;
@@ -58,7 +59,8 @@ public sealed class App0ArchiveTests : IDisposable
     [Fact]
     public void AStreamSeeksAndReadsLikeAFile()
     {
-        using var stream = App0Archive.OpenRead(Path.Combine(_root, "data", "movies", "intro.bk2"))!;
+        using var stream = Assert.IsType<ZArchiveFileStream>(
+            App0Archive.OpenRead(Path.Combine(_root, "data", "movies", "intro.bk2")));
         var expected = Bytes(80_000, 3);
 
         Assert.Equal(expected.Length, stream.Length);

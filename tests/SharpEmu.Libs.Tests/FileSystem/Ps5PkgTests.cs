@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using System.Text;
+using SharpEmu.HLE.FileSystem;
 using SharpEmu.HLE.FileSystem.Pkg;
 using Xunit;
 
@@ -11,6 +12,7 @@ namespace SharpEmu.Libs.Tests.FileSystem;
 // Synthetic data only: nothing here comes from a real package. The builder writes a tiny but
 // complete FIH package: FIH header, a signed 32-bit outer PFS (plain seed, encrypted mode bit set)
 // holding pfs_image.dat and naps_pkg_layout.dat, an inner flat PFS, and an embedded CNT.
+[Collection(App0MountCollection.Name)]
 public sealed class Ps5PkgTests
 {
     private const string DefaultContentId = "UP9000-PPSA01234_00-TESTGAME00000000";
@@ -555,6 +557,146 @@ public sealed class Ps5PkgTests
         }
     }
 
+    // ---- mounted package -----------------------------------------------------------------------
+
+    // A package run straight from the file: the game tree is served from the inner image, so only
+    // the files a host consumer extracts ever reach the disk.
+    [Fact]
+    public void AMountedPackageServesTheGameTreeWithoutExtractingIt()
+    {
+        var built = BuildPackage(new Spec());
+        WithFile(built.Bytes, path =>
+        {
+            using var archive = PkgArchive.Open(path);
+            Assert.NotNull(archive);
+
+            foreach (var (name, bytes) in GameFiles(built))
+            {
+                Assert.True(archive.TryGetFile(name, out var size), name);
+                Assert.Equal((ulong)bytes.Length, size);
+
+                using var stream = archive.OpenRead(name);
+                Assert.NotNull(stream);
+                Assert.Equal(bytes.Length, stream.Length);
+                var actual = new byte[bytes.Length];
+                Assert.Equal(bytes.Length, stream.Read(actual, 0, actual.Length));
+                Assert.Equal(bytes, actual);
+            }
+
+            Assert.True(archive.IsDirectory(string.Empty));
+            Assert.True(archive.IsDirectory("assets/sub"));
+            Assert.False(archive.IsDirectory("eboot.bin"));
+            // Listed outside uroot, so it is not part of the game.
+            Assert.False(archive.TryGetFile("readme", out _));
+            Assert.Equal(
+                ["assets", "eboot.bin", "sce_module"],
+                archive.GetEntries(string.Empty).Select(entry => entry.Name).Order(StringComparer.Ordinal));
+            Assert.Equal(
+                ["data.bin:False", "empty.bin:False", "sparse.bin:False", "sub:True"],
+                archive.GetEntries("assets").Select(entry => $"{entry.Name}:{entry.IsDirectory}"));
+        });
+    }
+
+    [Fact]
+    public void AStreamReadsAcrossTheRawAndKrakenBlocks()
+    {
+        var built = BuildPackage(new Spec());
+        WithFile(built.Bytes, path =>
+        {
+            using var archive = PkgArchive.Open(path);
+            var expected = built.ExpectedFiles["assets/data.bin"];
+            using var stream = Assert.IsType<Ps5InnerFileStream>(archive!.OpenRead("assets/data.bin"));
+
+            // data.bin starts at 0x7F00: this window spans the raw block and the Kraken block.
+            var window = new byte[0x100];
+            Assert.Equal(window.Length, stream.ReadAt(window, 0x50));
+            Assert.Equal(expected.AsSpan(0x50, window.Length).ToArray(), window);
+            Assert.Equal(0, stream.Position);
+
+            stream.Seek(0x1F0, SeekOrigin.Begin);
+            var tail = new byte[0x110];
+            Assert.Equal(tail.Length, stream.Read(tail));
+            Assert.Equal(expected.AsSpan(0x1F0).ToArray(), tail);
+        });
+    }
+
+    [Fact]
+    public void AMountedPackageAnswersApp0LookupsAndExtractsSingleFiles()
+    {
+        var built = BuildPackage(new Spec());
+        WithFile(built.Bytes, path =>
+        {
+            using var archive = PkgArchive.Open(path);
+            var root = Directory.CreateTempSubdirectory("sharpemu-ps5pkg-mount-").FullName;
+            App0Archive.MountPackage(archive!, root);
+            try
+            {
+                Assert.True(App0Archive.TryGetFile(Path.Combine(root, "assets", "data.bin"), out var size));
+                Assert.Equal((ulong)built.ExpectedFiles["assets/data.bin"].Length, size);
+                Assert.True(App0Archive.IsDirectory(root));
+                Assert.True(App0Archive.IsDirectory(Path.Combine(root, "ASSETS", "SUB")));
+                Assert.True(App0Archive.Exists(Path.Combine(root, "assets", "empty.bin")));
+                Assert.False(App0Archive.Exists(Path.Combine(root, "assets", "missing.bin")));
+                Assert.Contains(App0Archive.List(root), entry => entry.Name == "eboot.bin" && !entry.IsDirectory);
+                Assert.Contains("assets/sub/deep.bin", App0Archive.ListAllFiles());
+                Assert.Contains(
+                    Path.Combine(root, "assets", "sub", "deep.bin"),
+                    App0Archive.EnumerateFilesRecursive(root, "*.bin"));
+
+                using (var stream = App0Archive.OpenReadOrFile(Path.Combine(root, "eboot.bin")))
+                {
+                    Assert.Equal(built.ExpectedFiles["eboot.bin"].Length, stream.Length);
+                }
+
+                // Only the file a host consumer asks for is written out.
+                var eboot = Path.Combine(root, "eboot.bin");
+                Assert.True(App0Archive.Extract(eboot));
+                Assert.Equal(built.ExpectedFiles["eboot.bin"], File.ReadAllBytes(eboot));
+                Assert.False(File.Exists(Path.Combine(root, "assets", "data.bin")));
+            }
+            finally
+            {
+                App0Archive.UnmountPackage();
+                Directory.Delete(root, recursive: true);
+            }
+        });
+    }
+
+    [Fact]
+    public void ExtractingTheMetadataLeavesTheGameInsideThePackage()
+    {
+        var built = BuildPackage(new Spec());
+        WithFile(built.Bytes, path =>
+        {
+            var cacheRoot = PkgArchiveCache.ExtractMetadata(path);
+            Assert.NotNull(cacheRoot);
+            try
+            {
+                Assert.Equal(
+                    built.ExpectedFiles["sce_sys/param.json"],
+                    File.ReadAllBytes(Path.Combine(cacheRoot, "sce_sys", "param.json")));
+                Assert.Equal(
+                    built.ExpectedFiles["sce_sys/icon0.png"],
+                    File.ReadAllBytes(Path.Combine(cacheRoot, "sce_sys", "icon0.png")));
+                Assert.False(File.Exists(Path.Combine(cacheRoot, "eboot.bin")));
+            }
+            finally
+            {
+                Directory.Delete(cacheRoot, recursive: true);
+            }
+        });
+    }
+
+    [Fact]
+    public void OnlyReadableFakePackagesOpenAsAMount()
+    {
+        Assert.Null(PkgArchive.Open(Path.Combine(Path.GetTempPath(), "game.zar")));
+        WithFile(BuildPackage(new Spec()).Bytes, path => Assert.Null(PkgArchive.Open(path)), extension: ".bin");
+        WithFile(
+            BuildPackage(new Spec { RetailByte = 0x80 }).Bytes,
+            path => Assert.Throws<InvalidDataException>(() => PkgArchive.Open(path)));
+    }
+
     // ---- helpers -------------------------------------------------------------------------------
 
     private sealed record Spec
@@ -573,6 +715,12 @@ public sealed class Ps5PkgTests
     }
 
     private sealed record Built(byte[] Bytes, Dictionary<string, byte[]> ExpectedFiles, long GameBytes);
+
+    // The files the inner image holds; sce_sys comes from the CNT container instead.
+    private static IEnumerable<(string Name, byte[] Bytes)> GameFiles(Built built) =>
+        built.ExpectedFiles
+            .Where(pair => !pair.Key.StartsWith("sce_sys/", StringComparison.Ordinal))
+            .Select(pair => (pair.Key, pair.Value));
 
     private static byte[] Pattern(int seed, int length)
     {

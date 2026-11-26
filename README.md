@@ -111,6 +111,15 @@ chmod +x ./SharpEmu
 ./SharpEmu "/path/to/game/eboot.bin" --log-to-file
 ```
 
+A fake PS5 package can also be run straight from the file, without unpacking it (a large game may
+need several hundred GiB unpacked):
+
+```powershell
+.\SharpEmu.exe "C:\path\to\game.pkg"
+```
+
+See [docs/package-mount.md](docs/package-mount.md) for what is written to disk and the limits.
+
 SharpEmu supports environment variables that can be configured from the GUI. Undocumented variables are listed here: [docs/sharpemu-gui-undocumented-env-vars.md](docs/sharpemu-gui-undocumented-env-vars.md)
 
 You can set them per game or globally in the GUI, or pass them directly through the CLI.

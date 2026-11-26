@@ -76,8 +76,8 @@ public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
 
     public string Path { get; }
 
-    // Keep an archive's type while the library watcher catches up with a moved or removed file.
-    public bool IsArchive => Path.EndsWith(".zar", StringComparison.OrdinalIgnoreCase);
+    // Keep a container game's type while the library watcher catches up with a moved or removed file.
+    public bool IsArchive => GameContainer.IsContainer(Path);
 
     /// <summary>
     /// Total size of the game. Initially the eboot's own size from the scan;

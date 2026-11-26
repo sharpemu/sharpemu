@@ -437,16 +437,21 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         return result;
     }
 
-    // A .zar holds the whole application folder. Mount it at a cache folder that gets the files host
-    // code reads by path (the executable, its modules and sce_sys); everything else is read from the
-    // archive when the guest asks for it. The path becomes the cached executable.
+    // A .zar or a .pkg holds the whole application folder. Mount it at a cache folder that gets the
+    // files host code reads by path (the executable, its modules and sce_sys); everything else is
+    // read from the container when the guest asks for it. The path becomes the cached executable.
     private static ArchiveMountScope? MountArchive(ref string ebootPath)
     {
-        if (!ZArchive.IsArchivePath(ebootPath))
+        if (ZArchive.IsArchivePath(ebootPath))
         {
-            return null;
+            return MountZar(ref ebootPath);
         }
 
+        return PkgArchive.IsPackagePath(ebootPath) ? MountPackage(ref ebootPath) : null;
+    }
+
+    private static ArchiveMountScope MountZar(ref string ebootPath)
+    {
         var archivePath = Path.GetFullPath(ebootPath);
         var archive = ZArchive.Open(archivePath) ??
             throw new InvalidDataException($"'{archivePath}' is not a valid .zar archive.");
@@ -460,32 +465,7 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         App0Archive.Mount(archive, cacheRoot);
         try
         {
-            foreach (var entry in archive.GetEntries(archive.LookUp(string.Empty)))
-            {
-                if (entry.IsDirectory)
-                {
-                    if (entry.Name.Equals("sce_sys", StringComparison.OrdinalIgnoreCase) ||
-                        entry.Name.Equals("sce_module", StringComparison.OrdinalIgnoreCase) ||
-                        entry.Name.Equals("sce_modules", StringComparison.OrdinalIgnoreCase))
-                    {
-                        App0Archive.ExtractDirectory(entry.Name);
-                    }
-                }
-                else if (entry.Name.Equals("eboot.bin", StringComparison.OrdinalIgnoreCase) ||
-                    Path.GetExtension(entry.Name).Equals(".prx", StringComparison.OrdinalIgnoreCase) ||
-                    Path.GetExtension(entry.Name).Equals(".sprx", StringComparison.OrdinalIgnoreCase))
-                {
-                    App0Archive.Extract(Path.Combine(cacheRoot, entry.Name));
-                }
-            }
-
-            foreach (var modules in new[] { Path.Combine("Media", "Modules"), Path.Combine("Media", "Plugins") })
-            {
-                if (App0Archive.IsDirectory(Path.Combine(cacheRoot, modules)))
-                {
-                    App0Archive.ExtractDirectory(modules);
-                }
-            }
+            ExtractStartupFiles(archive.GetEntries(archive.LookUp(string.Empty)), cacheRoot);
         }
         catch
         {
@@ -495,12 +475,79 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
 
         Console.Error.WriteLine($"[RUNTIME] Mounted archive '{archivePath}' at '{cacheRoot}'");
         ebootPath = Path.Combine(cacheRoot, "eboot.bin");
-        return new ArchiveMountScope();
+        return new ArchiveMountScope(App0Archive.Unmount);
     }
 
-    private sealed class ArchiveMountScope : IDisposable
+    // A large game only fits in a package when it stays there: unpacked it needs several hundred
+    // GiB. Its inner image serves the game tree, and only the startup files reach the cache folder.
+    private static ArchiveMountScope MountPackage(ref string ebootPath)
     {
-        public void Dispose() => App0Archive.Unmount();
+        var packagePath = Path.GetFullPath(ebootPath);
+        var package = PkgArchive.Open(packagePath) ??
+            throw new InvalidDataException(
+                $"'{packagePath}' cannot be run directly: only fake/debug PS5 packages can be mounted, other packages have to be installed first.");
+        if (!package.TryGetFile("eboot.bin", out _))
+        {
+            package.Dispose();
+            throw new FileNotFoundException("The package has no eboot.bin at the root of its image.", packagePath);
+        }
+
+        var cacheRoot = PkgArchiveCache.Prepare(packagePath);
+        App0Archive.MountPackage(package, cacheRoot);
+        try
+        {
+            ExtractStartupFiles(package.GetEntries(string.Empty), cacheRoot);
+        }
+        catch
+        {
+            App0Archive.UnmountPackage();
+            package.Dispose();
+            throw;
+        }
+
+        Console.Error.WriteLine($"[RUNTIME] Mounted package '{packagePath}' at '{cacheRoot}'");
+        ebootPath = Path.Combine(cacheRoot, "eboot.bin");
+        return new ArchiveMountScope(() =>
+        {
+            App0Archive.UnmountPackage();
+            package.Dispose();
+        });
+    }
+
+    // The files of a mounted container that host code opens by path rather than through /app0.
+    private static void ExtractStartupFiles(IReadOnlyList<ZArchive.Entry> entries, string cacheRoot)
+    {
+        foreach (var entry in entries)
+        {
+            if (entry.IsDirectory)
+            {
+                if (entry.Name.Equals("sce_sys", StringComparison.OrdinalIgnoreCase) ||
+                    entry.Name.Equals("sce_module", StringComparison.OrdinalIgnoreCase) ||
+                    entry.Name.Equals("sce_modules", StringComparison.OrdinalIgnoreCase))
+                {
+                    App0Archive.ExtractDirectory(entry.Name);
+                }
+            }
+            else if (entry.Name.Equals("eboot.bin", StringComparison.OrdinalIgnoreCase) ||
+                Path.GetExtension(entry.Name).Equals(".prx", StringComparison.OrdinalIgnoreCase) ||
+                Path.GetExtension(entry.Name).Equals(".sprx", StringComparison.OrdinalIgnoreCase))
+            {
+                App0Archive.Extract(Path.Combine(cacheRoot, entry.Name));
+            }
+        }
+
+        foreach (var modules in new[] { Path.Combine("Media", "Modules"), Path.Combine("Media", "Plugins") })
+        {
+            if (App0Archive.IsDirectory(Path.Combine(cacheRoot, modules)))
+            {
+                App0Archive.ExtractDirectory(modules);
+            }
+        }
+    }
+
+    private sealed class ArchiveMountScope(Action unmount) : IDisposable
+    {
+        public void Dispose() => unmount();
     }
 
     private static App0BindingScope? BindApp0Root(string normalizedEbootPath)

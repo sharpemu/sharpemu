@@ -43,11 +43,11 @@ public static partial class KernelMemoryCompatExports
         }
     }
 
-    // A descriptor is a host file or a read-only file served from a mounted archive.
+    // A descriptor is a host file or a read-only file served from a mounted archive or package.
     private static int ReadOpenFileAt(Stream stream, Span<byte> buffer, long offset) => stream switch
     {
         FileStream file => RandomAccess.Read(file.SafeFileHandle, buffer, offset),
-        ZArchiveFileStream archived => archived.ReadAt(buffer, offset),
+        IApp0File archived => archived.ReadAt(buffer, offset),
         _ => throw new IOException("The descriptor does not support positional reads."),
     };
 

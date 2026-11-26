@@ -186,6 +186,14 @@ public partial class MainWindow
                 continue;
             }
 
+            // A fake PS5 package runs straight from the package: unpacking it needs several hundred
+            // GiB, and the library lists the package itself as a game.
+            if (IsMountablePackage(pkgPath))
+            {
+                AppendConsoleLine(Localization.Instance.Format("Library.Pkg.Mounted", Path.GetFileName(pkgPath)), DimLineBrush);
+                continue;
+            }
+
             // The game may already sit elsewhere under the root (next to its package, or from an
             // earlier manual install): installing it again would show two versions.
             var key = string.IsNullOrWhiteSpace(titleId) ? Path.GetFileNameWithoutExtension(pkgPath) : titleId;
@@ -310,6 +318,20 @@ public partial class MainWindow
         AppendConsoleLine(
             Localization.Instance.Format("Library.Pkg.SkippedNotGame", Path.GetFileName(pkgPath), category ?? string.Empty),
             ErrorLineBrush);
+
+    // A fake PS5 package runs straight from the package; only other packages are installed.
+    private static bool IsMountablePackage(string pkgPath)
+    {
+        try
+        {
+            using var package = GamePackage.Open(pkgPath);
+            return package is Ps5Package;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException)
+        {
+            return false;
+        }
+    }
 
     private bool TryReadPackageInfo(string pkgPath, out string titleId, out string folderName, out bool isGame, out string? category)
     {

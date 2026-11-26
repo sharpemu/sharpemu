@@ -9,15 +9,22 @@ namespace SharpEmu.HLE.FileSystem;
 // by path (the executable, its modules, sce_sys); every other /app0 path is served from the archive.
 // A host path under that directory that is not on disk resolves here: stat, listing and read-only
 // streams come from the archive, and a host consumer that needs a real file can extract just it.
+// A .pkg mounts the same way, with the package's inner image standing in for the archive.
 public static class App0Archive
 {
     private static readonly object Gate = new();
     private static ZArchive? _archive;
     private static string? _root;
+    private static PkgArchive? _package;
+    private static string? _packageRoot;
 
-    public static bool IsMounted => Volatile.Read(ref _archive) is not null;
+    // A package file larger than this is never written out as a real file: a big game keeps its
+    // tens of GiB assets inside the package and only the startup files are extracted.
+    private const long MaxExtractSize = 2L << 30;
 
-    public static string? Root => Volatile.Read(ref _root);
+    public static bool IsMounted => Volatile.Read(ref _archive) is not null || Volatile.Read(ref _package) is not null;
+
+    public static string? Root => Volatile.Read(ref _root) ?? Volatile.Read(ref _packageRoot);
 
     public static void Mount(ZArchive archive, string root)
     {
@@ -37,6 +44,55 @@ public static class App0Archive
             Volatile.Write(ref _archive, null);
             _root = null;
         }
+    }
+
+    // Mounts a package's inner image as /app0; the caller keeps ownership of the archive.
+    public static void MountPackage(PkgArchive package, string root)
+    {
+        lock (Gate)
+        {
+            Volatile.Write(ref _package, package);
+            _packageRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
+        }
+    }
+
+    public static void UnmountPackage()
+    {
+        lock (Gate)
+        {
+            Volatile.Write(ref _package, null);
+            _packageRoot = null;
+        }
+    }
+
+    // The mount-relative path ('/'-separated) of a host path under the package mount, or null.
+    private static string? PackageRelative(string hostPath)
+    {
+        var root = Volatile.Read(ref _packageRoot);
+        if (Volatile.Read(ref _package) is null || root is null || string.IsNullOrEmpty(hostPath))
+        {
+            return null;
+        }
+
+        string full;
+        try
+        {
+            full = Path.TrimEndingDirectorySeparator(Path.GetFullPath(hostPath));
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return null;
+        }
+
+        if (string.Equals(full, root, StringComparison.OrdinalIgnoreCase))
+        {
+            return string.Empty;
+        }
+
+        return full.Length > root.Length && full.StartsWith(root, StringComparison.OrdinalIgnoreCase) &&
+            full[root.Length] is '\\' or '/'
+            ? full[(root.Length + 1)..]
+            : null;
     }
 
     // The archive and the node a host path names, when it lies under the mount and the archive has it.
@@ -82,29 +138,62 @@ public static class App0Archive
     public static bool TryGetFile(string hostPath, out ulong size)
     {
         size = 0;
-        if (!TryResolve(hostPath, out var archive, out var node) || !archive.IsFile(node))
+        if (TryResolve(hostPath, out var archive, out var node) && archive.IsFile(node))
         {
-            return false;
+            size = archive.GetFileSize(node);
+            return true;
         }
 
-        size = archive.GetFileSize(node);
-        return true;
+        var relative = PackageRelative(hostPath);
+        return relative is not null && Volatile.Read(ref _package) is { } package && package.TryGetFile(relative, out size);
     }
 
-    public static bool IsDirectory(string hostPath) =>
-        TryResolve(hostPath, out var archive, out var node) && archive.IsDirectory(node);
+    public static bool IsDirectory(string hostPath)
+    {
+        if (TryResolve(hostPath, out var archive, out var node) && archive.IsDirectory(node))
+        {
+            return true;
+        }
 
-    public static bool Exists(string hostPath) => TryResolve(hostPath, out _, out _);
+        var relative = PackageRelative(hostPath);
+        return relative is not null && Volatile.Read(ref _package) is { } package && package.IsDirectory(relative);
+    }
+
+    public static bool Exists(string hostPath)
+    {
+        if (TryResolve(hostPath, out _, out _))
+        {
+            return true;
+        }
+
+        var relative = PackageRelative(hostPath);
+        return relative is not null && Volatile.Read(ref _package) is { } package &&
+            (package.IsDirectory(relative) || package.TryGetFile(relative, out _));
+    }
 
     // The names in the archive directory a host path names; empty when there is none.
-    public static IReadOnlyList<ZArchive.Entry> List(string hostPath) =>
-        TryResolve(hostPath, out var archive, out var node) ? archive.GetEntries(node) : [];
+    public static IReadOnlyList<ZArchive.Entry> List(string hostPath)
+    {
+        if (TryResolve(hostPath, out var archive, out var node))
+        {
+            return archive.GetEntries(node);
+        }
+
+        var relative = PackageRelative(hostPath);
+        return relative is not null && Volatile.Read(ref _package) is { } package ? package.GetEntries(relative) : [];
+    }
 
     // A read-only, seekable stream over the archive file a host path names.
-    public static ZArchiveFileStream? OpenRead(string hostPath) =>
-        TryResolve(hostPath, out var archive, out var node) && archive.IsFile(node)
-            ? new ZArchiveFileStream(archive, node, hostPath)
-            : null;
+    public static Stream? OpenRead(string hostPath)
+    {
+        if (TryResolve(hostPath, out var archive, out var node) && archive.IsFile(node))
+        {
+            return new ZArchiveFileStream(archive, node, hostPath);
+        }
+
+        var relative = PackageRelative(hostPath);
+        return relative is not null && Volatile.Read(ref _package) is { } package ? package.OpenRead(relative, hostPath) : null;
+    }
 
     // Opens a host path for reading: from the archive when it is under the mount and not on disk,
     // otherwise as a host file.
@@ -123,6 +212,16 @@ public static class App0Archive
         if (File.Exists(hostPath))
         {
             return true;
+        }
+
+        if (PackageRelative(hostPath) is { } relative &&
+            Volatile.Read(ref _package) is { } package &&
+            package.TryGetFile(relative, out var size) &&
+            size > MaxExtractSize)
+        {
+            Console.Error.WriteLine(
+                $"[APP0][WARN] Not extracting '{relative}' ({size} bytes) from the package: a real copy would need that much free space.");
+            return false;
         }
 
         if (OpenRead(hostPath) is not { } source)
@@ -168,6 +267,11 @@ public static class App0Archive
             AddFiles(archive, archive.LookUp(string.Empty), string.Empty, files);
         }
 
+        if (Volatile.Read(ref _package) is { } package)
+        {
+            files.AddRange(package.ListAllFiles());
+        }
+
         return files;
     }
 
@@ -188,7 +292,7 @@ public static class App0Archive
     }
 
     // Files under a host directory and all its subdirectories whose names match a pattern: those on
-    // disk and, when the directory is under the mount, those in the archive.
+    // disk and, when the directory is under the mount, those in the archive or package.
     public static IEnumerable<string> EnumerateFilesRecursive(string hostDirectory, string pattern)
     {
         var found = Directory.Exists(hostDirectory)
@@ -197,19 +301,38 @@ public static class App0Archive
         found.AddRange(GameFileOverlay.EnumerateFiles(hostDirectory, pattern, SearchOption.AllDirectories));
         found = found.Distinct(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal).ToList();
         var root = Root;
-        if (root is null || !TryResolve(hostDirectory, out var archive, out var node) || !archive.IsDirectory(node))
+        if (root is null)
         {
             return found;
         }
 
         var seen = new HashSet<string>(found, StringComparer.OrdinalIgnoreCase);
-        var start = Path.GetRelativePath(root, Path.GetFullPath(hostDirectory));
-        var prefix = start == "." ? string.Empty : start.Replace('\\', '/') + "/";
         var archived = new List<string>();
-        AddFiles(archive, node, prefix, archived);
-        foreach (var relative in archived)
+        if (TryResolve(hostDirectory, out var archive, out var node) && archive.IsDirectory(node))
         {
-            var hostPath = Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar));
+            var start = Path.GetRelativePath(root, Path.GetFullPath(hostDirectory));
+            var prefix = start == "." ? string.Empty : start.Replace('\\', '/') + "/";
+            AddFiles(archive, node, prefix, archived);
+        }
+
+        if (PackageRelative(hostDirectory) is { } relative &&
+            Volatile.Read(ref _package) is { } package &&
+            package.IsDirectory(relative))
+        {
+            var prefix = relative.Replace('\\', '/').Trim('/');
+            prefix = prefix.Length == 0 ? string.Empty : prefix + "/";
+            foreach (var file in package.ListAllFiles())
+            {
+                if (file.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                {
+                    archived.Add(file);
+                }
+            }
+        }
+
+        foreach (var relativePath in archived)
+        {
+            var hostPath = Path.Combine(root, relativePath.Replace('/', Path.DirectorySeparatorChar));
             if (FileSystemName.MatchesSimpleExpression(pattern, Path.GetFileName(hostPath)) && seen.Add(hostPath))
             {
                 found.Add(hostPath);
@@ -239,9 +362,20 @@ public static class App0Archive
     }
 }
 
+// A read-only file behind /app0, from an archive or from a mounted package: a positional read that
+// leaves the position alone, and the name the host opened it as.
+public interface IApp0File : IDisposable
+{
+    string Name { get; }
+
+    long Length { get; }
+
+    int ReadAt(Span<byte> buffer, long offset);
+}
+
 // One archive file as a read-only, seekable stream; reads at any position go through the archive's
 // block cache. Name is the host path it was opened as.
-public sealed class ZArchiveFileStream : Stream
+public sealed class ZArchiveFileStream : Stream, IApp0File
 {
     private readonly ZArchive _archive;
     private readonly int _node;

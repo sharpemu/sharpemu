@@ -103,16 +103,16 @@ public static partial class AmprExports
         public uint Flush;
     }
 
-    // A host file, or a file of an archive-mounted app0 that is not on disk.
+    // A host file, or a file of an archive- or package-mounted app0 that is not on disk.
     private sealed class CachedHostFile : IDisposable
     {
         private readonly SafeFileHandle? _handle;
-        private readonly ZArchiveFileStream? _archived;
+        private readonly IApp0File? _archived;
 
         public CachedHostFile(string path)
         {
             path = GameFileOverlay.ResolveFile(path);
-            if (!File.Exists(path) && App0Archive.OpenRead(path) is { } archived)
+            if (!File.Exists(path) && App0Archive.OpenRead(path) is IApp0File archived)
             {
                 _archived = archived;
                 Length = archived.Length;
