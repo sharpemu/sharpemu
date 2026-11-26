@@ -27,6 +27,8 @@ internal readonly record struct PadState(
     internal bool HostWindowFocused { get; init; }
     internal uint KeyboardButtons { get; init; }
     internal uint ControllerButtons { get; init; }
+    internal byte ControllerLeftX { get; init; } = 128;
+    internal byte ControllerLeftY { get; init; } = 128;
 }
 
 /// <summary>SCE_PAD_BUTTON bit values.</summary>

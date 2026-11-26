@@ -15,18 +15,32 @@ public sealed class Gen5StorageImageSwizzleCacheTests
     [InlineData("ImageStoreMip")]
     public void SpecializationSeparatesStorageImageSwizzles(string opcode)
     {
-        var identity = CreateSpecialization(Gen5ShaderTranslator.IdentityImageDstSelect, opcode);
-        var rotated = CreateSpecialization(0x9F5u, opcode);
+        var identity = CreateSpecialization(Gen5ShaderTranslator.IdentityImageDstSelect, opcode, runtimeImageSwizzles: false);
+        var rotated = CreateSpecialization(0x9F5u, opcode, runtimeImageSwizzles: false);
         Assert.NotEqual(identity, rotated);
         Assert.Equal(Gen5ShaderTranslator.IdentityImageDstSelect, Assert.Single(identity.Images).ShaderSwizzle);
         Assert.Equal(0x9F5u, Assert.Single(rotated.Images).ShaderSwizzle);
     }
 
-    private static ResourceSpecialization CreateSpecialization(uint destinationSelect, string opcode)
+    // With the select as shader data, the specialization keeps the identity select for every select.
+    [Theory]
+    [InlineData("ImageStore")]
+    [InlineData("ImageStoreMip")]
+    [InlineData("ImageLoad")]
+    public void RuntimeSwizzleSpecializationKeepsTheIdentitySelect(string opcode)
+    {
+        var identity = CreateSpecialization(Gen5ShaderTranslator.IdentityImageDstSelect, opcode, runtimeImageSwizzles: true);
+        var rotated = CreateSpecialization(0x9F5u, opcode, runtimeImageSwizzles: true);
+        Assert.Equal(identity, rotated);
+        Assert.Equal(Gen5ShaderTranslator.IdentityImageDstSelect, Assert.Single(rotated.Images).ShaderSwizzle);
+    }
+
+    private static ResourceSpecialization CreateSpecialization(uint destinationSelect, string opcode, bool runtimeImageSwizzles)
     {
         var program = ResourceTestProgram.Program(
             ResourceTestProgram.Image(0, opcode, resourceRegister: 8), ResourceTestProgram.EndProgram(8));
-        var plan = ResourceTestProgram.Extract(program, userDataCount: 16);
+        var plan = ShaderResourcePlan.Extract(program, ShaderStage.Compute, ResourceTestProgram.Hash, 0, 16,
+            runtimeImageSwizzles: runtimeImageSwizzles);
         var userData = new uint[16];
         userData[8] = 0x20;
         userData[9] = 71u << 20;

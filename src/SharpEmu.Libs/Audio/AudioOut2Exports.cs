@@ -79,7 +79,23 @@ public static class AudioOut2Exports
     internal const uint PassthroughLeft = 1;
     internal const uint PassthroughRight = 2;
     private const float HalfPower = 0.70710677f;
+    // A first-order scene is decoded for stereo by two virtual microphones facing about 74 degrees
+    // left and right (ACN channels are SN3D; FuMa channels are MaxN, W at sqrt(0.5)): a source ahead
+    // plays at full level on both sides (W + X = 1), one behind at -3 dB, one at the side with the
+    // power it has ahead. Microphones facing 90 degrees (W and Y alone) played sources ahead 3 dB
+    // below those at the sides, and the room's diffuse sound louder than the direct sound.
+    private const float AmbisonicsW = 0.85355339f;
+    private const float AmbisonicsX = 0.14644661f;
+    private const float AmbisonicsY = 0.52100538f;
+    private const float FumaW = AmbisonicsW * 1.41421356f;
     private const ushort PortStateOutputConnectedPrimary = 0x01;
+    // The output a port reaches when it plays on the controller's speaker.
+    private const ushort PortStateOutputConnectedController = 0x04;
+    private const ushort AudioOut2PortTypePadSpeaker = 3;
+    // The controller stream holds at most this much audio (its oldest audio goes past it): the guest is paced by its
+    // main output, and the controller's device runs on a clock of its own.
+    private const int ControllerQueueLimitMilliseconds = 80;
+    private const int ControllerChannelCount = 4;
 
     // A host device that already holds this much audio is pacing the context; anything beyond the
     // cushion counts as queued grains. The cushion stays below the emulated queue so host
@@ -162,13 +178,30 @@ public static class AudioOut2Exports
         }
 
         public double DeviceSlotFreeMilliseconds =>
-            DeviceSlotFreeThreshold(GrainSamples, Frequency, QueueDepth);
+            DeviceSlotFreeThreshold(GrainSamples, Frequency, QueueDepth, CushionMilliseconds);
+
+        public long ReserveMicroseconds;
+
+        public int CushionMilliseconds =>
+            (int)Math.Max(DeviceCushionMilliseconds, Volatile.Read(ref ReserveMicroseconds) / 1000);
+
+        public long CalmSince;
+        public long LastOutputTimestamp;
+        public float[] Recent = [];
+        public int RecentFrames;
+        public long StatsWindowStart;
+        public long StatsGrains;
+        public long StatsDropouts;
+        public long StatsStretches;
+        public long StatsStretchedFrames;
+        public long StatsSilentFills;
+        public long StatsTrims;
 
         // Grains the device holds beyond the cushion, at most QueueDepth.
         public uint DeviceQueuedGrains(int queuedMilliseconds)
         {
             var grainMilliseconds = GrainSamples * 1000.0 / Frequency;
-            var beyondCushion = queuedMilliseconds - DeviceCushionMilliseconds;
+            var beyondCushion = queuedMilliseconds - CushionMilliseconds;
             return beyondCushion <= 0
                 ? 0
                 : (uint)Math.Min(Math.Ceiling(beyondCushion / grainMilliseconds), QueueDepth);
@@ -246,9 +279,20 @@ public static class AudioOut2Exports
     private static IHostAudioStream? SecondaryBackend;
     private static string PrimaryBackendName = "none";
     private static string SecondaryBackendName = "none";
+    private static bool PrimaryBackendFloat;
+    private static bool SecondaryBackendFloat;
+    // A runaway gain cannot reach the device: float output is bounded far above full scale (+12 dBFS).
+    private const float FloatOutputBound = 4f;
     private static ulong PrimaryContextHandle;
     private static readonly object HostSubmitGate = new();
     private static Func<uint, IHostAudioStream?>? _streamFactoryForTests;
+
+    // The controller's own output device, opened once on first need: the pad speaker port plays on its first two
+    // channels and the vibration port on its actuators, the last two (when the device has them). Without it both ports
+    // stay silent, as before.
+    private static IHostAudioStream? ControllerBackend;
+    private static bool ControllerOpenTried;
+    private static Func<uint, IHostAudioStream?>? _controllerFactoryForTests;
 
     [SysAbiExport(
         Nid = "g2tViFIohHE",
@@ -512,6 +556,8 @@ public static class AudioOut2Exports
             Producers[producer] = context;
         }
 
+        _lastPushTimestamp = Stopwatch.GetTimestamp();
+
         // Host Submit already blocks on the output queue; software pacing covers grains with nothing
         // queued, once per grain whichever of Advance and Push comes first.
         var submitted = TrySubmitContextAudio(ctx, context);
@@ -743,7 +789,7 @@ public static class AudioOut2Exports
             byte[]? pcmData = null;
             if (pcmAddress != 0 &&
                 TryDecodeDataFormat(port.DataFormat, out var channels, out var bytesPerSample, out _) &&
-                IsSnapshotPcmPort(port.PortType, channels))
+                IsSnapshotPcmPort(port, channels))
             {
                 int byteLength;
                 try
@@ -885,7 +931,12 @@ public static class AudioOut2Exports
             channels = (byte)Math.Clamp(decodedChannels, 1, SpeakerMax);
         }
 
-        BinaryPrimitives.WriteUInt16LittleEndian(state[0x00..], PortStateOutputConnectedPrimary);
+        // A pad speaker port that plays on the controller's speaker reports that output.
+        BinaryPrimitives.WriteUInt16LittleEndian(
+            state[0x00..],
+            port is not null && (port.PortType & 0xFF) == AudioOut2PortTypePadSpeaker && ControllerTakes(port)
+                ? PortStateOutputConnectedController
+                : PortStateOutputConnectedPrimary);
         state[0x02] = channels;
         BinaryPrimitives.WriteInt16LittleEndian(state[0x04..], 127);
 
@@ -1132,6 +1183,11 @@ public static class AudioOut2Exports
     {
         var portHandle = ctx[CpuRegister.Rdi];
         var removed = Ports.TryRemove(portHandle, out var port);
+        if (port is not null && IsVibrationPort(port.PortType) && !ControllerTakes(port))
+        {
+            HapticRumble.Stop();
+        }
+
         var n = Interlocked.Increment(ref _portDestroyTraceCount);
         if (n <= 8 || n % 500 == 0)
         {
@@ -1217,6 +1273,31 @@ public static class AudioOut2Exports
         return SetReturn(ctx, 0);
     }
 
+    // A float stream keeps the mix's headroom: the 16-bit stream clipped every peak above full scale before the host
+    // applied its volume, which the host's float mixer does not. The queue cap is the same duration as the 16-bit one.
+    private static IHostAudioStream OpenContextStream(uint frequency, out bool isFloat)
+    {
+        var audio = HostPlatform.Current.Audio;
+        if (audio is IHostPcmAudioOutput pcm)
+        {
+            isFloat = true;
+            return pcm.OpenPcmStream(frequency, channels: 2, HostPcmFormat.Float32, maxQueuedBytes: 256 * 1024);
+        }
+
+        isFloat = false;
+        return audio.OpenStereoPcm16Stream(frequency, maxQueuedPcmBytes: 128 * 1024);
+    }
+
+    private static bool IsFloatBackend(IHostAudioStream backend)
+    {
+        lock (HostBackendGate)
+        {
+            return ReferenceEquals(backend, PrimaryBackend)
+                ? PrimaryBackendFloat
+                : ReferenceEquals(backend, SecondaryBackend) && SecondaryBackendFloat;
+        }
+    }
+
     private static IHostAudioStream? ResolveContextBackend(ContextState context, out string backendName)
     {
         lock (HostBackendGate)
@@ -1240,11 +1321,8 @@ public static class AudioOut2Exports
                         }
                         else
                         {
-                            var audio = HostPlatform.Current.Audio;
-                            PrimaryBackend = audio.OpenStereoPcm16Stream(
-                                context.Frequency,
-                                maxQueuedPcmBytes: 128 * 1024);
-                            PrimaryBackendName = audio.BackendName + "-primary";
+                            PrimaryBackend = OpenContextStream(context.Frequency, out PrimaryBackendFloat);
+                            PrimaryBackendName = HostPlatform.Current.Audio.BackendName + (PrimaryBackendFloat ? "-primary-f32" : "-primary");
                         }
                     }
                     catch (Exception exception)
@@ -1271,11 +1349,8 @@ public static class AudioOut2Exports
                     }
                     else
                     {
-                        var audio = HostPlatform.Current.Audio;
-                        SecondaryBackend = audio.OpenStereoPcm16Stream(
-                            context.Frequency,
-                            maxQueuedPcmBytes: 128 * 1024);
-                        SecondaryBackendName = audio.BackendName + "-secondary";
+                        SecondaryBackend = OpenContextStream(context.Frequency, out SecondaryBackendFloat);
+                        SecondaryBackendName = HostPlatform.Current.Audio.BackendName + (SecondaryBackendFloat ? "-secondary-f32" : "-secondary");
                     }
                 }
                 catch (Exception exception)
@@ -1292,7 +1367,80 @@ public static class AudioOut2Exports
     }
 
     internal static double DeviceSlotFreeThreshold(uint grainSamples, uint frequency, uint queueDepth) =>
-        DeviceCushionMilliseconds + (grainSamples * 1000.0 / frequency * Math.Max((long)queueDepth - 1, 0));
+        DeviceSlotFreeThreshold(grainSamples, frequency, queueDepth, DeviceCushionMilliseconds);
+
+    internal static double DeviceSlotFreeThreshold(uint grainSamples, uint frequency, uint queueDepth, int cushionMilliseconds) =>
+        cushionMilliseconds + (grainSamples * 1000.0 / frequency * Math.Max((long)queueDepth - 1, 0));
+
+    // The guest thread's last push: a thread that pushed within the last ActiveProducerMilliseconds feeds a context now.
+    [ThreadStatic]
+    private static long _lastPushTimestamp;
+
+    private const double ActiveProducerMilliseconds = 20;
+
+    // A nap at most this long is the one an idle job worker takes between jobs.
+    internal const ulong PreciseNapLimitMicroseconds = 1000;
+
+    /// <summary>
+    /// True when a short usleep on this thread must take only the time it asks for: the thread pushed into an AudioOut2
+    /// context within the last 20 ms and the device holds less than its cushion. A host timer wait rounds a nap of
+    /// 51 us up to about 0.5 ms, so a producer that naps between the jobs of each grain falls behind the device.
+    /// </summary>
+    public static bool ProducerNeedsPreciseNap(ulong microseconds)
+    {
+        if (microseconds > PreciseNapLimitMicroseconds ||
+            _lastPushTimestamp == 0 ||
+            !Producers.TryGetValue(GuestThreadExecution.CurrentGuestThreadHandle, out var context) ||
+            !context.DevicePaced ||
+            context.DeviceBackend is not { } backend)
+        {
+            return false;
+        }
+
+        var sincePush = (Stopwatch.GetTimestamp() - _lastPushTimestamp) * 1000.0 / Stopwatch.Frequency;
+        return PreciseProducerNap(
+            microseconds,
+            sincePush,
+            backend.QueuedMilliseconds,
+            context.GrainSamples,
+            context.Frequency);
+    }
+
+    private static int _preciseNappers;
+
+    internal const int MaxPreciseNappers = 1;
+
+    public static bool TryBeginPreciseNap(ulong microseconds)
+    {
+        if (!ProducerNeedsPreciseNap(microseconds))
+        {
+            return false;
+        }
+
+        if (Interlocked.Increment(ref _preciseNappers) <= MaxPreciseNappers)
+        {
+            return true;
+        }
+
+        Interlocked.Decrement(ref _preciseNappers);
+        return false;
+    }
+
+    public static void EndPreciseNap() => Interlocked.Decrement(ref _preciseNappers);
+
+    // A nap of at most PreciseNapLimitMicroseconds by a thread that pushed within the last ActiveProducerMilliseconds, while
+    // the device reports less than its cushion less one grain (-1: it cannot report).
+    internal static bool PreciseProducerNap(ulong microseconds, double millisecondsSincePush, int queuedMilliseconds,
+        uint grainSamples, uint frequency) =>
+        PreciseProducerNap(microseconds, millisecondsSincePush, queuedMilliseconds, grainSamples, frequency, DeviceCushionMilliseconds);
+
+    internal static bool PreciseProducerNap(ulong microseconds, double millisecondsSincePush, int queuedMilliseconds,
+        uint grainSamples, uint frequency, int cushionMilliseconds) =>
+        microseconds <= PreciseNapLimitMicroseconds &&
+        millisecondsSincePush >= 0 &&
+        millisecondsSincePush < ActiveProducerMilliseconds &&
+        queuedMilliseconds >= 0 &&
+        queuedMilliseconds < cushionMilliseconds - (grainSamples * 1000.0 / frequency);
 
     /// <summary>
     /// Halves a usleep taken by a thread that feeds an AudioOut2 context while the device runs short,
@@ -1408,16 +1556,65 @@ public static class AudioOut2Exports
         lock (HostSubmitGate)
         {
             var mix = ArrayPool<float>.Shared.Rent(frames * 2);
-            var output = ArrayPool<byte>.Shared.Rent(frames * AudioPcmConversion.OutputFrameSize);
+            var output = ArrayPool<byte>.Shared.Rent(frames * 2 * sizeof(float));
             try
             {
                 mix.AsSpan(0, frames * 2).Clear();
                 var mixedPorts = 0;
+                var hapticPorts = 0;
+                var hapticLeft = 0f;
+                var hapticRight = 0f;
+                float[]? controllerMix = null;
                 foreach (var port in Ports.Values)
                 {
                     if (port.ContextHandle != context.Handle ||
                         !TryDecodeDataFormat(port.DataFormat, out var ch, out var bps, out var isFloat))
                     {
+                        continue;
+                    }
+
+                    if (ControllerTakes(port))
+                    {
+                        var padBytes = frames * ch * bps;
+                        if (TakePortPcmSnapshot(port) is { } padPcm && padPcm.Length >= padBytes)
+                        {
+                            if (controllerMix is null)
+                            {
+                                controllerMix = ArrayPool<float>.Shared.Rent(frames * ControllerChannelCount);
+                                controllerMix.AsSpan(0, frames * ControllerChannelCount).Clear();
+                            }
+
+                            MixPortIntoController(
+                                padPcm.AsSpan(0, padBytes),
+                                controllerMix,
+                                frames,
+                                ch,
+                                bps,
+                                isFloat,
+                                port.Gain,
+                                (port.PortType & 0xFF) == AudioOut2PortTypePadSpeaker ? 0 : 2);
+                        }
+
+                        continue;
+                    }
+
+                    if (IsVibrationPort(port.PortType))
+                    {
+                        hapticPorts++;
+                        var hapticBytes = frames * ch * bps;
+                        if (TakePortPcmSnapshot(port) is { } hapticPcm && hapticPcm.Length >= hapticBytes)
+                        {
+                            HapticRumble.MeasurePeaks(
+                                hapticPcm.AsSpan(0, hapticBytes),
+                                frames,
+                                ch,
+                                bps,
+                                isFloat,
+                                port.Gain,
+                                ref hapticLeft,
+                                ref hapticRight);
+                        }
+
                         continue;
                     }
 
@@ -1462,30 +1659,29 @@ public static class AudioOut2Exports
                     mixedPorts++;
                 }
 
+                if (controllerMix is not null && ControllerBackend is { } controller)
+                {
+                    var controllerOutput = ArrayPool<byte>.Shared.Rent(frames * ControllerChannelCount * sizeof(float));
+                    try
+                    {
+                        controller.Submit(WriteFloatOutput(controllerMix.AsSpan(0, frames * ControllerChannelCount), controllerOutput, out _));
+                    }
+                    finally
+                    {
+                        ArrayPool<byte>.Shared.Return(controllerOutput);
+                        ArrayPool<float>.Shared.Return(controllerMix);
+                    }
+                }
+
+                if (hapticPorts > 0)
+                {
+                    HapticRumble.Update(hapticLeft, hapticRight, frames / (double)context.Frequency);
+                }
+
                 if (mixedPorts == 0)
                 {
                     TraceSubmitSkipped(context, frames, "no-ports");
                     return false;
-                }
-
-                var outputSpan = output.AsSpan(0, frames * AudioPcmConversion.OutputFrameSize);
-                var peak = 0f;
-                for (var frame = 0; frame < frames; frame++)
-                {
-                    if (LogClipping)
-                    {
-                        NoteClipping(mix[frame * 2], mix[(frame * 2) + 1]);
-                    }
-
-                    var left = Math.Clamp(mix[frame * 2], -1f, 1f);
-                    var right = Math.Clamp(mix[(frame * 2) + 1], -1f, 1f);
-                    peak = Math.Max(peak, Math.Max(Math.Abs(left), Math.Abs(right)));
-                    BinaryPrimitives.WriteInt16LittleEndian(
-                        outputSpan[(frame * AudioPcmConversion.OutputFrameSize)..],
-                        FloatToPcm16(left));
-                    BinaryPrimitives.WriteInt16LittleEndian(
-                        outputSpan[((frame * AudioPcmConversion.OutputFrameSize) + 2)..],
-                        FloatToPcm16(right));
                 }
 
                 var backend = ResolveContextBackend(context, out var backendName);
@@ -1495,6 +1691,11 @@ public static class AudioOut2Exports
                     return false;
                 }
 
+                float peak;
+                var isFloatBackend = IsFloatBackend(backend);
+                var outputSpan = isFloatBackend
+                    ? WriteFloatOutput(mix.AsSpan(0, frames * 2), output, out peak)
+                    : WritePcm16Output(mix.AsSpan(0, frames * 2), output, out peak);
                 context.DeviceBackend = backend;
 
                 var n = Interlocked.Increment(ref _submitTraceCount);
@@ -1505,7 +1706,7 @@ public static class AudioOut2Exports
                         $"ports={mixedPorts} peak={peak:F4} backend={backendName}");
                 }
 
-                return backend.Submit(outputSpan);
+                return SubmitWithReserve(context, backend, outputSpan, mix.AsSpan(0, frames * 2), frames, isFloatBackend);
             }
             finally
             {
@@ -1513,6 +1714,320 @@ public static class AudioOut2Exports
                 ArrayPool<byte>.Shared.Return(output);
             }
         }
+    }
+
+    private static readonly long ReserveBaseMicroseconds =
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_AUDIO_RESERVE_MS"), out var reserveMilliseconds)
+            ? Math.Clamp(reserveMilliseconds, 0, 200) * 1000L
+            : 20_000L;
+
+    private static readonly bool GrainStretchEnabled =
+        Environment.GetEnvironmentVariable("SHARPEMU_AUDIO_STRETCH") != "0";
+
+    private static readonly bool LogReserveStats = string.Equals(
+        Environment.GetEnvironmentVariable("SHARPEMU_LOG_AUDIO_OUT2"),
+        "1",
+        StringComparison.Ordinal);
+
+    private const long ReserveStepMicroseconds = 20_000;
+    private const long ReserveLimitMicroseconds = 200_000;
+    private const long ReserveRelaxMicroseconds = 10_000;
+    private const long ReserveRelaxAfterMicroseconds = 60_000_000;
+    private const long DropoutWindowMicroseconds = 300_000;
+    private const float QuietSampleLimit = 0.001f;
+    private const int MixChannels = 2;
+
+    private static byte[] _silence = [];
+    private static byte[] _stretchedOutput = [];
+    private static float[] _stretchedMix = [];
+    private static float[] _stretchMono = [];
+
+    private static long TicksToMicroseconds(long ticks) => ticks * 1_000_000L / Stopwatch.Frequency;
+
+    private static bool SubmitWithReserve(
+        ContextState context,
+        IHostAudioStream backend,
+        ReadOnlySpan<byte> output,
+        ReadOnlySpan<float> grain,
+        int frames,
+        bool isFloat)
+    {
+        var queuedMilliseconds = ReserveBaseMicroseconds == 0 ? -1 : backend.QueuedMilliseconds;
+        if (queuedMilliseconds < 0)
+        {
+            return backend.Submit(output);
+        }
+
+        var now = Stopwatch.GetTimestamp();
+        var grainMicroseconds = Math.Max(1L, frames * 1_000_000L / context.Frequency);
+        var first = context.LastOutputTimestamp == 0;
+        var ranDry = !first && queuedMilliseconds == 0;
+        var reserve = Volatile.Read(ref context.ReserveMicroseconds);
+        if (reserve == 0)
+        {
+            reserve = ReserveBaseMicroseconds;
+            context.CalmSince = now;
+        }
+
+        if (ranDry && TicksToMicroseconds(now - context.LastOutputTimestamp) < DropoutWindowMicroseconds)
+        {
+            reserve = Math.Min(reserve + ReserveStepMicroseconds, ReserveLimitMicroseconds);
+            context.CalmSince = now;
+            context.StatsDropouts++;
+        }
+        else if (TicksToMicroseconds(now - context.CalmSince) >= ReserveRelaxAfterMicroseconds &&
+                 reserve > ReserveBaseMicroseconds)
+        {
+            reserve = Math.Max(ReserveBaseMicroseconds, reserve - ReserveRelaxMicroseconds);
+            context.CalmSince = now;
+        }
+
+        Volatile.Write(ref context.ReserveMicroseconds, reserve);
+        context.LastOutputTimestamp = now;
+
+        var payload = output;
+        if (first || ranDry)
+        {
+            var silentGrains = (reserve + grainMicroseconds - 1) / grainMicroseconds;
+            SubmitSilence(backend, checked((int)(output.Length * silentGrains)));
+            context.RecentFrames = 0;
+        }
+        else
+        {
+            var queuedMicroseconds = queuedMilliseconds * 1000L;
+            var quiet = IsQuietMix(grain);
+            var high = (context.CushionMilliseconds * 1000L) + (context.QueueDepth * grainMicroseconds) + 10_000;
+            if ((queuedMicroseconds > high && quiet) || queuedMicroseconds > high + 90_000)
+            {
+                context.StatsTrims++;
+                RecordReserveStats(context, queuedMilliseconds);
+                return true;
+            }
+
+            if (queuedMicroseconds * 2 < reserve)
+            {
+                if (quiet)
+                {
+                    SubmitSilence(backend, output.Length);
+                    context.StatsSilentFills++;
+                }
+                else if (GrainStretchEnabled)
+                {
+                    var added = StretchMixGrain(
+                        context.Recent.AsSpan(0, context.RecentFrames * MixChannels),
+                        grain,
+                        (int)context.Frequency,
+                        ref _stretchedMix);
+                    if (added > 0)
+                    {
+                        var stretchedSamples = (frames + added) * MixChannels;
+                        var bytesPerSample = isFloat ? sizeof(float) : sizeof(short);
+                        if (_stretchedOutput.Length < stretchedSamples * bytesPerSample)
+                        {
+                            _stretchedOutput = new byte[stretchedSamples * bytesPerSample];
+                        }
+
+                        payload = isFloat
+                            ? WriteFloatOutput(_stretchedMix.AsSpan(0, stretchedSamples), _stretchedOutput, out _)
+                            : WritePcm16Output(_stretchedMix.AsSpan(0, stretchedSamples), _stretchedOutput, out _);
+                        context.StatsStretches++;
+                        context.StatsStretchedFrames += added;
+                    }
+                }
+            }
+        }
+
+        RememberRecentGrain(context, grain);
+        RecordReserveStats(context, queuedMilliseconds);
+        return backend.Submit(payload);
+    }
+
+    private static void SubmitSilence(IHostAudioStream backend, int bytes)
+    {
+        if (bytes <= 0)
+        {
+            return;
+        }
+
+        if (_silence.Length < bytes)
+        {
+            _silence = new byte[bytes];
+        }
+
+        _ = backend.Submit(_silence.AsSpan(0, bytes));
+    }
+
+    private static bool IsQuietMix(ReadOnlySpan<float> grain)
+    {
+        foreach (var sample in grain)
+        {
+            if (sample > QuietSampleLimit || sample < -QuietSampleLimit)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static void RememberRecentGrain(ContextState context, ReadOnlySpan<float> grain)
+    {
+        var keepFrames = (int)(context.Frequency / 50);
+        var keep = keepFrames * MixChannels;
+        if (context.Recent.Length < keep)
+        {
+            var grown = new float[keep];
+            context.Recent.AsSpan(0, context.RecentFrames * MixChannels).CopyTo(grown);
+            context.Recent = grown;
+        }
+
+        if (grain.Length >= keep)
+        {
+            grain[^keep..].CopyTo(context.Recent);
+            context.RecentFrames = keepFrames;
+            return;
+        }
+
+        var held = context.RecentFrames * MixChannels;
+        var overflow = held + grain.Length - keep;
+        if (overflow > 0)
+        {
+            context.Recent.AsSpan(overflow, held - overflow).CopyTo(context.Recent);
+            held -= overflow;
+        }
+
+        grain.CopyTo(context.Recent.AsSpan(held));
+        context.RecentFrames = (held + grain.Length) / MixChannels;
+    }
+
+    internal static int StretchMixGrain(ReadOnlySpan<float> history, ReadOnlySpan<float> grain, int frequency, ref float[] output)
+    {
+        var historyFrames = history.Length / MixChannels;
+        var grainFrames = grain.Length / MixChannels;
+        var total = historyFrames + grainFrames;
+        var window = Math.Min(grainFrames, frequency / 200);
+        var fade = Math.Min(grainFrames, frequency * 3 / 1000);
+        var shortest = frequency / 400;
+        var longest = Math.Min(frequency * 15 / 1000, total > window ? total - window : 0);
+        if (window == 0 || fade == 0 || shortest == 0 || longest < shortest)
+        {
+            return 0;
+        }
+
+        if (_stretchMono.Length < total)
+        {
+            _stretchMono = new float[total];
+        }
+
+        var mono = _stretchMono;
+        for (var frame = 0; frame < total; frame++)
+        {
+            mono[frame] = MixSample(history, grain, historyFrames, frame, 0) +
+                          MixSample(history, grain, historyFrames, frame, 1);
+        }
+
+        var end = total - window;
+        var endEnergy = 0f;
+        for (var k = 0; k < window; k++)
+        {
+            endEnergy += mono[end + k] * mono[end + k];
+        }
+
+        var lag = shortest;
+        var best = -2f;
+        for (var period = shortest; period <= longest; period++)
+        {
+            var earlier = end - period;
+            var dot = 0f;
+            var energy = 0f;
+            for (var k = 0; k < window; k++)
+            {
+                dot += mono[end + k] * mono[earlier + k];
+                energy += mono[earlier + k] * mono[earlier + k];
+            }
+
+            var score = dot / MathF.Sqrt((energy * endEnergy) + 1e-20f);
+            if (score > best)
+            {
+                best = score;
+                lag = period;
+            }
+        }
+
+        var outputSamples = (grainFrames + lag) * MixChannels;
+        if (output.Length < outputSamples)
+        {
+            output = new float[outputSamples];
+        }
+
+        grain[..((grainFrames - fade) * MixChannels)].CopyTo(output);
+        for (var frame = grainFrames - fade; frame < grainFrames; frame++)
+        {
+            var x = (frame - (grainFrames - fade) + 0.5f) / fade;
+            var weight = 0.5f - (0.5f * MathF.Cos(MathF.PI * x));
+            for (var channel = 0; channel < MixChannels; channel++)
+            {
+                output[(frame * MixChannels) + channel] =
+                    ((1f - weight) * MixSample(history, grain, historyFrames, historyFrames + frame, channel)) +
+                    (weight * MixSample(history, grain, historyFrames, historyFrames + frame - lag, channel));
+            }
+        }
+
+        for (var frame = grainFrames; frame < grainFrames + lag; frame++)
+        {
+            for (var channel = 0; channel < MixChannels; channel++)
+            {
+                output[(frame * MixChannels) + channel] =
+                    MixSample(history, grain, historyFrames, historyFrames + frame - lag, channel);
+            }
+        }
+
+        return lag;
+    }
+
+    private static float MixSample(ReadOnlySpan<float> history, ReadOnlySpan<float> grain, int historyFrames, int frame, int channel) =>
+        frame < historyFrames
+            ? history[(frame * MixChannels) + channel]
+            : grain[((frame - historyFrames) * MixChannels) + channel];
+
+    private static void RecordReserveStats(ContextState context, int queuedMilliseconds)
+    {
+        if (!LogReserveStats)
+        {
+            return;
+        }
+
+        context.StatsGrains++;
+        var now = Stopwatch.GetTimestamp();
+        if (context.StatsWindowStart == 0)
+        {
+            context.StatsWindowStart = now;
+            return;
+        }
+
+        var elapsed = now - context.StatsWindowStart;
+        if (elapsed < Stopwatch.Frequency)
+        {
+            return;
+        }
+
+        var seconds = elapsed / (double)Stopwatch.Frequency;
+        Console.Error.WriteLine(
+            $"[PERF][AUDIO_MIX] ctx=0x{context.Handle:X} {seconds:F1}s " +
+            $"grains/s={context.StatsGrains / seconds:F0} " +
+            $"expected/s={context.Frequency / (double)context.GrainSamples:F0} " +
+            $"queued_ms={queuedMilliseconds} " +
+            $"reserve_ms={Volatile.Read(ref context.ReserveMicroseconds) / 1000} dropouts={context.StatsDropouts} " +
+            $"stretches={context.StatsStretches} stretched_ms={context.StatsStretchedFrames * 1000.0 / context.Frequency:F0} " +
+            $"silent_fills={context.StatsSilentFills} trims={context.StatsTrims}");
+
+        context.StatsWindowStart = now;
+        context.StatsGrains = 0;
+        context.StatsDropouts = 0;
+        context.StatsStretches = 0;
+        context.StatsStretchedFrames = 0;
+        context.StatsSilentFills = 0;
+        context.StatsTrims = 0;
     }
 
     internal static byte[]? GetPortPcmSnapshotForTests(ulong portHandle)
@@ -1562,10 +2077,16 @@ public static class AudioOut2Exports
             SecondaryBackend = null;
             PrimaryBackendName = "none";
             SecondaryBackendName = "none";
+            PrimaryBackendFloat = false;
+            SecondaryBackendFloat = false;
             PrimaryContextHandle = 0;
+            ControllerBackend?.Dispose();
+            ControllerBackend = null;
+            ControllerOpenTried = false;
         }
 
         Volatile.Write(ref _streamFactoryForTests, null);
+        Volatile.Write(ref _controllerFactoryForTests, null);
     }
 
     private static bool IsMainOrBgmPort(ushort portType)
@@ -1609,29 +2130,117 @@ public static class AudioOut2Exports
             return true;
         }
 
+        // ACN orders the first order W, Y, Z, X; FuMa orders it W, X, Y, Z. Z and the higher orders
+        // add nothing to a horizontal pair.
         var acn = ambisonics >= AmbisonicsAcnBase;
         var component = acn ? ambisonics - AmbisonicsAcnBase : ambisonics;
         if (component == 0)
         {
-            left = acn ? gain * HalfPower : gain;
+            left = gain * (acn ? AmbisonicsW : FumaW);
             right = left;
             return true;
         }
 
         if (component == (acn ? 1u : 2u))
         {
-            left = gain * HalfPower;
+            left = gain * AmbisonicsY;
             right = -left;
+            return true;
+        }
+
+        if (component == (acn ? 3u : 1u))
+        {
+            left = gain * AmbisonicsX;
+            right = left;
             return true;
         }
 
         return false;
     }
 
-    private static bool IsSnapshotPcmPort(ushort portType, int channels) =>
-        RoutesToSpeakers(portType) &&
-        (portType & 0xFF) != AudioOut2PortTypeVibration &&
-        (!IsObjectPort(portType) || channels == 1);
+    private static bool IsSnapshotPcmPort(PortState port, int channels) =>
+        (RoutesToSpeakers(port.PortType) &&
+         (port.PortType & 0xFF) != AudioOut2PortTypeVibration &&
+         (!IsObjectPort(port.PortType) || channels == 1)) ||
+        ControllerTakes(port) ||
+        (HapticRumble.Enabled && IsVibrationPort(port.PortType));
+
+    private static bool IsControllerPort(ushort portType) =>
+        !IsObjectPort(portType) && (portType & 0xFF) is AudioOut2PortTypePadSpeaker or AudioOut2PortTypeVibration;
+
+    private static bool IsVibrationPort(ushort portType) =>
+        !IsObjectPort(portType) && (portType & 0xFF) == AudioOut2PortTypeVibration;
+
+    // A pad speaker or vibration port plays on the controller's own output device, when the host has one.
+    private static bool ControllerTakes(PortState port) =>
+        IsControllerPort(port.PortType) && EnsureControllerBackend(port.SamplingFrequency) is not null;
+
+    private static IHostAudioStream? EnsureControllerBackend(uint frequency)
+    {
+        lock (HostBackendGate)
+        {
+            if (ControllerOpenTried)
+            {
+                return ControllerBackend;
+            }
+
+            ControllerOpenTried = true;
+            var maxQueuedBytes = (int)(frequency * ControllerChannelCount * sizeof(float) * (long)ControllerQueueLimitMilliseconds / 1000);
+            try
+            {
+                if (Volatile.Read(ref _streamFactoryForTests) is not null)
+                {
+                    // Tests choose the controller; without one there is none.
+                    ControllerBackend = Volatile.Read(ref _controllerFactoryForTests)?.Invoke(frequency);
+                }
+                else if (HostPlatform.Current.Audio is IHostPcmAudioOutput pcm &&
+                         pcm.TryOpenControllerStream(frequency, maxQueuedBytes, out var channels) is { } stream)
+                {
+                    if (channels == ControllerChannelCount)
+                    {
+                        ControllerBackend = stream;
+                    }
+                    else
+                    {
+                        stream.Dispose();
+                    }
+                }
+            }
+            catch (Exception exception)
+            {
+                ControllerBackend = null;
+                Console.Error.WriteLine($"[LOADER][WARN] AudioOut2 controller output unavailable: {exception.Message}");
+            }
+
+            return ControllerBackend;
+        }
+    }
+
+    // A port's first two channels onto a pair of the controller's four: the speaker pair at 0, the actuators at 2. A mono
+    // port plays on both channels of its pair.
+    internal static void MixPortIntoController(
+        ReadOnlySpan<byte> source,
+        Span<float> mix,
+        int frames,
+        int channels,
+        int bytesPerSample,
+        bool isFloat,
+        float gain,
+        int firstChannel)
+    {
+        var frameSize = channels * bytesPerSample;
+        for (var frame = 0; frame < frames; frame++)
+        {
+            var frameBytes = source.Slice(frame * frameSize, frameSize);
+            var first = ReadNormalizedSample(frameBytes, 0, bytesPerSample, isFloat);
+            var second = channels == 1 ? first : ReadNormalizedSample(frameBytes, 1, bytesPerSample, isFloat);
+            mix[(frame * ControllerChannelCount) + firstChannel] += first * gain;
+            mix[(frame * ControllerChannelCount) + firstChannel + 1] += second * gain;
+        }
+    }
+
+    internal static void SetControllerFactoryForTests(Func<uint, IHostAudioStream?>? controllerFactory) =>
+        Volatile.Write(ref _controllerFactoryForTests, controllerFactory);
 
     internal static void MixPortIntoStereo(
         ReadOnlySpan<byte> source,
@@ -1675,7 +2284,7 @@ public static class AudioOut2Exports
         }
     }
 
-    private static float ReadNormalizedSample(
+    internal static float ReadNormalizedSample(
         ReadOnlySpan<byte> frame,
         int channel,
         int bytesPerSample,
@@ -1690,6 +2299,36 @@ public static class AudioOut2Exports
         }
 
         return BinaryPrimitives.ReadInt16LittleEndian(sample) / 32768f;
+    }
+
+    // The mix as interleaved float samples, bounded far above full scale only.
+    internal static Span<byte> WriteFloatOutput(ReadOnlySpan<float> mix, Span<byte> output, out float peak)
+    {
+        peak = 0f;
+        var span = output[..(mix.Length * sizeof(float))];
+        for (var i = 0; i < mix.Length; i++)
+        {
+            var value = Math.Clamp(mix[i], -FloatOutputBound, FloatOutputBound);
+            peak = Math.Max(peak, Math.Abs(value));
+            BinaryPrimitives.WriteSingleLittleEndian(span[(i * sizeof(float))..], value);
+        }
+
+        return span;
+    }
+
+    // The mix as interleaved 16-bit samples, clipped at full scale.
+    internal static Span<byte> WritePcm16Output(ReadOnlySpan<float> mix, Span<byte> output, out float peak)
+    {
+        peak = 0f;
+        var span = output[..(mix.Length * sizeof(short))];
+        for (var i = 0; i < mix.Length; i++)
+        {
+            var value = Math.Clamp(mix[i], -1f, 1f);
+            peak = Math.Max(peak, Math.Abs(value));
+            BinaryPrimitives.WriteInt16LittleEndian(span[(i * sizeof(short))..], FloatToPcm16(value));
+        }
+
+        return span;
     }
 
     private static short FloatToPcm16(float value)

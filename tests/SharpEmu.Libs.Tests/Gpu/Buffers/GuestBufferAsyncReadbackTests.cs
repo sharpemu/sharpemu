@@ -16,8 +16,11 @@ public sealed class GuestBufferAsyncReadbackTests(HeadlessVulkanFixture fixture)
 {
     private readonly HeadlessVulkan? _vulkan = fixture.Vulkan;
 
-    private static void Attach(CacheHarness harness, HeadlessVulkan vulkan) =>
+    private static void Attach(CacheHarness harness, HeadlessVulkan vulkan, bool eagerReadbacks = true)
+    {
         harness.Cache.AsyncReadback = new VulkanAsyncReadback(vulkan.DeviceInfo, harness.Scheduler, vulkan.Queue, vulkan.QueueFamily);
+        harness.Cache.EagerReadbacksEnabled = eagerReadbacks;
+    }
 
     private static void Detach(CacheHarness harness) => harness.Worker.Run(() =>
     {
@@ -117,9 +120,10 @@ public sealed class GuestBufferAsyncReadbackTests(HeadlessVulkanFixture fixture)
     private static void QueueRead(CacheHarness harness, ulong address) => harness.Worker.Run(() =>
         Assert.True(harness.Cache.TrySynchronizeCpuRead(address, 4, SharpEmu.HLE.GuestMemory.GuestMemoryProfile.ReadbackSource.ShaderResourceRead)));
 
+    // The batch's GPU work completes before the hook runs: a read-ahead starts only once its writer has finished.
     private static void SubmitBatch(CacheHarness harness) => harness.Worker.Run(() =>
     {
-        harness.Scheduler.Flush();
+        harness.Scheduler.Finish();
         harness.Cache.OnBatchSubmitted();
     });
 
@@ -140,6 +144,31 @@ public sealed class GuestBufferAsyncReadbackTests(HeadlessVulkanFixture fixture)
         QueueRead(harness, address);
 
         Assert.Equal(1, harness.Cache.EagerReadbacksUsed);
+        Assert.False(harness.Cache.HasGpuDirtyBytes(address, 0x100));
+        Assert.Equal(0x02020202u, BitConverter.ToUInt32(harness.Read(address + 0x40, 4)));
+        Detach(harness);
+        harness.Shutdown();
+    }
+
+    // Eager readbacks are on by default. Disabled, a GPU write into a hot window starts none, and the next read still lands
+    // the newest bytes through its own download.
+    [Fact]
+    public void AHotWindowIsNotReadAheadWhenEagerReadbacksAreDisabled()
+    {
+        if (_vulkan is null || !GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        using var fatal = new FatalScope();
+        Assert.True(harness.Cache.EagerReadbacksEnabled);
+        Attach(harness, _vulkan, eagerReadbacks: false);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        GpuWrite(harness, address, 0x01010101);
+        QueueRead(harness, address);
+
+        GpuWrite(harness, address, 0x02020202);
+        SubmitBatch(harness);
+        Assert.Equal(0, harness.Cache.EagerReadbacksStarted);
+        QueueRead(harness, address);
+
         Assert.False(harness.Cache.HasGpuDirtyBytes(address, 0x100));
         Assert.Equal(0x02020202u, BitConverter.ToUInt32(harness.Read(address + 0x40, 4)));
         Detach(harness);
@@ -182,7 +211,6 @@ public sealed class GuestBufferAsyncReadbackTests(HeadlessVulkanFixture fixture)
         QueueRead(harness, address);
 
         GpuWrite(harness, address, 0x02020202);
-        Assert.True(harness.Cache.HotWritePending);
         var value = 0x03030303u;
         var deadline = DateTime.UtcNow.AddSeconds(20);
         while (harness.Cache.EagerReadbacksWasted < 3 && DateTime.UtcNow < deadline)
@@ -195,7 +223,6 @@ public sealed class GuestBufferAsyncReadbackTests(HeadlessVulkanFixture fixture)
         SubmitBatch(harness);
         var started = harness.Cache.EagerReadbacksStarted;
         GpuWrite(harness, address, 0x07070707);
-        Assert.False(harness.Cache.HotWritePending);
         SubmitBatch(harness);
         SubmitBatch(harness);
 
@@ -289,6 +316,7 @@ public sealed class GuestBufferAsyncReadbackTests(HeadlessVulkanFixture fixture)
         harness.Shutdown();
     }
 
+    // Sixteen read-aheads run at a time; one more waits for a landing.
     [Fact]
     public void AReadAheadDeferredForASlotStartsLater()
     {
@@ -297,7 +325,8 @@ public sealed class GuestBufferAsyncReadbackTests(HeadlessVulkanFixture fixture)
         using var fatal = new FatalScope();
         Attach(harness, _vulkan);
         const ulong window = 0x80000;
-        const int windows = 5;
+        const int inFlight = 16;
+        const int windows = inFlight + 1;
         var address = harness.MapBacked(window * windows, ReadWrite);
         for (var index = 0; index < windows; index++)
         {
@@ -311,7 +340,7 @@ public sealed class GuestBufferAsyncReadbackTests(HeadlessVulkanFixture fixture)
         }
 
         SubmitBatch(harness);
-        Assert.Equal(4, harness.Cache.EagerReadbacksStarted);
+        Assert.Equal(inFlight, harness.Cache.EagerReadbacksStarted);
 
         var deadline = DateTime.UtcNow.AddSeconds(10);
         while (harness.Cache.EagerReadbacksStarted < windows && DateTime.UtcNow < deadline)

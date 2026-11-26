@@ -179,7 +179,77 @@ public static partial class AgcExports
         return indexSnapshots is { Count: > 0 } ? indexSnapshots : null;
     }
 
+    // AgcPacketWrites: the walk below with TryReadUInt32 serving the buffer's words from a copy loaded page by page as
+    // the walk reads them (a chained buffer gets its own copy at its depth). The walk writes no guest memory, so the
+    // copy holds what the word reads would return on this thread. A buffer that is too large or was walked already is
+    // walked with direct word reads.
+    [ThreadStatic]
+    private static byte[]?[]? _scanBuffers;
+    [ThreadStatic]
+    private static ulong[]?[]? _scanLoadedPages;
+
     private static void CaptureSubmittedIndexPacketsCore(
+        CpuContext ctx,
+        ulong commandAddress,
+        uint dwordCount,
+        HashSet<(ulong Address, uint Dwords)> visited,
+        Dictionary<ulong, SubmittedIndexSnapshot>? indexSnapshots,
+        Dictionary<ulong, SubmittedVertexSnapshot>? vertexSnapshots,
+        SubmittedDcbState captureState,
+        ref long retainedIndexBytes,
+        ref long retainedVertexBytes,
+        int depth)
+    {
+        byte[]? buffer = null;
+        ulong[]? loaded = null;
+        var bytes = (int)Math.Min(dwordCount, AgcPacketWrites.MaximumScanDwords) * sizeof(uint);
+        if (AgcPacketWrites.Active && commandAddress != 0 && dwordCount != 0 && dwordCount <= AgcPacketWrites.MaximumScanDwords &&
+            depth <= 8 && commandAddress <= ulong.MaxValue - (ulong)bytes && !visited.Contains((commandAddress, dwordCount)))
+        {
+            var buffers = _scanBuffers ??= new byte[]?[9];
+            var loadedPages = _scanLoadedPages ??= new ulong[]?[9];
+            buffer = buffers[depth];
+            if (buffer is null || buffer.Length < bytes)
+            {
+                buffer = new byte[Math.Max(bytes, ScanPageBytes)];
+                buffers[depth] = buffer;
+            }
+
+            // Pages the window overlaps, from the page holding its start: at most bytes / 4 KiB + 1.
+            var words = (bytes / ScanPageBytes + 2 + 63) / 64;
+            loaded = loadedPages[depth];
+            if (loaded is null || loaded.Length < words)
+            {
+                loaded = new ulong[words];
+                loadedPages[depth] = loaded;
+            }
+            else
+            {
+                Array.Clear(loaded, 0, words);
+            }
+        }
+
+        if (buffer is null)
+        {
+            CaptureSubmittedIndexPacketsWalk(ctx, commandAddress, dwordCount, visited, indexSnapshots, vertexSnapshots,
+                captureState, ref retainedIndexBytes, ref retainedVertexBytes, depth);
+            return;
+        }
+
+        var (outerWindow, outerStart, outerLength, outerLoaded) = (_scanWindow, _scanWindowStart, _scanWindowLength, _scanLoaded);
+        (_scanWindow, _scanWindowStart, _scanWindowLength, _scanLoaded) = (buffer, commandAddress, bytes, loaded);
+        try
+        {
+            CaptureSubmittedIndexPacketsWalk(ctx, commandAddress, dwordCount, visited, indexSnapshots, vertexSnapshots,
+                captureState, ref retainedIndexBytes, ref retainedVertexBytes, depth);
+        }
+        finally
+        {
+            (_scanWindow, _scanWindowStart, _scanWindowLength, _scanLoaded) = (outerWindow, outerStart, outerLength, outerLoaded);
+        }
+    }
+
+    private static void CaptureSubmittedIndexPacketsWalk(
         CpuContext ctx,
         ulong commandAddress,
         uint dwordCount,

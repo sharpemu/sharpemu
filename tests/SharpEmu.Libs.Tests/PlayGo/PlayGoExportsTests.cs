@@ -27,6 +27,7 @@ public sealed class PlayGoExportsTests : IDisposable
     private const ulong HandleAddress = MemoryBase + 0x200;
     private const ulong ChunkIdsAddress = MemoryBase + 0x300;
     private const ulong LociAddress = MemoryBase + 0x400;
+    private const ulong ProgressAddress = MemoryBase + 0x500;
 
     private readonly string? _originalApp0Root;
     private readonly string? _originalDisableMetadataFallback;
@@ -68,6 +69,18 @@ public sealed class PlayGoExportsTests : IDisposable
 
         Assert.Equal(BadChunkId, GetLocus(handle, [2, 3], 0xCC));
         Assert.Equal(new byte[] { LocusLocalFast, LocusNotDownloaded }, ReadLoci(2));
+    }
+
+    [Fact]
+    public void GetLocus_WithoutMetadata_ReportsReEngineChunkPaksAsInstalled()
+    {
+        File.WriteAllBytes(Path.Combine(_app0Root, "re_chunk_000.pak"), []);
+        File.WriteAllBytes(Path.Combine(_app0Root, "re_chunk_001.pak"), []);
+        var handle = InitializeAndOpen();
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, GetLocus(handle, [0, 1]));
+        Assert.Equal(new byte[] { LocusLocalFast, LocusLocalFast }, ReadLoci(2));
+        Assert.Equal(BadChunkId, GetLocus(handle, [2]));
     }
 
     [Theory]
@@ -142,6 +155,42 @@ public sealed class PlayGoExportsTests : IDisposable
         Assert.Equal(new byte[] { LocusLocalFast }, ReadLoci(1));
     }
 
+    // A title that ships playgo-chunk.dat without playgo-chunkdefs.xml lists the chunks its header counts.
+    [Theory]
+    [InlineData(0x6F676C70u)]
+    [InlineData(0x78676C70u)]
+    public void GetChunkId_ChunkDatWithoutDefinitions_ListsTheHeaderChunks(uint magic)
+    {
+        var dat = new byte[0x40];
+        BinaryPrimitives.WriteUInt32LittleEndian(dat, magic);
+        BinaryPrimitives.WriteUInt16LittleEndian(dat.AsSpan(0x08), 1);
+        BinaryPrimitives.WriteUInt16LittleEndian(dat.AsSpan(0x0A), 3);
+        BinaryPrimitives.WriteUInt32LittleEndian(dat.AsSpan(0x10), (uint)dat.Length);
+        var sceSys = Directory.CreateDirectory(Path.Combine(_app0Root, "sce_sys"));
+        File.WriteAllBytes(Path.Combine(sceSys.FullName, "playgo-chunk.dat"), dat);
+        var handle = InitializeAndOpen();
+
+        _ctx[CpuRegister.Rdi] = handle;
+        _ctx[CpuRegister.Rsi] = ChunkIdsAddress;
+        _ctx[CpuRegister.Rdx] = 16;
+        _ctx[CpuRegister.Rcx] = HandleAddress;
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, PlayGoExports.PlayGoGetChunkId(_ctx));
+        Span<byte> written = stackalloc byte[sizeof(uint) + 3 * sizeof(ushort)];
+        Assert.True(_memory.TryRead(HandleAddress, written[..sizeof(uint)]));
+        Assert.True(_memory.TryRead(ChunkIdsAddress, written[sizeof(uint)..]));
+        Assert.Equal(3u, BinaryPrimitives.ReadUInt32LittleEndian(written));
+        Assert.Equal(new ushort[] { 0, 1, 2 }, new[]
+        {
+            BinaryPrimitives.ReadUInt16LittleEndian(written[4..]),
+            BinaryPrimitives.ReadUInt16LittleEndian(written[6..]),
+            BinaryPrimitives.ReadUInt16LittleEndian(written[8..]),
+        });
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, GetLocus(handle, [0, 1, 2]));
+        Assert.Equal(new byte[] { LocusLocalFast, LocusLocalFast, LocusLocalFast }, ReadLoci(3));
+        Assert.Equal(BadChunkId, GetLocus(handle, [3]));
+    }
+
     [Fact]
     public void GetLocus_FaultingChunkAndOutputPointers_ReturnMemoryFault()
     {
@@ -174,6 +223,135 @@ public sealed class PlayGoExportsTests : IDisposable
             (int)OrbisGen2Result.ORBIS_GEN2_OK,
             PlayGoExports.PlayGoGetLocus(_ctx));
         Assert.Equal(new byte[] { 0xA5 }, ReadLoci(1));
+    }
+
+    [Fact]
+    public void GetLocus_PgmChunkCount_ReportsAllChunksAndStaysPermissivePastThem()
+    {
+        WritePgm(3);
+        var handle = InitializeAndOpen();
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, GetLocus(handle, [0, 1, 2]));
+        Assert.Equal(new byte[] { LocusLocalFast, LocusLocalFast, LocusLocalFast }, ReadLoci(3));
+
+        // Assumed ids are not authoritative: an id past the count is not rejected.
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, GetLocus(handle, [9]));
+    }
+
+    [Fact]
+    public void GetLocus_ChunkDefinitionsTakePrecedenceOverPgm()
+    {
+        WritePgm(2);
+        File.WriteAllText(
+            Path.Combine(_app0Root, "playgo-chunkdefs.xml"),
+            "<playgo default_chunk=\"5\"><chunk id=\"5\"/></playgo>");
+        var handle = InitializeAndOpen();
+
+        // The title's own chunk list stays exact: the pgm count does not add chunk 1.
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, GetLocus(handle, [5]));
+        Assert.Equal(BadChunkId, GetLocus(handle, [1]));
+        Assert.Equal((0ul, 0ul), GetProgress(handle, [5]));
+    }
+
+    [Fact]
+    public void GetLocus_PakChunksTakePrecedenceOverPgm()
+    {
+        WritePgm(2);
+        File.WriteAllBytes(Path.Combine(_app0Root, "pakchunk7-PS5.pak"), []);
+        var handle = InitializeAndOpen();
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, GetLocus(handle, [0, 7]));
+        Assert.Equal(BadChunkId, GetLocus(handle, [1]));
+    }
+
+    [Fact]
+    public void GetProgress_PgmChunks_ReportsAFullyInstalledTitle()
+    {
+        WritePgm(3);
+        var handle = InitializeAndOpen();
+
+        Assert.Equal((1ul, 1ul), GetProgress(handle, [0, 1, 2]));
+    }
+
+    [Fact]
+    public void GetProgress_WithoutPgm_ReportsZeroOfZero()
+    {
+        var handle = InitializeAndOpen();
+
+        Assert.Equal((0ul, 0ul), GetProgress(handle, [0]));
+    }
+
+    [Theory]
+    [InlineData("BAD!", 4u)]
+    [InlineData("DMGP", 0u)]
+    public void GetLocus_InvalidPgm_FallsBackToAuthoritativeDefault(string magic, uint count)
+    {
+        WritePgm(count, magic);
+        var handle = InitializeAndOpen();
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, GetLocus(handle, [0]));
+        Assert.Equal(BadChunkId, GetLocus(handle, [1]));
+    }
+
+    [Fact]
+    public void GetLocus_TruncatedPgm_FallsBackToAuthoritativeDefault()
+    {
+        var cache = Directory.CreateDirectory(Path.Combine(_app0Root, "cache_ps5"));
+        File.WriteAllBytes(Path.Combine(cache.FullName, "playgo.pgm"), "DMGP"u8.ToArray());
+        var handle = InitializeAndOpen();
+
+        Assert.Equal(BadChunkId, GetLocus(handle, [1]));
+    }
+
+    [Fact]
+    public void GetLocus_PakDiscoveryStillAppliesWithoutPgmOrSidecars()
+    {
+        File.WriteAllBytes(Path.Combine(_app0Root, "pakchunk4-PS5.pak"), []);
+        var handle = InitializeAndOpen();
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, GetLocus(handle, [0, 4]));
+        Assert.Equal(BadChunkId, GetLocus(handle, [1]));
+    }
+
+    [Fact]
+    public void GetLocus_ScenarioWithoutChunkList_UsesPgmChunks()
+    {
+        WritePgm(3);
+        WriteScenarioJson();
+        var handle = InitializeAndOpen();
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, GetLocus(handle, [0, 1, 2]));
+        Assert.Equal(new byte[] { LocusLocalFast, LocusLocalFast, LocusLocalFast }, ReadLoci(3));
+        Assert.Equal((1ul, 1ul), GetProgress(handle, [0, 1, 2]));
+    }
+
+    [Fact]
+    public void GetLocus_ScenarioWithoutChunkList_PakChunksTakePrecedenceOverPgm()
+    {
+        WritePgm(2);
+        WriteScenarioJson();
+        File.WriteAllBytes(Path.Combine(_app0Root, "pakchunk7-PS5.pak"), []);
+        var handle = InitializeAndOpen();
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, GetLocus(handle, [0, 7]));
+        Assert.Equal(BadChunkId, GetLocus(handle, [1]));
+    }
+
+    private void WriteScenarioJson()
+    {
+        var sceSys = Directory.CreateDirectory(Path.Combine(_app0Root, "sce_sys"));
+        File.WriteAllText(
+            Path.Combine(sceSys.FullName, "playgo-scenario.json"),
+            "{\"languages\":[\"en\"],\"scenarios\":[]}");
+    }
+
+    private void WritePgm(uint chunkCount, string magic = "DMGP")
+    {
+        var header = new byte[0x14];
+        System.Text.Encoding.ASCII.GetBytes(magic, header);
+        BinaryPrimitives.WriteUInt32LittleEndian(header.AsSpan(0x10), chunkCount);
+        var cache = Directory.CreateDirectory(Path.Combine(_app0Root, "cache_ps5"));
+        File.WriteAllBytes(Path.Combine(cache.FullName, "playgo.pgm"), header);
     }
 
     public void Dispose()
@@ -223,6 +401,16 @@ public sealed class PlayGoExportsTests : IDisposable
 
         SetGetLocusArguments(handle, ChunkIdsAddress, (uint)chunkIds.Length, LociAddress);
         return PlayGoExports.PlayGoGetLocus(_ctx);
+    }
+
+    private (ulong Installed, ulong Total) GetProgress(uint handle, ushort[] chunkIds)
+    {
+        WriteChunkIds(chunkIds);
+        SetGetLocusArguments(handle, ChunkIdsAddress, (uint)chunkIds.Length, ProgressAddress);
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, PlayGoExports.PlayGoGetProgress(_ctx));
+        var progress = new byte[sizeof(ulong) * 2];
+        Assert.True(_memory.TryRead(ProgressAddress, progress));
+        return (BinaryPrimitives.ReadUInt64LittleEndian(progress), BinaryPrimitives.ReadUInt64LittleEndian(progress.AsSpan(sizeof(ulong))));
     }
 
     private void WriteChunkIds(ushort[] chunkIds)

@@ -346,10 +346,33 @@ public sealed class PendingGpuWrites
 
     public void Release(long sequence)
     {
+        // While a deferred dispatch run is open, its members' marks stay pending, so the in-order checks of later members and
+        // of the command thread's register tables see every write before them; the release lands when the run closes.
+        var held = Volatile.Read(ref _holdFrom);
+        if (sequence >= held)
+        {
+            RaiseTo(ref _heldRelease, sequence);
+            RaiseTo(ref _released, held - 1);
+            return;
+        }
+
         if (sequence > Volatile.Read(ref _released))
         {
             Volatile.Write(ref _released, sequence);
         }
+    }
+
+    private long _holdFrom = long.MaxValue;
+    private long _heldRelease;
+
+    // No release reaches the first member of the open deferred dispatch run, or anything after it, until EndHold.
+    public void HoldFrom(long sequence) => Volatile.Write(ref _holdFrom, sequence);
+
+    public void EndHold()
+    {
+        Volatile.Write(ref _holdFrom, long.MaxValue);
+        Interlocked.MemoryBarrier();
+        RaiseTo(ref _released, Interlocked.Exchange(ref _heldRelease, 0));
     }
 
     private void Sweep()

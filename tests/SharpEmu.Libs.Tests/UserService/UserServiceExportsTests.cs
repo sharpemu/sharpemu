@@ -39,6 +39,54 @@ public sealed class UserServiceExportsTests
     }
 
     [Fact]
+    public void TriggerEffectAndVibrationIntensitiesReportTheStandardSetting()
+    {
+        const ulong address = 0x1_0000_0000;
+        var memory = new FakeCpuMemory(address, 0x100);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        Span<byte> value = stackalloc byte[4];
+        foreach (var export in new Func<CpuContext, int>[]
+                 {
+                     UserServiceExports.UserServiceGetAccessibilityTriggerEffect,
+                     UserServiceExports.UserServiceGetAccessibilityVibration,
+                 })
+        {
+            Assert.True(memory.TryWrite(address, new byte[] { 0xEE, 0xEE, 0xEE, 0xEE }));
+            ctx[CpuRegister.Rdi] = 0x10000000;
+            ctx[CpuRegister.Rsi] = address;
+            Assert.Equal(0, export(ctx));
+            Assert.True(memory.TryRead(address, value));
+            Assert.Equal(1, BitConverter.ToInt32(value));
+        }
+    }
+
+    [Fact]
+    public void GetUserColorWritesBlueForTheSignedInUser()
+    {
+        const ulong address = 0x1_0000_0000;
+        var memory = new FakeCpuMemory(address, 0x100);
+        var ctx = new CpuContext(memory, Generation.Gen4);
+        Assert.True(memory.TryWrite(address, new byte[] { 0xEE, 0xEE, 0xEE, 0xEE, 0xAA }));
+        ctx[CpuRegister.Rdi] = 0x10000000;
+        ctx[CpuRegister.Rsi] = address;
+        Assert.Equal(0, UserServiceExports.UserServiceGetUserColor(ctx));
+        Span<byte> actual = stackalloc byte[5];
+        Assert.True(memory.TryRead(address, actual));
+        Assert.Equal(new byte[] { 0, 0, 0, 0, 0xAA }, actual.ToArray());
+    }
+
+    [Theory]
+    [InlineData(0x10000001, 0x1_0000_0000UL, unchecked((int)0x80960009))]
+    [InlineData(0x10000000, 0UL, unchecked((int)0x80960005))]
+    public void GetUserColorValidatesUserAndOutput(int userId, ulong address, int expected)
+    {
+        var ctx = new CpuContext(new FakeCpuMemory(0x1_0000_0000, 0x100), Generation.Gen4);
+        ctx[CpuRegister.Rdi] = unchecked((ulong)userId);
+        ctx[CpuRegister.Rsi] = address;
+        Assert.Equal(expected, UserServiceExports.UserServiceGetUserColor(ctx));
+    }
+
+    [Fact]
     public void TerminateResetsTheLoginEvent()
     {
         const ulong address = 0x1_0000_0000;

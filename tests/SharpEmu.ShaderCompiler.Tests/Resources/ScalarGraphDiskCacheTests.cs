@@ -45,6 +45,58 @@ public sealed class ScalarGraphDiskCacheTests
     }
 
     [Fact]
+    public void HitMarksItsEntryUsedWithoutRewritingIt()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "sharpemu-graph-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var program = Program(ScalarLoad(0, 2, 8), EndProgram(8));
+            _ = ScalarGraphDiskCache.Build(program, 0, 16, null, 64, directory);
+            var file = Assert.Single(Directory.GetFiles(directory, "*.graph"));
+            var written = File.GetLastWriteTimeUtc(file);
+            var old = written.AddDays(-1);
+            File.SetLastAccessTimeUtc(file, old);
+            _ = ScalarGraphDiskCache.Build(program, 0, 16, null, 64, directory);
+            Assert.Equal(written, File.GetLastWriteTimeUtc(file));
+            Assert.True(File.GetLastAccessTimeUtc(file) > old);
+        }
+        finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+    }
+
+    [Fact]
+    public void TrimDropsTheEntriesUsedLongestAgoUntilTheTarget()
+    {
+        var directory = Path.Combine(Path.GetTempPath(), "sharpemu-graph-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(directory);
+            var now = DateTime.UtcNow;
+            string Entry(string name, int hoursAgoWritten, int hoursAgoUsed)
+            {
+                var path = Path.Combine(directory, name + ".graph");
+                File.WriteAllBytes(path, new byte[100]);
+                File.SetLastWriteTimeUtc(path, now.AddHours(-hoursAgoWritten));
+                File.SetLastAccessTimeUtc(path, now.AddHours(-hoursAgoUsed));
+                return path;
+            }
+
+            // Written first but used last: kept, where trimming by write time would drop it first. A hit leaves the
+            // last access time at or after the write time.
+            var usedLast = Entry("a", 10, 0);
+            var usedFirst = Entry("b", 9, 9);
+            var usedSecond = Entry("c", 8, 5);
+            var usedThird = Entry("d", 7, 3);
+            Assert.Equal(400, ScalarGraphDiskCache.Trim(directory, 100, 500, 300));
+            Assert.Equal(200, ScalarGraphDiskCache.Trim(directory, 100, 450, 300));
+            Assert.True(File.Exists(usedLast));
+            Assert.True(File.Exists(usedThird));
+            Assert.False(File.Exists(usedFirst));
+            Assert.False(File.Exists(usedSecond));
+        }
+        finally { if (Directory.Exists(directory)) Directory.Delete(directory, true); }
+    }
+
+    [Fact]
     public void CachePreservesExcludedRegistersAcrossReloads()
     {
         var directory = Path.Combine(Path.GetTempPath(), "sharpemu-graph-" + Guid.NewGuid().ToString("N"));

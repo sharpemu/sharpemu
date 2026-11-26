@@ -27,7 +27,9 @@ public sealed class FlattenedReadReuseDeviceTests(HeadlessVulkanFixture fixture)
             return;
         }
 
-        var request = Request(FlattenedReadReuseTests.RepeatedReadProgram(components), userDataCount: 9, tableBlock: tableBlock);
+        // This fixture exercises the host-flattened table without a guest page table, independent of the process policy.
+        var request = Request(FlattenedReadReuseTests.RepeatedReadProgram(components), userDataCount: 9, scalarDataOnDevice: false,
+            tableBlock: tableBlock);
         Assert.Equal(tableBlock, request.Bindings.UsesTableBlock);
         Assert.False(request.Resources.Info.UsesDeviceAddresses);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);

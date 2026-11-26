@@ -9,26 +9,6 @@ public static partial class Gen5SpirvTranslator
 {
     private sealed partial class CompilationContext
     {
-        private uint _integerReciprocalFunction;
-
-        private void DeclareIntegerReciprocalFunction()
-        {
-            if (!_request.Program.Instructions.Any(instruction => instruction.Opcode == "VRcpIflagF32"))
-            {
-                return;
-            }
-
-            // Keep integer reciprocal lowering outside the caller's optimization region.
-            const uint dontInline = 2;
-            var functionType = _module.TypeFunction(_floatType, _floatType);
-            _integerReciprocalFunction = _module.BeginFunction(_floatType, functionType, dontInline);
-            var source = _module.AddFunctionParameter(_floatType);
-            _module.AddLabel();
-            var reciprocal = _module.AddInstruction(SpirvOp.FDiv, _floatType, Float(1), source);
-            _module.AddStatement(SpirvOp.ReturnValue, reciprocal);
-            _module.EndFunction();
-        }
-
         private bool TryEmitVectorAlu(
             Gen5ShaderInstruction instruction,
             out string error)
@@ -615,15 +595,26 @@ public static partial class Gen5SpirvTranslator
                             EmitFlushF32DenormToSignedZero(
                                 GetFloatSource(instruction, 0))));
                     break;
+                // Inline: NVIDIA miscompiled a shader holding a real call (Demon's Souls half-wave culling compute).
+                // The fma Newton step keeps the reciprocal within the ~1 ulp the AMD integer division needs, which
+                // OpFDiv alone does not guarantee; inf/NaN/zero keep the division result.
                 case "VRcpIflagF32":
+                {
+                    var x = GetFloatSource(instruction, 0);
+                    var r = _module.AddInstruction(SpirvOp.FDiv, _floatType, Float(1), x);
+                    var negX = _module.AddInstruction(SpirvOp.FNegate, _floatType, x);
+                    var e = Ext(50, _floatType, negX, r, Float(1));
+                    var r1 = Ext(50, _floatType, r, e, r);
+                    var keep = LogicalOr(
+                        LogicalOr(
+                            _module.AddInstruction(SpirvOp.IsInf, _boolType, r),
+                            _module.AddInstruction(SpirvOp.IsNan, _boolType, r)),
+                        _module.AddInstruction(SpirvOp.FOrdEqual, _boolType, r, Float(0)));
                     result = EmitFloatResult(
                         instruction,
-                        _module.AddInstruction(
-                            SpirvOp.FunctionCall,
-                            _floatType,
-                            _integerReciprocalFunction,
-                            GetFloatSource(instruction, 0)));
+                        _module.AddInstruction(SpirvOp.Select, _floatType, keep, r, r1));
                     break;
+                }
                 case "VLogF32":
                     result = EmitFloatResult(
                         instruction,
@@ -925,6 +916,14 @@ public static partial class Gen5SpirvTranslator
                 {
                     // Every f16 value widens to f32 exactly, and min/max pick one
                     // input, so the f32 result narrows back without rounding.
+                    if (TryGetNativeHalfSources(instruction, 3, selects: true, out var halves))
+                    {
+                        result = EmitNativeHalfResult(instruction, destination, instruction.Opcode == "VMax3F16"
+                            ? NanIgnoringMinMax(40, NanIgnoringMinMax(40, halves[0], halves[1], _halfType), halves[2], _halfType)
+                            : EmitFloatMedian(halves[0], halves[1], halves[2], _halfType));
+                        break;
+                    }
+
                     var a = GetFloat16Source(instruction, 0);
                     var b = GetFloat16Source(instruction, 1);
                     var c = GetFloat16Source(instruction, 2);
@@ -2065,6 +2064,11 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
+            if (TryEmitNativePackedF16(instruction, control, out result))
+            {
+                return true;
+            }
+
             var low = EmitPackedF16Lane(instruction, control, highLane: false);
             var high = EmitPackedF16Lane(instruction, control, highLane: true);
             result = BitwiseOr(low, ShiftLeftLogical(high, UInt(16)));
@@ -2220,11 +2224,8 @@ public static partial class Gen5SpirvTranslator
             uint value;
             if (readAsHalf)
             {
-                var raw = GetRawSource(instruction, index);
-                var half = ((control.OpSelMask >> index) & 1) != 0
-                    ? ShiftRightLogical(raw, UInt(16))
-                    : raw;
-                value = Bitcast(_floatType, EmitHalfToFloat(half));
+                value = Bitcast(_floatType,
+                    EmitHalfToFloat(GetRawSource(instruction, index), ((control.OpSelMask >> index) & 1) != 0));
             }
             else
             {
@@ -2329,11 +2330,8 @@ public static partial class Gen5SpirvTranslator
                 })
                 : GetRawSource(instruction, index);
 
-        private uint EmitPackedF16Half(uint raw, bool highLane)
-        {
-            var half = highLane ? ShiftRightLogical(raw, UInt(16)) : raw;
-            return Bitcast(_floatType, EmitHalfToFloat(half));
-        }
+        private uint EmitPackedF16Half(uint raw, bool highLane) =>
+            Bitcast(_floatType, EmitHalfToFloat(raw, highLane));
 
         // Saturates an f32 bit pattern to [0, 1] the way the VOP3P clamp modifier
         // does: below 0 (and NaN, since the ordered compare is false for it) becomes
@@ -2428,10 +2426,7 @@ public static partial class Gen5SpirvTranslator
         {
             var raw = GetPackedF16Source(instruction, index);
             var selectMask = highLane ? control.OpSelHiMask : control.OpSelMask;
-            var half = ((selectMask >> index) & 1) != 0
-                ? ShiftRightLogical(raw, UInt(16))
-                : raw;
-            var value = Bitcast(_floatType, EmitHalfToFloat(half));
+            var value = Bitcast(_floatType, EmitHalfToFloat(raw, ((selectMask >> index) & 1) != 0));
             var negateMask = highLane ? control.NegHiMask : control.NegLoMask;
             if (((negateMask >> index) & 1) != 0)
             {
@@ -2444,21 +2439,23 @@ public static partial class Gen5SpirvTranslator
         // fminnum_like / fmaxnum_like: if one operand is NaN return the other; if both
         // are NaN return a NaN; otherwise the ordered smaller/larger. The ordering of
         // -0/+0 is unspecified under these opcodes, so the ordered compare is enough.
-        private uint EmitPackedF16MinMax(uint left, uint right, bool isMax)
+        private uint EmitPackedF16MinMax(uint left, uint right, bool isMax, uint type = 0, uint boolType = 0)
         {
+            type = type == 0 ? _floatType : type;
+            boolType = boolType == 0 ? _boolType : boolType;
             var compare = _module.AddInstruction(
                 isMax ? SpirvOp.FOrdGreaterThan : SpirvOp.FOrdLessThan,
-                _boolType,
+                boolType,
                 left,
                 right);
             var numeric = _module.AddInstruction(
-                SpirvOp.Select, _floatType, compare, left, right);
-            var leftNan = _module.AddInstruction(SpirvOp.IsNan, _boolType, left);
-            var rightNan = _module.AddInstruction(SpirvOp.IsNan, _boolType, right);
+                SpirvOp.Select, type, compare, left, right);
+            var leftNan = _module.AddInstruction(SpirvOp.IsNan, boolType, left);
+            var rightNan = _module.AddInstruction(SpirvOp.IsNan, boolType, right);
             var withRight = _module.AddInstruction(
-                SpirvOp.Select, _floatType, rightNan, left, numeric);
+                SpirvOp.Select, type, rightNan, left, numeric);
             return _module.AddInstruction(
-                SpirvOp.Select, _floatType, leftNan, right, withRight);
+                SpirvOp.Select, type, leftNan, right, withRight);
         }
 
         private uint ReadMinimumHalfBits(Gen5ShaderInstruction instruction, int sourceIndex)
@@ -2547,42 +2544,49 @@ public static partial class Gen5SpirvTranslator
             return EmitHalfResult(instruction, destination, bits);
         }
 
-        // Widens an f16 value held in the low 16 bits of `halfBits` to an f32 bit
+        // Widens an f16 value held in the low 16 bits of `halfBits` (the high 16 bits when `high` is set) to an f32 bit
         // pattern, exactly (subnormals normalised, Inf/NaN and signed zero preserved).
-        // Mirrors the branchless HalfToFloat reference validated against System.Half.
-        private uint EmitHalfToFloat(uint halfBits)
+        // The exponent and mantissa move into place and the exponent is re-biased;
+        // Inf/NaN take a second re-bias to the all-ones exponent. A subnormal m becomes
+        // 2^-14 * (1 + m / 1024) - 2^-14: both floats are normal and their difference
+        // m * 2^-24 is representable, so the subtraction is exact even when the driver
+        // flushes denormals.
+        private uint EmitHalfToFloat(uint halfBits, bool high = false)
         {
-            var sign = ShiftLeftLogical(BitwiseAnd(halfBits, UInt(0x8000)), UInt(16));
-            var exponent = BitwiseAnd(ShiftRightLogical(halfBits, UInt(10)), UInt(0x1F));
-            var mantissa = BitwiseAnd(halfBits, UInt(0x3FF));
+            if (_request.NativeFloat16Conversions && !_module.TryGetConstantValue(halfBits, out _))
+            {
+                return EmitNativeHalfToFloat(halfBits, high);
+            }
 
-            var normal = BitwiseOr(
-                ShiftLeftLogical(IAdd(exponent, UInt(112)), UInt(23)),
-                ShiftLeftLogical(mantissa, UInt(13)));
-            var infinityNan = BitwiseOr(UInt(0x7F80_0000), ShiftLeftLogical(mantissa, UInt(13)));
+            if (high)
+            {
+                halfBits = ShiftRightLogical(halfBits, UInt(16));
+            }
 
-            // Subnormal: normalise the mantissa. FindUMsb of (mantissa | 1) keeps the
-            // op defined when mantissa is 0; that lane is discarded by the select below.
-            var highBit = Ext(75, _uintType, BitwiseOr(mantissa, UInt(1)));
-            var shift = ISubU(UInt(23), highBit);
-            var subFraction = BitwiseAnd(ShiftLeftLogical(mantissa, shift), UInt(0x7F_FFFF));
-            var subnormal = SelectU(
-                IsNotZero(mantissa),
-                BitwiseOr(ShiftLeftLogical(IAdd(highBit, UInt(103)), UInt(23)), subFraction),
-                UInt(0));
-
-            var magnitude = SelectU(
+            var magnitude = ShiftLeftLogical(BitwiseAnd(halfBits, UInt(0x7FFF)), UInt(13));
+            var exponent = BitwiseAnd(magnitude, UInt(0x0F80_0000));
+            var rebiased = IAdd(magnitude, UInt(112u << 23));
+            var infinityNan = IAdd(rebiased, UInt(112u << 23));
+            var subnormal = Bitcast(_uintType, _module.AddInstruction(SpirvOp.FSub, _floatType,
+                Bitcast(_floatType, IAdd(rebiased, UInt(1u << 23))), Float(1f / 16384f)));
+            var widened = SelectU(
                 Equal(exponent, 0),
                 subnormal,
-                SelectU(Equal(exponent, 31), infinityNan, normal));
-            return BitwiseOr(sign, magnitude);
+                SelectU(Equal(exponent, 0x0F80_0000), infinityNan, rebiased));
+            return BitwiseOr(widened, ShiftLeftLogical(BitwiseAnd(halfBits, UInt(0x8000)), UInt(16)));
         }
 
         // Narrows an f32 bit pattern to an f16 value in the low 16 bits, rounding to
         // nearest even (subnormals, overflow-to-Inf and NaN/Inf handled). Mirrors the
         // branchless FloatToHalf reference validated exhaustively against System.Half.
+        // A NaN becomes the quiet NaN of its sign, 0x7E00.
         private uint EmitFloatToHalf(uint bits)
         {
+            if (_request.NativeFloat16Conversions && !_module.TryGetConstantValue(bits, out _))
+            {
+                return EmitNativeFloatToHalf(bits);
+            }
+
             var sign = BitwiseAnd(ShiftRightLogical(bits, UInt(16)), UInt(0x8000));
             var absolute = BitwiseAnd(bits, UInt(0x7FFF_FFFF));
 
@@ -2622,13 +2626,240 @@ public static partial class Gen5SpirvTranslator
                 _module.AddInstruction(
                     SpirvOp.LogicalAnd,
                     _boolType,
-                    Equal(lowBits, halfWay),
+                    UCmp(SpirvOp.IEqual, lowBits, halfWay),
                     IsNotZero(BitwiseAnd(quotient, UInt(1)))));
             var subnormal = IAdd(quotient, SelectU(roundUp, UInt(1), UInt(0)));
 
             var isSubnormal = UCmp(SpirvOp.ULessThanEqual, exponent, UInt(112));
             var finite = SelectU(isSubnormal, subnormal, normal);
             return SelectU(isInfinityNan, infinityNan, BitwiseOr(sign, finite));
+        }
+
+        private uint _halfType;
+        private uint _half2Type;
+
+        // The f16 type of the native conversions. Its first use declares it with the float controls under which OpFConvert
+        // converts as the guest does (the entry point gets their execution modes): round-to-nearest-even, kept denormals,
+        // kept signed zero, infinity and NaN, all for 16-bit floats.
+        private uint HalfType()
+        {
+            if (_halfType == 0)
+            {
+                _module.AddCapability(SpirvCapability.Float16);
+                _module.AddCapability(SpirvCapability.DenormPreserve);
+                _module.AddCapability(SpirvCapability.RoundingModeRte);
+                _module.AddCapability(SpirvCapability.SignedZeroInfNanPreserve);
+                _halfType = _module.TypeFloat(16);
+                _half2Type = _module.TypeVector(_halfType, 2);
+            }
+
+            return _halfType;
+        }
+
+        // EmitHalfToFloat with NativeFloat16Conversions. OpFConvert widens; a NaN keeps its payload as the integer sequence
+        // keeps it, which the device need not do: the half at the top of a word, shifted right arithmetically by 3, has the
+        // sign, exponent and mantissa of the f32 NaN in place, and 0x70000000 fills the rest of its exponent.
+        private uint EmitNativeHalfToFloat(uint bits, bool high)
+        {
+            var half = _module.AddInstruction(SpirvOp.CompositeExtract, HalfType(), Bitcast(_half2Type, bits), high ? 1u : 0u);
+            var top = high ? BitwiseAnd(bits, UInt(0xFFFF_0000)) : ShiftLeftLogical(bits, UInt(16));
+            var nan = BitwiseOr(_module.AddInstruction(SpirvOp.ShiftRightArithmetic, _uintType, top, UInt(3)), UInt(0x7000_0000));
+            return Bitcast(_uintType, _module.AddInstruction(SpirvOp.Select, _floatType,
+                _module.AddInstruction(SpirvOp.IsNan, _boolType, half),
+                Bitcast(_floatType, nan),
+                _module.AddInstruction(SpirvOp.FConvert, _floatType, half)));
+        }
+
+        // EmitFloatToHalf with NativeFloat16Conversions. OpFConvert rounds to nearest even, makes f16 denormals and overflows
+        // to infinity; a NaN becomes 0x7E00 with its sign, as in the integer sequence.
+        private uint EmitNativeFloatToHalf(uint bits)
+        {
+            var half = HalfType();
+            var value = Bitcast(_floatType, bits);
+            var narrowed = _module.AddInstruction(SpirvOp.CompositeConstruct, _half2Type,
+                _module.AddInstruction(SpirvOp.FConvert, half, value), _module.Constant(half, 0));
+            var nan = SelectU(UCmp(SpirvOp.UGreaterThan, bits, UInt(0x7FFF_FFFF)), UInt(0xFE00), UInt(0x7E00));
+            return SelectU(IsNan(value), nan, Bitcast(_uintType, narrowed));
+        }
+
+        private uint HalfConstant(uint bits) => _module.Constant(HalfType(), bits);
+
+        // With NativeFloat16Conversions the f16 add, subtract, multiply, maximum and median are f16 ops where they give the
+        // bits of the f32 forms: one f16 rounding equals the f32 rounding followed by the narrowing (24 >= 2 * 11 + 2
+        // significand bits), and the maximum and median select one of their inputs in either width. The f32 forms must keep
+        // signed zero and NaN (SignedZeroInfNanPreserve for 32 bits), and the abs and neg modifiers are bit operations: an
+        // NVIDIA driver's f16 negation of a NaN can lose its sign, and its compiler folds x + -x of f16 pairs to -0. A maximum or
+        // median with a negated operand keeps the f32 forms, whose NaN result takes the sign of the negation or not as the
+        // driver compiles it. Output scaling, SDWA and DPP keep the f32 forms, as does a constant f16 cannot hold (1/(2 pi))
+        // or a NaN constant, whose widened payload the f32 forms compute with.
+        private bool TryGetNativeHalfSources(Gen5ShaderInstruction instruction, int count, bool selects, out uint[] halves)
+        {
+            halves = new uint[count];
+            if (!_request.NativeFloat16Conversions || !_request.ShaderSignedZeroInfNanPreserveFloat32Supported ||
+                instruction.Control is not (null or Gen5Vop3Control { OutputModifier: 0 }) ||
+                (selects && instruction.Control is Gen5Vop3Control { NegateMask: not 0 }))
+            {
+                return false;
+            }
+
+            var control = instruction.Control as Gen5Vop3Control;
+            bool Bit(uint? mask, int index) => ((mask ?? 0) & (1u << index)) != 0;
+            var constants = new int[count];
+            for (var index = 0; index < count; index++)
+            {
+                if (!TryGetNativeHalfConstant(instruction.Sources[index], Bit(control?.OperandSelect, index), out constants[index]))
+                {
+                    return false;
+                }
+            }
+
+            for (var index = 0; index < count; index++)
+            {
+                var high = Bit(control?.OperandSelect, index);
+                var sign = high ? 0x8000_0000u : 0x8000u;
+                var bits = constants[index] >= 0
+                    ? UInt((uint)constants[index] << (high ? 16 : 0))
+                    : GetRawSource(instruction, index, applySdwaIntegerModifiers: false);
+                if (Bit(control?.AbsoluteMask, index))
+                {
+                    bits = BitwiseAnd(bits, UInt(~sign));
+                }
+
+                if (Bit(control?.NegateMask, index))
+                {
+                    bits = BitwiseXor(bits, UInt(sign));
+                }
+
+                halves[index] = _module.TryGetConstantValue(bits, out var constant)
+                    ? HalfConstant(high ? constant >> 16 : constant & 0xFFFF)
+                    : _module.AddInstruction(SpirvOp.CompositeExtract, HalfType(), Bitcast(_half2Type, bits), high ? 1u : 0u);
+            }
+
+            return true;
+        }
+
+        // The f16 bits of a constant source as GetFloat16Source reads it, or -1 for a register. False when f16 cannot hold
+        // the value or it is a NaN.
+        private static bool TryGetNativeHalfConstant(Gen5Operand operand, bool high, out int bits)
+        {
+            bits = -1;
+            if (operand.Kind == Gen5OperandKind.EncodedConstant &&
+                Gen5InlineConstants.TryDecode(operand.Value, out var inline))
+            {
+                var number = operand.Value switch
+                {
+                    >= 128 and <= 192 => operand.Value - 128f,
+                    >= 193 and <= 208 => 192f - operand.Value,
+                    _ => BitConverter.UInt32BitsToSingle(inline),
+                };
+                bits = BitConverter.HalfToUInt16Bits((Half)number);
+                return (float)(Half)number == number;
+            }
+
+            if (operand.Kind == Gen5OperandKind.LiteralConstant)
+            {
+                bits = (int)((high ? operand.Value >> 16 : operand.Value) & 0xFFFF);
+                return (bits & 0x7FFF) <= 0x7C00;
+            }
+
+            return true;
+        }
+
+        // A native f16 result as the low half of a word for EmitHalfResult. The clamp is EmitClampToUnitInterval's; without
+        // it a NaN becomes 0x7E00 with its sign, as the narrowing makes it.
+        private uint EmitNativeHalfResult(Gen5ShaderInstruction instruction, uint destination, uint value)
+        {
+            var clamp = instruction.Control is Gen5Vop3Control { Clamp: true };
+            if (clamp)
+            {
+                value = ClampHalvesToUnitInterval(value, _halfType, _boolType, HalfConstant(0), HalfConstant(0x3C00));
+            }
+
+            var bits = Bitcast(_uintType, _module.AddInstruction(SpirvOp.CompositeConstruct, _half2Type, value, HalfConstant(0)));
+            return EmitHalfResult(instruction, destination, clamp ? bits : SelectU(
+                _module.AddInstruction(SpirvOp.IsNan, _boolType, value),
+                BitwiseOr(BitwiseAnd(bits, UInt(0x8000)), UInt(0x7E00)),
+                bits));
+        }
+
+        // TryEmitPackedF16 on f16 pairs under the rules of TryGetNativeHalfSources; V_PK_FMA_F16 keeps its f32 form. A NaN
+        // lane becomes 0x7E00 with its sign, as the narrowing of the lane makes it.
+        private bool TryEmitNativePackedF16(Gen5ShaderInstruction instruction, Gen5Vop3pControl control, out uint result)
+        {
+            result = 0;
+            if (!_request.NativeFloat16Conversions || !_request.ShaderSignedZeroInfNanPreserveFloat32Supported ||
+                instruction.Opcode == "VPkFmaF16" ||
+                (instruction.Opcode is "VPkMaxF16" or "VPkMinF16" && ((control.NegLoMask | control.NegHiMask) & 3) != 0) ||
+                !TryGetNativeHalfPair(instruction, control, 0, out var left) ||
+                !TryGetNativeHalfPair(instruction, control, 1, out var right))
+            {
+                return false;
+            }
+
+            var bool2 = _module.TypeVector(_boolType, 2);
+            var value = instruction.Opcode switch
+            {
+                "VPkAddF16" => _module.AddInstruction(SpirvOp.FAdd, _half2Type, left, right),
+                "VPkMulF16" => _module.AddInstruction(SpirvOp.FMul, _half2Type, left, right),
+                _ => EmitPackedF16MinMax(left, right, instruction.Opcode == "VPkMaxF16", _half2Type, bool2),
+            };
+            if (control.Clamp)
+            {
+                result = Bitcast(_uintType, ClampHalvesToUnitInterval(value, _half2Type, bool2,
+                    Bitcast(_half2Type, UInt(0)), Bitcast(_half2Type, UInt(0x3C00_3C00))));
+                return true;
+            }
+
+            var bits = Bitcast(_uintType, value);
+            var nan = _module.AddInstruction(SpirvOp.IsNan, bool2, value);
+            var lanes = BitwiseOr(
+                SelectU(_module.AddInstruction(SpirvOp.CompositeExtract, _boolType, nan, 0u), UInt(0x0000_FFFF), UInt(0)),
+                SelectU(_module.AddInstruction(SpirvOp.CompositeExtract, _boolType, nan, 1u), UInt(0xFFFF_0000), UInt(0)));
+            var quiet = BitwiseOr(BitwiseAnd(bits, UInt(0x8000_8000)), UInt(0x7E00_7E00));
+            result = BitwiseXor(bits, BitwiseAnd(BitwiseXor(bits, quiet), lanes));
+            return true;
+        }
+
+        // A packed source as an f16 pair: op_sel and op_sel_hi pick the half of each lane and neg_lo and neg_hi flip its sign,
+        // on the bits. False for a constant with a NaN half.
+        private bool TryGetNativeHalfPair(Gen5ShaderInstruction instruction, Gen5Vop3pControl control, int index, out uint pair)
+        {
+            pair = 0;
+            var bits = GetPackedF16Source(instruction, index);
+            var low = (control.OpSelMask >> index) & 1;
+            var high = (control.OpSelHiMask >> index) & 1;
+            if (low != 0 || high != 1)
+            {
+                bits = BitwiseOr(
+                    low != 0 ? ShiftRightLogical(bits, UInt(16)) : BitwiseAnd(bits, UInt(0xFFFF)),
+                    high != 0 ? BitwiseAnd(bits, UInt(0xFFFF_0000)) : ShiftLeftLogical(bits, UInt(16)));
+            }
+
+            var negate = (((control.NegLoMask >> index) & 1) << 15) | (((control.NegHiMask >> index) & 1) << 31);
+            if (negate != 0)
+            {
+                bits = BitwiseXor(bits, UInt(negate));
+            }
+
+            if (_module.TryGetConstantValue(bits, out var constant) &&
+                ((constant & 0x7FFF) > 0x7C00 || ((constant >> 16) & 0x7FFF) > 0x7C00))
+            {
+                return false;
+            }
+
+            HalfType();
+            pair = Bitcast(_half2Type, bits);
+            return true;
+        }
+
+        // EmitClampToUnitInterval on a native f16 value or pair: the ordered compares send NaN and every value up to zero to
+        // +0 and every value from one to one.
+        private uint ClampHalvesToUnitInterval(uint value, uint type, uint boolType, uint zero, uint one)
+        {
+            var lowerBounded = _module.AddInstruction(SpirvOp.Select, type,
+                _module.AddInstruction(SpirvOp.FOrdGreaterThan, boolType, value, zero), value, zero);
+            return _module.AddInstruction(SpirvOp.Select, type,
+                _module.AddInstruction(SpirvOp.FOrdLessThan, boolType, lowerBounded, one), lowerBounded, one);
         }
 
         private uint SelectU(uint condition, uint whenTrue, uint whenFalse) =>
@@ -4248,6 +4479,13 @@ public static partial class Gen5SpirvTranslator
             {
                 value = _module.AddInstruction(SpirvOp.Not, _ulongType, left);
             }
+            else if (instruction.Opcode == "SBrevB64")
+            {
+                // Vulkan limits OpBitReverse to 32-bit operands: reverse each half and swap them.
+                var low = _module.AddInstruction(SpirvOp.BitReverse, _uintType, Narrow(ShiftRightLogical64(left, ULong(32))));
+                var high = _module.AddInstruction(SpirvOp.BitReverse, _uintType, Narrow(left));
+                value = _module.AddInstruction(SpirvOp.BitwiseOr, _ulongType, Widen(low), ShiftLeftLogical64(Widen(high), ULong(32)));
+            }
             else
             {
                 if (instruction.Sources.Count < 2)
@@ -4506,6 +4744,17 @@ public static partial class Gen5SpirvTranslator
 
             var targetLane = IAdd(BitwiseAnd(lane, UInt(0xFFFF_FFF8)), selector);
             targetLane = BitwiseAnd(targetLane, UInt(NativeLaneMask));
+            if (HostSubgroupMayBePartial)
+            {
+                if (control.FetchInactive)
+                {
+                    return ReadGraphicsLane(value, targetLane, out _);
+                }
+
+                var graphicsValue = ReadGraphicsLaneIfActive(value, targetLane, out var usable);
+                return _module.AddInstruction(SpirvOp.Select, _uintType, usable, graphicsValue, UInt(0));
+            }
+
             var shuffled = ShuffleLane(value, targetLane);
             if (control.FetchInactive)
             {
@@ -4530,23 +4779,79 @@ public static partial class Gen5SpirvTranslator
 
         private uint ApplyDppSource(Gen5DppControl control, uint value)
         {
+            if (HostSubgroupMayBePartial)
+            {
+                GetDppSourceLane(control, out var targetLane, out var inRange);
+                var graphicsTarget = BitwiseAnd(
+                    _module.AddInstruction(SpirvOp.Select, _uintType, inRange, targetLane, GuestWaveLane()),
+                    UInt(NativeLaneMask));
+                if (control.FetchInactive)
+                {
+                    return _module.AddInstruction(
+                        SpirvOp.Select, _uintType, inRange, ReadGraphicsLane(value, graphicsTarget, out _), UInt(0));
+                }
+
+                var graphicsValue = ReadGraphicsLaneIfActive(value, graphicsTarget, out var usable);
+                return _module.AddInstruction(
+                    SpirvOp.Select,
+                    _uintType,
+                    _module.AddInstruction(SpirvOp.LogicalAnd, _boolType, inRange, usable),
+                    graphicsValue,
+                    UInt(0));
+            }
+
+            GetDppSource(control, out var safeTarget, out var valid);
+            var shuffled = _pairedMeshLanes
+                ? ShufflePairedValue(_pairedDppSources[0], _pairedDppSources[1], safeTarget)
+                : ShuffleLane(value, safeTarget);
+            return _module.AddInstruction(
+                SpirvOp.Select,
+                _uintType,
+                valid,
+                shuffled,
+                UInt(0));
+        }
+
+        // DPP16: the lane src0 is read from (the reading lane itself when the source is invalid) and whether the source is
+        // valid: in range, and active in the guest unless FI (fetch inactive) is set. An invalid source reads as zero;
+        // without BOUND_CTRL it also leaves the destination unwritten (IsDppWriteEnabled).
+        private void GetDppSource(Gen5DppControl control, out uint safeTarget, out uint valid)
+        {
             GetDppSourceLane(control, out var targetLane, out var inRange);
-            var lane = GuestWaveLane();
-            var safeTarget = _module.AddInstruction(
+            if (!_pairedMeshLanes && _waveLowering is NativeWave32Lowering && _subgroupInvocationIdInput != 0)
+            {
+                // A ballot names the lanes that can be read: an invocation missing from the host subgroup (a fragment warp
+                // that is not full) is never shuffled from, and without FI neither is a lane the guest has inactive.
+                _module.AddCapability(SpirvCapability.GroupNonUniformBallot);
+                var readable = _module.AddInstruction(
+                    SpirvOp.GroupNonUniformBallot,
+                    _uvec4Type,
+                    UInt(3),
+                    control.FetchInactive ? _module.ConstantBool(true) : Load(_boolType, _exec));
+                var target = BitwiseAnd(targetLane, UInt(31));
+                valid = _module.AddInstruction(
+                    SpirvOp.LogicalAnd,
+                    _boolType,
+                    inRange,
+                    _module.AddInstruction(SpirvOp.GroupNonUniformBallotBitExtract, _boolType, UInt(3), readable, target));
+                safeTarget = BitwiseAnd(
+                    _module.AddInstruction(SpirvOp.Select, _uintType, valid, target, GuestWaveLane()),
+                    UInt(NativeLaneMask));
+                return;
+            }
+
+            safeTarget = _module.AddInstruction(
                 SpirvOp.Select,
                 _uintType,
                 inRange,
                 targetLane,
-                lane);
+                GuestWaveLane());
             if (!_pairedMeshLanes)
             {
                 safeTarget = BitwiseAnd(safeTarget, UInt(NativeLaneMask));
             }
-            var shuffled = _pairedMeshLanes
-                ? ShufflePairedValue(_pairedDppSources[0], _pairedDppSources[1], safeTarget)
-                : ShuffleLane(value, safeTarget);
 
-            var sourceAvailable = inRange;
+            valid = inRange;
             if (!control.FetchInactive)
             {
                 var activeWord = _module.AddInstruction(
@@ -4558,19 +4863,12 @@ public static partial class Gen5SpirvTranslator
                 var shuffledActive = _pairedMeshLanes
                     ? ShufflePairedValue(_pairedActiveWords[0], _pairedActiveWords[1], safeTarget)
                     : ShuffleLane(activeWord, safeTarget);
-                sourceAvailable = _module.AddInstruction(
+                valid = _module.AddInstruction(
                     SpirvOp.LogicalAnd,
                     _boolType,
-                    sourceAvailable,
+                    valid,
                     IsNotZero(shuffledActive));
             }
-
-            return _module.AddInstruction(
-                SpirvOp.Select,
-                _uintType,
-                sourceAvailable,
-                shuffled,
-                UInt(0));
         }
 
         private uint ApplySdwaDestination(
@@ -4726,19 +5024,37 @@ public static partial class Gen5SpirvTranslator
 
         private uint IsDppWriteEnabled(Gen5DppControl control)
         {
-            GetDppSourceLane(control, out _, out var inRange);
             var lane = GuestWaveLane();
             var row = ShiftRightLogical(lane, UInt(4));
-            var bank = BitwiseAnd(lane, UInt(3));
+            // A bank is four consecutive lanes of each row (RDNA2 ISA, table 90).
+            var bank = BitwiseAnd(ShiftRightLogical(lane, UInt(2)), UInt(3));
             var rowEnabled = IsNotZero(BitwiseAnd(
                 UInt(control.RowMask),
                 ShiftLeftLogical(UInt(1), row)));
             var bankEnabled = IsNotZero(BitwiseAnd(
                 UInt(control.BankMask),
                 ShiftLeftLogical(UInt(1), bank)));
-            var sourceAllowsWrite = control.BoundControl
-                ? _module.ConstantBool(true)
-                : inRange;
+            var sourceAllowsWrite = _module.ConstantBool(true);
+            if (!control.BoundControl && HostSubgroupMayBePartial)
+            {
+                // ISA: with BOUND_CTRL clear, a lane whose source is out of range or disabled keeps its
+                // old destination. A graphics source lane the host never launched is disabled unless
+                // whole-wave code turned it on.
+                GetDppSourceLane(control, out var sourceLane, out var inRange);
+                sourceAllowsWrite = inRange;
+                if (!control.FetchInactive)
+                {
+                    var safeSource = BitwiseAnd(
+                        _module.AddInstruction(SpirvOp.Select, _uintType, inRange, sourceLane, lane),
+                        UInt(NativeLaneMask));
+                    sourceAllowsWrite = _module.AddInstruction(
+                        SpirvOp.LogicalAnd, _boolType, inRange, IsGraphicsLaneUsable(safeSource));
+                }
+            }
+            else if (!control.BoundControl)
+            {
+                GetDppSource(control, out _, out sourceAllowsWrite);
+            }
             return _module.AddInstruction(
                 SpirvOp.LogicalAnd,
                 _boolType,
@@ -4788,13 +5104,8 @@ public static partial class Gen5SpirvTranslator
                     instruction,
                     sourceIndex,
                     applySdwaIntegerModifiers: false);
-                if (instruction.Control is Gen5Vop3Control control &&
-                    (control.OperandSelect & (1u << sourceIndex)) != 0)
-                {
-                    raw = ShiftRightLogical(raw, UInt(16));
-                }
-
-                value = Bitcast(_floatType, EmitHalfToFloat(raw));
+                value = Bitcast(_floatType, EmitHalfToFloat(raw,
+                    instruction.Control is Gen5Vop3Control control && (control.OperandSelect & (1u << sourceIndex)) != 0));
             }
 
             uint absoluteMask = 0;
@@ -5127,6 +5438,12 @@ public static partial class Gen5SpirvTranslator
             SpirvOp operation,
             bool reverse = false)
         {
+            if (TryGetNativeHalfSources(instruction, 2, selects: false, out var halves))
+            {
+                return EmitNativeHalfResult(instruction, destination,
+                    _module.AddInstruction(operation, _halfType, halves[reverse ? 1 : 0], halves[reverse ? 0 : 1]));
+            }
+
             var left = GetFloat16Source(instruction, reverse ? 1 : 0);
             var right = GetFloat16Source(instruction, reverse ? 0 : 1);
             return EmitFloat16Result(
@@ -5139,13 +5456,15 @@ public static partial class Gen5SpirvTranslator
             Gen5ShaderInstruction instruction,
             uint destination,
             uint operation) =>
-            EmitFloat16Result(
-                instruction,
-                destination,
-                NanIgnoringMinMax(
-                    operation,
-                    GetFloat16Source(instruction, 0),
-                    GetFloat16Source(instruction, 1)));
+            TryGetNativeHalfSources(instruction, 2, selects: true, out var halves)
+                ? EmitNativeHalfResult(instruction, destination, NanIgnoringMinMax(operation, halves[0], halves[1], _halfType))
+                : EmitFloat16Result(
+                    instruction,
+                    destination,
+                    NanIgnoringMinMax(
+                        operation,
+                        GetFloat16Source(instruction, 0),
+                        GetFloat16Source(instruction, 1)));
 
         private uint EmitFloatBinary(
             Gen5ShaderInstruction instruction,
@@ -5171,17 +5490,19 @@ public static partial class Gen5SpirvTranslator
                     GetFloatSource(instruction, 0),
                     GetFloatSource(instruction, 1)));
 
-        private uint EmitFloatMedian(uint a, uint b, uint c)
+        // v_med3_f32 with a NaN operand is v_min3_f32 (RDNA2 ISA). Without one no intermediate is NaN, so plain FMin and FMax
+        // give the median the NaN-ignoring forms would.
+        private uint EmitFloatMedian(uint a, uint b, uint c, uint type = 0)
         {
-            var low = NanIgnoringMinMax(37, a, b);
-            var high = NanIgnoringMinMax(40, a, b);
-            var median = NanIgnoringMinMax(40, low, NanIgnoringMinMax(37, high, c));
+            type = type == 0 ? _floatType : type;
             var anyNan = _module.AddInstruction(
                 SpirvOp.LogicalOr,
                 _boolType,
-                IsNanBits(a),
-                _module.AddInstruction(SpirvOp.LogicalOr, _boolType, IsNanBits(b), IsNanBits(c)));
-            return _module.AddInstruction(SpirvOp.Select, _floatType, anyNan, NanIgnoringMinMax(37, low, c), median);
+                IsNan(a, type),
+                _module.AddInstruction(SpirvOp.LogicalOr, _boolType, IsNan(b, type), IsNan(c, type)));
+            var median = Ext(40, type, Ext(37, type, a, b), Ext(37, type, Ext(40, type, a, b), c));
+            return _module.AddInstruction(SpirvOp.Select, type, anyNan,
+                NanIgnoringMinMax(37, NanIgnoringMinMax(37, a, b, type), c, type), median);
         }
 
         private uint EmitFloatTernaryExt(
@@ -5197,12 +5518,20 @@ public static partial class Gen5SpirvTranslator
                 NanIgnoringMinMax(operation, first, GetFloatSource(instruction, 2)));
         }
 
-        private uint NanIgnoringMinMax(uint operation, uint left, uint right)
+        private uint NanIgnoringMinMax(uint operation, uint left, uint right, uint type = 0)
         {
-            var result = Ext(operation, _floatType, left, right);
-            result = _module.AddInstruction(SpirvOp.Select, _floatType, IsNanBits(right), left, result);
-            return _module.AddInstruction(SpirvOp.Select, _floatType, IsNanBits(left), right, result);
+            type = type == 0 ? _floatType : type;
+            var result = Ext(operation, type, left, right);
+            result = _module.AddInstruction(SpirvOp.Select, type, IsNan(right, type), left, result);
+            return _module.AddInstruction(SpirvOp.Select, type, IsNan(left, type), right, result);
         }
+
+        // A module that declares SignedZeroInfNanPreserve keeps OpIsNan exact; without it a driver may assume no NaN, and
+        // the test reads the bits. A native f16 value is under the 16-bit float controls.
+        private uint IsNan(uint value, uint type = 0) =>
+            _request.ShaderSignedZeroInfNanPreserveFloat32Supported || (type != 0 && type == _halfType)
+                ? _module.AddInstruction(SpirvOp.IsNan, _boolType, value)
+                : IsNanBits(value);
 
         // NaN tested on the bits, which fast math cannot assume away.
         private uint IsNanBits(uint value) =>
@@ -5223,13 +5552,12 @@ public static partial class Gen5SpirvTranslator
                 _module.AddInstruction(SpirvOp.UGreaterThanEqual, _boolType, bits, UInt(0x4F80_0000)),
                 UInt(uint.MaxValue),
                 converted);
-            // Negative values, including negative NaN, have the sign bit set.
-            converted = _module.AddInstruction(
+            // Above +Inf as unsigned bits: a positive NaN or a negative value (negative NaN and -0 included).
+            return _module.AddInstruction(
                 SpirvOp.Select, _uintType,
-                _module.AddInstruction(SpirvOp.UGreaterThanEqual, _boolType, bits, UInt(0x8000_0000)),
+                _module.AddInstruction(SpirvOp.UGreaterThan, _boolType, bits, UInt(0x7F80_0000)),
                 UInt(0),
                 converted);
-            return _module.AddInstruction(SpirvOp.Select, _uintType, IsNanBits(value), UInt(0), converted);
         }
 
         private uint ConvertDoubleToIntegerSaturated(uint value, bool signed)
@@ -5653,6 +5981,13 @@ public static partial class Gen5SpirvTranslator
                 var broadcast = BroadcastWaveLane(sourceValue, selectedLane);
                 StoreS(destination, ReadLaneSpillSlot(instruction, selectedLane, broadcast));
             }
+            else if (HostSubgroupMayBePartial)
+            {
+                // The selected lane of the invocation's own graphics wave, whatever its EXEC state; a lane
+                // the host never launched reads as the reading lane.
+                var read = ReadGraphicsLane(sourceValue, selectedLane, out _);
+                StoreS(destination, ReadLaneSpillSlot(instruction, selectedLane, read));
+            }
             else
             {
                 // Fallback: no subgroup ops, read current lane's value, or the
@@ -5731,8 +6066,29 @@ public static partial class Gen5SpirvTranslator
 
             var targetLane = IAdd(rowBase, selector);
             targetLane = BitwiseAnd(targetLane, UInt(NativeLaneMask));
-            var shuffled = ShuffleLane(value, targetLane);
             var fetchInactive = (control.OperandSelect & 1) != 0;
+            if (HostSubgroupMayBePartial)
+            {
+                if (fetchInactive)
+                {
+                    return ReadGraphicsLane(value, targetLane, out _);
+                }
+
+                // ISA: a disabled source lane gives zero with BOUND_CTRL (OP_SEL[1]) set and keeps the old
+                // destination with it clear.
+                var graphicsValue = ReadGraphicsLaneIfActive(value, targetLane, out var usable);
+                var boundControl = (control.OperandSelect & 2) != 0;
+                return _module.AddInstruction(
+                    SpirvOp.Select,
+                    _uintType,
+                    usable,
+                    graphicsValue,
+                    boundControl || instruction.Destinations.Count == 0
+                        ? UInt(0)
+                        : LoadV(instruction.Destinations[0].Value));
+            }
+
+            var shuffled = ShuffleLane(value, targetLane);
             if (fetchInactive)
             {
                 return shuffled;
@@ -5847,12 +6203,21 @@ public static partial class Gen5SpirvTranslator
             return value;
         }
 
+        // V_CVT_PKRTZ_F16_F32 rounds toward zero. Clearing the 13 mantissa bits a half cannot hold makes the
+        // round-to-nearest pack exact inside the half range, but a finite value of 65536 or more would still round
+        // to infinity, where rounding toward zero gives the largest finite half, 65504. A NaN keeps its bits, so a
+        // payload held only in the cleared bits does not become infinity either.
         private uint TruncateFloat32ForPack(uint value)
         {
-            var raw = BitwiseAnd(
-                Bitcast(_uintType, value),
-                UInt(0xFFFF_E000));
-            return Bitcast(_floatType, raw);
+            var bits = Bitcast(_uintType, value);
+            var raw = BitwiseAnd(bits, UInt(0xFFFF_E000));
+            var magnitude = BitwiseAnd(bits, UInt(0x7FFF_FFFF));
+            var overflow = LogicalAnd(
+                UCmp(SpirvOp.UGreaterThanEqual, magnitude, UInt(0x4780_0000)),
+                UCmp(SpirvOp.ULessThan, magnitude, UInt(0x7F80_0000)));
+            var largest = BitwiseOr(BitwiseAnd(bits, UInt(0x8000_0000)), UInt(0x477F_E000));
+            var nan = UCmp(SpirvOp.UGreaterThan, magnitude, UInt(0x7F80_0000));
+            return Bitcast(_floatType, SelectU(nan, bits, SelectU(overflow, largest, raw)));
         }
 
         private uint Ext(uint operation, uint resultType, params uint[] operands)

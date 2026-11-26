@@ -66,6 +66,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 _spareBuffers = new ConcurrentBag<RecordingBuffer>();
                 _arena = new SliceArena(presenter._arenaPool!, _deviceInfo.NonCoherentAtomSize);
+                _sliceDescriptors = new SliceDescriptorHeap(_deviceInfo, presenter._descriptorPoolStock!);
                 _hazards = new SliceHazards();
                 _workerRecorder = presenter._translation.CreateWorkerRecorder(this);
             }

@@ -263,8 +263,24 @@ public static partial class AgcExports
                     _host.RenderHost is { } renderHost && _host.ResolveWorkerCount > 0
                     ? new ResolvePool(this, renderHost, _host.ResolveWorkerCount)
                     : null;
+                ReplaceDispatchRuns(value is not null);
+                _computeTicketPool?.Dispose();
+                _computeTicketPool = value is not null && _executor is not null && _pipelines is { SupportsParallelResolution: true } pipelines &&
+                    ComputeTickets.Mode != ComputeTickets.TicketMode.Off
+                    ? new ComputeTickets(pipelines, reads => _host.BeginWorkerResolve(long.MaxValue, reads), () => _host.EndWorkerResolve(),
+                        reads => _host.ValidateTicketReads(reads), ComputeTickets.WorkerCount, verify: ComputeTickets.Mode == ComputeTickets.TicketMode.Verify)
+                    : null;
+                if (_pipelines is not null)
+                {
+                    _pipelines.Tickets = _computeTicketPool;
+                }
             }
         }
+
+        // SHARPEMU_COMPUTE_TICKETS: worker rebinds for direct dispatches, with the command stream on its own thread.
+        private ComputeTickets? _computeTicketPool;
+
+        internal ComputeTickets? ComputeTicketPool => _computeTicketPool;
 
         private bool Producing => Sink is { IsProducerThread: true };
 
@@ -312,6 +328,12 @@ public static partial class AgcExports
                 return;
             }
 
+            if (work is DeferredDispatch dispatch)
+            {
+                JoinDeferredDispatch(dispatch);
+                return;
+            }
+
             RunDeferred(work, _recorder!);
         }
 
@@ -327,6 +349,13 @@ public static partial class AgcExports
                     break;
                 case DeferredDraw deferred:
                     recorder.Record(deferred.Record!);
+                    break;
+                case DeferredDispatch dispatch:
+                    if (!dispatch.Cancelled)
+                    {
+                        recorder.Record(dispatch.Record!);
+                    }
+
                     break;
                 default:
                     throw _host.Fatal($"The deferred work is unknown: {work.GetType().Name}.");
@@ -352,6 +381,9 @@ public static partial class AgcExports
                     break;
                 case DeferredDraw deferred:
                     CompleteDeferredDraw(deferred);
+                    break;
+                case DeferredDispatch dispatch:
+                    CompleteDeferredDispatch(dispatch);
                     break;
             }
         }
@@ -475,6 +507,26 @@ public static partial class AgcExports
             state.IndexSize = arguments.IndexTypeAndSize & 0x3u;
             state.InstanceCount = Math.Max(arguments.InstanceCount, 1);
             SelectSnapshots(state, arguments.PacketAddress, indexed: true, arguments.IndexAddress, arguments.IndexCount);
+        }
+
+        internal bool TryDrawIndexedRun(ulong submitId, in DrawIndexedArguments first, ReadOnlySpan<uint> offsets)
+        {
+            var state = RequireCurrent();
+            var banks = RequireTypedRegisters(state);
+            if (_resolvePool is not { } pool || _executor is null || !Producing ||
+                state.ActiveVertexSnapshots is { Count: > 0 } || state.ActiveIndexSnapshots is { Count: > 0 } ||
+                !_drawWrites.TryGetValue((banks.Shader.Vertex.ExportAddress, banks.Shader.Pixel.Address), out var known) ||
+                !known.Group || known.Registrations != ShaderHeaderRegistry.Registrations || !_executor.CanGroupIndexed(banks, in first)) return false;
+            Diagnostics.DispatchRunTally.NoteDraw();
+            RecordIndexedDrawState(in first);
+            RecordKnownColorTargets(state, banks);
+            var run = offsets.ToArray();
+            DeferDraw(pool, submitId, banks, true, in first, default, run);
+            state.FrameDrawCount += (uint)run.Length;
+            state.SawIndexedDraw = true;
+            state.CurrentIndexSnapshot = null;
+            state.CurrentVertexSnapshot = null;
+            return true;
         }
 
         public void DrawAuto(ulong submitId, in DrawAutoArguments arguments)

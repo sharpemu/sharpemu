@@ -59,7 +59,7 @@ public sealed partial class GuestImageCacheTests
     [InlineData(false, true, 2u)]
     [InlineData(true, false, 2u)]
     [InlineData(true, true, 2u)]
-    public void SingletonImageTypeReplacementPreservesContentsAndRetiresTheOldBacking(
+    public void SingletonImageTypeChangePreservesContentsAndRetiresOnlyAGpuWrittenBacking(
         bool startWithTwoDimensions, bool gpuModified, uint layers)
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
@@ -85,8 +85,9 @@ public sealed partial class GuestImageCacheTests
         var destinationIdentifier = harness.Acquire(ref destination);
         var destinationImage = harness.Image(destinationIdentifier);
         Assert.NotEqual(sourceIdentifier, destinationIdentifier);
-        Assert.False(sourceImage.Registered);
-        Assert.True(sourceImage.Binding.NeedsRebind);
+        // Guest contents keep the image of the other type beside the new one; GPU-written contents move into it.
+        Assert.Equal(!gpuModified, sourceImage.Registered);
+        Assert.Equal(gpuModified, sourceImage.Binding.NeedsRebind);
         Assert.NotEqual(0ul, sourceImage.Backing.Handle.Handle);
         Assert.Equal(startWithTwoDimensions ? ImageType.Type1D : ImageType.Type2D, destinationImage.Backing.ImageType);
         Assert.True(destinationImage.SupportsViewType(destination.View));
@@ -96,12 +97,13 @@ public sealed partial class GuestImageCacheTests
         var expected = Enumerable.Range(0, (int)layers)
             .Select(layer => gpuModified ? deviceValue : guestValue + (uint)layer).ToArray();
         Assert.Equal(Bytes(expected), harness.ReadImageBytes(destinationImage));
-        Assert.Equal(0ul, sourceImage.Backing.Handle.Handle);
+        Assert.Equal(gpuModified, sourceImage.Backing.Handle.Handle == 0);
         for (uint layer = 0; layer < layers; layer++)
             Assert.Equal(Bytes(guestValue + layer), harness.Read(address + layer * sliceSize, sizeof(uint)));
 
         var restoredIdentifier = harness.Acquire(ref source);
         Assert.NotEqual(destinationIdentifier, restoredIdentifier);
+        Assert.Equal(!gpuModified, restoredIdentifier == sourceIdentifier);
         Assert.Equal(Bytes(expected), harness.ReadImageBytes(harness.Image(restoredIdentifier)));
         harness.Shutdown();
     }
@@ -133,6 +135,67 @@ public sealed partial class GuestImageCacheTests
         harness.Shutdown();
     }
 
+    // A texture the guest reads both as 1D and as 2D keeps one image of each type instead of replacing one with the other
+    // on every lookup.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ASingleRowTextureReadAsBothTypesKeepsOneImageOfEach(bool startWithTwoDimensions)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Write(address, Bytes(0x10203040u));
+        var first = SingletonRequest(address, 1, startWithTwoDimensions);
+        var second = SingletonRequest(address, 1, !startWithTwoDimensions);
+        var firstIdentifier = harness.Acquire(ref first);
+        var secondIdentifier = harness.Acquire(ref second);
+        Assert.NotEqual(firstIdentifier, secondIdentifier);
+        for (var round = 0; round < 3; round++)
+        {
+            first = SingletonRequest(address, 1, startWithTwoDimensions);
+            second = SingletonRequest(address, 1, !startWithTwoDimensions);
+            Assert.Equal(firstIdentifier, harness.Acquire(ref first));
+            Assert.Equal(secondIdentifier, harness.Acquire(ref second));
+        }
+
+        Assert.True(harness.Image(firstIdentifier).Registered);
+        Assert.True(harness.Image(secondIdentifier).Registered);
+        Assert.Equal(Bytes(0x10203040u), harness.ReadImageBytes(harness.Image(firstIdentifier)));
+        Assert.Equal(Bytes(0x10203040u), harness.ReadImageBytes(harness.Image(secondIdentifier)));
+        harness.Shutdown();
+    }
+
+    // Once one twin is GPU-written, the other holds stale contents: its next lookup retires it and grows the written image
+    // into its type.
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AGpuWriteToOneSingleRowTwinRetiresTheOther(bool writeTwoDimensions)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Write(address, Bytes(0x10203040u));
+        var written = SingletonRequest(address, 1, writeTwoDimensions);
+        var other = SingletonRequest(address, 1, !writeTwoDimensions);
+        var otherIdentifier = harness.Acquire(ref other);
+        var writtenIdentifier = harness.Acquire(ref written);
+        var otherImage = harness.Image(otherIdentifier);
+        var writtenImage = harness.Image(writtenIdentifier);
+        Assert.Same(writtenImage, otherImage.DimensionTwin);
+        writtenImage.MarkGpuModified();
+        Assert.True(otherImage.DimensionTwinStale);
+
+        other = SingletonRequest(address, 1, !writeTwoDimensions);
+        var refreshedIdentifier = harness.Acquire(ref other);
+        Assert.NotEqual(otherIdentifier, refreshedIdentifier);
+        Assert.False(otherImage.Registered);
+        Assert.True(harness.Image(refreshedIdentifier).IsGpuModified);
+        Assert.True(harness.Image(refreshedIdentifier).SupportsViewType(other.View));
+        harness.Shutdown();
+    }
+
     [Fact]
     public void SingletonVolumeKeepsItsCompatibleTwoDimensionalView()
     {
@@ -150,6 +213,37 @@ public sealed partial class GuestImageCacheTests
         Assert.Equal(ImageType.Type3D, harness.Image(volumeIdentifier).Backing.ImageType);
         Assert.Equal(Bytes(0x10203040u), harness.ReadImageBytes(harness.Image(volumeIdentifier)));
         harness.Shutdown();
+    }
+
+    // A program can read a two-dimensional texture as a volume. Its image is not 3D, and an image made from the texture's
+    // description would not be either: the lookup finds the same image again instead of making a new one each time.
+    [Fact]
+    public void TwoDimensionalTextureReadAsVolumeIsFoundAgain()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var request = VolumeViewOfTexture(address);
+        var imageIdentifier = harness.Find(ref request);
+        var images = harness.Images.ImageCount;
+
+        for (var lookup = 0; lookup < 3; lookup++)
+        {
+            var again = VolumeViewOfTexture(address);
+            Assert.Equal(imageIdentifier, harness.Find(ref again));
+        }
+
+        Assert.Equal(images, harness.Images.ImageCount);
+        Assert.False(harness.Image(imageIdentifier).SupportsViewType(request.View));
+        harness.Shutdown();
+    }
+
+    private static ImageRequest VolumeViewOfTexture(ulong address)
+    {
+        var request = LinearRequest(address, 64 * 64 * sizeof(uint), Format.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D,
+            new Extent3D(64, 64, 1), 1, sizeof(uint), 1);
+        request.View = request.View with { Type = ImageViewType.Type3D };
+        return request;
     }
 
     private static ImageRequest SingletonRequest(ulong address, uint layers, bool twoDimensions)

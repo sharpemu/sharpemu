@@ -17,6 +17,46 @@ public static class LibcInternalExports
     private static readonly object _heapTraceGate = new();
     private static nint _heapTraceStorage;
 
+    // C++ thread_local destructors the guest's libc registered on this thread; they run, newest first, when it exits.
+    [ThreadStatic]
+    private static List<(ulong Destructor, ulong Object)>? _threadAtexitDestructors;
+
+    // The guest's libc registers a destructor for each thread_local object here: (destructor, object, DSO handle).
+    [SysAbiExport(
+        Nid = "qBS714-Jr3g",
+        ExportName = "_sceLibcInternalThreadAtexit",
+        Target = Generation.Gen5,
+        LibraryName = "LibcInternalExt")]
+    public static int LibcInternalThreadAtexit(CpuContext ctx)
+    {
+        var destructor = ctx[CpuRegister.Rdi];
+        if (destructor != 0)
+        {
+            (_threadAtexitDestructors ??= []).Add((destructor, ctx[CpuRegister.Rsi]));
+        }
+
+        ctx[CpuRegister.Rax] = 0;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // Runs on the exiting guest thread before its pthread key destructors. A destructor can register another one,
+    // which runs in the same pass.
+    public static void RunThreadAtexitDestructors(CpuContext ctx)
+    {
+        var destructors = _threadAtexitDestructors;
+        if (destructors is null || GuestThreadExecution.Scheduler is not { } scheduler)
+        {
+            return;
+        }
+
+        while (destructors.Count != 0)
+        {
+            var (destructor, obj) = destructors[^1];
+            destructors.RemoveAt(destructors.Count - 1);
+            _ = scheduler.TryCallGuestFunction(ctx, destructor, obj, 0, 0, 0, "thread_atexit_destructor", out _);
+        }
+    }
+
     [SysAbiExport(
         Nid = "NWtTN10cJzE",
         ExportName = "sceLibcHeapGetTraceInfo",

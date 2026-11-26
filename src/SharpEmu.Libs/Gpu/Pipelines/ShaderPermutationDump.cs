@@ -41,7 +41,7 @@ internal static class ShaderPermutationDump
             {
                 ProgramId = candidate.Handle.Id,
                 SpecializationMatches = candidate.Specialization.Equals(specialization),
-                PushDataMatches = candidate.Bindings.PushDataStartDword == PushData.StartFor(pushDataCursor, candidate.Bindings.ShaderDataDwordCount),
+                PushDataMatches = candidate.Bindings.PushDataStartDword == candidate.Bindings.PushStartFor(pushDataCursor),
                 candidate.Bindings.PushDataStartDword,
                 candidate.Bindings.ShaderDataDwordCount,
             }).ToArray();

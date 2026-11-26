@@ -28,7 +28,8 @@ public sealed class SelfImage
         uint tlsModuleId = 0,
         ulong tlsMemorySize = 0,
         ulong tlsStaticOffset = 0,
-        IReadOnlyList<string>? importedModuleNames = null)
+        IReadOnlyList<string>? importedModuleNames = null,
+        string? conceptId = null)
     {
         ArgumentNullException.ThrowIfNull(programHeaders);
         ArgumentNullException.ThrowIfNull(mappedRegions);
@@ -48,6 +49,7 @@ public sealed class SelfImage
         Title = title;
         TitleId = titleId;
         Version = version;
+        ConceptId = conceptId;
         TlsModuleId = tlsModuleId;
         TlsMemorySize = tlsMemorySize;
         TlsStaticOffset = tlsStaticOffset;
@@ -83,6 +85,9 @@ public sealed class SelfImage
     public string? TitleId { get; }
 
     public string? Version { get; }
+
+    /// <summary>The PS5 concept id shared by every regional release of the game, when param.json has one.</summary>
+    public string? ConceptId { get; }
 
     public uint TlsModuleId { get; }
 

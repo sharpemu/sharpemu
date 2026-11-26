@@ -227,6 +227,32 @@ public sealed unsafe partial class GuestImageCacheTests
         harness.Shutdown();
     }
 
+    // Only an image that starts at the buffer's address is synchronized into it: one that starts two 1 MiB owner pages into a
+    // larger buffer is not taken for that buffer, and is for a buffer at its own address.
+    [Fact]
+    public void BufferSynchronization_TakesOnlyTheImageAtTheBuffersAddress()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        const ulong page = 0x100000;
+        var address = harness.MapBacked(3 * page, ReadWrite);
+        var later = address + 2 * page;
+        harness.Write(later, Bytes(0x11223344u));
+        var request = LinearRequest(later, 4, Format.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 4, 1);
+        var imageIdentifier = harness.Acquire(ref request);
+        harness.MarkGpuWritten(imageIdentifier);
+        harness.Worker.Run(() =>
+        {
+            using var whole = new GpuBuffer(harness.Vulkan.DeviceInfo, harness.Scheduler, GpuBufferUsage.DeviceLocal, address, GpuBuffer.AllFlags, 3 * page);
+            using var own = new GpuBuffer(harness.Vulkan.DeviceInfo, harness.Scheduler, GpuBufferUsage.DeviceLocal, later, GpuBuffer.AllFlags, page);
+            Assert.False(harness.Images.TrySynchronizeBufferFromImage(whole, address, 3 * page));
+            Assert.True(harness.Images.TrySynchronizeBufferFromImage(own, later, page));
+            Assert.Equal(0x11223344u, BitConverter.ToUInt32(harness.CopyFromDevice(own.Handle, 0, 4)));
+            harness.Scheduler.Finish();
+        });
+        harness.Shutdown();
+    }
+
     // A tiled array's mip layout ends before its tile plan does: each level spans its size times the layer count from
     // its offset in the first slice, while every 64 KiB slice holds a whole chain with the base level last. A buffer
     // over the whole image takes every tile; a buffer that ends inside the last tile keeps the guest bytes.

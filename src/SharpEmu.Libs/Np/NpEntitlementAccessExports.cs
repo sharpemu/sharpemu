@@ -4,6 +4,7 @@
 using System.Buffers.Binary;
 using System.Text;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Kernel;
 
 namespace SharpEmu.Libs.Np;
 
@@ -17,34 +18,22 @@ public static class NpEntitlementAccessExports
 
     // libSceNpEntitlementAccess package / download codes observed on Prospero.
     // package_type 3 = PSAL (license-style add-on); download_status 4 = INSTALLED.
-    private const uint PackageTypePsal = 3;
-    private const uint DownloadStatusInstalled = 4;
     private const uint SkuFlagFull = 3;
 
     private const int NpEntitlementAccessErrorParameter = unchecked((int)0x817D0002);
     private const int NpEntitlementAccessErrorNoEntitlement = unchecked((int)0x817D0007);
+    private const int NpEntitlementAccessErrorSignedOut = unchecked((int)0x817D0014);
+    private const int NpEntitlementAccessErrorRequestNotFound = unchecked((int)0x817D0015);
+    private const int NpEntitlementAccessPollFinished = 0;
     private const int EntitlementKeySize = 16;
 
-    // Offline entitlements queried by titles through NpEntitlementAccess.
-    // GTA V Enhanced (PPSA04264) gates Story Mode on these three labels; without
-    // them the frontend offers "Buy GTAV Story Mode" despite a full dump.
-    // Ghost of Yotei (PPSA26344) separately checks its application and base
-    // game entitlements before it creates the frontend.  These represent the
-    // locally installed main package only; optional editions and add-ons remain
-    // unowned.
-    private static readonly AddcontEntitlement[] OwnedAddcontEntitlements =
-    [
-        new("85y-je", PackageTypePsal, DownloadStatusInstalled),
-        new("5d5c48", PackageTypePsal, DownloadStatusInstalled),
-        new("_mtqu6", PackageTypePsal, DownloadStatusInstalled),
-        new("GHOST2APP0000000", PackageTypePsal, DownloadStatusInstalled),
-        new("GHOST2BASE000000", PackageTypePsal, DownloadStatusInstalled),
-    ];
+    // Asynchronous requests by id, with the result each one finished with.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<long, int> Requests = new();
+    private static long _nextRequestId;
 
-    private readonly record struct AddcontEntitlement(
-        string Label,
-        uint PackageType,
-        uint DownloadStatus);
+    // The owned labels of the running title, from AddcontEntitlements: the
+    // user/entitlements.json configuration (or the built-in defaults), plus the
+    // addcont packages installed next to the game image.
 
     [SysAbiExport(
         Nid = "jO8DM8oyego",
@@ -131,7 +120,8 @@ public static class NpEntitlementAccessExports
             return ctx.SetReturn(NpEntitlementAccessErrorParameter);
         }
 
-        var hitNum = (uint)OwnedAddcontEntitlements.Length;
+        var owned = AddcontEntitlements.Owned();
+        var hitNum = (uint)owned.Count;
         Span<byte> hitNumBytes = stackalloc byte[sizeof(uint)];
         BinaryPrimitives.WriteUInt32LittleEndian(hitNumBytes, hitNum);
         if (!ctx.Memory.TryWrite(hitNumAddress, hitNumBytes))
@@ -157,7 +147,7 @@ public static class NpEntitlementAccessExports
                 if (!TryWriteAddcontEntitlementInfo(
                         ctx,
                         listAddress + index * (ulong)AddcontEntitlementInfoSize,
-                        OwnedAddcontEntitlements[(int)index]))
+                        owned[(int)index]))
                 {
                     return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
                 }
@@ -198,13 +188,8 @@ public static class NpEntitlementAccessExports
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        foreach (var entitlement in OwnedAddcontEntitlements)
+        if (AddcontEntitlements.TryGet(label, out var entitlement))
         {
-            if (!string.Equals(label, entitlement.Label, StringComparison.Ordinal))
-            {
-                continue;
-            }
-
             if (!TryWriteAddcontEntitlementInfo(ctx, infoAddress, entitlement))
             {
                 return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
@@ -248,16 +233,99 @@ public static class NpEntitlementAccessExports
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        return ctx.SetReturn(OwnedAddcontEntitlements.Any(entitlement =>
-            string.Equals(label, entitlement.Label, StringComparison.Ordinal))
+        return ctx.SetReturn(AddcontEntitlements.Owns(label)
             ? (int)OrbisGen2Result.ORBIS_GEN2_OK
             : NpEntitlementAccessErrorNoEntitlement);
     }
 
+    // Unified entitlements are kept on the PSN servers. The user is signed out, as in libSceNpManager, so a request
+    // finishes at once with that result and no entitlements.
+    [SysAbiExport(
+        Nid = "uCZf2L27th8",
+        ExportName = "sceNpEntitlementAccessRequestUnifiedEntitlementInfoList",
+        Target = Generation.Gen5,
+        LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessRequestUnifiedEntitlementInfoList(CpuContext ctx)
+    {
+        // userId, serviceLabel, label list (null for every label), list size, parameters, request id out.
+        var listAddress = ctx[CpuRegister.Rdx];
+        var listNum = unchecked((uint)ctx[CpuRegister.Rcx]);
+        var requestIdAddress = ctx[CpuRegister.R9];
+        if (requestIdAddress == 0 || (listAddress == 0 && listNum != 0))
+        {
+            return ctx.SetReturn(NpEntitlementAccessErrorParameter);
+        }
+
+        var requestId = Interlocked.Increment(ref _nextRequestId);
+        if (!ctx.TryWriteUInt64(requestIdAddress, unchecked((ulong)requestId)))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        Requests[requestId] = NpEntitlementAccessErrorSignedOut;
+        TraceNpEntitlementAccess($"request_unified_list id={requestId} labels={listNum}");
+        return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_OK);
+    }
+
+    [SysAbiExport(
+        Nid = "nAEqawEZG5s",
+        ExportName = "sceNpEntitlementAccessPollUnifiedEntitlementInfoList",
+        Target = Generation.Gen5,
+        LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessPollUnifiedEntitlementInfoList(CpuContext ctx)
+    {
+        // requestId, result out, info list, list size, hit count out, next offset out, previous offset out (stack).
+        var requestId = unchecked((long)ctx[CpuRegister.Rdi]);
+        var resultAddress = ctx[CpuRegister.Rsi];
+        var hitNumAddress = ctx[CpuRegister.R8];
+        var nextOffsetAddress = ctx[CpuRegister.R9];
+        if (!Requests.TryGetValue(requestId, out var result))
+        {
+            return ctx.SetReturn(NpEntitlementAccessErrorRequestNotFound);
+        }
+
+        if (resultAddress == 0)
+        {
+            return ctx.SetReturn(NpEntitlementAccessErrorParameter);
+        }
+
+        _ = ctx.TryGetImportStackArgument(0, out var previousOffsetAddress);
+        if (!ctx.TryWriteInt32(resultAddress, result) ||
+            (hitNumAddress != 0 && !ctx.TryWriteUInt32(hitNumAddress, 0)) ||
+            (nextOffsetAddress != 0 && !ctx.TryWriteInt32(nextOffsetAddress, 0)) ||
+            (previousOffsetAddress != 0 && !ctx.TryWriteInt32(previousOffsetAddress, 0)))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        return ctx.SetReturn(NpEntitlementAccessPollFinished);
+    }
+
+    [SysAbiExport(
+        Nid = "Z0eQj8m7XA8",
+        ExportName = "sceNpEntitlementAccessDeleteRequest",
+        Target = Generation.Gen5,
+        LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessDeleteRequest(CpuContext ctx) =>
+        ctx.SetReturn(Requests.TryRemove(unchecked((long)ctx[CpuRegister.Rdi]), out _)
+            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+            : NpEntitlementAccessErrorRequestNotFound);
+
+    // Every request has finished by the time the title can abort it.
+    [SysAbiExport(
+        Nid = "HFcQl9TMcFQ",
+        ExportName = "sceNpEntitlementAccessAbortRequest",
+        Target = Generation.Gen5,
+        LibraryName = "libSceNpEntitlementAccess")]
+    public static int NpEntitlementAccessAbortRequest(CpuContext ctx) =>
+        ctx.SetReturn(Requests.ContainsKey(unchecked((long)ctx[CpuRegister.Rdi]))
+            ? (int)OrbisGen2Result.ORBIS_GEN2_OK
+            : NpEntitlementAccessErrorRequestNotFound);
+
     private static bool TryWriteAddcontEntitlementInfo(
         CpuContext ctx,
         ulong address,
-        AddcontEntitlement entitlement)
+        AddcontEntitlements.Entitlement entitlement)
     {
         Span<byte> info = stackalloc byte[AddcontEntitlementInfoSize];
         info.Clear();

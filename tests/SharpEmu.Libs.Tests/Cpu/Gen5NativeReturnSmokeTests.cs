@@ -83,6 +83,36 @@ public sealed class Gen5NativeReturnSmokeTests
     }
 
     [Fact]
+    public async Task GuestCodeRunsWithTheConsoleFloatingPointControlAndTheHostGetsItsOwnBack()
+    {
+        if (!IsSupportedHost)
+            return;
+
+        if (Environment.GetEnvironmentVariable(WorkerEnvironmentVariable) != "1")
+        {
+            var result = await RunIsolatedWorker(nameof(GuestCodeRunsWithTheConsoleFloatingPointControlAndTheHostGetsItsOwnBack));
+            Assert.True(result.Completed, result.Output);
+            Assert.True(result.ExitCode == 0, result.Output);
+            return;
+        }
+
+        var instructions = new List<byte>
+        {
+            0x0F, 0xAE, 0x1F,                         // stmxcsr [rdi]
+            0xD9, 0x7F, 0x04,                         // fnstcw [rdi+4]
+            0x48, 0xB8                                // mov rax,imm64
+        };
+        var returnValue = new byte[8];
+        BinaryPrimitives.WriteUInt64LittleEndian(returnValue, CallbackReturnValue);
+        instructions.AddRange(returnValue);
+        instructions.Add(0xC3);
+        ExecuteSyntheticGuest(instructions.ToArray(), expectedExtracts: 0, checkFloatingPointControl: true);
+    }
+
+    private static int _smallestDenormalBits = 1;
+    private static float _one = 1.0f;
+
+    [Fact]
     public async Task SyntheticGen5Continuation_PreservesFullReturnValue()
     {
         if (!IsSupportedHost)
@@ -252,7 +282,8 @@ public sealed class Gen5NativeReturnSmokeTests
     }
 
     private static void ExecuteSyntheticGuest(byte[]? callbackInstructions = null, bool continuation = false,
-        int expectedExtracts = 1, bool checkRedZone = false, bool checkExtractControls = false)
+        int expectedExtracts = 1, bool checkRedZone = false, bool checkExtractControls = false,
+        bool checkFloatingPointControl = false)
     {
         using var memory = new PhysicalVirtualMemory();
         var image = new SelfLoader().Load(BuildSyntheticElf(callbackInstructions), memory);
@@ -345,6 +376,17 @@ public sealed class Gen5NativeReturnSmokeTests
         }
         Assert.True(callbackReturn == CallbackReturnValue,
             $"Guest return value changed: expected 0x{CallbackReturnValue:X16}, actual 0x{callbackReturn:X16}.");
+        if (checkFloatingPointControl)
+        {
+            var control = new byte[8];
+            Assert.True(memory.TryRead(dataAddress, control));
+            // Flush-to-zero and denormals-are-zero with every exception masked; the status flags may be anything.
+            Assert.Equal(CpuContext.InitialMxcsr, BinaryPrimitives.ReadUInt32LittleEndian(control) & ~0x3Fu);
+            Assert.Equal((ushort)0x037F, BinaryPrimitives.ReadUInt16LittleEndian(control.AsSpan(4)));
+            // The host thread is back in its own environment: a denormal survives a multiply.
+            var denormal = BitConverter.Int32BitsToSingle(Volatile.Read(ref _smallestDenormalBits));
+            Assert.Equal(1, BitConverter.SingleToInt32Bits(denormal * Volatile.Read(ref _one)));
+        }
         if (checkRedZone)
         {
             var snapshot = new byte[128];

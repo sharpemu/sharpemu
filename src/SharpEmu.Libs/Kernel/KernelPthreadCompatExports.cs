@@ -665,6 +665,34 @@ public static class KernelPthreadCompatExports
     public static int PosixPthreadCondattrDestroy(CpuContext ctx)
         => PthreadCondattrDestroyCore(ctx, ctx[CpuRegister.Rdi], posixErrors: true);
 
+    // Per guest thread; guest threads run 1:1 on host threads. 0 = PTHREAD_CANCEL_ENABLE (default).
+    [ThreadStatic]
+    private static int _cancelState;
+
+    [SysAbiExport(
+        Nid = "lZzFeSxPl08",
+        ExportName = "pthread_setcancelstate",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libKernel")]
+    public static int PosixPthreadSetcancelstate(CpuContext ctx)
+    {
+        var state = unchecked((int)ctx[CpuRegister.Rdi]);
+        var oldStateAddress = ctx[CpuRegister.Rsi];
+        if (state is not (0 or 1))
+        {
+            return PosixInvalidArgument;
+        }
+
+        var previous = _cancelState;
+        if (oldStateAddress != 0 && !TryWriteUInt32(ctx, oldStateAddress, unchecked((uint)previous)))
+        {
+            return PosixBadAddress;
+        }
+
+        _cancelState = state;
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     [SysAbiExport(
         Nid = "cTDYxTUNPhM",
         ExportName = "pthread_condattr_getclock",

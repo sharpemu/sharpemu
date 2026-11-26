@@ -31,6 +31,123 @@ public sealed class ResourceTrackerTests
         Assert.Equal(wide, image.Atomic64);
     }
 
+    // A descriptor word that 40 branches each change on both sides is a web with 2^40 paths. Planning and evaluating
+    // it must look at each node once: walking every path did not finish.
+    [Fact]
+    public void ADescriptorWordMergedThroughManyBranchesIsPlannedQuickly()
+    {
+        var instructions = new List<Gen5ShaderInstruction>
+        {
+            // s5..s7 are loaded words; s4 starts as user data.
+            ScalarLoad(0, 0, 8, count: 4),
+            MoveScalarRegister(8, 5, 9),
+            MoveScalarRegister(12, 6, 10),
+            MoveScalarRegister(16, 7, 11),
+            MoveScalarRegister(20, 4, 2),
+        };
+        var pc = 24u;
+        for (var branch = 0; branch < 40; branch++, pc += 20)
+        {
+            // if (s3 == 0) s4 += 1; else s4 += 2;
+            instructions.Add(Sopc(pc, "SCmpEqU32", Gen5Operand.Scalar(3), Operand(0)));
+            instructions.Add(Branch(pc + 4, "SCbranchScc0", 2));
+            instructions.Add(Sop2(pc + 8, "SAddU32", 4, Gen5Operand.Scalar(4), Operand(1)));
+            instructions.Add(Branch(pc + 12, "SBranch", 1));
+            instructions.Add(Sop2(pc + 16, "SAddU32", 4, Gen5Operand.Scalar(4), Operand(2)));
+        }
+
+        instructions.Add(BufferLoad(pc, 4));
+        instructions.Add(EndProgram(pc + 8));
+        var program = Program([.. instructions]);
+
+        // The V# words s5..s7 are read at 0x1000; s2 = 0x2000 and s3 = 0, so every branch adds 1.
+        var memory = new TestWordMemory { Words = [0, 0, 16, 0] };
+        var userData = new uint[64];
+        userData[0] = 0x1000;
+        userData[2] = 0x2000;
+        var snapshot = new ResourceSnapshot();
+        var specialization = new ResourceSpecialization();
+        var materialized = false;
+        Exception? failure = null;
+        var planning = new Thread(() =>
+        {
+            try
+            {
+                var plan = Extract(program);
+                materialized = ResourceMaterializer.Materialize(plan, Inputs(userData, memory.Read, memory.Read),
+                    ref snapshot, ref specialization);
+            }
+            catch (Exception exception)
+            {
+                failure = exception;
+            }
+        })
+        {
+            IsBackground = true,
+        };
+        planning.Start();
+
+        Assert.True(planning.Join(TimeSpan.FromSeconds(30)), "planning did not finish");
+        Assert.Null(failure);
+        Assert.True(materialized);
+        Assert.Equal(0x2000u + 40u, Assert.Single(snapshot.Buffers)[0]);
+    }
+
+    // Behind exec branches the same word is a web of phis, which the runtime-descriptor check walks for a memory read.
+    // The V# the branches choose has no single source to bind, so the load reads it from its registers when it runs;
+    // the walk still finishes at once.
+    [Fact]
+    public void ADescriptorWordMergedThroughManyExecBranchesIsPlannedQuickly()
+    {
+        var instructions = new List<Gen5ShaderInstruction>
+        {
+            ScalarLoad(0, 0, 8, count: 4),
+            MoveScalarRegister(8, 5, 9),
+            MoveScalarRegister(12, 6, 10),
+            MoveScalarRegister(16, 7, 11),
+            MoveScalarRegister(20, 4, 2),
+            // One more exec branch makes s5..s7 phis too, which the check accepts as runtime words.
+            Vopc(24, "VCmpxEqU32", Operand(1), 24),
+            Branch(28, "SCbranchExecz", 3),
+            Sop2(32, "SAddU32", 5, Gen5Operand.Scalar(5), Operand(1)),
+            Sop2(36, "SAddU32", 6, Gen5Operand.Scalar(6), Operand(1)),
+            Sop2(40, "SAddU32", 7, Gen5Operand.Scalar(7), Operand(1)),
+        };
+        var pc = 44u;
+        for (var branch = 0; branch < 40; branch++, pc += 12)
+        {
+            // Lanes where v24 == 1 add 1 to s4; with none, the block is skipped.
+            instructions.Add(Vopc(pc, "VCmpxEqU32", Operand(1), 24));
+            instructions.Add(Branch(pc + 4, "SCbranchExecz", 1));
+            instructions.Add(Sop2(pc + 8, "SAddU32", 4, Gen5Operand.Scalar(4), Operand(1)));
+        }
+
+        instructions.Add(BufferLoad(pc, 4));
+        instructions.Add(EndProgram(pc + 8));
+        var program = Program([.. instructions]);
+
+        Exception? failure = null;
+        var planning = new Thread(() =>
+        {
+            try
+            {
+                Extract(program);
+            }
+            catch (Exception exception)
+            {
+                failure = exception;
+            }
+        })
+        {
+            IsBackground = true,
+        };
+        planning.Start();
+
+        Assert.True(planning.Join(TimeSpan.FromSeconds(30)), "planning did not finish");
+        Assert.Null(failure);
+        Assert.True(Extract(program).Memory.Entries.Single(memory => memory.Pc == pc).DeviceDescriptor);
+    }
+
     [Fact]
     public void DenseBufferTracking()
     {
@@ -199,22 +316,94 @@ public sealed class ResourceTrackerTests
     [Fact]
     public void SamplerLoadedAtALaneChosenIndex_IsStillRejected()
     {
-        var program = Program(
-            MoveScalarRegister(0, 16, 0),
-            MoveScalarRegister(4, 17, 1),
-            MoveScalarRegister(8, 18, 2),
-            MoveScalarRegister(12, 19, 3),
-            Vop2(16, "VLshlrevB32", 1, Operand(12), Gen5Operand.Vector(0)),
-            ReadFirstLane(20, 106, 1),
-            ScalarBufferLoad(24, 16, destination: 24, count: 4, dynamicOffsetRegister: 106),
-            Image(32, "ImageSample", 8, 24),
-            EndProgram(40));
+        var program = LaneIndexedSamplerProgram();
 
         var error = Assert.Throws<ResourcePlanException>(() => Extract(program, stage: ShaderStage.Pixel));
         Assert.Contains("not a valid runtime value", error.Message);
     }
 
-    private static Gen5ShaderProgram LaneIndexedImageProgram() => Program(
+    // Opted in to the bindless fallback, the same heap entry reads as a null image in compute too, and the plan names
+    // the access.
+    [Fact]
+    public void ImageDescriptorLoadedAtALaneChosenIndexInCompute_ReadsAsNullWhenOptedIn()
+    {
+        var program = LaneIndexedImageProgram();
+
+        var plan = Extract(program, stage: ShaderStage.Compute, bindlessNullDescriptors: true);
+
+        var image = Assert.Single(plan.DescriptorSources, source => source.DwordCount == 8);
+        Assert.All(image.Dwords, dword => Assert.True(dword.IsConstant && dword.ConstantU32 == 0));
+        Assert.Equal([48u], plan.NullBindlessDescriptorPcs);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(Request(program, bindlessNullDescriptors: true), out var shader, out var error), error);
+        Assert.NotEmpty(shader.Spirv);
+    }
+
+    // A sampler read from a heap at a lane-chosen index reads as a null sampler when opted in.
+    [Fact]
+    public void SamplerLoadedAtALaneChosenIndex_ReadsAsNullWhenOptedIn()
+    {
+        var program = LaneIndexedSamplerProgram();
+
+        var plan = Extract(program, stage: ShaderStage.Pixel, bindlessNullDescriptors: true);
+
+        Assert.Single(plan.DescriptorSources, source =>
+            source.DwordCount == 4 && source.Dwords.All(dword => dword.IsConstant && dword.ConstantU32 == 0));
+        Assert.Equal([32u], plan.NullBindlessDescriptorPcs);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(Request(program, ShaderStage.Pixel, bindlessNullDescriptors: true), out var shader, out var error), error);
+        Assert.NotEmpty(shader.Spirv);
+    }
+
+    // The plan lists only what the opt-in added: a pixel shader's lane-chosen image reads as null without it.
+    [Fact]
+    public void ThePlanListsOnlyTheOptedInFallbacks()
+    {
+        var plan = Extract(LaneIndexedImageProgram(), stage: ShaderStage.Pixel, bindlessNullDescriptors: true);
+
+        Assert.Empty(plan.NullBindlessDescriptorPcs);
+    }
+
+    // A T# whose two halves a shader reads from one scalar buffer at a uniform record offset, but not next to each other
+    // (a terrain material pixel shader builds s88..s95 from record bytes 48..63 and 192..207): each
+    // word is a scalar buffer read the host evaluates when the draw is bound, so the image is a runtime descriptor.
+    [Fact]
+    public void AnImageAssembledFromTwoScalarBufferReadsIsEvaluatedPerWord()
+    {
+        var program = Program(
+            // The record table V# in s16..s19 and the record index in s4 come from user data.
+            MoveScalarRegister(0, 16, 0),
+            MoveScalarRegister(4, 17, 1),
+            MoveScalarRegister(8, 18, 2),
+            MoveScalarRegister(12, 19, 3),
+            Sop2(16, "SLshlB32", 106, Gen5Operand.Scalar(4), Operand(7)),
+            ScalarBufferLoad(20, 16, destination: 20, count: 4, immediateOffset: 16, dynamicOffsetRegister: 106),
+            ScalarBufferLoad(28, 16, destination: 24, count: 4, immediateOffset: 96, dynamicOffsetRegister: 106),
+            Image(36, "ImageLoad", 20),
+            EndProgram(44));
+        var memory = new TestWordMemory { Base = 0x1000, Words = new uint[128] };
+        for (var word = 0; word < memory.Words.Length; word++)
+            memory.Words[word] = 0xA000u + (uint)word;
+
+        var plan = Extract(program, stage: ShaderStage.Pixel);
+
+        var image = Assert.Single(plan.Info.Images);
+        Assert.True(RuntimeValueEvaluator.EvaluateDescriptorSource(plan, image.Source,
+            Inputs([0x1000, 0, 0x200, 0, 2], memory.Read), out var words));
+        // Record 2 starts at byte 256 (word 64): words 4..7 and 24..27 of it.
+        Assert.Equal([0xA044u, 0xA045u, 0xA046u, 0xA047u, 0xA058u, 0xA059u, 0xA05Au, 0xA05Bu], words.Dwords.ToArray());
+    }
+
+    internal static Gen5ShaderProgram LaneIndexedSamplerProgram() => Program(
+        MoveScalarRegister(0, 16, 0),
+        MoveScalarRegister(4, 17, 1),
+        MoveScalarRegister(8, 18, 2),
+        MoveScalarRegister(12, 19, 3),
+        Vop2(16, "VLshlrevB32", 1, Operand(12), Gen5Operand.Vector(0)),
+        ReadFirstLane(20, 106, 1),
+        ScalarBufferLoad(24, 16, destination: 24, count: 4, dynamicOffsetRegister: 106),
+        Image(32, "ImageSample", 8, 24),
+        EndProgram(40));
+
+    internal static Gen5ShaderProgram LaneIndexedImageProgram(uint dimension = 1, string opcode = "ImageSample", bool r128 = false) => Program(
         // The table V# in s16..s19 and the sampler in s24..s27 come from user data.
         MoveScalarRegister(0, 16, 0),
         MoveScalarRegister(4, 17, 1),
@@ -228,7 +417,7 @@ public sealed class ResourceTrackerTests
         ReadFirstLane(32, 106, 7),
         Sop2(36, "SLshlB32", 106, Gen5Operand.Scalar(106), Operand(5)),
         ScalarBufferLoad(40, 16, destination: 0, count: 8, dynamicOffsetRegister: 106),
-        Image(48, "ImageSample", 0, 24),
+        Image(48, opcode, 0, 24, dimension: dimension, r128: r128),
         EndProgram(56));
     // A shader that selects among states with v_cmpx and s_cbranch_execz sets a constant sampler up in the first state's block and samples
     // with it in a later state's block. The skip edge of the first branch reaches the join with the sampler registers unwritten, so the host
@@ -452,7 +641,7 @@ public sealed class ResourceTrackerTests
 
     // The material table s[0:3], the heap s[4:7], the key selector in s8; the image words
     // come from the heap record the key selects.
-    internal static Gen5ShaderProgram IndirectImageProgram(bool malformed, int materialImmediate = 0, bool memoryBackedMaterial = false)
+    internal static Gen5ShaderProgram IndirectImageProgram(bool malformed, int materialImmediate = 0, bool memoryBackedMaterial = false, bool laneKey = false, (string Opcode, uint Value)? selectorClamp = null)
     {
         var instructions = new List<Gen5ShaderInstruction>();
         uint pc = 0x1000;
@@ -466,7 +655,14 @@ public sealed class ResourceTrackerTests
             Add(At(current => ScalarLoad(current, 28, destination: 0)));
         }
 
-        Add(At(current => Vop1(current, "VMovB32", 1, Gen5Operand.Scalar(8))));
+        Add(At(current => Vop1(current, "VMovB32", 1, laneKey ? Gen5Operand.Vector(0) : Gen5Operand.Scalar(8))));
+        if (selectorClamp is { } clamp)
+        {
+            Add(At(current => clamp.Opcode == "VMed3U32" ?
+                Vop3(current, "VMed3U32", 1, Operand(0), Operand(clamp.Value), Gen5Operand.Vector(1)) :
+                Vop2(current, clamp.Opcode, 1, Operand(clamp.Value), Gen5Operand.Vector(1))));
+        }
+
         Add(At(current => ReadFirstLane(current, 9, 1)));
         Add(At(current => Sop2(current, "SMulI32", 10, Gen5Operand.Scalar(9), Operand(224))));
         Add(At(current => Sop2(current, "SAddU32", 11, Gen5Operand.Scalar(10), Operand(4))));
@@ -637,11 +833,17 @@ public sealed class ResourceTrackerTests
         Assert.Same(priorSpecialization, specialization);
     }
 
+    // A heap record whose last word is not next to the others is not an indirect heap image; its words are still scalar
+    // buffer reads at a uniform offset, so the host reads them one by one when the draw is bound.
     [Fact]
-    public void MalformedIndirectImage_IsRejected()
+    public void MalformedIndirectImage_IsReadWordByWord()
     {
-        var error = Assert.Throws<ResourcePlanException>(() => Extract(IndirectImageProgram(true)));
-        Assert.Contains("not a valid runtime value", error.Message);
+        var plan = Extract(IndirectImageProgram(true));
+
+        var image = Assert.Single(plan.Info.Images);
+        var source = plan.DescriptorSources[(int)image.Source];
+        Assert.Null(source.IndirectImage);
+        Assert.All(source.Dwords, dword => Assert.Equal(ScalarValueKind.ScalarBufferWord, dword.Kind));
     }
 
     [Fact]
@@ -700,13 +902,22 @@ public sealed class ResourceTrackerTests
         memory.Reads = 0;
         memory.FailAfter = 0;
         var snapshot = new ResourceSnapshot { UserData = [1] };
-        var specialization = new ResourceSpecialization { Buffers = [new BufferSpecialization(7, 0, 0)] };
+        var specialization = new ResourceSpecialization { Buffers = [new BufferSpecialization(7, 0)] };
         Assert.False(ResourceMaterializer.Materialize(plan, inputs, ref snapshot, ref specialization));
         Assert.Equal([1u], snapshot.UserData);
-        Assert.Equal(7u, specialization.Buffers[0].PackedStride);
+        Assert.Equal(7u, specialization.Buffers[0].DescriptorFormat);
 
         var layout = BindingLayout.Allocate(plan.Info, BindingLayout.CollectUserDataRegisters(program, 0, 64), false, plan.TableReads.Count != 0, false);
         Assert.NotNull(layout.Find(DescriptorBindingKind.FlattenedResourceTable));
+    }
+
+    // An indexed buffer access (idxen) makes the program read its buffers' strides at run time; offsets alone do not.
+    [Fact]
+    public void AnIndexedBufferAccessReadsTheBufferStridesAtRunTime()
+    {
+        Assert.True(Extract(Program(BufferAccess(0, "BufferLoadDword", 0, indexEnabled: true, vectorAddress: 1), EndProgram(8)))
+            .Info.UsesIndexedBuffers);
+        Assert.False(Extract(Program(BufferLoad(0, 0), EndProgram(8))).Info.UsesIndexedBuffers);
     }
 
     [Fact]
@@ -790,8 +1001,86 @@ public sealed class ResourceTrackerTests
             BufferLoad(32, 8),
             EndProgram(36));
 
-        var error = Assert.Throws<ResourcePlanException>(() => Extract(program));
+        // The unevaluated branch picks the V#, so the access reads it from its registers.
+        var plan = Extract(program);
+        Assert.Empty(plan.Info.Buffers);
+        Assert.True(plan.Memory.TryGetIndex(32, 0, out var index));
+        Assert.True(plan.Memory[index].DeviceDescriptor);
+    }
+
+    // A branch the plan cannot evaluate picks the V#: a descriptor loaded from memory, or one built from a lane value.
+    private static Gen5ShaderProgram PhiSelectedDescriptor(string opcode = "BufferLoadDwordx3") => Program(
+        Branch(0, "SCbranchScc1", 3),
+        ScalarLoad(4, 2, 8, count: 4), Branch(12, "SBranch", 4),
+        ReadFirstLane(16, 8, 0), MoveScalar(20, 9, 0), MoveScalar(24, 10, 64), MoveScalar(28, 11, 0),
+        BufferAccess(32, opcode, 8, dwords: 3),
+        EndProgram(40));
+
+    [Fact]
+    public void DescriptorChosenByControlFlow_ReadsThroughRegisters()
+    {
+        var plan = Extract(PhiSelectedDescriptor());
+
+        Assert.Empty(plan.Info.Buffers);
+        Assert.True(plan.Info.UsesDeviceAddresses);
+        Assert.True(plan.Memory.TryGetIndex(32, 0, out var index));
+        Assert.True(plan.Memory[index].DeviceDescriptor);
+    }
+
+    [Fact]
+    public void DescriptorWalkedByALoop_ReadsThroughRegisters()
+    {
+        // Each iteration loads the next V# through the base of the current one.
+        var plan = Extract(Program(
+            ScalarLoad(0, 2, 8, count: 4),
+            BufferLoad(8, 8, dwords: 3),
+            ScalarLoad(16, 8, 8, count: 4),
+            Branch(24, "SCbranchScc1", -5),
+            EndProgram(32)));
+
+        Assert.Empty(plan.Info.Buffers);
+        Assert.True(plan.Info.UsesDeviceAddresses);
+        Assert.True(plan.Memory.TryGetIndex(8, 0, out var index));
+        // main reads a V# loaded from scalar-buffer data through its registers (IsDeviceLoadedBufferHandle).
+        Assert.True(plan.Memory[index].DeviceDescriptor);
+    }
+
+    [Fact]
+    public void DescriptorWalkedByALoopFromALaneValue_IsNeverBoundStatically()
+    {
+        var plan = Extract(Program(
+            ReadFirstLane(0, 8, 0), MoveScalar(4, 9, 0), MoveScalar(8, 10, 64), MoveScalar(12, 11, 0),
+            BufferLoad(16, 8, dwords: 3),
+            ScalarLoad(24, 8, 8, count: 4),
+            Branch(32, "SCbranchScc1", -5),
+            EndProgram(36)));
+
+        Assert.Empty(plan.Info.Buffers);
+        Assert.True(plan.Memory.TryGetIndex(16, 0, out var index));
+        Assert.True(plan.Memory[index].DeviceDescriptor ||
+            plan.Memory[index].BufferDescriptor?.Provenance == BufferDescriptorProvenance.Runtime);
+    }
+
+    [Fact]
+    public void DescriptorChosenByControlFlow_KeepsTypedAccessRejected()
+    {
+        var error = Assert.ThrowsAny<ResourcePlanException>(() => Extract(PhiSelectedDescriptor("TBufferLoadFormatXyz")));
         Assert.Contains("not a valid runtime value", error.Message);
+    }
+
+    [Fact]
+    public void StaticDescriptor_StaysHostBound()
+    {
+        var plan = Extract(Program(
+            MoveScalar(0, 8, 0x1000), MoveScalar(4, 9, 0), MoveScalar(8, 10, 256), MoveScalar(12, 11, 0),
+            BufferLoad(16, 8, dwords: 3), EndProgram(24)));
+        var userDataPlan = Extract(Program(BufferLoad(0, 0, dwords: 3), EndProgram(8)));
+
+        foreach (var candidate in new[] { plan, userDataPlan })
+        {
+            Assert.Single(candidate.Info.Buffers);
+            Assert.DoesNotContain(candidate.Memory.Entries, memory => memory.DeviceDescriptor);
+        }
     }
 
     [Fact]

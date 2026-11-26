@@ -65,6 +65,8 @@ public sealed partial class GuestImageCache
     // that remembers a lookup's result can tell when it may have changed.
     public ulong LookupGeneration => _lookupGeneration;
 
+    internal ulong CollectionTick => Volatile.Read(ref _collectionTick);
+
     // What a remembered lookup still does on reuse: the image counts as used now. False when the
     // image is gone.
     public bool TryReuseAcquired(ResourceSlotIdentifier imageIdentifier, ulong backing)
@@ -110,6 +112,79 @@ public sealed partial class GuestImageCache
         generation = _lookupGeneration;
         image.LastAccessTick = _scheduler.CurrentTick;
         TouchImage(image);
+        return true;
+    }
+
+    internal readonly record struct RememberedTexture(ResourceSlotIdentifier Image, bool Ranged, ulong Begin, ulong End);
+
+    internal bool TryTouchRememberedSet(ReadOnlySpan<RememberedTexture> textures, ref ulong generation)
+    {
+        using var held = _lock.Hold();
+        if (!RememberedSetHolds(textures, generation))
+        {
+            return false;
+        }
+
+        var tick = _scheduler.CurrentTick;
+        var ranged = false;
+        foreach (var texture in textures)
+        {
+            if (!texture.Ranged)
+            {
+                continue;
+            }
+
+            var image = _slots[texture.Image];
+            image.LastAccessTick = tick;
+            TouchImage(image);
+            ranged = true;
+        }
+
+        if (ranged)
+        {
+            generation = _lookupGeneration;
+        }
+
+        return true;
+    }
+
+    internal bool TryRememberedSetForSlice(ReadOnlySpan<RememberedTexture> textures, ref ulong generation)
+    {
+        using var held = _lock.Read();
+        if (!RememberedSetHolds(textures, generation))
+        {
+            return false;
+        }
+
+        foreach (var texture in textures)
+        {
+            if (texture.Ranged)
+            {
+                generation = _lookupGeneration;
+                break;
+            }
+        }
+
+        return true;
+    }
+
+    private bool RememberedSetHolds(ReadOnlySpan<RememberedTexture> textures, ulong generation)
+    {
+        foreach (var texture in textures)
+        {
+            if (_slots.TryGet(texture.Image) is not { } image ||
+                ((!image.Registered || image.DepthOwner.IsValid) && !ImageDescription.IsEmptyRange(image.Description.Data)) ||
+                image.Binding.NeedsRebind)
+            {
+                return false;
+            }
+
+            if (texture.Ranged && (!LookupUnchangedSince(generation, texture.Begin, texture.End) || image is not { Registered: true, Parked: false }))
+            {
+                return false;
+            }
+        }
+
         return true;
     }
 
@@ -164,7 +239,7 @@ public sealed partial class GuestImageCache
         return hash & (LookupSlots - 1);
     }
 
-    private static bool SameRequest(in ImageRequest left, in ImageRequest right) =>
+    internal static bool SameRequest(in ImageRequest left, in ImageRequest right) =>
         SameDescription(left.Description, right.Description) && left.View == right.View && left.Role == right.Role &&
         left.TraceTextureMetadataAddress == right.TraceTextureMetadataAddress &&
         string.Equals(left.TraceTextureDescriptor, right.TraceTextureDescriptor, StringComparison.Ordinal) &&
@@ -177,7 +252,7 @@ public sealed partial class GuestImageCache
             left.GuestFormat != right.GuestFormat || left.Type != right.Type ||
             left.Extent.Width != right.Extent.Width || left.Extent.Height != right.Extent.Height ||
             left.Extent.Depth != right.Extent.Depth || left.Resources != right.Resources ||
-            left.Pitch != right.Pitch || left.BytesPerBlock != right.BytesPerBlock ||
+            left.Pitch != right.Pitch || left.BytesPerBlock != right.BytesPerBlock || left.FirstLevel != right.FirstLevel ||
             left.Samples != right.Samples || left.TileMode != right.TileMode || left.Bgra16 != right.Bgra16)
         {
             return false;
@@ -221,7 +296,7 @@ public sealed partial class GuestImageCache
 
         ref var memo = ref lookups[LookupSlot(request, exactFormat)];
         if (memo.ExactFormat != exactFormat || !SameRequest(memo.Request, request) || !LookupUnchangedSince(memo.Generation, memo.Begin, memo.End) ||
-            _slots.TryGet(memo.Result) is not { Registered: true, Parked: false } image)
+            _slots.TryGet(memo.Result) is not { Registered: true, Parked: false, DimensionTwinStale: false } image)
         {
             _lookupMisses++;
             _totalLookupMisses.Increment();

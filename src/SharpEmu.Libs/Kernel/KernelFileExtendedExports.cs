@@ -122,6 +122,78 @@ public static partial class KernelMemoryCompatExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    // preadv(fd, iov, iovcnt, offset): fills each { base, length } entry in turn from one positional read.
+    [SysAbiExport(Nid = "yTj62I7kw4s", ExportName = "sceKernelPreadv",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
+    public static int KernelPreadv(CpuContext ctx)
+    {
+        const int MaxIov = 1024;
+        var fd = unchecked((int)ctx[CpuRegister.Rdi]);
+        var iov = ctx[CpuRegister.Rsi];
+        var count = unchecked((int)ctx[CpuRegister.Rdx]);
+        var offset = unchecked((long)ctx[CpuRegister.Rcx]);
+        if (count < 0 || count > MaxIov || (count > 0 && iov == 0) || offset < 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        var stream = GetOpenFile(fd);
+        if (stream is null)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
+        var entries = new (ulong Base, int Length)[count];
+        long total = 0;
+        for (var i = 0; i < count; i++)
+        {
+            var entry = iov + (ulong)i * 16;
+            if (!ctx.TryReadUInt64(entry, out var entryBase) || !ctx.TryReadUInt64(entry + 8, out var entryLength))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            if (entryLength > int.MaxValue || total + (long)entryLength > int.MaxValue || (entryLength != 0 && entryBase == 0))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            }
+
+            total += (long)entryLength;
+            entries[i] = (entryBase, (int)entryLength);
+        }
+
+        var buffer = GC.AllocateUninitializedArray<byte>((int)total);
+        int read;
+        try
+        {
+            read = total == 0 ? 0 : ReadOpenFileAt(stream, buffer, offset);
+        }
+        catch (IOException)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        var copied = 0;
+        foreach (var (entryBase, length) in entries)
+        {
+            var part = Math.Min(length, read - copied);
+            if (part <= 0)
+            {
+                break;
+            }
+
+            if (!ctx.Memory.TryWrite(entryBase, buffer.AsSpan(copied, part)))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            copied += part;
+        }
+
+        ctx[CpuRegister.Rax] = unchecked((ulong)read);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     [SysAbiExport(Nid = "C2kJ-byS5rM", ExportName = "pwrite",
         Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
     public static int PosixPwrite(CpuContext ctx) => KernelPwriteCore(ctx);
@@ -169,6 +241,66 @@ public static partial class KernelMemoryCompatExports
         }
 
         ctx[CpuRegister.Rax] = unchecked((ulong)requested);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // pwritev(fd, iov, iovcnt, offset): writes the { base, length } entries back to back at offset.
+    [SysAbiExport(Nid = "mBd4AfLP+u8", ExportName = "sceKernelPwritev",
+        Target = Generation.Gen4 | Generation.Gen5, LibraryName = "libKernel")]
+    public static int KernelPwritev(CpuContext ctx)
+    {
+        const int MaxIov = 1024;
+        var fd = unchecked((int)ctx[CpuRegister.Rdi]);
+        var iov = ctx[CpuRegister.Rsi];
+        var count = unchecked((int)ctx[CpuRegister.Rdx]);
+        var offset = unchecked((long)ctx[CpuRegister.Rcx]);
+        if (count < 0 || count > MaxIov || (count > 0 && iov == 0) || offset < 0)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+        }
+
+        var stream = GetOpenFile(fd);
+        if (stream is null)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND;
+        }
+
+        var payload = new MemoryStream();
+        for (var i = 0; i < count; i++)
+        {
+            var entry = iov + (ulong)i * 16;
+            if (!ctx.TryReadUInt64(entry, out var entryBase) || !ctx.TryReadUInt64(entry + 8, out var entryLength))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            if (entryLength > int.MaxValue || payload.Length + (long)entryLength > int.MaxValue || (entryLength != 0 && entryBase == 0))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            }
+
+            var part = GC.AllocateUninitializedArray<byte>((int)entryLength);
+            if (!ctx.Memory.TryRead(entryBase, part))
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT;
+            }
+
+            payload.Write(part);
+        }
+
+        if (payload.Length != 0)
+        {
+            try
+            {
+                WriteOpenFileAt(stream, payload.GetBuffer().AsSpan(0, (int)payload.Length), offset);
+            }
+            catch (IOException)
+            {
+                return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT;
+            }
+        }
+
+        ctx[CpuRegister.Rax] = unchecked((ulong)payload.Length);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 

@@ -58,6 +58,80 @@ public sealed class Gen5FlatMemoryTests
             : [], instruction.Destinations);
     }
 
+    // A shipped compute shader: global_load_ubyte v2, v53, s[0:1] offset:217.
+    // Bit 0 of a FLAT word is offset bit 0, not an opcode bit (that is MIMG only).
+    [Fact]
+    public void GlobalLoadUbyteWithOddOffset_DecodesAsGlobalLoadUbyte()
+    {
+        var instruction = DecodeProgram(0xDC20_80D9, 0x0200_0035, SEndpgm).Instructions[0];
+
+        Assert.Equal("GlobalLoadUbyte", instruction.Opcode);
+        var control = Assert.IsType<Gen5GlobalMemoryControl>(instruction.Control);
+        Assert.Equal(1u, control.DwordCount);
+        Assert.Equal(0x35u, control.VectorAddress);
+        Assert.Equal(0u, control.ScalarAddress);
+        Assert.Equal(2u, control.DestinationVectorRegister);
+        Assert.Equal(0xD9, control.OffsetBytes);
+        Assert.False(control.Glc);
+        Assert.False(control.UsesFlatAddress);
+        Assert.Equal([Gen5Operand.Vector(0x35), Gen5Operand.Scalar(0)], instruction.Sources);
+        Assert.Equal([Gen5Operand.Vector(2)], instruction.Destinations);
+    }
+
+    public static IEnumerable<object[]> OddOffsetCases()
+    {
+        foreach (var segment in new uint[] { 0, 2 })
+        foreach (var opcode in new uint[] { 8, 9, 10, 11, 12, 13, 14, 15, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 50, 56 })
+            yield return [segment, opcode];
+    }
+
+    [Theory]
+    [MemberData(nameof(OddOffsetCases))]
+    public void OddOffset_KeepsTheOpcodeOfTheEvenOffset(uint segment, uint opcode)
+    {
+        var even = DecodeProgram(0xDC00_0000u | (opcode << 18) | (segment << 14) | 0x10, 0x0810_0309, SEndpgm).Instructions[0];
+        var odd = DecodeProgram(0xDC00_0000u | (opcode << 18) | (segment << 14) | 0x11, 0x0810_0309, SEndpgm).Instructions[0];
+
+        Assert.Equal(even.Opcode, odd.Opcode);
+        Assert.Equal(0x11, Assert.IsType<Gen5GlobalMemoryControl>(odd.Control).OffsetBytes);
+    }
+
+    // GFX10 FLAT word 0: OFFSET[11:0] (signed for global and scratch), DLC[12], LDS[13], SEG[15:14].
+    [Theory]
+    [InlineData(0x000u, 0)]
+    [InlineData(0x0D9u, 0xD9)]
+    [InlineData(0x7FFu, 2047)]
+    [InlineData(0x800u, -2048)]
+    [InlineData(0xFFFu, -1)]
+    public void GlobalOffset_IsTwelveBitSignedAndIgnoresDlc(uint offsetField, int expected)
+    {
+        foreach (var dlc in new uint[] { 0, 1u << 12 })
+        {
+            // global_load_dword v8, v9, s[16:17] offset:<field> [dlc]
+            var instruction = DecodeProgram(0xDC30_8000u | dlc | offsetField, 0x0810_0009, SEndpgm).Instructions[0];
+            Assert.Equal("GlobalLoadDword", instruction.Opcode);
+            Assert.Equal(expected, Assert.IsType<Gen5GlobalMemoryControl>(instruction.Control).OffsetBytes);
+        }
+    }
+
+    [Fact]
+    public void GlobalLoadUbyteWithOddOffset_CompilesToADeviceAddressByteLoad()
+    {
+        // global_load_ubyte v1, v0, s[0:1] offset:217; s[0:1] is user data.
+        var program = DecodeProgram(0xDC20_80D9, 0x0100_0000, SEndpgm);
+        var instruction = Assert.Single(program.Instructions, item => item.Opcode == "GlobalLoadUbyte");
+
+        var (plan, resources, layout) = ResourceTestProgram.Prepare(program, userDataBase: 0, userDataCount: 2);
+        Assert.True(plan.Info.UsesDeviceAddresses);
+        Assert.True(plan.Memory.TryGetIndex(instruction.Pc, 0, out _));
+        var request = new ShaderCompileRequest(plan, resources, layout);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var compiled, out var error), error);
+        var opcodes = ReadSpirvOpcodes(compiled.Spirv);
+        Assert.Contains((ushort)SpirvOp.ConvertUToPtr, opcodes);
+        // An unsigned byte load is zero-extended, never sign-extracted.
+        Assert.DoesNotContain((ushort)SpirvOp.BitFieldSExtract, opcodes);
+    }
+
     [Fact]
     public void ReturningAtomic_InvalidatesThePreviousFlatAddressDefinition()
     {

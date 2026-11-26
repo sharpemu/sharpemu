@@ -18,7 +18,7 @@ public sealed class ShaderPlanningDumpTests
     public void RejectedPlanPreservesDiagnosticsOnlyWhenTheGateAndAddressMatch(string enabled, bool addressMatches, bool expectFiles, bool blockedDirectory)
     {
         var directory = Directory.CreateTempSubdirectory("shader-planning-test-").FullName;
-        var names = new[] { "SHARPEMU_DUMP_SPIRV", "SHARPEMU_DUMP_SPIRV_ADDRESS", "SHARPEMU_SHADER_SPIRV_DUMP_DIR" };
+        var names = new[] { "SHARPEMU_DUMP_SPIRV", "SHARPEMU_DUMP_SPIRV_ADDRESS", "SHARPEMU_SHADER_SPIRV_DUMP_DIR", "SHARPEMU_BINDLESS_NULL" };
         var previous = names.Select(Environment.GetEnvironmentVariable).ToArray();
         try
         {
@@ -28,6 +28,8 @@ public sealed class ShaderPlanningDumpTests
             var outputDirectory = Path.Combine(directory, "output");
             if (blockedDirectory) File.WriteAllText(outputDirectory, "This file prevents directory creation.");
             Environment.SetEnvironmentVariable(names[2], outputDirectory);
+            // Null bindless descriptors off: the image descriptor below then rejects the plan.
+            Environment.SetEnvironmentVariable(names[3], "0");
             using var fatalScope = new FatalScope();
             var guest = new PipelineTestGuest();
             // A lane-derived offset reads an image descriptor without a material-table selector.

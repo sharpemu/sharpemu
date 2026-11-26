@@ -82,6 +82,9 @@ public sealed record LaunchConfiguration(EffectiveLaunchSettings Settings, IRead
         values["SHARPEMU_GPU_READBACKS"] =
             string.Equals(Settings.GpuReadbacks, "Off", StringComparison.OrdinalIgnoreCase) ? "off" : "full";
         values[DefaultProfileVariable] = GuiSettings.NormalizeDefaultProfile(launcher.DefaultProfile);
+        values[SharpEmu.Libs.Overlay.OverlayPalette.EnvironmentVariable] = LauncherThemes.EmulatorPalette(launcher);
+        values[SharpEmu.Libs.Overlay.OverlayText.LanguageVariable] = EmulatorOverlayText.Language(launcher);
+        values[SharpEmu.Libs.Overlay.OverlayText.StringsVariable] = EmulatorOverlayText.Strings(launcher);
         values[GnmTrophyPackageReader.KeyEnvironmentName] =
             string.IsNullOrEmpty(launcher.GnmTrophyKey) ? null : launcher.GnmTrophyKey;
         values["SHARPEMU_BINK_MODE"] = Settings.BinkPlaybackMode.ToLowerInvariant() switch

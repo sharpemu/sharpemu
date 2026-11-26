@@ -88,13 +88,15 @@ internal sealed class PresenterUnderTest : IDisposable
             "_batchResources", "_batchRetireBuffers", "_pendingGuestSubmissions",
             "_deferredGuestImageVersionDestroys",
             "_pipelineEntries", "_shaderModules", "_shaderModuleSpirvBytes", "_rectangleStageCode",
+            "_sharedPipelineBinaries", "_pipelineBuilds", "_pendingGraphicsPipelines", "_graphicsLibraries", "_graphicsLibraryLock",
+            "_graphicsLibraryCompiles", "_earlyPixelLibraryTasks", "_pendingComputePipelines", "_prewarmedComputePipelines",
         })
         {
             var field = PresenterType.GetField(name, InstanceMembers)!;
             field.SetValue(Instance, Activator.CreateInstance(field.FieldType, nonPublic: true));
         }
 
-        SetField("_shaderModuleCacheIdentities", new Dictionary<ulong, string>());
+        SetField("_shaderModuleCacheIdentities", new System.Collections.Concurrent.ConcurrentDictionary<ulong, string>());
         var cacheShards = PresenterType.GetField("_pipelineCacheShards", InstanceMembers)!;
         cacheShards.SetValue(Instance, Activator.CreateInstance(cacheShards.FieldType, nonPublic: true));
         forwarder.Target = this;

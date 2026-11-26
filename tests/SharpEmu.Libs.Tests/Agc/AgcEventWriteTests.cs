@@ -87,6 +87,34 @@ public sealed class AgcEventWriteTests
         Assert.Equal(0xDEADBEEFu, host.ReadDword(PacketAddress));
     }
 
+    // A title reserves room with sceAgcDcbEventWriteGetSize before it writes the event; the two must agree.
+    [Theory]
+    [InlineData(0x38u)]
+    [InlineData(0x39u)]
+    [InlineData(0x07u)]
+    [InlineData(0x3Au)]
+    public void GetSize_ReportsTheBytesTheWriterTakes(uint eventType)
+    {
+        var host = CreateHost(out var context);
+        context[CpuRegister.Rdi] = eventType;
+        var size = AgcExports.DcbEventWriteGetSize(context);
+        context[CpuRegister.Rdi] = CommandBufferAddress;
+        context[CpuRegister.Rsi] = eventType;
+        context[CpuRegister.Rdx] = ResultAddress;
+
+        Assert.Equal(0, AgcExports.DcbEventWrite(context));
+        Assert.Equal(PacketAddress + (ulong)size, host.ReadQword(CommandBufferAddress + 0x10));
+    }
+
+    [Fact]
+    public void GetSize_IsZeroForAnInvalidEvent()
+    {
+        CreateHost(out var context);
+        context[CpuRegister.Rdi] = 0x40;
+
+        Assert.Equal(0, AgcExports.DcbEventWriteGetSize(context));
+    }
+
     [Fact]
     public void InvalidEvent_DoesNotAllocateAPacket()
     {

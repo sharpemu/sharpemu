@@ -220,6 +220,7 @@ internal sealed class RecordingRenderHost : IRenderHost
     public void ResetBindings() => Calls.Add("reset_bindings");
 
     public DrawScopeToken Scope { get; set; }
+    public bool EndScopeOnBindingCommit { get; set; }
 
     public DrawScopeToken DrawScope => Scope;
 
@@ -342,8 +343,14 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public void BindResources(IPreparedBindings prepared) => Calls.Add($"bind_resources {((RecordedBindings)prepared).Id}");
 
-    public void CommitBindings(PipelineBindPoint bindPoint, in PipelineHandle pipeline, ReadOnlySpan<IPreparedBindings> stages) =>
+    public void CommitBindings(PipelineBindPoint bindPoint, in PipelineHandle pipeline, ReadOnlySpan<IPreparedBindings> stages)
+    {
         Calls.Add($"commit {bindPoint} {pipeline.Pipeline:X} [{string.Join(",", stages.ToArray().Select(s => ((RecordedBindings)s).Id))}]");
+        if (EndScopeOnBindingCommit)
+        {
+            Scope = default;
+        }
+    }
 
     public void SetDynamicState(in DynamicDrawState state)
     {
@@ -369,6 +376,9 @@ internal sealed class RecordingRenderHost : IRenderHost
 
     public void DrawIndexedIndirect(BufferBinding arguments) =>
         Calls.Add($"draw_indexed_indirect {arguments.Handle:X}:{arguments.Offset:X}");
+
+    public void DrawIndirect(BufferBinding arguments) =>
+        Calls.Add($"draw_indirect {arguments.Handle:X}:{arguments.Offset:X}");
 
     public void DrawMeshTasks(uint groupCountX, uint groupCountY, uint groupCountZ) =>
         Calls.Add($"draw_mesh {groupCountX} {groupCountY} {groupCountZ}");
@@ -416,6 +426,21 @@ internal sealed class RecordingRenderHost : IRenderHost
     }
 
     long IRenderHost.DeferredBarrierPromotions => Promotions;
+
+    // The stream position of the item being recorded; zero keeps dispatches from sealing a replay basis.
+    public long ItemSequence { get; set; }
+
+    long IRenderHost.CurrentItemSequence => ItemSequence;
+
+    public bool AcceptDispatchReplay { get; set; } = true;
+
+    void IRenderHost.SealDispatchReplay() => Calls.Add("seal_dispatch");
+
+    bool IRenderHost.TryReplayDispatch(in PipelineHandle pipeline, in ShaderStageResources stage, bool replaceTable)
+    {
+        Calls.Add($"replay_dispatch table={replaceTable}");
+        return AcceptDispatchReplay;
+    }
 
     public bool RetainTargetlessDraws { get; set; }
 
@@ -589,6 +614,13 @@ internal sealed class FakePipelineProvider : IShaderPipelineProvider
         CompletionRequested?.Invoke();
         return PendingComputeCompletion;
     }
+
+    public HashSet<ulong> SlowLinkedPrograms { get; } = [];
+    public List<(ulong Hash, bool Slow)> RecordedLinkedCompiles { get; } = [];
+
+    public bool IsSlowLinkedCompile(ulong hash) => SlowLinkedPrograms.Contains(hash);
+
+    public void RecordLinkedCompile(ulong hash, bool slow, long milliseconds) => RecordedLinkedCompiles.Add((hash, slow));
 
     public bool TryCreateComputePipeline(ComputeInputInfo input, ShaderProgram program, out PipelineHandle handle)
     {

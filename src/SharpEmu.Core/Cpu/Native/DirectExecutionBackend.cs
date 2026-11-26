@@ -561,7 +561,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 	private readonly record struct PendingGuestException(
 		ulong Handler,
 		int ExceptionType,
-		ulong ExceptionStackBase);
+		ulong ExceptionStackBase,
+		GuestExceptionHandlerArguments Arguments);
 
 	private sealed class GuestContinuationRunner : IDisposable
 	{
@@ -2251,7 +2252,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		frame[14] = target.R13;
 		frame[15] = target.R14;
 		frame[16] = target.R15;
-		frame[17] = target.Mxcsr == 0 ? 0x1F80u : target.Mxcsr;
+		frame[17] = target.Mxcsr == 0 ? CpuContext.InitialMxcsr : target.Mxcsr;
 		frame[18] = target.FpuControlWord == 0 ? 0x037Fu : target.FpuControlWord;
 		frame[19] = target.RestoreFullFpuState ? 1u : 0u;
 		// The TEB stores NT_TIB.StackBase (the high address) at +0x08 and
@@ -2785,6 +2786,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		EmitByte(code, ref offset, 0x20);
 		EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0x89); EmitByte(code, ref offset, 0xC2); // mov r10,rax
 		EmitHostStackBounds(code, ref offset, save: false);
+		EmitHostFloatingPointControlRestore(code, ref offset);
 		EmitHostNonvolatileXmmRestore(code, ref offset);
 		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5F);
 		EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5E);
@@ -3379,17 +3381,49 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return (nint)ptr;
 	}
 
+	// rel32 calls from guest code reach +-2 GiB; stay well inside it so stubs at both ends of the block are reachable.
+	private const ulong NearEntryWindow = 0x70000000uL;
+	private const ulong AllocationGranularity = 0x10000uL;
+	private const ulong MaxUserAddress = 0x00007FFFFFFE0000uL;
+	private const uint MEM_FREE = 0x10000u;
+
 	private unsafe void* TryAllocateNearEntry(nuint size)
 	{
-		ulong entryPoint = _entryPoint;
-		ulong baseAddress = entryPoint & 0xFFFFFFFFFFFF0000uL;
-		for (long num = 0L; num <= 1879048192; num += 16777216)
+		ulong baseAddress = _entryPoint & ~(AllocationGranularity - 1);
+		ulong lowLimit = baseAddress > NearEntryWindow ? baseAddress - NearEntryWindow : 0;
+		if (lowLimit < AllocationGranularity)
 		{
-			if (TryAllocAt(baseAddress, num, size, out var memory))
+			lowLimit = AllocationGranularity;
+		}
+		ulong highLimit = Math.Min(baseAddress + NearEntryWindow, MaxUserAddress);
+
+		// Grid probing missed every gap in crowded layouts; ask the OS where the free ranges are instead.
+		var freeRegions = new List<(ulong Start, ulong End)>();
+		ulong cursor = lowLimit;
+		while (cursor < highLimit)
+		{
+			if (VirtualQuery((void*)cursor, out var information, (nuint)sizeof(MEMORY_BASIC_INFORMATION64)) == 0 ||
+				information.RegionSize == 0)
 			{
-				return memory;
+				break;
 			}
-			if (num != 0L && TryAllocAt(baseAddress, -num, size, out memory))
+			ulong regionStart = information.BaseAddress;
+			ulong regionEnd = regionStart + information.RegionSize;
+			if (information.State == MEM_FREE)
+			{
+				freeRegions.Add((regionStart, regionEnd));
+			}
+			if (regionEnd <= cursor)
+			{
+				break;
+			}
+			cursor = regionEnd;
+		}
+
+		foreach (ulong candidate in OrderNearEntryCandidates(freeRegions, baseAddress, size, lowLimit, highLimit))
+		{
+			void* memory = VirtualAlloc((void*)candidate, size, 12288u, 64u);
+			if (memory != null)
 			{
 				return memory;
 			}
@@ -3397,36 +3431,52 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return null;
 	}
 
-	private unsafe static bool TryAllocAt(ulong baseAddress, long signedDelta, nuint size, out void* memory)
+	// Returns 64 KiB-aligned addresses where `size` bytes fit inside a free region and inside
+	// [lowLimit, highLimit), nearest to entryBase first.
+	internal static List<ulong> OrderNearEntryCandidates(
+		IReadOnlyList<(ulong Start, ulong End)> freeRegions,
+		ulong entryBase,
+		ulong size,
+		ulong lowLimit,
+		ulong highLimit)
 	{
-		memory = null;
-		ulong num;
-		if (signedDelta >= 0)
+		var candidates = new List<(ulong Distance, ulong Address)>();
+		foreach (var (regionStart, regionEnd) in freeRegions)
 		{
-			if (baseAddress > (ulong)(-1 - signedDelta))
+			ulong start = (Math.Max(regionStart, lowLimit) + AllocationGranularity - 1) & ~(AllocationGranularity - 1);
+			ulong end = Math.Min(regionEnd, highLimit);
+			if (end <= start || end - start < size)
 			{
-				return false;
+				continue;
 			}
-			num = baseAddress + (ulong)signedDelta;
-		}
-		else
-		{
-			ulong num2 = (ulong)(-signedDelta);
-			if (baseAddress < num2)
-			{
-				return false;
-			}
-			num = baseAddress - num2;
-		}
-		void* ptr = VirtualAlloc((void*)num, size, 12288u, 64u);
-		if (ptr == null)
-		{
-			return false;
-		}
-		memory = ptr;
-		return true;
-	}
 
+			// Candidate above the entry: the lowest aligned address at or after it.
+			ulong above = (Math.Max(start, entryBase) + AllocationGranularity - 1) & ~(AllocationGranularity - 1);
+			if (above <= end && end - above >= size)
+			{
+				candidates.Add((above - entryBase, above));
+			}
+
+			// Candidate below the entry: the highest aligned address whose block ends at or before it.
+			ulong belowEnd = Math.Min(end, entryBase);
+			if (belowEnd >= start && belowEnd - start >= size)
+			{
+				ulong below = (belowEnd - size) & ~(AllocationGranularity - 1);
+				if (below >= start)
+				{
+					candidates.Add((entryBase - below, below));
+				}
+			}
+		}
+
+		candidates.Sort(static (left, right) => left.Distance.CompareTo(right.Distance));
+		var result = new List<ulong>(candidates.Count);
+		foreach (var candidate in candidates)
+		{
+			result.Add(candidate.Address);
+		}
+		return result;
+	}
 	internal readonly record struct TlsPatchScanRange(ulong Start, ulong End);
 
 	private readonly record struct TlsPatchCounts(
@@ -3514,10 +3564,15 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			}
 		}
 
+		var outOfRange = Volatile.Read(ref _tlsOutOfRangeSites);
 		Console.Error.WriteLine(
 			$"[LOADER][INFO] Patched {counts.Loads} TLS loads, {counts.Stores} TLS stores, " +
 			$"{counts.StackCanaries} stack-canary accesses " +
-			$"across {scannedRanges} executable range(s), bytes=0x{scannedBytes:X}, reused={reusedRanges}");
+			$"across {scannedRanges} executable range(s), bytes=0x{scannedBytes:X}, reused={reusedRanges}, out_of_range={outOfRange}");
+		if (outOfRange > 0)
+		{
+			Console.Error.WriteLine($"[LOADER][WARNING] {outOfRange} TLS site(s) are beyond rel32 range of the TLS handler at 0x{_tlsHandlerAddress:X16}.");
+		}
 	}
 
 	private unsafe TlsPatchCounts PatchTlsPatternsInRange(ulong rangeStart, ulong rangeEnd)
@@ -3725,7 +3780,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
         }
         var displacement = (long)handler - ((long)address + 6);
         if (displacement < int.MinValue || displacement > int.MaxValue)
+        {
+            Interlocked.Increment(ref _tlsOutOfRangeSites);
             return false;
+        }
         // REX.W keeps retained operand-size prefixes from changing the call width.
         Span<byte> patch = stackalloc byte[instructionLength];
         patch.Fill(0x90);
@@ -3734,6 +3792,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
         System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(patch[2..], (int)displacement);
         return WriteTlsInstruction(address, patch);
     }
+
+    private int _tlsOutOfRangeSites;
 
     private readonly nint[] _tlsRegisterLoadHelpers = new nint[16];
 
@@ -3790,6 +3850,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		long num3 = _tlsHandlerAddress - (num + num2 + 4);
 		if (num3 < int.MinValue || num3 > int.MaxValue)
 		{
+			Interlocked.Increment(ref _tlsOutOfRangeSites);
 			Console.Error.WriteLine($"[LOADER][WARNING] TLS store helper out of rel32 range at 0x{num:X16}");
 			return 0;
 		}
@@ -3842,6 +3903,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		var displacement = (long)target - ((long)address + 5);
 		if (displacement < int.MinValue || displacement > int.MaxValue)
 		{
+			Interlocked.Increment(ref _tlsOutOfRangeSites);
 			Console.Error.WriteLine($"[LOADER][WARNING] TLS patch out of rel32 range at 0x{address:X16}");
 			return false;
 		}
@@ -4885,7 +4947,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			FsBase = callerContext.FsBase != 0 ? callerContext.FsBase : (continuation.FsBase != 0 ? continuation.FsBase : fallbackTlsBase),
 			GsBase = callerContext.GsBase != 0 ? callerContext.GsBase : (continuation.GsBase != 0 ? continuation.GsBase : fallbackTlsBase),
 			FpuControlWord = continuation.FpuControlWord == 0 ? (ushort)0x037F : continuation.FpuControlWord,
-			Mxcsr = continuation.Mxcsr == 0 ? 0x1F80u : continuation.Mxcsr,
+			Mxcsr = continuation.Mxcsr == 0 ? CpuContext.InitialMxcsr : continuation.Mxcsr,
 		};
 
 		context[CpuRegister.Rax] = continuation.Rax;
@@ -5023,6 +5085,23 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		int exceptionType,
 		out string? error)
 	{
+		return TryRaiseGuestException(
+			callerContext,
+			threadHandle,
+			handler,
+			exceptionType,
+			GuestExceptionHandlerArguments.Signal,
+			out error);
+	}
+
+	public bool TryRaiseGuestException(
+		CpuContext callerContext,
+		ulong threadHandle,
+		ulong handler,
+		int exceptionType,
+		GuestExceptionHandlerArguments arguments,
+		out string? error)
+	{
 		error = null;
 		var logGuestExceptions = string.Equals(
 			Environment.GetEnvironmentVariable("SHARPEMU_LOG_GUEST_EXCEPTIONS"),
@@ -5086,7 +5165,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					QueuePendingGuestExceptionLocked(threadHandle, new PendingGuestException(
 						handler,
 						exceptionType,
-						external.ExceptionStackBase));
+						external.ExceptionStackBase,
+						arguments));
 					return true;
 				}
 
@@ -5098,7 +5178,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				QueuePendingGuestExceptionLocked(threadHandle, new PendingGuestException(
 					handler,
 					exceptionType,
-					external.ExceptionStackBase));
+					external.ExceptionStackBase,
+					arguments));
 				if (logGuestExceptions)
 				{
 					Console.Error.WriteLine(
@@ -5146,14 +5227,16 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					QueuePendingGuestExceptionLocked(threadHandle, new PendingGuestException(
 						handler,
 						exceptionType,
-						exceptionStackBase));
+						exceptionStackBase,
+						arguments));
 					return true;
 				}
 
 				QueuePendingGuestExceptionLocked(threadHandle, new PendingGuestException(
 					handler,
 					exceptionType,
-					exceptionStackBase));
+					exceptionStackBase,
+					arguments));
 				if (logGuestExceptions)
 				{
 					Console.Error.WriteLine(
@@ -5265,11 +5348,18 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			var deliveryStarted = Stopwatch.GetTimestamp();
 			try
 			{
+				ResolveGuestExceptionHandlerArguments(
+					target.Context,
+					arguments,
+					exceptionType,
+					exceptionContextAddress,
+					out var handlerArg0,
+					out var handlerArg1);
 				deliverySucceeded = TryCallGuestFunction(
 						target.Context,
 						handler,
-						unchecked((ulong)exceptionType),
-						exceptionContextAddress,
+						handlerArg0,
+						handlerArg1,
 						exceptionStackBase + callbackStackOffset,
 						callbackStackSize,
 						$"kernel exception 0x{exceptionType:X2}",
@@ -5324,6 +5414,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 						threadHandle,
 						pendingFollowUp.Handler,
 						pendingFollowUp.ExceptionType,
+						pendingFollowUp.Arguments,
 						out var followUpError))
 				{
 					Console.Error.WriteLine(
@@ -5473,11 +5564,18 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					$"rip=0x{interruptedContinuation.Rip:X16}");
 			}
 
+			ResolveGuestExceptionHandlerArguments(
+				currentContext,
+				pending.Arguments,
+				pending.ExceptionType,
+				exceptionContextAddress,
+				out var handlerArg0,
+				out var handlerArg1);
 			if (!TryCallGuestFunction(
 					currentContext,
 					pending.Handler,
-					unchecked((ulong)pending.ExceptionType),
-					exceptionContextAddress,
+					handlerArg0,
+					handlerArg1,
 					pending.ExceptionStackBase + callbackStackOffset,
 					callbackStackSize,
 					$"kernel exception 0x{pending.ExceptionType:X2} safe point",
@@ -5496,6 +5594,29 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 				_activeGuestExceptionDeliveries.Remove(threadHandle);
 			}
 		}
+	}
+
+	// A Unity GC suspend callback takes (mcontext, interrupted rsp), where the signal
+	// convention takes (type, mcontext). The rsp is read back from the context the
+	// writer just filled in, so both paths agree on the interrupted stack pointer.
+	internal static void ResolveGuestExceptionHandlerArguments(
+		CpuContext context,
+		GuestExceptionHandlerArguments arguments,
+		int exceptionType,
+		ulong exceptionContextAddress,
+		out ulong arg0,
+		out ulong arg1)
+	{
+		if (arguments == GuestExceptionHandlerArguments.UnityGcSuspend)
+		{
+			_ = context.TryReadUInt64(exceptionContextAddress + 0xB8, out var interruptedRsp);
+			arg0 = exceptionContextAddress;
+			arg1 = interruptedRsp;
+			return;
+		}
+
+		arg0 = unchecked((ulong)exceptionType);
+		arg1 = exceptionContextAddress;
 	}
 
 	private void QueuePendingGuestExceptionLocked(
@@ -6221,6 +6342,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 					thread.ThreadHandle,
 					pendingException.Handler,
 					pendingException.ExceptionType,
+					pendingException.Arguments,
 					out var pendingError))
 			{
 				Console.Error.WriteLine(
@@ -6332,7 +6454,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		context.FpuControlWord = continuation.FpuControlWord == 0
 			? (ushort)0x037F
 			: continuation.FpuControlWord;
-		context.Mxcsr = continuation.Mxcsr == 0 ? 0x1F80u : continuation.Mxcsr;
+		context.Mxcsr = continuation.Mxcsr == 0 ? CpuContext.InitialMxcsr : continuation.Mxcsr;
 	}
 
 	private unsafe GuestNativeCallExitReason ExecuteGuestThreadEntry(CpuContext context, ulong entryPoint, string name, out string? reason)
@@ -6400,6 +6522,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr2[offset++] = 73;
 			ptr2[offset++] = 137;
 			ptr2[offset++] = 34;
+			EmitFloatingPointControlSwitch(ptr2, ref offset, context.Mxcsr, context.FpuControlWord);
 			EmitGuestStackBounds(ptr2, ref offset, context[CpuRegister.Rsp]);
 			ptr2[offset++] = 72;
 			ptr2[offset++] = 184;
@@ -6463,6 +6586,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr2[offset++] = 139;
 			ptr2[offset++] = 34;
 			EmitHostStackBounds(ptr2, ref offset, save: false);
+			EmitHostFloatingPointControlRestore(ptr2, ref offset);
 			EmitHostNonvolatileXmmRestore(ptr2, ref offset);
 			ptr2[offset++] = 65;
 			ptr2[offset++] = 95;
@@ -6612,19 +6736,12 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			emitter.Emit(0x41); emitter.Emit(0x56); // push r14
 			emitter.Emit(0x41); emitter.Emit(0x57); // push r15
 			EmitHostNonvolatileXmmSave(ptr2, ref emitter.Offset);
+			emitter.EmitMovR64Immediate(0x49, 0xBA, hostRspSlot); // mov r10, hostRspSlot
+			emitter.Emit(0x49); emitter.Emit(0x89); emitter.Emit(0x22); // mov [r10], rsp
 			// Restore the fiber's floating-point control environment before
 			// abandoning the host stack. This path is used when a blocked guest
 			// continuation migrates to another managed worker.
-			emitter.Emit(0x48); emitter.Emit(0x83); emitter.Emit(0xEC); emitter.Emit(0x08); // sub rsp,8
-			emitter.Emit(0xC7); emitter.Emit(0x04); emitter.Emit(0x24); // mov dword [rsp],imm32
-			emitter.Emit(context.Mxcsr);
-			emitter.Emit(0x0F); emitter.Emit(0xAE); emitter.Emit(0x14); emitter.Emit(0x24); // ldmxcsr [rsp]
-			emitter.Emit(0x66); emitter.Emit(0xC7); emitter.Emit(0x04); emitter.Emit(0x24); // mov word [rsp],imm16
-			emitter.Emit(context.FpuControlWord);
-			emitter.Emit(0xD9); emitter.Emit(0x2C); emitter.Emit(0x24); // fldcw [rsp]
-			emitter.Emit(0x48); emitter.Emit(0x83); emitter.Emit(0xC4); emitter.Emit(0x08); // add rsp,8
-			emitter.EmitMovR64Immediate(0x49, 0xBA, hostRspSlot); // mov r10, hostRspSlot
-			emitter.Emit(0x49); emitter.Emit(0x89); emitter.Emit(0x22); // mov [r10], rsp
+			EmitFloatingPointControlSwitch(ptr2, ref emitter.Offset, context.Mxcsr, context.FpuControlWord);
 			EmitGuestStackBounds(ptr2, ref emitter.Offset, context[CpuRegister.Rsp]);
 			emitter.EmitMovR64Immediate(0x48, 0xB8, context[CpuRegister.Rsp]); // mov rax, guest rsp
 			emitter.Emit(0x48); emitter.Emit(0x89); emitter.Emit(0xC4); // mov rsp, rax
@@ -6778,6 +6895,31 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		offset += sizeof(uint);
 	}
 
+	// R10 holds the host state block. The guest starts with its context's MXCSR and x87 control word (a new thread gets
+	// the console's) instead of the host thread's, which the block keeps for every way back to the host: their control
+	// bits are callee-saved on the host.
+	private static unsafe void EmitFloatingPointControlSwitch(byte* code, ref int offset, uint mxcsr, ushort fpuControlWord)
+	{
+		ReadOnlySpan<byte> save = [0x41, 0x0F, 0xAE, 0x5A, HostMxcsrOffset, 0x41, 0xD9, 0x7A, HostFpuControlWordOffset]; // stmxcsr [r10+24]; fnstcw [r10+28]
+		foreach (var value in save) EmitByte(code, ref offset, value);
+		ReadOnlySpan<byte> storeMxcsr = [0x48, 0x83, 0xEC, 0x08, 0xC7, 0x04, 0x24]; // sub rsp,8; mov dword [rsp],imm32
+		foreach (var value in storeMxcsr) EmitByte(code, ref offset, value);
+		EmitUInt32(code, ref offset, mxcsr);
+		ReadOnlySpan<byte> storeControlWord = [0x0F, 0xAE, 0x14, 0x24, 0x66, 0xC7, 0x04, 0x24]; // ldmxcsr [rsp]; mov word [rsp],imm16
+		foreach (var value in storeControlWord) EmitByte(code, ref offset, value);
+		EmitByte(code, ref offset, (byte)fpuControlWord);
+		EmitByte(code, ref offset, (byte)(fpuControlWord >> 8));
+		ReadOnlySpan<byte> load = [0xD9, 0x2C, 0x24, 0x48, 0x83, 0xC4, 0x08]; // fldcw [rsp]; add rsp,8
+		foreach (var value in load) EmitByte(code, ref offset, value);
+	}
+
+	// R10 holds the host state block.
+	private static unsafe void EmitHostFloatingPointControlRestore(byte* code, ref int offset)
+	{
+		ReadOnlySpan<byte> restore = [0x41, 0x0F, 0xAE, 0x52, HostMxcsrOffset, 0x41, 0xD9, 0x6A, HostFpuControlWordOffset]; // ldmxcsr [r10+24]; fldcw [r10+28]
+		foreach (var value in restore) EmitByte(code, ref offset, value);
+	}
+
 	private static unsafe void EmitHostNonvolatileXmmSave(byte* code, ref int offset)
 	{
 		EmitByte(code, ref offset, 0x48);
@@ -6895,6 +7037,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr2[num3++] = 73;
 			ptr2[num3++] = 137;
 			ptr2[num3++] = 34;
+			EmitFloatingPointControlSwitch(ptr2, ref num3, context.Mxcsr, context.FpuControlWord);
 			EmitGuestStackBounds(ptr2, ref num3, context[CpuRegister.Rsp]);
 			ptr2[num3++] = 72;
 			ptr2[num3++] = 184;
@@ -6958,6 +7101,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			ptr2[num3++] = 139;
 			ptr2[num3++] = 34;
 			EmitHostStackBounds(ptr2, ref num3, save: false);
+			EmitHostFloatingPointControlRestore(ptr2, ref num3);
 			EmitHostNonvolatileXmmRestore(ptr2, ref num3);
 			ptr2[num3++] = 65;
 			ptr2[num3++] = 95;

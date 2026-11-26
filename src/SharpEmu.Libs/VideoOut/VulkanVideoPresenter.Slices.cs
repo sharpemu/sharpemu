@@ -126,7 +126,7 @@ internal static unsafe partial class VulkanVideoPresenter
     internal static string TakeSliceReport() =>
         FormattableString.Invariant($"[PERF][SLICES] slices={_slicesRecorded.Take()} segments={_segmentsRecorded.Take()} empty={_segmentsEmpty.Take()} uses_shared={_usesShared.Take()} attachments_kept={RecordingHost.TakeAttachmentsKept()} worker_queries={RecordingHost.TakeWorkerQueries()} native_rechecks_failed={_nativeColorRechecksFailed.Take()} ") +
         SharpEmu.Libs.Gpu.Rendering.RenderRecorder.TakeInPlaceReport() + FormattableString.Invariant($" textures_kept={RecordingHost.TakeTexturesKept()} ") + RecordingHost.TakeTableReport() +
-        FormattableString.Invariant($"bda_sweeps={Interlocked.Exchange(ref GuestBufferCache.BdaSweeps, 0)}/skipped:{Interlocked.Exchange(ref GuestBufferCache.BdaSweepsSkipped, 0)} ") +
+        FormattableString.Invariant($"bda_sweeps={Interlocked.Exchange(ref GuestBufferCache.BdaSweeps, 0)}/skipped:{Interlocked.Exchange(ref GuestBufferCache.BdaSweepsSkipped, 0)}/bounded:{Interlocked.Exchange(ref GuestBufferCache.BdaBoundedPreparations, 0)} ") + GuestBufferCache.TakeHeldSliceUseReport() + " " +
         FormattableString.Invariant($"serial_cuts={_slicesSerial.Take()} invalid={_slicesInvalid.Take()} frontend_textures_stale={_frontendTexturesStale.Take()} ") +
         FormattableString.Invariant($"slice_items={_sliceItems.Take()} serial_items={_serialItems.Take()} join_wait_ms={_sliceWaitTicks.Take() * 1000.0 / System.Diagnostics.Stopwatch.Frequency:F1} ") +
         FormattableString.Invariant($"image_barriers={ImageAccessState.Barriers.Take()}/elided:{ImageAccessState.BarriersElided.Take()} ") +
@@ -278,10 +278,16 @@ internal static unsafe partial class VulkanVideoPresenter
         public readonly List<(ulong Address, uint[] Words)> KnownWrites = new();
         public readonly List<SubmissionUploadResources> Resources = new();
         public bool NeedsBdaSweep;
+        public bool NeedsBdaTouch;
         public long BufferSerial;
         public long? ReadsVersion;
         public bool MixedReadsVersions;
         public readonly List<(ResourceSlotIdentifier Image, ImageRequest Request)> NativeColorUses = new();
+        // Native color clears the worker passed because only their registration was not current; the join applies them.
+        public readonly List<(ResourceSlotIdentifier Image, ImageRequest Request)> NativeColorEntries = new();
+        // One clear entry per depth view with HTILE first acquired in the segment, and their keys for the join's image check.
+        public readonly List<SliceDepthClear> DepthClears = new();
+        public readonly List<(ResourceSlotIdentifier Image, ImageViewDescription View)> DepthClearKeys = new();
 
         public bool WritesRange(GuestSpan range)
         {
@@ -321,6 +327,28 @@ internal static unsafe partial class VulkanVideoPresenter
         public long MetadataGeneration;
         public IReadOnlyList<GuestSpan>? BdaSpans;
         public ulong BdaMapping;
+        // The windows of the segment's windowed device-address programs; one program that is not windowed sweeps every
+        // mapped span.
+        public readonly List<(ulong Start, ulong End)> BdaWindows = new();
+        public bool BdaFullSweep;
+    }
+
+    // A depth view with HTILE that a render worker acquired in a segment, and what the render thread's first acquisition of
+    // it would clear when its base layer's HTILE slice is clear at the join: the area of the segment's first rendering with
+    // the view, with the draw's clear value.
+    private sealed class SliceDepthClear
+    {
+        public ResourceSlotIdentifier Image;
+        public CachedImage Expected = null!;
+        public ImageViewDescription View;
+        public ImageView NativeView;
+        public ulong Htile;
+        public uint BaseLayer;
+        public uint ClearWord;
+        public bool HasArea;
+        public uint Width;
+        public uint Height;
+        public uint Layers;
     }
 
     // Items recorded into one command buffer; the item after them, if any, needs the render thread.
@@ -345,6 +373,7 @@ internal static unsafe partial class VulkanVideoPresenter
         public int Resume;
         public RecordingHost? Host;
         public List<SliceArenaChunk> Chunks = [];
+        public List<DescriptorPool> DescriptorPools = [];
         public bool Submitted;
         public bool Dispatched;
         public long DispatchedAt;
@@ -459,6 +488,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private RenderWorkerPool? _workers;
         internal SliceArenaPool? _arenaPool;
+        internal DescriptorPoolStock? _descriptorPoolStock;
 
         private void CreateRenderWorkers()
         {
@@ -469,8 +499,9 @@ internal static unsafe partial class VulkanVideoPresenter
 
             _scheduler.MemoryBarrierRecorder ??= RecordRequestedMemoryBarrier;
             _arenaPool = new SliceArenaPool(_deviceInfo, _scheduler);
+            _descriptorPoolStock ??= new DescriptorPoolStock(_deviceInfo);
             _workers = new RenderWorkerPool(this, RenderWorkerCount);
-            Console.Error.WriteLine($"[LOADER][INFO] Render workers: {RenderWorkerCount}");
+            Console.Error.WriteLine($"[LOADER][INFO] Render workers: {RenderWorkerCount} {CommandThread.DescribeQueue()}");
         }
 
         private void StopRenderWorkers()
@@ -494,10 +525,10 @@ internal static unsafe partial class VulkanVideoPresenter
             _workers!.Dispatch(slice, urgent);
         }
 
-        internal static void NoteStolen(RenderSlice slice)
+        internal static void NoteStolen(RenderSlice slice, int inlineItems)
         {
             _slicesStolen.Increment();
-            _stolenItems.Add(slice.Items.Count);
+            _stolenItems.Add(inlineItems);
             _stolenByOrigin[slice.Origin].Increment();
             var age = (System.Diagnostics.Stopwatch.GetTimestamp() - slice.DispatchedAt) * 1_000_000 / System.Diagnostics.Stopwatch.Frequency;
             _stolenByAge[age < 100 ? 0 : age < 1000 ? 1 : 2].Increment();
@@ -709,7 +740,8 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var started = System.Diagnostics.Stopwatch.GetTimestamp();
-            var valid = _imageCache.ValidateSliceImages(requests.Images, requests.LookupGeneration, requests.MetadataGeneration);
+            var valid = _imageCache.ValidateSliceImages(requests.Images, requests.LookupGeneration, requests.MetadataGeneration,
+                requests.DepthClearKeys.Count != 0 ? requests.DepthClearKeys : null);
             var imagesDone = System.Diagnostics.Stopwatch.GetTimestamp();
             _validateImageTicks.Add(imagesDone - started);
             if (!valid)
@@ -753,7 +785,69 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _validateDeferredTicks.Add(System.Diagnostics.Stopwatch.GetTimestamp() - buffersDone);
+            if (valid && requests.DepthClears.Count != 0 && !DepthClearsAppliable(requests))
+            {
+                return false;
+            }
+
+            // Last, so nothing refuses the segment after its entries are applied.
+            if (valid && requests.NativeColorEntries.Count != 0 && !ApplyNativeColorEntries(requests))
+            {
+                return false;
+            }
+
             return valid;
+        }
+
+        // The native color clears the segment's worker passed with only their registration out of date. The segment is
+        // refused when one would now record a clear or its metadata is GPU-dirty; otherwise each serial apply runs in stream
+        // order, updating the registration without recording anything.
+        private bool ApplyNativeColorEntries(SliceRequests requests)
+        {
+            foreach (var (image, request) in requests.NativeColorEntries)
+            {
+                var range = request.Description.Metadata.Range;
+                if (_bufferCache.HasGpuDirtyBytes(range.Address, range.Size) ||
+                    _imageCache.PredictNativeColorClear(image, request) is NativeColorClearPrediction.ClearCode or NativeColorClearPrediction.BadView)
+                {
+                    return false;
+                }
+            }
+
+            foreach (var (image, request) in requests.NativeColorEntries)
+            {
+                _imageCache.ApplyNativeColorClear(image, request);
+            }
+
+            return true;
+        }
+
+        // A clear the join records ahead of the segment needs the area of its view's first rendering, and no other use of its
+        // image in the segment: a sampled use there would see the clear before its turn.
+        private bool DepthClearsAppliable(SliceRequests requests)
+        {
+            foreach (var entry in requests.DepthClears)
+            {
+                if (!_imageCache.IsMetadataCleared(entry.Htile, entry.BaseLayer))
+                {
+                    continue;
+                }
+
+                if (!entry.HasArea)
+                {
+                    return false;
+                }
+
+                foreach (var use in requests.Images)
+                {
+                    if (use.Image == entry.Image && use.Request.Role != ImageRole.DepthTarget)
+                    {
+                        return false;
+                    }
+                }
+            }
+
+            return true;
         }
 
         private bool ValidateDeferredItems(RenderSlice slice, SliceSegment segment)
@@ -775,6 +869,7 @@ internal static unsafe partial class VulkanVideoPresenter
             slice.Done.Wait();
             _slicesRecorded.Increment();
             _scheduler.NoteSliceJoined(slice.Generation);
+            RetireSliceDescriptorPools(slice);
             if (slice.Chunks.Count == 0)
             {
                 return;
@@ -792,6 +887,28 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
+        private void RetireSliceDescriptorPools(RenderSlice slice)
+        {
+            if (slice.DescriptorPools.Count == 0)
+            {
+                return;
+            }
+
+            var pools = slice.DescriptorPools;
+            var stock = _descriptorPoolStock!;
+            slice.DescriptorPools = [];
+            if (slice.Submitted)
+            {
+                _scheduler.QueueCompletionAction(() => pools.ForEach(stock.Return));
+            }
+            else
+            {
+                pools.ForEach(stock.Return);
+            }
+        }
+
+        private readonly List<GuestSpan> _prologueWindowSpans = [];
+
         private void RecordSlicePrologue(SliceRequests requests)
         {
             Recording.EndRendering();
@@ -804,7 +921,29 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 if (requests.NeedsBdaSweep && requests.BdaSpans is { } spans)
                 {
-                    _bufferCache.PrepareBda(spans, requests.BdaMapping);
+                    // A worker captured these spans before this thread ran the relay's mapping changes between items.
+                    // A guest munmap among them marks the buffers it covered CPU-dirty, and sweeping the captured spans
+                    // then reads memory that is gone. Sweep the spans current at the join.
+                    var mapping = requests.BdaMapping;
+                    if (GuestGpuMemoryHook.Current is { } memory)
+                    {
+                        spans = Recording.DeviceAddressSpans(memory);
+                        mapping = Recording.DeviceAddressSpanMapping;
+                    }
+
+                    if (!requests.BdaFullSweep && requests.BdaWindows.Count != 0)
+                    {
+                        GuestBufferCache.ClipSpansToWindows(spans, requests.BdaWindows, _prologueWindowSpans);
+                        _bufferCache.PrepareWindowedBda(_prologueWindowSpans, GuestBufferCache.MappingKey(_prologueWindowSpans), mapping);
+                    }
+                    else
+                    {
+                        _bufferCache.PrepareBda(spans, mapping);
+                    }
+                }
+                else if (requests.NeedsBdaTouch && requests.BdaSpans is { } touched)
+                {
+                    _bufferCache.PrepareBoundedBda(touched, requests.BdaMapping);
                 }
 
                 foreach (var (address, size) in requests.SyncRanges)
@@ -834,6 +973,12 @@ internal static unsafe partial class VulkanVideoPresenter
                 _imageCache.ApplySliceUse(use.Image, in request);
             }
 
+            // After the image uses, so a refresh from guest memory comes before the clear, as before a load-op clear.
+            if (requests.DepthClears.Count != 0)
+            {
+                Recording.ApplySliceDepthClears(requests.DepthClears);
+            }
+
             foreach (var (address, words) in requests.KnownWrites)
             {
                 _bufferCache.NoteKnownGpuContents(address, words);
@@ -848,6 +993,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private long _itemSequence;
         private readonly ConcurrentBag<RecordingBuffer>? _spareBuffers;
         private readonly SliceArena? _arena;
+        private readonly SliceDescriptorHeap? _sliceDescriptors;
         private readonly SliceHazards? _hazards;
         private readonly RenderRecorder? _workerRecorder;
         private readonly Dictionary<CachedImage, BindingBox> _workerBindings = new(ReferenceEqualityComparer.Instance);
@@ -874,6 +1020,7 @@ internal static unsafe partial class VulkanVideoPresenter
         internal void RecordSlice(RenderSlice slice)
         {
             slice.Host = this;
+            _failedSliceLookups.Clear();
             _buffers = _bufferCache.Snapshot;
             SliceSegment? segment = null;
             slice.Resume = slice.Items.Count;
@@ -882,6 +1029,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 for (var index = 0; index < slice.Items.Count; index++)
                 {
                     var started = System.Diagnostics.Stopwatch.GetTimestamp();
+                    var depthClearMark = -1;
                     try
                     {
                         if (!_presenter._translation.CanRecordDeferred(slice.Items[index].Work!))
@@ -904,6 +1052,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         }
 
                         segment ??= BeginSegment(index);
+                        depthClearMark = segment.Requests.DepthClears.Count;
                         _itemSequence = slice.Items[index].Sequence;
                         if (slice.Items[index].Work is SharpEmu.Libs.Agc.AgcExports.GlobalBarrierWork)
                         {
@@ -919,6 +1068,14 @@ internal static unsafe partial class VulkanVideoPresenter
                     }
                     catch (SerialRequiredException serial)
                     {
+                        // The item runs on the render thread, so the clear entries it made leave the segment.
+                        if (depthClearMark >= 0 && segment!.Requests.DepthClears.Count > depthClearMark)
+                        {
+                            var dropped = segment.Requests.DepthClears.Count - depthClearMark;
+                            segment.Requests.DepthClears.RemoveRange(depthClearMark, dropped);
+                            segment.Requests.DepthClearKeys.RemoveRange(depthClearMark, dropped);
+                        }
+
                         segment!.SerialReason = serial.Message;
                         Interlocked.Increment(ref _serialReasons.GetOrAdd(serial.Message, static _ => new StrongBox<long>()).Value);
                         EndSegment(slice, segment);
@@ -944,6 +1101,7 @@ internal static unsafe partial class VulkanVideoPresenter
             finally
             {
                 slice.Chunks = _arena!.TakeChunks();
+                slice.DescriptorPools = _sliceDescriptors!.TakePools();
                 _segment = null;
             }
         }
@@ -968,16 +1126,26 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private static void NoteReadsVersion(SliceRequests requests, SharpEmu.Libs.Agc.AgcExports.DeferredWork work)
         {
-            if (work is not SharpEmu.Libs.Agc.AgcExports.DeferredDraw draw)
+            long readsVersion;
+            if (work is SharpEmu.Libs.Agc.AgcExports.DeferredDraw draw)
+            {
+                readsVersion = draw.Reads.Version;
+            }
+            else if (work is SharpEmu.Libs.Agc.AgcExports.DeferredDispatch { Cancelled: false } dispatch)
+            {
+                // A deferred dispatch member's reads join the segment's check like a deferred draw's.
+                readsVersion = dispatch.Reads.Version;
+            }
+            else
             {
                 return;
             }
 
             if (requests.ReadsVersion is not { } version)
             {
-                requests.ReadsVersion = draw.Reads.Version;
+                requests.ReadsVersion = readsVersion;
             }
-            else if (version != draw.Reads.Version)
+            else if (version != readsVersion)
             {
                 requests.MixedReadsVersions = true;
             }
@@ -1131,6 +1299,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     {
                         _arena.Commit(in reservation);
                         _streamCopies.Increment();
+                        _preparationStreamCopied = true;
                         return (reservation.Chunk.Buffer, reservation.Offset, (size + 3) & ~3UL);
                     }
                 }
@@ -1181,12 +1350,19 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             else if (request.Description.Metadata.NativeColorClear)
             {
-                if (!_imageCache.NativeColorClearSettled(imageIdentifier, request))
+                // A clear whose only change would be its registration passes: no slice holds a clear code, so the serial
+                // apply records nothing, and the join runs it in stream order. Its use is not part of the join's settled check.
+                switch (_imageCache.PredictNativeColorClear(imageIdentifier, request))
                 {
-                    throw Serial("native color clear", resumable: true);
+                    case NativeColorClearPrediction.Settled:
+                        Requests.NativeColorUses.Add((imageIdentifier, request));
+                        break;
+                    case NativeColorClearPrediction.RegistrationOnly:
+                        Requests.NativeColorEntries.Add((imageIdentifier, request));
+                        break;
+                    default:
+                        throw Serial("native color clear", resumable: true);
                 }
-
-                Requests.NativeColorUses.Add((imageIdentifier, request));
             }
         }
 
@@ -1324,14 +1500,27 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw Serial("stale depth target");
             }
 
+            // A pending HTILE clear passes when the segment holds a clear entry for the view: the join records the clear ahead
+            // of the segment. The draw's own depth clear, or an earlier use of the image other than as depth, stops the worker.
             var layer = resolution.Request.View.BaseLayer;
+            var pending = false;
             if (resolution.HasHtile && (resolution.DepthClearEnabled || _imageCache.IsMetadataCleared(resolution.HtileAddress, layer)))
             {
-                throw Serial("depth clear");
+                if (resolution.DepthClearEnabled || HasNonDepthUse(depth.Image))
+                {
+                    throw Serial("depth clear");
+                }
+
+                pending = true;
             }
 
             if (TryKeptAttachment(depth.Image, resolution.Request, out var keptView, out var keptImage))
             {
+                if (pending && !HasDepthClear(depth.Image, resolution.Request.View))
+                {
+                    throw Serial("depth clear");
+                }
+
                 return new DepthAttachmentAcquisition(keptView, keptImage.Backing.Samples, false);
             }
 
@@ -1343,7 +1532,120 @@ internal static unsafe partial class VulkanVideoPresenter
             var image = Image(depth.Image);
             Requests.AddImage(new ImageSliceUse(depth.Image, image, resolution.Request));
             _attachments.Add((depth.Image, resolution.Request, view, image));
+            if (resolution.HasHtile && !HasDepthClear(depth.Image, resolution.Request.View))
+            {
+                Requests.DepthClears.Add(new SliceDepthClear
+                {
+                    Image = depth.Image,
+                    Expected = image,
+                    View = resolution.Request.View,
+                    NativeView = view,
+                    Htile = resolution.HtileAddress,
+                    BaseLayer = layer,
+                    ClearWord = BitConverter.SingleToUInt32Bits(depth.Target.State.DepthClearValue),
+                });
+                Requests.DepthClearKeys.Add((depth.Image, resolution.Request.View));
+            }
+
             return new DepthAttachmentAcquisition(view, image.Backing.Samples, false);
+        }
+
+        private bool HasDepthClear(ResourceSlotIdentifier image, in ImageViewDescription view)
+        {
+            foreach (var key in Requests.DepthClearKeys)
+            {
+                if (key.Image == image && key.View == view)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private bool HasNonDepthUse(ResourceSlotIdentifier image)
+        {
+            foreach (var use in Requests.Images)
+            {
+                if (use.Image == image && use.Request.Role != ImageRole.DepthTarget)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        // A worker notes the area of the segment's first rendering with each clear entry's view.
+        private static void NoteDepthClearArea(SliceRequests requests, in RenderingState state)
+        {
+            if (!state.DepthStencilAttachment.HasDepth)
+            {
+                return;
+            }
+
+            foreach (var entry in requests.DepthClears)
+            {
+                if (!entry.HasArea && entry.NativeView.Handle == state.DepthStencilAttachment.View.Handle)
+                {
+                    entry.HasArea = true;
+                    entry.Width = state.Width;
+                    entry.Height = state.Height;
+                    entry.Layers = state.Layers;
+                }
+            }
+        }
+
+        // The render thread records a segment's pending depth clears ahead of it, as the first acquisition of each view would:
+        // it consumes the base layer's HTILE clear state and clears the area of the view's first rendering with the draw's
+        // value. Stencil is not touched.
+        internal void ApplySliceDepthClears(List<SliceDepthClear> clears)
+        {
+            foreach (var entry in clears)
+            {
+                _imageCache.NoteDepthClearValue(entry.Htile, BitConverter.UInt32BitsToSingle(entry.ClearWord));
+                if (!_imageCache.IsMetadataCleared(entry.Htile, entry.BaseLayer))
+                {
+                    continue;
+                }
+
+                if (!entry.HasArea)
+                {
+                    throw SubmissionScheduler.Fatal($"A slice depth clear has no rendering area: htile=0x{entry.Htile:X16}.");
+                }
+
+                if (!_imageCache.SetMetadataSlice(entry.Htile, entry.BaseLayer, false))
+                {
+                    throw SubmissionScheduler.Fatal($"The HTile clear state could not be consumed: htile=0x{entry.Htile:X16} layer={entry.BaseLayer}.");
+                }
+
+                EndRendering();
+                var command = BeginBatchedGuestCommands();
+                var view = entry.View;
+                TransitionImage(entry.Expected, AccessFlags.DepthStencilAttachmentReadBit | AccessFlags.DepthStencilAttachmentWriteBit,
+                    new SubresourceRange(view.BaseLevel, view.LevelCount, view.BaseLayer, view.LayerCount), command);
+                var depth = new RenderingAttachmentInfo
+                {
+                    SType = StructureType.RenderingAttachmentInfo,
+                    ImageView = entry.NativeView,
+                    ImageLayout = ImageLayout.General,
+                    LoadOp = AttachmentLoadOp.Clear,
+                    StoreOp = AttachmentStoreOp.Store,
+                    ClearValue = new ClearValue { DepthStencil = new ClearDepthStencilValue(BitConverter.UInt32BitsToSingle(entry.ClearWord), 0) },
+                };
+                var rendering = new RenderingInfo
+                {
+                    SType = StructureType.RenderingInfo,
+                    RenderArea = new Rect2D(new Offset2D(0, 0), new Extent2D(entry.Width, entry.Height)),
+                    LayerCount = entry.Layers,
+                    PDepthAttachment = &depth,
+                };
+                using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                {
+                    _vk.CmdBeginRendering(command, &rendering);
+                    _vk.CmdEndRendering(command);
+                }
+            }
         }
 
         private ImageView AcquireTextureViewForSlice(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)

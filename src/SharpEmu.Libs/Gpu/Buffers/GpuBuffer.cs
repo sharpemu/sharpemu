@@ -159,6 +159,8 @@ public unsafe class GpuBuffer : IDisposable
             {
                 throw SubmissionScheduler.Fatal("The buffer device address is unavailable.");
             }
+            if (DeviceFaultReport.Requested)
+                DeviceFaultReport.Track(_deviceAddress, Size, usage.ToString(), cpuAddress);
         }
 
         // A dedicated allocation arrives zeroed; keep that for a block another buffer used.
@@ -199,6 +201,9 @@ public unsafe class GpuBuffer : IDisposable
     public ulong CpuAddress { get; }
 
     public ulong DeviceAddress => _deviceAddress != 0 ? _deviceAddress : throw SubmissionScheduler.Fatal("The buffer has no device address.");
+
+    // Created with ShaderDeviceAddressBit (rings are not).
+    public bool HasDeviceAddress => _deviceAddress != 0;
 
     public int StreamScore { get; private set; }
 
@@ -567,6 +572,7 @@ public unsafe class GpuBuffer : IDisposable
             }
         }
 
+        DeviceFaultReport.Untrack(_deviceAddress);
         _device.Vk.DestroyBuffer(_device.Device, _handle, null);
         if (_slab is { } slab)
         {

@@ -219,6 +219,36 @@ public sealed class SaveDataExportsTests : IDisposable
         Assert.Equal(NoEvent, SaveDataExports.SaveDataGetEventResult(Reg(rsi: EventOut)));
     }
 
+    // Titles mount as usual after "not found" or "no need to convert"; any other result is their save error path.
+    [Fact]
+    public void Convert_ReportsNotFoundThenNoNeedToConvert()
+    {
+        const int NoNeedConvert = unchecked((int)0x809F001E);
+        WriteAscii(SecondDirNamePtr, DirName);
+        Span<byte> convert = stackalloc byte[0x38];
+        convert.Clear();
+        BinaryPrimitives.WriteInt32LittleEndian(convert, UserId);
+        BinaryPrimitives.WriteUInt64LittleEndian(convert[0x08..], SecondDirNamePtr);
+        Assert.True(_memory.TryWrite(DeleteParam, convert));
+
+        Assert.Equal(NoEvent, SaveDataExports.SaveDataConvert(Reg(rdi: DeleteParam)));
+        Assert.Equal(0, Mount());
+        Assert.Equal(NoNeedConvert, SaveDataExports.SaveDataConvert(Reg(rdi: DeleteParam)));
+        Assert.Equal(ParameterError, SaveDataExports.SaveDataConvert(Reg(rdi: 0)));
+    }
+
+    [Fact]
+    public void Cancel_ReleasesAPreparedResourceAndRejectsAnUnknownOne()
+    {
+        const int ResourceInvalid = unchecked((int)0x809F001C);
+        var resource = SaveDataExports.SaveDataCreateTransactionResource(Reg(rdi: 0x1000));
+        Assert.True(resource > 0);
+
+        Assert.Equal(0, SaveDataExports.SaveDataCancel(Reg(rdi: (ulong)resource)));
+        Assert.Equal(0, SaveDataExports.SaveDataDeleteTransactionResource(Reg(rdi: (ulong)resource)));
+        Assert.Equal(ResourceInvalid, SaveDataExports.SaveDataCancel(Reg(rdi: (ulong)resource)));
+    }
+
     [Fact]
     public void Mount_CreatesSlotDirectory_AndReportsMounted()
     {

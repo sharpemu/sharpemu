@@ -63,7 +63,7 @@ public sealed class RenderExecutorPendingWritesTests : IDisposable
 
     public void Dispose() => _fatal.Dispose();
 
-    private static BufferResourceInfo Written => new(false, true, false, false, false, 4, 0);
+    private static BufferResourceInfo Written => new(false, true, false, false, false, 4);
 
     [Fact]
     public void ADrawMarksItsTargetAndItsWrittenBufferUntilTheRecorderFinishesIt()

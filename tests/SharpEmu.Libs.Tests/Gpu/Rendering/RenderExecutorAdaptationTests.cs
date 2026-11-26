@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.GpuCommands.Registers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Rendering;
@@ -178,6 +179,55 @@ public sealed class RenderExecutorAdaptationTests : IDisposable
         Assert.Contains(_host.Calls, call => call.StartsWith("draw 4", StringComparison.Ordinal));
     }
 
+    private const ulong IndirectArguments = RecordingRenderHost.MemoryBase + 0x60_0000;
+
+    private DrawAutoArguments IndirectAuto(uint count)
+    {
+        var bytes = new byte[16];
+        BitConverter.TryWriteBytes(bytes.AsSpan(0), count);
+        BitConverter.TryWriteBytes(bytes.AsSpan(4), 1u);
+        _host.WriteGuest(IndirectArguments, bytes);
+        return Auto(0, source: DrawOffsetSource.IndirectArguments) with { IndirectArgumentsAddress = IndirectArguments };
+    }
+
+    // An indirect strip whose state may make it a metadata clear quad reads its count and positions on the CPU and is
+    // dropped as a direct one is.
+    [Fact]
+    public void IndirectMetadataClearQuad_ReadsItsCountOnTheCpuAndIsDropped()
+    {
+        var banks = MetadataQuadBanks();
+        _executor.DrawAuto(1, banks, IndirectAuto(4));
+
+        Assert.DoesNotContain(_host.Calls, call => call.StartsWith("draw", StringComparison.Ordinal));
+        Assert.Equal(1 + 4, _host.GuestReads);
+    }
+
+    // The same state with another count draws what it read, and a strip whose state cannot be a metadata clear quad (here
+    // an ordinary blend, or no DCC) lets the GPU read its arguments.
+    [Theory]
+    [InlineData(6u, false, true, "draw 6")]
+    [InlineData(4u, true, true, "draw_indirect")]
+    [InlineData(4u, false, false, "draw_indirect")]
+    public void IndirectStrip_ReadsItsCountOnlyWhenItMayBeAMetadataClearQuad(uint count, bool ordinaryBlend, bool dcc, string expected)
+    {
+        var banks = MetadataQuadBanks();
+        if (ordinaryBlend)
+        {
+            banks.Context.BlendControls[0] = new BlendRegisters { Enable = true, ColorSourceFactor = 4, ColorDestinationFactor = 5 };
+        }
+
+        if (!dcc)
+        {
+            var words = banks.Context.ColorTargets[0];
+            banks.Context.ColorTargets[0] = words with { Info = words.Info & ~DccEnabledBit };
+        }
+
+        _executor.DrawAuto(1, banks, IndirectAuto(count));
+
+        Assert.Contains(_host.Calls, call => call.StartsWith(expected, StringComparison.Ordinal));
+        Assert.Equal(expected == "draw_indirect" ? 0 : 1, _host.GuestReads);
+    }
+
     private RegisterBanks TargetlessBanks()
     {
         var banks = Banks();
@@ -230,7 +280,7 @@ public sealed class RenderExecutorAdaptationTests : IDisposable
     public void TargetlessDrawWithImagesAndBufferWrites_IsNeverRetained(bool vertexWrites, bool atomic)
     {
         _host.RetainTargetlessDraws = true;
-        var written = new BufferResourceInfo(false, true, atomic, false, false, 4, 0);
+        var written = new BufferResourceInfo(false, true, atomic, false, false, 4);
         var vertex = Stage(Program(ShaderStageKind.Vertex,
             buffers: vertexWrites ? [written] : []),
             buffers: vertexWrites ? [BufferDescriptor(VertexBase, 4, 16)] : []);

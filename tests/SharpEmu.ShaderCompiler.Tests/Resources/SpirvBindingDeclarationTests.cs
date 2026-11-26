@@ -351,14 +351,16 @@ public sealed class SpirvBindingDeclarationTests
     [Theory]
     [InlineData(ImageType2D, ImageType2DArray)]
     [InlineData(ImageType2DArray, ImageType2D)]
-    public void IndirectImage_Mixed2DAnd2DArrayCandidatesCompileAcrossBindingClasses(uint firstImageType, uint secondImageType)
+    public void IndirectImage_Mixed2DAnd2DArrayCandidatesShareTheArrayBindingClass(uint firstImageType, uint secondImageType)
     {
+        // An array read takes a 2D texture as a one-layer array.
         var (request, snapshot) = IndirectImageAfterPlainImageRequest(
             firstImageType: firstImageType, secondImageType: secondImageType, indirectDimension: 5);
         var root = request.Resources.Info.Images[1];
         var candidate = request.Resources.Info.Images[2];
-        Assert.NotEqual(root.Dimension, candidate.Dimension);
-        Assert.NotEqual(ImageDescriptorBinding.ForImage(root), ImageDescriptorBinding.ForImage(candidate));
+        Assert.Equal(ImageDimension.Dim2DArray, root.Dimension);
+        Assert.Equal(ImageDimension.Dim2DArray, candidate.Dimension);
+        Assert.Equal(ImageDescriptorBinding.ForImage(root), ImageDescriptorBinding.ForImage(candidate));
         Assert.Equal(firstImageType, snapshot.Images[1][3] >> 28);
         Assert.Equal(secondImageType, snapshot.Images[2][3] >> 28);
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);

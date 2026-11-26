@@ -92,13 +92,13 @@ internal sealed unsafe class MeshIndirectPipeline : IDisposable
             GpuBuffer.AllFlags | BufferUsageFlags.ShaderDeviceAddressBit, bucket);
     }
 
+    // No host clear: the helper's invocation 0 writes the status word on every exit (each dispatch has at least one
+    // group, and the shader has no early return), before the completion action reads it.
     private GpuBuffer RentStatus(SubmissionScheduler scheduler)
     {
         GpuBuffer? status = null;
         lock (_resourceGate) _freeStatuses.TryPop(out status);
         status ??= new GpuBuffer(_device, scheduler, GpuBufferUsage.Download, 0, GpuBuffer.AllFlags, 4);
-        status.Mapped.Clear();
-        status.Flush(0, 4);
         return status;
     }
 
@@ -148,10 +148,16 @@ internal sealed unsafe class MeshIndirectPipeline : IDisposable
         if (result != Result.Success) throw SubmissionScheduler.Fatal($"The indirect mesh resource could not be created: result={result}.");
     }
 
+    [System.Runtime.CompilerServices.InlineArray((int)SpirvMeshIndirect.PushWordCount)]
+    private struct PushWords
+    {
+        private uint _word;
+    }
+
     internal sealed class PreparedDraw : IDisposable
     {
         private readonly MeshIndirectPipeline _owner;
-        private readonly uint[] _push;
+        private PushWords _push;
         private readonly uint _capacity;
         private GpuBuffer? _output;
         private GpuBuffer? _status;
@@ -162,9 +168,10 @@ internal sealed unsafe class MeshIndirectPipeline : IDisposable
         {
             _owner = owner;
             _capacity = request.IndexCapacity;
-            _push = new uint[SpirvMeshIndirect.PushWordCount];
-            if (_capacity is 0 or > IndirectMeshDrawRequest.MaximumIndexCapacity || request.IndexElementSize is not (2 or 4) ||
-                request.PrimitivesPerGroup is 0 or > IndirectMeshDrawRequest.MaximumIndexCapacity)
+            var validIndices = request.Automatic
+                ? _capacity == 0 && request.IndexAddress == 0
+                : _capacity is not (0 or > IndirectMeshDrawRequest.MaximumIndexCapacity) && (request.IndexElementSize is 2 or 4);
+            if (!validIndices || request.PrimitivesPerGroup is 0 or > IndirectMeshDrawRequest.MaximumIndexCapacity)
                 throw SubmissionScheduler.Fatal("The indirect mesh preparation has invalid bounds.");
             var device = owner._device;
             try
@@ -176,8 +183,10 @@ internal sealed unsafe class MeshIndirectPipeline : IDisposable
                 var alignment = device.MinStorageBufferOffsetAlignment;
                 var argumentsBase = arguments.Offset / alignment * alignment;
                 var indicesBase = indices.Offset / alignment * alignment;
-                var indexSize = (indexByteOffset + (ulong)_capacity * request.IndexElementSize + 3) & ~3ul;
-                infos[0] = new(new Silk.NET.Vulkan.Buffer(arguments.Handle), argumentsBase, arguments.Offset - argumentsBase + 20);
+                var argumentsSize = request.Automatic ? 16ul : 20ul;
+                // An automatic draw reads no indices; its arguments fill the unused binding.
+                var indexSize = request.Automatic ? argumentsSize : (indexByteOffset + (ulong)_capacity * request.IndexElementSize + 3) & ~3ul;
+                infos[0] = new(new Silk.NET.Vulkan.Buffer(arguments.Handle), argumentsBase, arguments.Offset - argumentsBase + argumentsSize);
                 infos[1] = new(new Silk.NET.Vulkan.Buffer(indices.Handle), indicesBase, indices.Offset - indicesBase + indexSize);
                 infos[2] = new(_output.Handle, 0, _output.Size);
                 infos[3] = new(_status.Handle, 0, 4);
@@ -195,7 +204,8 @@ internal sealed unsafe class MeshIndirectPipeline : IDisposable
                 device.Vk.UpdateDescriptorSets(device.Device, 4, writes, 0, null);
                 _push[0] = checked((uint)((arguments.Offset - argumentsBase) / 4));
                 _push[1] = checked((uint)(indices.Offset - indicesBase + indexByteOffset));
-                _push[2] = _capacity;
+                // Nothing bounds an automatic draw's vertices but the group limits.
+                _push[2] = request.Automatic ? uint.MaxValue : _capacity;
                 _push[3] = request.IndexElementSize;
                 _push[4] = request.PrimitivesPerGroup;
                 _push[5] = request.PointList ? 1u : 0u;
@@ -230,10 +240,10 @@ internal sealed unsafe class MeshIndirectPipeline : IDisposable
             vk.CmdBindPipeline(command, PipelineBindPoint.Compute, _owner._pipeline);
             var set = _set;
             vk.CmdBindDescriptorSets(command, PipelineBindPoint.Compute, _owner._layout, 0, 1, &set, 0, null);
-            fixed (uint* push = _push)
+            fixed (uint* push = &_push[0])
                 vk.CmdPushConstants(command, _owner._layout, ShaderStageFlags.ComputeBit, 0, SpirvMeshIndirect.PushWordCount * 4, push);
             NativeBindingEpoch.Advance();
-            vk.CmdDispatch(command, (_capacity + 63) / 64, 1, 1);
+            vk.CmdDispatch(command, Math.Max(1u, (_capacity + 63) / 64), 1, 1);
             var after = new MemoryBarrier2
             {
                 SType = StructureType.MemoryBarrier2, SrcAccessMask = AccessFlags2.ShaderWriteBit,

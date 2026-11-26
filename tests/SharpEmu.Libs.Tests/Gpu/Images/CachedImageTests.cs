@@ -45,6 +45,38 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
         return description;
     }
 
+    // A depth target's device-local allocation can fail with ErrorOutOfDeviceMemory although its requirements also
+    // allow system memory. Device-local types come first; when they are exhausted the image takes another allowed type
+    // and keeps its contents; only when no type can be allocated is it fatal.
+    [Fact]
+    public void ExhaustedDeviceLocalMemory_PlacesTheImageInAnotherAllowedType()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        using var fatal = new FatalScope();
+        var device = harness.Device;
+        var description = Color2D(16, 16);
+        var bytes = new byte[16 * 16 * 4];
+        new System.Random(7).NextBytes(bytes);
+        try
+        {
+            device.SimulateExhaustedMemoryType = index => (device.GetMemoryTypeFlags(index) & MemoryPropertyFlags.DeviceLocalBit) != 0;
+            var image = harness.CreateImage(description);
+            Assert.True(image.Backing.Exists);
+            var copies = ImageTestHarness.WholeImageCopies(description, (ulong)bytes.Length);
+            harness.UploadImage(image, bytes, copies);
+            Assert.Equal(bytes, harness.ReadImage(image, copies, (ulong)bytes.Length));
+
+            device.SimulateExhaustedMemoryType = static _ => true;
+            var failure = Assert.Throws<SchedulerFatalException>(() => harness.CreateImage(description));
+            Assert.Contains("ErrorOutOfDeviceMemory", failure.Message);
+        }
+        finally
+        {
+            device.SimulateExhaustedMemoryType = null;
+        }
+    }
+
     [Fact]
     public void CalculateRowsPerCopy_LimitsRowsToTheStagingCapacity()
     {

@@ -36,8 +36,8 @@ public sealed class ShortcutSplashTests : IDisposable
         Assert.NotNull(path);
         Assert.Equal(ShortcutSplashCache.PathForGame(game, cache), path);
         Assert.Equal(File.ReadAllBytes(source), File.ReadAllBytes(path));
-        File.Delete(source);
-        using var cached = SKBitmap.Decode(path);
+        RetryWhileLocked(() => File.Delete(source));
+        using var cached = SKBitmap.Decode(File.ReadAllBytes(path));
         Assert.NotNull(cached);
         Assert.Equal(width, cached.Width);
         Assert.Equal(height, cached.Height);
@@ -111,5 +111,23 @@ public sealed class ShortcutSplashTests : IDisposable
         Assert.Equal(ready, EmulatorProcess.IsWindowReadyMessage(line));
     }
 
-    public void Dispose() => Directory.Delete(_root, recursive: true);
+    public void Dispose() => RetryWhileLocked(() => Directory.Delete(_root, recursive: true));
+
+    // A Windows virus scanner can briefly hold a freshly written image open; that is not the
+    // splash cache leaking a handle, so wait for it instead of failing.
+    private static void RetryWhileLocked(Action delete)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try
+            {
+                delete();
+                return;
+            }
+            catch (IOException) when (attempt < 20)
+            {
+                Thread.Sleep(100);
+            }
+        }
+    }
 }

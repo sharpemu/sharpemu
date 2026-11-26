@@ -17,11 +17,14 @@ namespace SharpEmu.Libs.Tests.Gpu.Vulkan;
 // adds the two bytes to its byte addresses (the buffer's byte bias).
 public sealed class BiasedStorageBufferDeviceTests(HeadlessVulkanFixture fixture) : IClassFixture<HeadlessVulkanFixture>
 {
+    // The view ends on a whole dword: the last partial one when the buffer holds it, else the one before it, which the
+    // shader's ArrayLength leaves out as well. Under four bytes there is no whole dword, and the view keeps its bytes.
     [Theory]
     [InlineData(6ul, 64ul, 8ul)]
     [InlineData(8ul, 64ul, 8ul)]
-    [InlineData(6ul, 7ul, 6ul)]
+    [InlineData(6ul, 7ul, 4ul)]
     [InlineData(5ul, 64ul, 8ul)]
+    [InlineData(2ul, 3ul, 2ul)]
     public void TheViewEndsOnADwordInsideTheBuffer(ulong bytes, ulong available, ulong expected) =>
         Assert.Equal(expected, VulkanVideoPresenter.StorageBufferViewRange(bytes, available, uint.MaxValue));
 

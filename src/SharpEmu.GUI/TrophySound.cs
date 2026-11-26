@@ -12,6 +12,7 @@ internal static class TrophySound
     private const int SampleRate = 48000;
 
     private static readonly Dictionary<int, byte[]> Rendered = [];
+    private static readonly Dictionary<int, SharpEmu.Libs.Overlay.OverlayAccent[]> RenderedAccents = [];
 
     public static bool Enabled { get; set; } = true;
 
@@ -53,8 +54,27 @@ internal static class TrophySound
         }
     }
 
+    public static IReadOnlyList<SharpEmu.Libs.Overlay.OverlayAccent> Accents(int grade)
+    {
+        grade = Math.Clamp(grade, 1, 4);
+        lock (RenderedAccents)
+        {
+            if (RenderedAccents.TryGetValue(grade, out var cached))
+            {
+                return cached;
+            }
+        }
+
+        Render(grade);
+        lock (RenderedAccents)
+        {
+            return RenderedAccents[grade];
+        }
+    }
+
     internal static byte[] Render(int grade)
     {
+        var accents = new List<SharpEmu.Libs.Overlay.OverlayAccent>();
         var tail = grade switch { 1 => 3.2, 2 => 2.6, _ => 2.2 };
         var length = (int)((ImpactDelaySeconds + tail) * SampleRate);
         var left = new double[length];
@@ -85,9 +105,12 @@ internal static class TrophySound
         double[] pentatonic = [1975.53, 2217.46, 2489.02, 2959.96, 3322.44, 3951.07];
         for (var i = 0; i < sparkles; i++)
         {
-            var start = impact + (int)((0.05 + random.NextDouble() * (grade == 1 ? 1.1 : 0.6)) * SampleRate);
-            AddMallet(left, right, start, pentatonic[random.Next(pentatonic.Length)], 0.05 + random.NextDouble() * 0.04, 6.5,
-                random.NextDouble() * 1.6 - 0.8);
+            var offset = 0.05 + random.NextDouble() * (grade == 1 ? 1.1 : 0.6);
+            var note = pentatonic[random.Next(pentatonic.Length)];
+            var gain = 0.05 + random.NextDouble() * 0.04;
+            var pan = random.NextDouble() * 1.6 - 0.8;
+            AddMallet(left, right, impact + (int)(offset * SampleRate), note, gain, 6.5, pan);
+            accents.Add(new(offset, (float)pan, (float)(gain / 0.09)));
         }
 
         if (grade == 1)
@@ -96,7 +119,13 @@ internal static class TrophySound
             for (var i = 0; i < climb.Length; i++)
             {
                 AddMallet(left, right, impact + (int)((0.38 + i * 0.075) * SampleRate), climb[i], 0.12, 3.0, -0.3 + i * 0.2);
+                accents.Add(new(0.38 + i * 0.075, (float)(-0.3 + i * 0.2), 1.35f));
             }
+        }
+
+        lock (RenderedAccents)
+        {
+            RenderedAccents[grade] = [.. accents.OrderBy(accent => accent.Offset)];
         }
 
         Reverb(left, right, grade == 1 ? 0.34 : 0.26);

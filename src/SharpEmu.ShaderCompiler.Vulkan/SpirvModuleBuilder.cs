@@ -35,6 +35,7 @@ public enum SpirvOp : ushort
     Constant = 43,
     ConstantComposite = 44,
     ConstantNull = 46,
+    SpecConstant = 50,
     Function = 54,
     FunctionParameter = 55,
     FunctionEnd = 56,
@@ -177,13 +178,23 @@ public enum SpirvOp : ushort
     GroupNonUniformBroadcast = 337,
     GroupNonUniformBroadcastFirst = 338,
     GroupNonUniformBallot = 339,
+    GroupNonUniformBallotBitExtract = 341,
     GroupNonUniformBallotBitCount = 342,
     GroupNonUniformShuffle = 345,
     GroupNonUniformShuffleXor = 346,
     GroupNonUniformShuffleUp = 347,
     GroupNonUniformShuffleDown = 348,
+    GroupNonUniformIAdd = 349,
+    GroupNonUniformSMin = 353,
     GroupNonUniformUMin = 354,
+    GroupNonUniformSMax = 356,
+    GroupNonUniformUMax = 357,
+    GroupNonUniformBitwiseAnd = 359,
+    GroupNonUniformBitwiseOr = 360,
+    GroupNonUniformBitwiseXor = 361,
+    EmitMeshTasksExt = 5294,
     SetMeshOutputsExt = 5295,
+    ReadClockKhr = 5056,
 }
 
 public enum SpirvCapability : uint
@@ -223,8 +234,11 @@ public enum SpirvCapability : uint
     RuntimeDescriptorArray = 5302,
     SampledImageArrayNonUniformIndexing = 5307,
     PhysicalStorageBufferAddresses = 5347,
+    DenormPreserve = 4464,
     SignedZeroInfNanPreserve = 4466,
+    RoundingModeRte = 4467,
     MeshShadingExt = 5283,
+    ShaderClockKhr = 5055,
 }
 
 public enum SpirvStorageClass : uint
@@ -240,6 +254,7 @@ public enum SpirvStorageClass : uint
     Image = 11,
     StorageBuffer = 12,
     PhysicalStorageBuffer = 5349,
+    TaskPayloadWorkgroupExt = 5402,
 }
 
 public enum SpirvExecutionModel : uint
@@ -249,6 +264,7 @@ public enum SpirvExecutionModel : uint
     TessellationEvaluation = 2,
     Fragment = 4,
     GLCompute = 5,
+    TaskExt = 5364,
     MeshExt = 5365,
 }
 
@@ -264,9 +280,12 @@ public enum SpirvExecutionMode : uint
     Quads = 24,
     Isolines = 25,
     OriginUpperLeft = 7,
+    EarlyFragmentTests = 9,
     DepthReplacing = 12,
     LocalSize = 17,
+    DenormPreserve = 4459,
     SignedZeroInfNanPreserve = 4461,
+    RoundingModeRte = 4462,
     OutputVertices = 26,
     OutputPrimitivesExt = 5270,
     OutputTrianglesExt = 5298,
@@ -274,6 +293,7 @@ public enum SpirvExecutionMode : uint
 
 public enum SpirvDecoration : uint
 {
+    SpecId = 1,
     Block = 2,
     ArrayStride = 6,
     BuiltIn = 11,
@@ -310,6 +330,7 @@ public enum SpirvBuiltIn : uint
     PatchVertices = 14,
     VertexIndex = 42,
     InstanceIndex = 43,
+    BaseVertex = 4424,
     BaseInstance = 4425,
     FragCoord = 15,
     BaryCoordKhr = 5286,
@@ -388,6 +409,7 @@ public sealed partial class SpirvModuleBuilder
 {
     private const uint Magic = 0x07230203;
     private const uint Version15 = 0x00010500;
+    private const uint Version16 = 0x00010600;
     private const uint Generator = 0x53504500; // "SPE"
 
     private readonly List<uint> _capabilities = [];
@@ -849,6 +871,16 @@ public sealed partial class SpirvModuleBuilder
         return id;
     }
 
+    // A 32-bit specialization constant. It is never folded or shared with a constant, because
+    // the pipeline sets its value.
+    public uint SpecConstant(uint type, uint specId, uint defaultValue)
+    {
+        var id = AllocateId();
+        Emit(_typesConstantsGlobals, SpirvOp.SpecConstant, type, id, defaultValue);
+        AddDecoration(id, SpirvDecoration.SpecId, specId);
+        return id;
+    }
+
     public uint AddGlobalVariable(
         uint pointerType,
         SpirvStorageClass storageClass,
@@ -878,6 +910,10 @@ public sealed partial class SpirvModuleBuilder
         {
             _inputVariables.Add(id);
         }
+        else if (storageClass is SpirvStorageClass.UniformConstant or SpirvStorageClass.PushConstant)
+        {
+            _immutableVariables.Add(id);
+        }
 
         return id;
     }
@@ -900,6 +936,9 @@ public sealed partial class SpirvModuleBuilder
 
     public uint AddFunctionParameter(uint type) =>
         EmitResult(_functions, SpirvOp.FunctionParameter, type);
+
+    // The label of the block being emitted.
+    public uint CurrentBlock => _currentBlock;
 
     public uint AddLabel(uint? id = null)
     {
@@ -1089,7 +1128,35 @@ public sealed partial class SpirvModuleBuilder
         CurrentFunction = 0;
     }
 
-    public byte[] Build()
+    // A driver may fuse a multiply with an add, or split a fused multiply-add, and decide differently in each pipeline.
+    // A depth prepass and the pass that tests its depth for equality run different programs that compute the same
+    // position, so a vertex that moves by one ulp in only one of them drops the triangle from the second pass. Set for
+    // the stages before rasterization: each such operation keeps its own rounding, as the guest's instructions do.
+    public bool KeepsFloatRounding { get; set; }
+
+    private const uint GlslFma = 50;
+
+    private List<uint> WithNoContraction(List<uint> functions, List<uint> annotations)
+    {
+        var decorated = new List<uint>(annotations);
+        var glsl = _extInstImports.GetValueOrDefault("GLSL.std.450");
+        for (var offset = 0; offset < functions.Count; offset += Math.Max(1, (int)(functions[offset] >> 16)))
+        {
+            var opcode = (SpirvOp)(functions[offset] & 0xFFFF);
+            if ((opcode is SpirvOp.FAdd or SpirvOp.FSub or SpirvOp.FMul ||
+                 opcode == SpirvOp.ExtInst && glsl != 0 && functions[offset + 3] == glsl && functions[offset + 4] == GlslFma) &&
+                !_plainDecorations.Contains((functions[offset + 2], SpirvDecoration.NoContraction)))
+            {
+                Emit(decorated, SpirvOp.Decorate, functions[offset + 2], (uint)SpirvDecoration.NoContraction);
+            }
+        }
+
+        return decorated;
+    }
+
+    public byte[] Build() => Build(spirv16: false);
+
+    internal byte[] Build(bool spirv16)
     {
         if (_memoryModel.Count == 0)
         {
@@ -1101,6 +1168,11 @@ public sealed partial class SpirvModuleBuilder
         var functions = CompactFunctions(removedIds, unreadPointers);
         var debug = WithoutTargets(_debug, removedIds);
         var annotations = WithoutTargets(_annotations, removedIds);
+        if (KeepsFloatRounding)
+        {
+            annotations = WithNoContraction(functions, annotations);
+        }
+
         var entryPoints = WithoutInterfaces(_entryPoints, unreadVariables);
         var globals = WithoutVariables(_typesConstantsGlobals, unreadVariables);
         var wordCount =
@@ -1118,7 +1190,7 @@ public sealed partial class SpirvModuleBuilder
         var words = new uint[wordCount];
         var offset = 0;
         WriteWord(Magic);
-        WriteWord(Version15);
+        WriteWord(spirv16 ? Version16 : Version15);
         WriteWord(Generator);
         WriteWord(_nextId);
         WriteWord(0);
@@ -1157,11 +1229,10 @@ public sealed partial class SpirvModuleBuilder
         params uint[] operands)
     {
         var result = AllocateId();
-        var values = new uint[operands.Length + 2];
-        values[0] = resultType;
-        values[1] = result;
-        operands.CopyTo(values, 2);
-        Emit(section, opcode, values);
+        section.Add(((uint)(operands.Length + 3) << 16) | (ushort)opcode);
+        section.Add(resultType);
+        section.Add(result);
+        section.AddRange(operands);
         NoteResultType(result, resultType);
         return result;
     }

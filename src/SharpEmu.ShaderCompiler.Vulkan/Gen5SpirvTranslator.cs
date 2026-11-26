@@ -80,6 +80,7 @@ public static partial class Gen5SpirvTranslator
         private static readonly bool PixelLiveExec = !string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_PS_LIVE_EXEC"), "0", StringComparison.Ordinal);
         private readonly bool _enableGraphicsSubgroupOperations;
+        private readonly bool _graphicsPartialSubgroupLanes;
         private readonly uint _waveLaneCount;
         private readonly IWaveLowering _waveLowering;
         private bool _guestLaneFromSubgroup;
@@ -87,6 +88,7 @@ public static partial class Gen5SpirvTranslator
         private readonly Dictionary<uint, Dictionary<uint, uint>> _savedLaneValues = new();
         private readonly bool _usesBufferAtomics;
         private readonly bool _usesCoherentBufferPairs;
+        private readonly bool _usesBufferQwordAtomics;
 
         // Safety valve for the PC-dispatcher loop. Each iteration executes one
         // GCN basic block; a correctly-translated shader always reaches its
@@ -152,6 +154,7 @@ public static partial class Gen5SpirvTranslator
         private uint _intType;
         private uint _longType;
         private uint _ulongType;
+        private uint _steppedClock;
         private uint _floatType;
         private uint _vec2Type;
         private uint _vec3Type;
@@ -163,6 +166,7 @@ public static partial class Gen5SpirvTranslator
         private uint _privateVec2Pointer;
         private readonly HashSet<uint> _flagVariables = [];
         private uint _runtimeBufferBiases;
+        private uint _runtimeBufferStrides;
         // One Private variable per register the program touches, declared on first use. A whole
         // register-file array is kept only for the VGPRs of a program that indexes them at run time
         // (V_MOVREL*): MoltenVK lowers a 512-entry private array to thread memory, and every
@@ -187,6 +191,7 @@ public static partial class Gen5SpirvTranslator
         private readonly Dictionary<(uint Register, uint Lane), uint> _laneSpillSlots = new();
         private uint _globalBuffers;
         private uint _globalBufferPairs;
+        private uint _globalBufferQwords;
         private uint _gfx10BufferFormatTable;
         private uint _storageBlockPointer;
         private uint _storagePairBlockPointer;
@@ -215,6 +220,7 @@ public static partial class Gen5SpirvTranslator
         private uint _vertexIndexInput;
         private uint _instanceIndexInput;
         private uint _baseInstanceInput;
+        private uint _baseVertexInput;
         private uint _fragCoordInput;
         private uint _localInvocationIdInput;
         private uint _localInvocationIndexInput;
@@ -255,7 +261,10 @@ public static partial class Gen5SpirvTranslator
             uint ConversionFormat = 0,
             uint ShaderSwizzle = 0,
             int EmulatedCompareFunction = -1,
-            int ResourceIndex = -1);
+            int ResourceIndex = -1,
+            // The slot of the image's store channel map in shader data (RuntimeImageSwizzle.Slot), or -1 when its stores
+            // keep the select of the module.
+            int SwizzleSlot = -1);
 
         private readonly record struct SpirvVertexInput(
             uint Variable,
@@ -330,7 +339,6 @@ public static partial class Gen5SpirvTranslator
                 FindLocalComparisonPredicates(blocks);
                 profile.Switch(ShaderTranslationProfile.Part.Declarations);
                 DeclareModule();
-                DeclareIntegerReciprocalFunction();
                 var functionType = _module.TypeFunction(_voidType);
                 var main = _module.BeginFunction(_voidType, functionType);
                 _module.AddName(main, "main");
@@ -498,6 +506,8 @@ public static partial class Gen5SpirvTranslator
                 // After every function that may call it.
                 EmitTypedElementDecoder();
                 EmitCallRecordSearch();
+                EmitDeviceRangeFunctions();
+                EmitDeviceDwordFunction();
 
                 var model = _stage switch
                 {
@@ -519,9 +529,20 @@ public static partial class Gen5SpirvTranslator
                         SpirvExecutionMode.SignedZeroInfNanPreserve,
                         32);
                 }
+                if (_halfType != 0)
+                {
+                    _module.AddExecutionMode(main, SpirvExecutionMode.RoundingModeRte, 16);
+                    _module.AddExecutionMode(main, SpirvExecutionMode.DenormPreserve, 16);
+                    _module.AddExecutionMode(main, SpirvExecutionMode.SignedZeroInfNanPreserve, 16);
+                }
                 if (_stage == Gen5SpirvStage.Pixel)
                 {
                     _module.AddExecutionMode(main, SpirvExecutionMode.OriginUpperLeft);
+                    // Rejected fragments must not write guest buffers or storage images.
+                    if (_request.PixelEarlyDepth)
+                    {
+                        _module.AddExecutionMode(main, SpirvExecutionMode.EarlyFragmentTests);
+                    }
                     if (_pixelDepthOutput != 0)
                     {
                         _module.AddExecutionMode(main, SpirvExecutionMode.DepthReplacing);
@@ -539,6 +560,10 @@ public static partial class Gen5SpirvTranslator
                     if (_pairedLanes)
                     {
                         _module.AddExecutionMode(main, SpirvExecutionMode.LocalSize, PairedHostThreadCount(), 1, 1);
+                    }
+                    else if (UsesHalfWaveSubgroups && physicalSizes[0] % 32 != 0)
+                    {
+                        _module.AddExecutionMode(main, SpirvExecutionMode.LocalSize, 32, (HalfWaveThreadCount + 31) / 32, 1);
                     }
                     else
                     {
@@ -565,7 +590,7 @@ public static partial class Gen5SpirvTranslator
                     ? (uint)_vertexOutputs.Count
                     : (uint)_pixelInputs.Count;
                 profile.Switch(ShaderTranslationProfile.Part.Serialization);
-                shader = new Gen5SpirvShader(_module.Build(), attributeCount)
+                shader = new Gen5SpirvShader(_module.Build(spirv16: UsesHalfWaveSubgroups), attributeCount)
                 {
                     InputLocationMask = _stage == Gen5SpirvStage.Pixel ? _pixelInputLocationMask : null,
                 };
@@ -880,7 +905,7 @@ public static partial class Gen5SpirvTranslator
                 // LocalInvocationIndex is a compute-stage built-in. Graphics
                 // stages can still use native subgroup operations, but they
                 // cannot combine two subgroup32 halves through a workgroup.
-                if ((_stage is Gen5SpirvStage.Compute or Gen5SpirvStage.Mesh) && _waveLaneCount == 64)
+                if ((_stage is Gen5SpirvStage.Compute or Gen5SpirvStage.Mesh) && _waveLaneCount == 64 && !UsesHalfWaveSubgroups)
                 {
                     _localInvocationIndexInput = _module.AddGlobalVariable(
                         subgroupPointer,
@@ -892,7 +917,7 @@ public static partial class Gen5SpirvTranslator
                     _interfaces.Add(_localInvocationIndexInput);
                 }
 
-                DeclarePairedLaneInputs();
+                DeclareComputeSubgroupId();
             }
 
             if (HasVertexOutputs)
@@ -937,6 +962,17 @@ public static partial class Gen5SpirvTranslator
                         (uint)SpirvBuiltIn.BaseInstance);
                     _interfaces.Add(_baseInstanceInput);
                     _module.AddCapability(SpirvCapability.DrawParameters);
+                    if (_request.BaseVertexUserData >= 0)
+                    {
+                        _baseVertexInput = _module.AddGlobalVariable(
+                            _module.TypePointer(SpirvStorageClass.Input, _uintType),
+                            SpirvStorageClass.Input);
+                        _module.AddDecoration(
+                            _baseVertexInput,
+                            SpirvDecoration.BuiltIn,
+                            (uint)SpirvBuiltIn.BaseVertex);
+                        _interfaces.Add(_baseVertexInput);
+                    }
                 }
 
                 var outputPointer =
@@ -1162,13 +1198,12 @@ public static partial class Gen5SpirvTranslator
             {
                 var inputPointer =
                     _module.TypePointer(SpirvStorageClass.Input, _uvec3Type);
-                _localInvocationIdInput = _module.AddGlobalVariable(
-                    inputPointer,
-                    SpirvStorageClass.Input);
-                _module.AddDecoration(
-                    _localInvocationIdInput,
-                    SpirvDecoration.BuiltIn,
-                    (uint)SpirvBuiltIn.LocalInvocationId);
+                if (!UsesHalfWaveSubgroups)
+                {
+                    _localInvocationIdInput = _module.AddGlobalVariable(inputPointer, SpirvStorageClass.Input);
+                    _module.AddDecoration(_localInvocationIdInput, SpirvDecoration.BuiltIn, (uint)SpirvBuiltIn.LocalInvocationId);
+                    _interfaces.Add(_localInvocationIdInput);
+                }
                 _workGroupIdInput = _module.AddGlobalVariable(
                     inputPointer,
                     SpirvStorageClass.Input);
@@ -1176,7 +1211,6 @@ public static partial class Gen5SpirvTranslator
                     _workGroupIdInput,
                     SpirvDecoration.BuiltIn,
                     (uint)SpirvBuiltIn.WorkgroupId);
-                _interfaces.Add(_localInvocationIdInput);
                 _interfaces.Add(_workGroupIdInput);
                 if (_stage == Gen5SpirvStage.Mesh)
                 {
@@ -1287,9 +1321,14 @@ public static partial class Gen5SpirvTranslator
                 else
                 {
                     var lanes = BooleanToWaveMask(_module.ConstantBool(true));
-                    laneCount = IAdd(
-                        _module.AddInstruction(SpirvOp.BitCount, _uintType, Narrow(lanes)),
-                        _module.AddInstruction(SpirvOp.BitCount, _uintType, Narrow(ShiftRightLogical64(lanes, _module.Constant64(_ulongType, 32)))));
+                    var lowLanes = Narrow(lanes);
+                    var highLanes = Narrow(ShiftRightLogical64(lanes, _module.Constant64(_ulongType, 32)));
+                    laneCount = _module.AddInstruction(
+                        SpirvOp.Select,
+                        _uintType,
+                        IsNotZero(highLanes),
+                        IAdd(Ext(75, _uintType, highLanes), UInt(33)),
+                        IAdd(Ext(75, _uintType, lowLanes), UInt(1)));
                 }
 
                 StoreS(3, BitwiseOr(laneCount, ShiftLeftLogical(laneCount, UInt(8))));
@@ -1302,7 +1341,17 @@ public static partial class Gen5SpirvTranslator
             {
                 if (_stage == Gen5SpirvStage.Vertex)
                 {
-                    StoreV(_request.Program.VertexIndexRegister, Load(_uintType, _vertexIndexInput), guardWithExec: false);
+                    // A base vertex the indirect draw names in user data reaches the program there, and the vertex
+                    // index counts from it, as the CP's base_vtx_loc write does.
+                    var vertexIndex = Load(_uintType, _vertexIndexInput);
+                    if (_baseVertexInput != 0)
+                    {
+                        var baseVertex = Load(_uintType, _baseVertexInput);
+                        vertexIndex = ISubU(vertexIndex, baseVertex);
+                        StoreS(_request.UserDataBase + (uint)_request.BaseVertexUserData, baseVertex);
+                    }
+
+                    StoreV(_request.Program.VertexIndexRegister, vertexIndex, guardWithExec: false);
                     var instanceIndex = Load(_uintType, _instanceIndexInput);
                     if (_baseInstanceInput != 0)
                         instanceIndex = ISubU(instanceIndex, Load(_uintType, _baseInstanceInput));
@@ -1360,9 +1409,12 @@ public static partial class Gen5SpirvTranslator
             }
             else
             {
-                var localId = Load(_uvec3Type, _localInvocationIdInput);
+                var halfWaveIndex = UsesHalfWaveSubgroups ? HalfWaveLocalIndex() : 0;
+                var localId = halfWaveIndex != 0 ? HalfWaveLocalCoordinates(halfWaveIndex) : Load(_uvec3Type, _localInvocationIdInput);
                 var workGroupId = Load(_uvec3Type, _workGroupIdInput);
-                var invocationInBounds = _module.ConstantBool(true);
+                var invocationInBounds = halfWaveIndex != 0 && HalfWaveThreadCount % 32 != 0
+                    ? _module.AddInstruction(SpirvOp.ULessThan, _boolType, halfWaveIndex, UInt(HalfWaveThreadCount))
+                    : _module.ConstantBool(true);
                 for (uint component = 0; component < 3; component++)
                 {
                     // gl_LocalInvocationId/gl_WorkGroupId are indexed by the physical SPIR-V
@@ -1548,7 +1600,22 @@ public static partial class Gen5SpirvTranslator
 
         private enum SharedMemoryPhase { None, Read, Write }
 
+        private IReadOnlyList<ShaderBlock>? _dispatcherStartBlocks;
+        private int _dispatcherStart;
+
+        // Every block body asks for the dispatcher start of the same immutable block list: scan it once.
         private int FindComputeDispatcherStart(IReadOnlyList<ShaderBlock> blocks)
+        {
+            if (!ReferenceEquals(blocks, _dispatcherStartBlocks))
+            {
+                _dispatcherStart = ScanComputeDispatcherStart(blocks);
+                _dispatcherStartBlocks = blocks;
+            }
+
+            return _dispatcherStart;
+        }
+
+        private int ScanComputeDispatcherStart(IReadOnlyList<ShaderBlock> blocks)
         {
             if (_stage != Gen5SpirvStage.Compute || _hasIndirectControlFlow) return 0;
             var start = blocks.Count;
@@ -1712,6 +1779,8 @@ public static partial class Gen5SpirvTranslator
             }
             var passedWorkgroupBarrier = false;
             var pendingSharedReads = false;
+            var waveReductions = FindWaveReductions(block);
+            _deferGuards = waveReductions is null && CanDeferGuards;
             for (var index = block.StartIndex; index < block.EndIndex; index++)
             {
                 var instruction = _request.Program.Instructions[index];
@@ -1719,6 +1788,11 @@ public static partial class Gen5SpirvTranslator
                 if (IsBranch(instruction.Opcode) || instruction.Opcode == "SEndpgm")
                 {
                     continue;
+                }
+
+                if (_deferGuards && ReadsOtherLanes(instruction))
+                {
+                    FlushDeferredGuards();
                 }
 
                 if (lastWorkgroupBarrierIndex >= 0)
@@ -1760,12 +1834,19 @@ public static partial class Gen5SpirvTranslator
                     return false;
                 }
 
+                if (waveReductions is not null)
+                {
+                    ApplyWaveReduction(waveReductions, index);
+                }
+
                 CapturePixelVgprs(instruction);
                 CapturePixelVgprPoints(instruction);
                 MarkPixelPath(instruction);
                 CapturePixelExec(instruction);
             }
 
+            FlushDeferredGuards();
+            _deferGuards = false;
             if (_stage != Gen5SpirvStage.Mesh) _waveLowering.EndBlock();
             return true;
         }
@@ -2559,6 +2640,14 @@ public static partial class Gen5SpirvTranslator
                 return TryEmitScalarAlu(instruction, out error);
             }
 
+            if (instruction.Opcode is "SMemtime" or "SMemrealtime")
+            {
+                var clock = ReadShaderClock();
+                StoreS(instruction.Destinations[0].Value, Narrow(clock));
+                StoreS(instruction.Destinations[1].Value, Narrow(ShiftRightLogical64(clock, ULong(32))));
+                return true;
+            }
+
             if (instruction.Encoding is
                 Gen5ShaderEncoding.Sopp or
                 Gen5ShaderEncoding.Smrd or
@@ -2941,6 +3030,7 @@ public static partial class Gen5SpirvTranslator
                     return true;
                 }
                 case "DsRead2B64":
+                case "DsRead2St64B64":
                     return TryEmitDataShareReadPair64(instruction, control, out error);
                 case "DsRead2B32":
                 case "DsRead2St64B32":
@@ -3390,6 +3480,26 @@ public static partial class Gen5SpirvTranslator
             });
         }
 
+        // An X2 buffer atomic (SWAP, AND, OR) as one 64-bit atomic on the pair in the data registers, low dword first; with
+        // glc the registers take the pair from before it.
+        private void EmitQwordAtomic(SpirvOp op, uint pointer, Gen5BufferMemoryControl control)
+        {
+            _module.AddCapability(SpirvCapability.Int64Atomics);
+            var original = EmitAtomic(
+                op,
+                _ulongType,
+                pointer,
+                scope: 1,
+                semantics: 0x48,
+                value: () => Pair64(LoadV(control.VectorData), LoadV(control.VectorData + 1)),
+                comparator: () => ULong(0));
+            if (control.Glc)
+            {
+                StoreV(control.VectorData, Narrow(original));
+                StoreV(control.VectorData + 1, Narrow(ShiftRightLogical64(original, ULong(32))));
+            }
+        }
+
         // Maps the AMD atomic-op name suffix shared by buffer/image atomics to a SPIR-V opcode.
         // Inc/Dec approximate the AMD wrap-clamp semantics (MEM = tmp >= DATA ? 0 : tmp + 1),
         // which is exact for the common 0xFFFFFFFF clamp operand.
@@ -3713,7 +3823,6 @@ public static partial class Gen5SpirvTranslator
             }
 
             var specialized = info.Buffers[bindingIndex];
-            var stride = UInt(specialized.PackedStride & 0x3FFF);
             var descriptorFormat = specialized.DescriptorFormat;
             var descriptorSwizzle = specialized.DescriptorSwizzle;
             var descriptorWord3 = UInt((specialized.DescriptorFormat << 12) | (specialized.DescriptorSwizzle & 0xFFF));
@@ -3731,14 +3840,22 @@ public static partial class Gen5SpirvTranslator
                 UInt(unchecked((uint)control.OffsetBytes)),
                 scalarOffset);
             byteAddress = IAdd(byteAddress, vectorOffset);
-            byteAddress = IAdd(
-                byteAddress,
-                _module.AddInstruction(SpirvOp.IMul, _uintType, vectorIndex, stride));
+            if (control.IndexEnabled)
+            {
+                byteAddress = IAdd(byteAddress, _module.AddInstruction(SpirvOp.IMul, _uintType, vectorIndex, RuntimeBufferStride(bindingIndex)));
+            }
+
             byteAddress = ApplyGuestBufferByteBias(bindingIndex, byteAddress);
             var dwordAddress = ShiftRightLogical(byteAddress, UInt(2));
 
-            if (instruction.Opcode is "BufferAtomicSwapX2" or "BufferAtomicOrX2")
+            if (instruction.Opcode is "BufferAtomicSwapX2" or "BufferAtomicAndX2" or "BufferAtomicOrX2")
             {
+                var atomicOp = instruction.Opcode switch
+                {
+                    "BufferAtomicSwapX2" => SpirvOp.AtomicExchange,
+                    "BufferAtomicAndX2" => SpirvOp.AtomicAnd,
+                    _ => SpirvOp.AtomicOr,
+                };
                 EmitExecConditional(() =>
                 {
                     var firstInRange = IsBufferWordInRange(bindingIndex, dwordAddress);
@@ -3746,30 +3863,70 @@ public static partial class Gen5SpirvTranslator
                     var secondInRange = IsBufferWordInRange(bindingIndex, secondAddress);
                     EmitBufferAtomicInRange(LogicalAnd(firstInRange, secondInRange), control.Glc, control.VectorData, 2, () =>
                     {
-                        var atomicOp = instruction.Opcode == "BufferAtomicSwapX2"
-                            ? SpirvOp.AtomicExchange
-                            : SpirvOp.AtomicOr;
-                        var first = EmitAtomic(
-                            atomicOp,
-                            _uintType,
-                            BufferWordPointer(bindingIndex, dwordAddress),
-                            scope: 1,
-                            semantics: 0x48,
-                            value: () => LoadV(control.VectorData),
-                            comparator: () => UInt(0));
-                        var second = EmitAtomic(
-                            atomicOp,
-                            _uintType,
-                            BufferWordPointer(bindingIndex, secondAddress),
-                            scope: 1,
-                            semantics: 0x48,
-                            value: () => LoadV(control.VectorData + 1),
-                            comparator: () => UInt(0));
-                        if (control.Glc)
+                        void EmitDwordAtomics()
                         {
-                            StoreV(control.VectorData, first);
-                            StoreV(control.VectorData + 1, second);
+                            var first = EmitAtomic(
+                                atomicOp,
+                                _uintType,
+                                BufferWordPointer(bindingIndex, dwordAddress),
+                                scope: 1,
+                                semantics: 0x48,
+                                value: () => LoadV(control.VectorData),
+                                comparator: () => UInt(0));
+                            var second = EmitAtomic(
+                                atomicOp,
+                                _uintType,
+                                BufferWordPointer(bindingIndex, secondAddress),
+                                scope: 1,
+                                semantics: 0x48,
+                                value: () => LoadV(control.VectorData + 1),
+                                comparator: () => UInt(0));
+                            if (control.Glc)
+                            {
+                                StoreV(control.VectorData, first);
+                                StoreV(control.VectorData + 1, second);
+                            }
                         }
+
+                        if (!_usesBufferQwordAtomics)
+                        {
+                            EmitDwordAtomics();
+                            return;
+                        }
+
+                        // An 8-byte aligned pair is one 64-bit word; any other address names none, so it stays two dword atomics.
+                        if (_request.Bindings.UsesTableBlock)
+                        {
+                            // A table-block buffer is addressed through its device address, so the pair is aligned when that is.
+                            var address = TableBufferByteAddress(bindingIndex, dwordAddress);
+                            EmitConditional(
+                                LogicalAnd(
+                                    _module.AddInstruction(SpirvOp.IEqual, _boolType, BitwiseAnd(byteAddress, UInt(3)), UInt(0)),
+                                    _module.AddInstruction(SpirvOp.IEqual, _boolType, And64(address, ULong(7)), ULong(0))),
+                                () => EmitQwordAtomic(
+                                    atomicOp,
+                                    _module.AddInstruction(
+                                        SpirvOp.ConvertUToPtr,
+                                        _module.TypePointer(SpirvStorageClass.PhysicalStorageBuffer, _ulongType),
+                                        address),
+                                    control),
+                                EmitDwordAtomics);
+                            return;
+                        }
+
+                        EmitConditional(
+                            _module.AddInstruction(SpirvOp.IEqual, _boolType, BitwiseAnd(byteAddress, UInt(7)), UInt(0)),
+                            () => EmitQwordAtomic(
+                                atomicOp,
+                                _module.AddInstruction(
+                                    SpirvOp.AccessChain,
+                                    _storageUlongPointer,
+                                    _globalBufferQwords,
+                                    UInt((uint)bindingIndex),
+                                    UInt(0),
+                                    ShiftRightLogical(dwordAddress, UInt(1))),
+                                control),
+                            EmitDwordAtomics);
                     });
                 });
                 return true;
@@ -3846,7 +4003,8 @@ public static partial class Gen5SpirvTranslator
                 }
 
                 EmitExecConditional(() => TryEmitBufferFormatStore(bindingIndex, byteAddress, control, descriptorWord3, descriptorFormat,
-                    storedHalves, component => LoadBufferD16Component(control.VectorData, component, storedNumberFormat)));
+                    storedHalves, component => LoadBufferD16Component(control.VectorData,
+                        component + (IsFormatD16High(instruction.Opcode) ? 1u : 0u), storedNumberFormat)));
                 return true;
             }
 
@@ -3950,7 +4108,8 @@ public static partial class Gen5SpirvTranslator
                 var (_, loadedNumberFormat) = DecodeGfx10BufferFormat(
                     BitwiseAnd(ShiftRightLogical(descriptorWord3, UInt(12)), UInt(0x7F)));
                 StoreBufferD16Components(control.VectorData,
-                    BufferFormatLoadValues(bindingIndex, byteAddress, descriptorWord3, loadedHalves), loadedNumberFormat);
+                    BufferFormatLoadValues(bindingIndex, byteAddress, descriptorWord3, loadedHalves), loadedNumberFormat,
+                    IsFormatD16High(instruction.Opcode));
                 return true;
             }
 
@@ -4111,6 +4270,8 @@ public static partial class Gen5SpirvTranslator
             out string error)
         {
             error = string.Empty;
+            // Addresses come from VGPRs, as on the physical storage buffer path: inactive lanes must hold their own values.
+            FlushDeferredGuards();
             if (control.Typed || instruction.Opcode.StartsWith("TBuffer", StringComparison.Ordinal))
             {
                 error = $"device buffer descriptor operation {instruction.Opcode} is not supported";
@@ -4143,7 +4304,8 @@ public static partial class Gen5SpirvTranslator
                 var (_, deviceNumberFormat) = DecodeGfx10BufferFormat(
                     BitwiseAnd(ShiftRightLogical(descriptorWord3, UInt(12)), UInt(0x7F)));
                 StoreBufferD16Components(control.VectorData,
-                    DeviceBufferFormatLoadValues(baseAddress, size, byteAddress, descriptorWord3, deviceHalves), deviceNumberFormat);
+                    DeviceBufferFormatLoadValues(baseAddress, size, byteAddress, descriptorWord3, deviceHalves), deviceNumberFormat,
+                    IsFormatD16High(instruction.Opcode));
                 return true;
             }
 
@@ -4157,6 +4319,13 @@ public static partial class Gen5SpirvTranslator
                     control.VectorData,
                     control.DwordCount,
                     control.SplitDescriptorFormat);
+                return true;
+            }
+
+            if (instruction.Opcode.StartsWith("BufferStoreFormat", StringComparison.Ordinal) &&
+                !instruction.Opcode.Contains("D16", StringComparison.Ordinal))
+            {
+                EmitExecConditional(() => EmitDeviceBufferFormatStore(baseAddress, size, byteAddress, descriptorWord3, control));
                 return true;
             }
 
@@ -4265,9 +4434,14 @@ public static partial class Gen5SpirvTranslator
         {
             error = string.Empty;
             var atomicSuffix = instruction.Opcode["BufferAtomic".Length..];
-            if (atomicSuffix is "SwapX2" or "OrX2")
+            if (atomicSuffix is "SwapX2" or "AndX2" or "OrX2")
             {
-                var atomicOp = atomicSuffix == "SwapX2" ? SpirvOp.AtomicExchange : SpirvOp.AtomicOr;
+                var atomicOp = atomicSuffix switch
+                {
+                    "SwapX2" => SpirvOp.AtomicExchange,
+                    "AndX2" => SpirvOp.AtomicAnd,
+                    _ => SpirvOp.AtomicOr,
+                };
                 EmitExecConditional(() =>
                 {
                     var valid = IsDeviceBufferByteRangeInRange(size, byteAddress, 2 * sizeof(uint));
@@ -4275,23 +4449,53 @@ public static partial class Gen5SpirvTranslator
                     var secondAddress = And64(IAdd64(baseAddress, Widen(IAdd(byteAddress, UInt(sizeof(uint))))), ULong(DeviceAddressMask & ~3ul));
                     EmitBufferAtomicInRange(valid, control.Glc, control.VectorData, 2, () =>
                     {
-                        var (firstPointer, firstMapped) = ResolveDeviceAddress(firstAddress);
-                        var (secondPointer, secondMapped) = ResolveDeviceAddress(secondAddress);
-                        var bothMapped = LogicalAnd(firstMapped, secondMapped);
-                        EmitBufferAtomicInRange(bothMapped, control.Glc, control.VectorData, 2, () =>
+                        void EmitDwordAtomics()
                         {
-                            var originalLow = EmitAtomic(
-                                atomicOp, _uintType, DeviceWordPointer(firstPointer), 1, 0x48,
-                                () => LoadV(control.VectorData), () => UInt(0));
-                            var originalHigh = EmitAtomic(
-                                atomicOp, _uintType, DeviceWordPointer(secondPointer), 1, 0x48,
-                                () => LoadV(control.VectorData + 1), () => UInt(0));
-                            if (control.Glc)
+                            var (firstPointer, firstMapped) = ResolveDeviceAddress(firstAddress);
+                            var (secondPointer, secondMapped) = ResolveDeviceAddress(secondAddress);
+                            var bothMapped = LogicalAnd(firstMapped, secondMapped);
+                            EmitBufferAtomicInRange(bothMapped, control.Glc, control.VectorData, 2, () =>
                             {
-                                StoreV(control.VectorData, originalLow);
-                                StoreV(control.VectorData + 1, originalHigh);
-                            }
-                        });
+                                var originalLow = EmitAtomic(
+                                    atomicOp, _uintType, DeviceWordPointer(firstPointer), 1, 0x48,
+                                    () => LoadV(control.VectorData), () => UInt(0));
+                                var originalHigh = EmitAtomic(
+                                    atomicOp, _uintType, DeviceWordPointer(secondPointer), 1, 0x48,
+                                    () => LoadV(control.VectorData + 1), () => UInt(0));
+                                if (control.Glc)
+                                {
+                                    StoreV(control.VectorData, originalLow);
+                                    StoreV(control.VectorData + 1, originalHigh);
+                                }
+                            });
+                        }
+
+                        if (!_request.SupportsBufferInt64Atomics)
+                        {
+                            EmitDwordAtomics();
+                            return;
+                        }
+
+                        // An 8-byte aligned pair is one 64-bit word on one page; any other address names none.
+                        var aligned = _module.AddInstruction(
+                            SpirvOp.IEqual,
+                            _boolType,
+                            And64(IAdd64(baseAddress, Widen(byteAddress)), ULong(7)),
+                            ULong(0));
+                        EmitConditional(aligned, () =>
+                        {
+                            var (pointer, mapped) = ResolveDeviceAddress(firstAddress);
+                            EmitBufferAtomicInRange(mapped, control.Glc, control.VectorData, 2, () =>
+                            {
+                                EmitQwordAtomic(
+                                    atomicOp,
+                                    _module.AddInstruction(
+                                        SpirvOp.ConvertUToPtr,
+                                        _module.TypePointer(SpirvStorageClass.PhysicalStorageBuffer, _ulongType),
+                                        pointer),
+                                    control);
+                            });
+                        }, EmitDwordAtomics);
                     });
                 });
                 return true;
@@ -4775,6 +4979,7 @@ public static partial class Gen5SpirvTranslator
 
             var canonical = new uint[4];
             var componentBounds = new uint[4];
+            var elementWords = new Dictionary<uint, uint>();
             for (var component = 0; component < canonical.Length; component++)
             {
                 canonical[component] = LoadGfx10BufferFormatComponent(
@@ -4783,7 +4988,8 @@ public static partial class Gen5SpirvTranslator
                     dataFormat,
                     numberFormat,
                     component,
-                    out componentBounds[component]);
+                    out componentBounds[component],
+                    elementWords);
             }
 
             // Only selected memory components contribute to the shared bounds check.
@@ -4827,7 +5033,7 @@ public static partial class Gen5SpirvTranslator
         // The components a D16 format operation transfers (X to XYZW), or 0 for any other operation.
         private static uint FormatD16Components(string opcode) => opcode switch
         {
-            "BufferLoadFormatD16X" or "BufferStoreFormatD16X" => 1u,
+            "BufferLoadFormatD16X" or "BufferStoreFormatD16X" or "BufferLoadFormatD16HiX" or "BufferStoreFormatD16HiX" => 1u,
             "BufferLoadFormatD16Xy" or "BufferStoreFormatD16Xy" => 2u,
             "BufferLoadFormatD16Xyz" or "BufferStoreFormatD16Xyz" => 3u,
             "BufferLoadFormatD16Xyzw" or "BufferStoreFormatD16Xyzw" => 4u,
@@ -4836,8 +5042,9 @@ public static partial class Gen5SpirvTranslator
 
         // A D16 load returns its components as 16-bit values, two to a register with the first in the low half: halves for
         // the float and normalized formats, the low 16 bits for UINT and SINT (number formats 4 and 5). An odd last
-        // component leaves the high half zero.
-        private void StoreBufferD16Components(uint vectorData, uint[] values, uint numberFormat)
+        // component leaves the high half zero. The D16_HI form (highHalf) writes its one component to bits 16..31 and keeps
+        // bits 0..15 of the register.
+        private void StoreBufferD16Components(uint vectorData, uint[] values, uint numberFormat, bool highHalf = false)
         {
             var integer = _module.AddInstruction(SpirvOp.LogicalOr, _boolType,
                 _module.AddInstruction(SpirvOp.IEqual, _boolType, numberFormat, UInt(4)),
@@ -4849,9 +5056,19 @@ public static partial class Gen5SpirvTranslator
                 var halves = Ext(58, _uintType, _module.AddInstruction(SpirvOp.CompositeConstruct, _vec2Type,
                     Bitcast(_floatType, low), Bitcast(_floatType, high)));
                 var integers = BitwiseOr(BitwiseAnd(low, UInt(0xFFFF)), ShiftLeftLogical(BitwiseAnd(high, UInt(0xFFFF)), UInt(16)));
-                StoreV(vectorData + (uint)(index / 2), _module.AddInstruction(SpirvOp.Select, _uintType, integer, integers, halves));
+                var packed = _module.AddInstruction(SpirvOp.Select, _uintType, integer, integers, halves);
+                if (highHalf)
+                {
+                    packed = BitwiseOr(BitwiseAnd(LoadV(vectorData), UInt(0xFFFF)), ShiftLeftLogical(packed, UInt(16)));
+                }
+
+                StoreV(vectorData + (uint)(index / 2), packed);
             }
         }
+
+        // BUFFER_LOAD_FORMAT_D16_HI_X and BUFFER_STORE_FORMAT_D16_HI_X move their one component through bits 16..31.
+        private static bool IsFormatD16High(string opcode) =>
+            opcode is "BufferLoadFormatD16HiX" or "BufferStoreFormatD16HiX";
 
         // The 32-bit register value one component of a D16 store stands for: its half widened to a float for the float and
         // normalized formats, its 16 bits (sign-extended for SINT) for the integer ones.
@@ -4909,6 +5126,7 @@ public static partial class Gen5SpirvTranslator
                     UInt(Gfx10UnifiedFormat.GetAccessByteSize(dataFormat, control.DwordCount) - 1)));
             var dataFormatId = UInt(dataFormat);
             var numberFormatId = UInt(numberFormat);
+            var elementWords = new Dictionary<uint, uint>();
             for (uint destination = 0; destination < control.DwordCount; destination++)
             {
                 var value = destination < componentCount
@@ -4918,7 +5136,8 @@ public static partial class Gen5SpirvTranslator
                         dataFormatId,
                         numberFormatId,
                         (int)destination,
-                        out _)
+                        out _,
+                        elementWords)
                     : UInt(0);
                 StoreV(
                     control.VectorData + destination,
@@ -4989,7 +5208,7 @@ public static partial class Gen5SpirvTranslator
                         componentValue(component),
                         bitCount,
                         numberFormat,
-                        dataFormat);
+                        IsUnsignedMiniFloat(numberFormat, dataFormat));
                     var dword = (int)(byteOffset / 4);
                     var bit = ((byteOffset & 3) * 8) + bitOffset;
                     var (value, mask) = element[dword];
@@ -5003,8 +5222,175 @@ public static partial class Gen5SpirvTranslator
             return true;
         }
 
+        // A runtime V# names its format only when the shader runs, so each buffer format stores through its own
+        // branch, converting the registers as a formatted store through a bound buffer does. A branch depends only on
+        // its format's store shape (DeviceFormatStoreShape), so the formats of one shape share one branch.
+        private void EmitDeviceBufferFormatStore(
+            uint baseAddress,
+            uint size,
+            uint byteAddress,
+            uint descriptorWord3,
+            Gen5BufferMemoryControl control)
+        {
+            var unifiedFormat = BitwiseAnd(ShiftRightLogical(descriptorWord3, UInt(12)), UInt(0x7F));
+            var shapes = new List<(DeviceFormatStoreShape Shape, List<uint> Formats)>();
+            for (uint format = 1; format <= 0x7F; format++)
+            {
+                if (!TryGetDeviceFormatStoreShape(format, control.DwordCount, out var shape))
+                {
+                    continue;
+                }
+
+                var known = shapes.FindIndex(entry => entry.Shape.Equals(shape));
+                if (known < 0)
+                {
+                    shapes.Add((shape, [format]));
+                }
+                else
+                {
+                    shapes[known].Formats.Add(format);
+                }
+            }
+
+            foreach (var (shape, formats) in shapes)
+            {
+                uint matches = 0;
+                foreach (var format in formats)
+                {
+                    var match = _module.AddInstruction(SpirvOp.IEqual, _boolType, unifiedFormat, UInt(format));
+                    matches = matches == 0 ? match : _module.AddInstruction(SpirvOp.LogicalOr, _boolType, matches, match);
+                }
+
+                var selected = LogicalAnd(matches, IsDeviceBufferByteRangeInRange(size, byteAddress, shape.ElementBytes));
+                EmitConditional(selected, () =>
+                {
+                    var element = new (uint Value, uint Mask)[(shape.ElementBytes + 3) / 4];
+                    for (var index = 0; index < element.Length; index++)
+                    {
+                        element[index] = (UInt(0), 0);
+                    }
+
+                    for (var component = 0; component < shape.Components.Length; component++)
+                    {
+                        var (byteOffset, bitOffset, bitCount, numberFormat, miniFloat) = shape.Components[component];
+                        var register = LoadV(control.VectorData + (uint)component);
+                        var dword = (int)(byteOffset / 4);
+                        if (bitCount == 32)
+                        {
+                            // Dword components keep their register bits.
+                            element[dword] = (register, uint.MaxValue);
+                            continue;
+                        }
+
+                        var encoded = EncodeGfx10BufferComponent(register, bitCount, numberFormat, miniFloat);
+                        var bit = ((byteOffset & 3) * 8) + bitOffset;
+                        var (value, mask) = element[dword];
+                        element[dword] = (
+                            BitwiseOr(value, bit == 0 ? encoded : ShiftLeftLogical(encoded, UInt(bit))),
+                            mask | (((1u << (int)bitCount) - 1) << (int)bit));
+                    }
+
+                    StoreDeviceElementBits(baseAddress, byteAddress, element);
+                });
+            }
+        }
+
+        // What a device store's branch for one format depends on: the bytes its element spans, and for each stored component
+        // its layout and encoding (EncodeGfx10BufferComponent's inputs; a 32-bit component keeps its register bits, so it has
+        // no encoding).
+        private readonly record struct DeviceFormatStoreComponent(uint ByteOffset, uint BitOffset, uint BitCount, uint NumberFormat, bool MiniFloat);
+
+        private sealed record DeviceFormatStoreShape(uint ElementBytes, DeviceFormatStoreComponent[] Components)
+        {
+            public bool Equals(DeviceFormatStoreShape? other) =>
+                other is not null && ElementBytes == other.ElementBytes && Components.AsSpan().SequenceEqual(other.Components);
+
+            public override int GetHashCode() => HashCode.Combine(ElementBytes, Components.Length);
+        }
+
+        private static bool TryGetDeviceFormatStoreShape(uint format, uint dwordCount, out DeviceFormatStoreShape shape)
+        {
+            shape = null!;
+            if (!Gfx10UnifiedFormat.TryDecode(format, out var dataFormat, out var numberFormat))
+            {
+                return false;
+            }
+
+            var componentCount = Math.Min(dwordCount, Gfx10UnifiedFormat.ComponentCount(dataFormat));
+            if (componentCount == 0)
+            {
+                return false;
+            }
+
+            var components = new DeviceFormatStoreComponent[componentCount];
+            for (uint component = 0; component < componentCount; component++)
+            {
+                Gfx10UnifiedFormat.TryGetComponentLayout(dataFormat, component, out var byteOffset, out var bitOffset, out var bitCount);
+                components[component] = bitCount == 32
+                    ? new(byteOffset, bitOffset, bitCount, 0, false)
+                    : new(byteOffset, bitOffset, bitCount, numberFormat, IsUnsignedMiniFloat(numberFormat, dataFormat));
+            }
+
+            shape = new(Gfx10UnifiedFormat.GetAccessByteSize(dataFormat, componentCount), components);
+            return true;
+        }
+
+        // The device form of StoreBufferElementBits: each dword the element touches takes its masked bits.
+        private void StoreDeviceElementBits(uint baseAddress, uint byteAddress, IReadOnlyList<(uint Value, uint Mask)> element)
+        {
+            var alignment = BitwiseAnd(byteAddress, UInt(3));
+            var shift = ShiftLeftLogical(alignment, UInt(3));
+            var aligned = _module.AddInstruction(SpirvOp.IEqual, _boolType, alignment, UInt(0));
+            var carryShift = _module.AddInstruction(SpirvOp.ISub, _uintType, UInt(32), shift);
+            var firstAddress = And64(
+                IAdd64(baseAddress, Widen(BitwiseAnd(byteAddress, UInt(~3u)))),
+                ULong(DeviceAddressMask & ~3ul));
+            for (var index = 0; index <= element.Count; index++)
+            {
+                var value = UInt(0);
+                var mask = UInt(0);
+                if (index < element.Count)
+                {
+                    var (elementValue, elementMask) = element[index];
+                    value = ShiftLeftLogical(BitwiseAnd(elementValue, UInt(elementMask)), shift);
+                    mask = ShiftLeftLogical(UInt(elementMask), shift);
+                }
+
+                if (index > 0)
+                {
+                    // An unaligned element carries its high bits into the next dword.
+                    var (previousValue, previousMask) = element[index - 1];
+                    value = BitwiseOr(
+                        value,
+                        _module.AddInstruction(
+                            SpirvOp.Select,
+                            _uintType,
+                            aligned,
+                            UInt(0),
+                            ShiftRightLogical(BitwiseAnd(previousValue, UInt(previousMask)), carryShift)));
+                    mask = BitwiseOr(
+                        mask,
+                        _module.AddInstruction(
+                            SpirvOp.Select,
+                            _uintType,
+                            aligned,
+                            UInt(0),
+                            ShiftRightLogical(UInt(previousMask), carryShift)));
+                }
+
+                StoreDeviceMaskedWord(
+                    index == 0 ? firstAddress : IAdd64(firstAddress, ULong((ulong)index * sizeof(uint))),
+                    value,
+                    mask,
+                    _module.ConstantBool(true));
+            }
+        }
+
+        // The 10_11_11 and 11_11_10 float formats store unsigned mini-floats.
+        private static bool IsUnsignedMiniFloat(uint numberFormat, uint dataFormat) => numberFormat == 7 && dataFormat is 6 or 7;
+
         // Converts one register to the bits its component stores, per the number format.
-        private uint EncodeGfx10BufferComponent(uint value, uint bitCount, uint numberFormat, uint dataFormat)
+        private uint EncodeGfx10BufferComponent(uint value, uint bitCount, uint numberFormat, bool miniFloat)
         {
             if (bitCount == 32)
             {
@@ -5038,7 +5424,7 @@ public static partial class Gen5SpirvTranslator
                                 _module.Constant(_intType, signedMaximum))),
                         UInt(mask));
                 case 7:
-                    if (dataFormat is 6 or 7)
+                    if (miniFloat)
                     {
                         return EncodeUnsignedMiniFloat(value, bitCount);
                     }
@@ -5218,13 +5604,17 @@ public static partial class Gen5SpirvTranslator
                     UInt(0xFF)));
         }
 
+        // elementWords, when given, holds the dwords of this element already read, by their index from the element's first
+        // dword. A known component at a dword offset takes its two dwords from there, so neighbouring components share
+        // their reads: a 32_32_32_32 element reads 5 dwords instead of 8.
         private uint LoadGfx10BufferFormatComponent(
             int bindingIndex,
             uint elementAddress,
             uint dataFormat,
             uint numberFormat,
             int component,
-            out uint componentInBounds)
+            out uint componentInBounds,
+            Dictionary<uint, uint>? elementWords = null)
         {
             var byteOffset = UInt(0);
             var bitOffset = UInt(0);
@@ -5266,15 +5656,66 @@ public static partial class Gen5SpirvTranslator
                 }
             }
 
-            var packed = LoadUnalignedBufferWord(
-                bindingIndex,
-                IAdd(elementAddress, byteOffset));
-            var componentBytes = ShiftRightLogical(IAdd(IAdd(bitOffset, bitCount), UInt(7)), UInt(3));
-            componentInBounds = _module.AddInstruction(
-                SpirvOp.LogicalOr, _boolType,
-                _module.AddInstruction(SpirvOp.IEqual, _boolType, bitCount, UInt(0)),
-                IsBufferElementInRange(bindingIndex, IAdd(elementAddress, byteOffset),
-                    _module.AddInstruction(SpirvOp.ISub, _uintType, componentBytes, UInt(1))));
+            var knownLayout = _module.TryGetConstantValue(byteOffset, out var knownByteOffset) &
+                _module.TryGetConstantValue(bitOffset, out var knownBitOffset) &
+                _module.TryGetConstantValue(bitCount, out var knownBitCount);
+            if (knownLayout && knownBitCount == 0)
+            {
+                // The format has no such component: it reads as zero (one for W), and nothing is loaded.
+                componentInBounds = _module.ConstantBool(true);
+                return component == 3 ? Gfx10FormatOne(numberFormat) : UInt(0);
+            }
+
+            uint packed;
+            if (elementWords is not null && knownLayout && (knownByteOffset & 3) == 0)
+            {
+                // The component's bytes start in the element's dword knownByteOffset / 4 and end in that dword or the
+                // next, as the element's own byte offset carries; those are the dwords whose bounds it needs. A field in
+                // one byte never reaches the next dword. Dword i is the one (elementAddress + 4 * i) >> 2 names in 32 bits,
+                // so the index wraps at 2^30.
+                var elementDword = ShiftRightLogical(elementAddress, UInt(2));
+                uint ElementDword(uint index) => index == 0 ? elementDword : BitwiseAnd(IAdd(elementDword, UInt(index)), UInt(0x3FFF_FFFF));
+                uint ElementWord(uint index)
+                {
+                    if (!elementWords.TryGetValue(index, out var word))
+                    {
+                        word = LoadBufferWord(bindingIndex, ElementDword(index));
+                        elementWords[index] = word;
+                    }
+
+                    return word;
+                }
+
+                var first = knownByteOffset / 4;
+                var lastByte = (knownBitOffset + knownBitCount + 7) / 8 - 1;
+                var firstInRange = IsBufferWordInRange(bindingIndex, ElementDword(first));
+                if (lastByte == 0)
+                {
+                    packed = ShiftRightLogical(ElementWord(first), ShiftLeftLogical(BitwiseAnd(elementAddress, UInt(3)), UInt(3)));
+                    componentInBounds = firstInRange;
+                }
+                else
+                {
+                    packed = SpliceUnalignedWord(elementAddress, ElementWord(first), ElementWord(first + 1));
+                    var endsInNext = _module.AddInstruction(SpirvOp.UGreaterThan, _boolType,
+                        IAdd(BitwiseAnd(elementAddress, UInt(3)), UInt(lastByte)), UInt(3));
+                    componentInBounds = LogicalAnd(firstInRange, _module.AddInstruction(SpirvOp.Select, _boolType, endsInNext,
+                        IsBufferWordInRange(bindingIndex, ElementDword(first + 1)), firstInRange));
+                }
+            }
+            else
+            {
+                packed = LoadUnalignedBufferWord(
+                    bindingIndex,
+                    IAdd(elementAddress, byteOffset));
+                var componentBytes = ShiftRightLogical(IAdd(IAdd(bitOffset, bitCount), UInt(7)), UInt(3));
+                componentInBounds = _module.AddInstruction(
+                    SpirvOp.LogicalOr, _boolType,
+                    _module.AddInstruction(SpirvOp.IEqual, _boolType, bitCount, UInt(0)),
+                    IsBufferElementInRange(bindingIndex, IAdd(elementAddress, byteOffset),
+                        _module.AddInstruction(SpirvOp.ISub, _uintType, componentBytes, UInt(1))));
+            }
+
             var raw = _module.AddInstruction(
                 SpirvOp.BitFieldUExtract,
                 _uintType,
@@ -5884,6 +6325,16 @@ public static partial class Gen5SpirvTranslator
                     return false;
                 }
 
+                if (IsHeapLoad(instruction, out var heapLoad))
+                {
+                    return TryEmitHeapLoad(instruction, image, heapLoad, out error);
+                }
+
+                if (IsHeapVolumeRead(instruction, out var heapVolume, out var volumeType))
+                {
+                    return TryEmitHeapVolumeRead(instruction, image, heapVolume, volumeType, out error);
+                }
+
                 if (!TryResolveLayoutImage(instruction, image, out resource, out imageObject, out dstSelect, out error))
                 {
                     return false;
@@ -5897,6 +6348,124 @@ public static partial class Gen5SpirvTranslator
 
             return EmitImageOperation(instruction, image, resource, imageObject, dstSelect, mipLevel, out error);
         }
+
+        // A heap record can hold an integer texture, which shaders read with loads and size queries: the instruction is the
+        // same whatever the format, and its result is the texel's bits. A load of a class with integer forms reads the
+        // record through the declaration of the element's numeric class.
+        private bool IsHeapLoad(Gen5ShaderInstruction instruction, out HeapRecordUse heapImage)
+        {
+            heapImage = default;
+            if (instruction.Opcode is not ("ImageLoad" or "ImageLoadMip" or "ImageGetResinfo") ||
+                !_request.Memory.TryGetIndex(instruction.Pc, 0, out var memoryIndex) ||
+                !_request.HeapImageByMemoryIndex.TryGetValue(memoryIndex, out heapImage))
+            {
+                return false;
+            }
+
+            var entry = _request.Memory[memoryIndex];
+            var info = _request.Resources.Info;
+            return entry.Resource < (uint)info.Images.Count &&
+                ImageDescriptorBinding.ForImage(info.Images[(int)entry.Resource]) is { } kind &&
+                BindlessHeap.HoldsIntegers(BindlessHeap.ImageSlot(kind));
+        }
+
+        private bool TryEmitHeapLoad(Gen5ShaderInstruction instruction, Gen5ImageControl image, HeapRecordUse heapImage, out string error)
+        {
+            var elementClass = HeapElementClass(HeapRecordIndex(heapImage));
+            var emitted = true;
+            var branchError = string.Empty;
+            foreach (var numericClass in new[] { ImageNumericClass.Float, ImageNumericClass.Uint, ImageNumericClass.Sint })
+            {
+                if (!emitted)
+                {
+                    break;
+                }
+
+                EmitConditional(_module.AddInstruction(SpirvOp.IEqual, _boolType, elementClass, UInt(BindlessHeap.ClassCode(numericClass))), () =>
+                {
+                    if (numericClass == ImageNumericClass.Float && IsHeapVolumeRead(instruction, out var heapVolume, out var volumeType))
+                    {
+                        emitted = TryEmitHeapVolumeRead(instruction, image, heapVolume, volumeType, out branchError);
+                        return;
+                    }
+
+                    emitted = TryResolveLayoutImage(instruction, image, out var resource, out var imageObject, out var dstSelect, out branchError,
+                            heapNumericClass: numericClass) &&
+                        EmitImageOperation(instruction, image, resource, imageObject, dstSelect,
+                            HeapReadMipLevel(instruction, image, resource), out branchError);
+                });
+            }
+
+            error = branchError;
+            return emitted;
+        }
+
+        // A heap record a 3D read picks can hold a 2D texture, whose 3D element stays null; the hardware then takes the
+        // third coordinate as the array layer. Reads that place their operands alike in both shapes (no gradients) try
+        // the 3D element and, when it is null, the record's 2D-array element.
+        private bool IsHeapVolumeRead(Gen5ShaderInstruction instruction, out HeapRecordUse heapImage, out uint volumeType)
+        {
+            heapImage = default;
+            volumeType = 0;
+            var opcode = instruction.Opcode;
+            var sameOperands = opcode is "ImageLoad" or "ImageLoadMip" || opcode.StartsWith("ImageGather4", StringComparison.Ordinal) ||
+                (opcode.StartsWith("ImageSample", StringComparison.Ordinal) && !opcode.Contains("SampleD", StringComparison.Ordinal) &&
+                 !opcode.Contains("SampleCD", StringComparison.Ordinal) && !opcode.Contains("SampleCd", StringComparison.Ordinal) &&
+                 !opcode.Contains("SampleCCd", StringComparison.Ordinal));
+            if (!sameOperands || !_request.Memory.TryGetIndex(instruction.Pc, 0, out var memoryIndex) ||
+                !_request.HeapImageByMemoryIndex.TryGetValue(memoryIndex, out heapImage))
+            {
+                return false;
+            }
+
+            var entry = _request.Memory[memoryIndex];
+            var info = _request.Resources.Info;
+            if (entry.Resource >= (uint)info.Images.Count ||
+                ImageDescriptorBinding.ForImage(info.Images[(int)entry.Resource]) is not { } kind ||
+                BindlessHeap.ImageSlot(kind) != BindlessHeap.VolumeSlot || !_imageClasses.TryGetValue(kind, out var volumeClass))
+            {
+                return false;
+            }
+
+            volumeType = volumeClass.ImageType;
+            return true;
+        }
+
+        private bool TryEmitHeapVolumeRead(Gen5ShaderInstruction instruction, Gen5ImageControl image, HeapRecordUse heapImage,
+            uint volumeType, out string error)
+        {
+            // A null descriptor reports no levels. Each branch builds its sampled image in the block that samples it, so the
+            // query loads the 3D element on its own.
+            _module.AddCapability(SpirvCapability.ImageQuery);
+            var (_, volumeImage) = LoadHeapElement(BindlessHeap.VolumeSlot, volumeType, HeapImageIndex(heapImage, BindlessHeap.VolumeSlot));
+            var levels = _module.AddInstruction(SpirvOp.ImageQueryLevels, _uintType, volumeImage);
+            _module.AddDecoration(levels, SpirvDecoration.NonUniform);
+            var isVolume = _module.AddInstruction(SpirvOp.INotEqual, _boolType, levels, UInt(0));
+            var emitted = true;
+            var branchError = string.Empty;
+            EmitConditional(isVolume, () =>
+                emitted = TryResolveLayoutImage(instruction, image, out var volume, out var volumeObject, out var volumeSelect, out branchError) &&
+                    EmitImageOperation(instruction, image, volume, volumeObject, volumeSelect,
+                        HeapReadMipLevel(instruction, image, volume), out branchError));
+            if (!emitted)
+            {
+                error = branchError;
+                return false;
+            }
+
+            EmitConditional(_module.AddInstruction(SpirvOp.LogicalNot, _boolType, isVolume), () =>
+                emitted = TryResolveLayoutImage(instruction, image, out var layers, out var layersObject, out var layersSelect, out branchError,
+                    heapVolumeLayers: true) &&
+                    EmitImageOperation(instruction, image, layers, layersObject, layersSelect,
+                        HeapReadMipLevel(instruction, image, layers), out branchError));
+            error = branchError;
+            return emitted;
+        }
+
+        private uint HeapReadMipLevel(Gen5ShaderInstruction instruction, Gen5ImageControl image, SpirvImageResource resource) =>
+            instruction.Opcode == "ImageLoadMip"
+                ? LoadImageIntegerAddress(image, (int)ImageCoordinateComponentCount(resource))
+                : UInt(0);
 
         // One image operation over a resolved image object; its results are register writes.
         private bool EmitImageOperation(
@@ -6017,6 +6586,13 @@ public static partial class Gen5SpirvTranslator
                     image,
                     0,
                     coordinateComponentCount);
+                if (resource.SwizzleSlot >= 0)
+                {
+                    var mapped = PackImageTexel(resource, RuntimeSwizzleStoreTexel(image, resource));
+                    EmitExecConditional(() => _module.AddStatement(SpirvOp.ImageWrite, imageObject, coordinates, mapped));
+                    return true;
+                }
+
                 var components = new uint[4];
                 for (var component = 0; component < components.Length; component++)
                 {
@@ -6200,6 +6776,10 @@ public static partial class Gen5SpirvTranslator
                         image,
                         0,
                         coordinateComponentCount);
+                    if (resource.Arrayed)
+                    {
+                        coordinates = ClampFetchLayer(resource, fetchedImage, coordinates, coordinateComponentCount);
+                    }
                     if (resource.Multisampled)
                     {
                         var sample = LoadImageIntegerAddress(
@@ -6521,6 +7101,25 @@ public static partial class Gen5SpirvTranslator
                     goto GatherComplete;
                 }
 
+                if (GatherCompareLod &&
+                    instruction.Opcode == "ImageGather4CL" &&
+                    resource.Dimension == SpirvImageDim.Dim2D)
+                {
+                    // OpImageDrefGather has no level operand either; compare the four texels at the requested level.
+                    sampled = EmitGatherAtLevel(
+                        image,
+                        resource,
+                        imageObject,
+                        coordinates,
+                        LoadImageFloatAddress(
+                            image,
+                            addressCursor + (int)coordinateComponentCount),
+                        reference,
+                        resource.EmulatedCompareFunction);
+                    writeAllComponents = true;
+                    goto GatherComplete;
+                }
+
                 var operands = new List<uint>
                 {
                     imageObject,
@@ -6747,12 +7346,21 @@ public static partial class Gen5SpirvTranslator
 
         // The four texels a gather reads, (i, j+1), (i+1, j+1), (i+1, j) and (i, j), taken from one level of
         // detail. Each is sampled at its centre, so the sampler still applies its addressing and its level clamp.
+        // image_gather4_c_l gathers at its LOD instead of the base level (SHARPEMU_GATHER_COMPARE_LOD=0 reads the base level,
+        // for bisecting). A terrain occlusion test gathers its HiZ pyramid at the patch's footprint level; at the base
+        // level it tests a 2x2-texel corner of the footprint, so patches behind a thin occluder (a character's legs) drop out of the list.
+        private static readonly bool GatherCompareLod = Environment.GetEnvironmentVariable("SHARPEMU_GATHER_COMPARE_LOD") != "0";
+
+        // reference != 0: each texel is the depth comparison against it (in the sampler, or emulated when
+        // emulatedCompare >= 0), as image_gather4_c* returns.
         private uint EmitGatherAtLevel(
             Gen5ImageControl image,
             SpirvImageResource resource,
             uint sampledImage,
             uint coordinates,
-            uint lod)
+            uint lod,
+            uint reference = 0,
+            int emulatedCompare = -1)
         {
             var imageValue = _module.AddInstruction(
                 SpirvOp.Image,
@@ -6832,6 +7440,19 @@ public static partial class Gen5SpirvTranslator
                         layer);
                 }
 
+                if (reference != 0 && emulatedCompare < 0)
+                {
+                    values[index] = _module.AddInstruction(
+                        SpirvOp.ImageSampleDrefExplicitLod,
+                        _floatType,
+                        sampledImage,
+                        centre,
+                        reference,
+                        2u,
+                        levelFloat);
+                    continue;
+                }
+
                 var texel = _module.AddInstruction(
                     SpirvOp.ImageSampleExplicitLod,
                     resource.VectorType,
@@ -6844,6 +7465,10 @@ public static partial class Gen5SpirvTranslator
                     resource.ComponentType,
                     texel,
                     component);
+                if (reference != 0)
+                {
+                    values[index] = EmulatedDepthCompare(reference, values[index], emulatedCompare);
+                }
             }
 
             return _module.AddInstruction(
@@ -7163,6 +7788,42 @@ public static partial class Gen5SpirvTranslator
                 UInt(0xFFFF));
         }
 
+        // A store's texel when the image's select is shader data (RuntimeImageSwizzle): the words of the components the
+        // dmask enables, in data-register order (zero for the others), each moved to the physical channel its slot's map names
+        // (a code xor its channel; 4 stores zero), as GetImageStoreSourceIndex places them for a select baked into the module.
+        // The map's decode is of an entry load and constants, so it runs once per function; a store adds a pick and a select
+        // per channel. The words are the bits the baked store writes, cast once.
+        private uint RuntimeSwizzleStoreTexel(Gen5ImageControl image, SpirvImageResource resource)
+        {
+            var dmask = (image.Dmask & 0xFu) == 0 ? 1u : image.Dmask & 0xFu;
+            var logical = new uint[4];
+            var source = 0u;
+            for (var component = 0; component < logical.Length; component++)
+            {
+                logical[component] = (dmask & (1u << component)) != 0 ? LoadImageStoreComponent(image, resource, source++) : UInt(0);
+            }
+
+            var words = _module.AddInstruction(SpirvOp.CompositeConstruct, _uvec4Type, logical);
+            var slot = (uint)resource.SwizzleSlot;
+            var map = LoadShaderDataDwordAtEntry(_request.Bindings.StorageImageSwizzlesDword + slot / 2);
+            var physical = new uint[4];
+            for (var channel = 0u; channel < 4; channel++)
+            {
+                var code = _module.AddInstruction(SpirvOp.BitFieldUExtract, _uintType, map, UInt(slot % 2 * 16 + channel * 3), UInt(3));
+                if (channel != 0)
+                {
+                    code = _module.AddInstruction(SpirvOp.BitwiseXor, _uintType, code, UInt(channel));
+                }
+
+                var stored = _module.AddInstruction(SpirvOp.ULessThan, _boolType, code, UInt(4));
+                var picked = _module.AddInstruction(SpirvOp.VectorExtractDynamic, _uintType, words, BitwiseAnd(code, UInt(3)));
+                physical[channel] = _module.AddInstruction(SpirvOp.Select, _uintType, stored, picked, UInt(0));
+            }
+
+            var texel = _module.AddInstruction(SpirvOp.CompositeConstruct, _uvec4Type, physical);
+            return resource.ComponentKind == ImageComponentKind.Uint ? texel : Bitcast(resource.VectorType, texel);
+        }
+
         private uint LoadImageStoreComponent(
             Gen5ImageControl image,
             SpirvImageResource resource,
@@ -7245,6 +7906,23 @@ public static partial class Gen5SpirvTranslator
                 SpirvOp.CompositeConstruct,
                 ImageIntegerCoordinateType(componentCount),
                 components);
+        }
+
+        // The hardware clamps the slice of an image read to the T#'s last layer, while Vulkan fetches zero past a view's
+        // last layer. A 2D texture an array read is bound to (ResourceMaterializer.SampledArrayRead) is a one-layer view,
+        // so a fetch with a nonzero slice reads its only layer, as on the hardware.
+        private uint ClampFetchLayer(SpirvImageResource resource, uint image, uint coordinates, uint componentCount)
+        {
+            var vectorType = ImageIntegerCoordinateType(componentCount);
+            var size = resource.Multisampled
+                ? _module.AddInstruction(SpirvOp.ImageQuerySize, vectorType, image)
+                : _module.AddInstruction(SpirvOp.ImageQuerySizeLod, vectorType, image, UInt(0));
+            var layerComponent = componentCount - 1;
+            var layers = Bitcast(_uintType, _module.AddInstruction(SpirvOp.CompositeExtract, _intType, size, layerComponent));
+            var layer = Bitcast(_uintType, _module.AddInstruction(SpirvOp.CompositeExtract, _intType, coordinates, layerComponent));
+            var lastLayer = _module.AddInstruction(SpirvOp.ISub, _uintType, layers, UInt(1));
+            var clamped = Ext(38, _uintType, layer, lastLayer);
+            return _module.AddInstruction(SpirvOp.CompositeInsert, vectorType, Bitcast(_intType, clamped), coordinates, layerComponent);
         }
 
         private uint BuildImageOffset(
@@ -8543,6 +9221,14 @@ public static partial class Gen5SpirvTranslator
 
         private uint LoadBufferWord(int binding, uint dwordAddress)
         {
+            // robustBufferAccess2 reads zero past the view's range, as the selects below do. A view ends on a whole dword
+            // (StorageBufferViewRange), so the device bounds the load where ArrayLength does; a length of zero leaves both
+            // unbounded. A table-block buffer is read through its device address, which robust access does not bound.
+            if (_request.RobustBufferAccess2 && !_request.Bindings.UsesTableBlock)
+            {
+                return Load(_uintType, BufferWordPointer(binding, RobustDwordIndex(dwordAddress)));
+            }
+
             var inRange = IsBufferWordInRange(binding, dwordAddress);
             var safeAddress = _module.AddInstruction(
                 SpirvOp.Select,
@@ -8559,6 +9245,12 @@ public static partial class Gen5SpirvTranslator
                 UInt(0));
         }
 
+        // A robust load's dword index stays below 2^30: NVIDIA's robust access takes the byte offset modulo 2^32, so a larger
+        // index would read the view's start instead of zero. From 0x3FFFFFFF on an index is past every view (at most 2^32 - 1
+        // bytes), so the clamp changes no result, and it folds away when the index cannot pass it (a byte address >> 2).
+        private uint RobustDwordIndex(uint dwordIndex) => Ext(38, _uintType, dwordIndex, UInt(0x3FFF_FFFF));
+
+        // The packed memory-offset byte of this buffer, loaded at entry.
         private uint ApplyGuestBufferByteBias(int binding, uint byteAddress) =>
             IAdd(byteAddress, CapturedBufferValue(_bufferBiasValues, binding) ?? Load(_uintType, RuntimeBufferBiasPointer(binding)));
 
@@ -8566,7 +9258,10 @@ public static partial class Gen5SpirvTranslator
         {
             EmitConditional(
                 IsBufferWordInRange(binding, dwordAddress),
-                () => Store(BufferWordPointer(binding, dwordAddress), value));
+                () =>
+                {
+                    Store(BufferWordPointer(binding, dwordAddress), value);
+                });
         }
 
         // A GLC DWORDX2 access: one 64-bit access when it is aligned and inside the pair view, else two dword accesses.
@@ -8593,9 +9288,12 @@ public static partial class Gen5SpirvTranslator
             var pairIndex = ShiftRightLogical(dwordAddress, UInt(1));
             EmitConditional(
                 IsBufferPairInRange(binding, dwordAddress, pairIndex),
-                () => Store(
-                    BufferPairPointer(binding, pairIndex),
-                    _module.AddInstruction(SpirvOp.CompositeConstruct, _uvec2Type, low, high)),
+                () =>
+                {
+                    Store(
+                        BufferPairPointer(binding, pairIndex),
+                        _module.AddInstruction(SpirvOp.CompositeConstruct, _uvec2Type, low, high));
+                },
                 () =>
                 {
                     StoreBufferWord(binding, dwordAddress, low);
@@ -8647,12 +9345,23 @@ public static partial class Gen5SpirvTranslator
                 _uintType,
                 buffer,
                 0);
-            return _module.AddInstruction(
-                SpirvOp.ULessThan,
-                _boolType,
-                dwordAddress,
-                length);
+            // NVIDIA's driver reports a length of zero for a storage binding over 2 GiB, though its loads read the
+            // memory. A bound view holds at least a dword, so zero is an unknown length: robust buffer access bounds
+            // those accesses.
+            return LogicalOr(
+                _module.AddInstruction(SpirvOp.IEqual, _boolType, length, UInt(0)),
+                _module.AddInstruction(
+                    SpirvOp.ULessThan,
+                    _boolType,
+                    dwordAddress,
+                    length));
         }
+
+        // The device address of a dword of a table-block buffer.
+        private uint TableBufferByteAddress(int binding, uint dwordAddress) =>
+            IAdd64(
+                CapturedBufferValue(_bufferBaseValues, binding) ?? Load(_ulongType, TableBufferBasePointer(binding)),
+                ShiftLeftLogical64(Widen(dwordAddress), ULong(2)));
 
         private uint BufferWordPointer(int binding, uint dwordAddress) =>
             _request.Bindings.UsesTableBlock ? TableBufferWordPointer(binding, dwordAddress) :
@@ -8791,6 +9500,20 @@ public static partial class Gen5SpirvTranslator
                 _runtimeBufferBiases,
                 UInt(checked((uint)binding)));
 
+        // The stride an indexed access multiplies its index by, from the binding's V# at run time.
+        private uint RuntimeBufferStride(int binding) =>
+            _runtimeBufferStrides != 0 && (uint)binding < _request.Bindings.BufferStrideCount
+                ? CapturedBufferValue(_bufferStrideValues, binding) ?? Load(_uintType, RuntimeBufferStridePointer(binding))
+                : throw new ResourcePlanException(
+                    $"buffer binding {binding} is indexed, but the layout carries {_request.Bindings.BufferStrideCount} buffer strides");
+
+        private uint RuntimeBufferStridePointer(int binding) =>
+            _module.AddInstruction(
+                SpirvOp.AccessChain,
+                _privateUintPointer,
+                _runtimeBufferStrides,
+                UInt(checked((uint)binding)));
+
         private uint VectorPointer(uint register)
         {
             if (_vectorRegisters != 0)
@@ -8927,6 +9650,30 @@ public static partial class Gen5SpirvTranslator
             return _packedHalfRegisters;
         }
 
+        // Programs wait on these counters, so they must run. Without a device clock each read moves a
+        // per-invocation counter 2^32 ahead, which ends any wait for a 32-bit number of ticks.
+        private uint ReadShaderClock()
+        {
+            if (_request.SupportsShaderDeviceClock)
+            {
+                _module.AddCapability(SpirvCapability.ShaderClockKhr);
+                _module.AddExtension("SPV_KHR_shader_clock");
+                return _module.AddInstruction(SpirvOp.ReadClockKhr, _ulongType, UInt(1));
+            }
+
+            if (_steppedClock == 0)
+            {
+                _steppedClock = _module.AddGlobalVariable(
+                    _module.TypePointer(SpirvStorageClass.Private, _ulongType), SpirvStorageClass.Private, ULong(0));
+                _module.AddName(_steppedClock, "steppedClock");
+                _interfaces.Add(_steppedClock);
+            }
+
+            var value = Load(_ulongType, _steppedClock);
+            Store(_steppedClock, IAdd64(value, ULong(1UL << 32)));
+            return value;
+        }
+
         private uint LoadS(uint register) =>
             _scalarSnapshot is { } snapshot && snapshot.TryGetValue(register, out var value)
                 ? value
@@ -9025,6 +9772,11 @@ public static partial class Gen5SpirvTranslator
             if (!preserveSavedLanes) _savedLaneValues.Remove(register);
             if (guardWithExec && !_execKnownFull && !_unobservedWrites.Contains(register))
             {
+                if (TryDeferGuard(register, value))
+                {
+                    return;
+                }
+
                 var active = Load(_boolType, _exec);
                 var oldValue = LoadV(register);
                 value = _module.AddInstruction(
@@ -9111,6 +9863,12 @@ public static partial class Gen5SpirvTranslator
 
         private void Store(uint pointer, uint value)
         {
+            if (pointer == _exec && _deferredGuards.Count != 0)
+            {
+                // The region of the current EXEC ends.
+                FlushDeferredGuards();
+            }
+
             if (_executingWave != 0 && pointer == _exec) value = LogicalAnd(value, _executingWave);
             if (_executingWave != 0 && (pointer == _scc || pointer == _programActive))
             {
@@ -9251,6 +10009,10 @@ public static partial class Gen5SpirvTranslator
             {
                 return PairedGuestLane();
             }
+            if (_waveLowering is HalfWave64Lowering && _subgroupIdInput != 0)
+            {
+                return BitwiseAnd(HalfWaveLocalIndex(), UInt(63));
+            }
 
             // A native wave64 is one host subgroup: its lane is the subgroup lane, the same one
             // ballot and shuffle address, whatever order the driver gave the invocations.
@@ -9315,6 +10077,102 @@ public static partial class Gen5SpirvTranslator
                     _pairedLanes || _waveLowering is HalfWave64Lowering
                         ? BitwiseAnd(lane, UInt(PairedHalfLaneCount - 1))
                         : lane);
+
+        // A graphics host subgroup (a fragment one above all) can be partly empty: the lanes past the quads
+        // the rasterizer packed into it were never launched. The PS5 wave behind it still has those lanes,
+        // dead but with registers, and whole-wave code (S_ORN2_SAVEEXEC/S_OR_SAVEEXEC of EXEC) turns them on
+        // after filling them with a reduction's identity. A shuffle from an invocation that does not exist is
+        // undefined, so DPP, DPP8, PERMLANE and V_READLANE reads of such a lane go through ReadGraphicsLane.
+        // Compute and mesh subgroups are full. Opt-in (ShaderCompileRequest.GraphicsPartialSubgroupLanes).
+        private bool HostSubgroupMayBePartial =>
+            _graphicsPartialSubgroupLanes && _subgroupInvocationIdInput != 0 && !_pairedLanes && !_pairedMeshLanes &&
+            _stage is not (Gen5SpirvStage.Compute or Gen5SpirvStage.Mesh);
+
+        // The host invocation of a guest lane of a graphics wave. A graphics wave is one group of up to 32
+        // host lanes (GuestWaveLane), so the lane is at its position within the reading invocation's group;
+        // the upper half of an emulated wave64 has no host lanes and maps onto the same positions. A native
+        // wave64 is its subgroup.
+        private uint GraphicsHostLane(uint guestLane)
+        {
+            if (_guestLaneFromSubgroup)
+            {
+                return BitwiseAnd(guestLane, UInt(63));
+            }
+
+            var group = BitwiseAnd(Load(_uintType, _subgroupInvocationIdInput), UInt(~31u));
+            return BitwiseOr(group, BitwiseAnd(guestLane, UInt(31)));
+        }
+
+        // Whether the host invocation exists: its bit in a ballot of true.
+        private uint IsHostLanePresent(uint hostLane)
+        {
+            _module.AddCapability(SpirvCapability.GroupNonUniformBallot);
+            var ballot = _module.AddInstruction(
+                SpirvOp.GroupNonUniformBallot, _uvec4Type, UInt(3), _module.ConstantBool(true));
+            var word = _module.AddInstruction(
+                SpirvOp.VectorExtractDynamic, _uintType, ballot, ShiftRightLogical(hostLane, UInt(5)));
+            return IsNotZero(BitwiseAnd(ShiftRightLogical(word, BitwiseAnd(hostLane, UInt(31))), UInt(1)));
+        }
+
+        // A guest lane's bit in the guest EXEC mask, which keeps the bits of the lanes the host never launched.
+        private uint IsGuestLaneExecSet(uint guestLane)
+        {
+            uint word;
+            uint bit;
+            if (_waveLaneCount == 32)
+            {
+                word = LoadS(126);
+                bit = BitwiseAnd(guestLane, UInt(31));
+            }
+            else
+            {
+                var lane = BitwiseAnd(guestLane, UInt(63));
+                word = _module.AddInstruction(
+                    SpirvOp.Select,
+                    _uintType,
+                    _module.AddInstruction(SpirvOp.ULessThan, _boolType, lane, UInt(32)),
+                    LoadS(126),
+                    LoadS(127));
+                bit = BitwiseAnd(lane, UInt(31));
+            }
+
+            return IsNotZero(BitwiseAnd(ShiftRightLogical(word, bit), UInt(1)));
+        }
+
+        // Reads a guest lane's register in a graphics wave whatever its EXEC state. present reports whether
+        // the lane's host invocation exists. An absent lane has no register on the host and no value is
+        // right; it reads as the caller's own value, which keeps the min/max/and/or reductions that
+        // whole-wave code runs across dead lanes exact (a wave-minimum loop).
+        private uint ReadGraphicsLane(uint value, uint guestLane, out uint present)
+        {
+            var hostLane = GraphicsHostLane(guestLane);
+            present = IsHostLanePresent(hostLane);
+            var sourceLane = _module.AddInstruction(
+                SpirvOp.Select,
+                _uintType,
+                present,
+                hostLane,
+                Load(_uintType, _subgroupInvocationIdInput));
+            return ShuffleLane(value, sourceLane);
+        }
+
+        // The fetch-inactive-off read of a graphics lane: usable is the source lane's EXEC state, judged by
+        // the guest EXEC bit for a lane the host never launched (set means whole-wave code turned the dead
+        // lane on). The caller applies the ISA's invalid-source result where usable is false.
+        private uint ReadGraphicsLaneIfActive(uint value, uint guestLane, out uint usable)
+        {
+            usable = IsGraphicsLaneUsable(guestLane);
+            return ReadGraphicsLane(value, guestLane, out _);
+        }
+
+        private uint IsGraphicsLaneUsable(uint guestLane)
+        {
+            var activeWord = _module.AddInstruction(
+                SpirvOp.Select, _uintType, Load(_boolType, _exec), UInt(1), UInt(0));
+            var hostActive = IsNotZero(ReadGraphicsLane(activeWord, guestLane, out var present));
+            return _module.AddInstruction(
+                SpirvOp.Select, _boolType, present, hostActive, IsGuestLaneExecSet(guestLane));
+        }
 
         private uint CurrentLaneBit() =>
             _waveLowering.CurrentLaneBit();
@@ -9458,8 +10316,11 @@ public static partial class Gen5SpirvTranslator
              UsesSubgroupShuffle() ||
              UsesSubgroupBroadcast() ||
              UsesWaveControl() ||
+             // These need the invocation's lane in the guest wave. V_WRITELANE picks its lane by it: without the lane
+             // inputs every invocation is lane 0, and a write to any other lane was dropped.
              _request.Program.Instructions.Any(static instruction =>
-                 instruction.Opcode is "VMbcntLoU32B32" or "VMbcntHiU32B32" or "DsWriteAddtidB32" or "DsReadAddtidB32"));
+                 instruction.Opcode is "VMbcntLoU32B32" or "VMbcntHiU32B32" or "DsWriteAddtidB32" or "DsReadAddtidB32" or
+                     "VWritelaneB32"));
 
         private static bool IsWaveMaskOperand(Gen5Operand operand) =>
             operand.Kind == Gen5OperandKind.ScalarRegister &&

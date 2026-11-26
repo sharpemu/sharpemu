@@ -47,7 +47,16 @@ internal sealed partial class ShaderPipelineCache
         var address = vertex.LocalAddress != 0 ? vertex.LocalAddress : vertex.HullAddress;
         var registered = _registry.Require(address, "merged-hull", vertex.HullUserScalars.Values);
         if (!registered.IsFused)
-            throw SubmissionScheduler.Fatal("The tessellation path requires a registered merged local/hull program.");
+        {
+            // A complete hull binary is bound as the local program alone; it reads its own
+            // user scalars in both halves and takes no separate hull table.
+            var combined = PrepareSource(address, ShaderStage.Compute, "merged-hull",
+                UserData(vertex.HullUserScalars, vertex.HullResource2.UserScalarCount, false, address, "merged-hull").ToArray(),
+                VertexUserDataBase, out _);
+            if (!Gen5TessellationLowering.TryFindCombinedHullEntry(_programs.Decode(combined), out var combinedEntry))
+                throw SubmissionScheduler.Fatal("The tessellation path requires a registered merged local/hull program.");
+            return CompileTessellationHull(combined, registered, vertex, shaderInterface, tessellation, combinedEntry + 4);
+        }
         var count = vertex.HullResource2.UserScalarCount;
         // A merged front may consume more user data than the back's RSRC2.
         // Reading its own declared count preserves the guest's AGC header.

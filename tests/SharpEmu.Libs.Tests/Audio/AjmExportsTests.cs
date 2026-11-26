@@ -257,6 +257,127 @@ public sealed class AjmExportsTests : IDisposable
         Assert.Equal(80ul, ReadUInt64(BatchInfoAddress + 8));
     }
 
+    /// <summary>
+    /// With asynchronous batches a job runs after sceAjmBatchStart, on the AJM thread, and sceAjmBatchWait collects it, as with
+    /// the decoder hardware. The job's buffer descriptors are read when it is added, so a title that reuses that memory before
+    /// the batch starts still gets the buffers it named.
+    /// </summary>
+    [Fact]
+    public void AnAsyncBatchRunsAfterStartWithTheDescriptorsItWasGiven()
+    {
+        const ulong inputDescriptors = MemoryBase + 0x600;
+        const ulong outputDescriptors = MemoryBase + 0x640;
+        const ulong inputData = MemoryBase + 0x700;
+        const ulong outputData = MemoryBase + 0x800;
+        const ulong sideband = MemoryBase + 0x900;
+        const ulong errorAddress = MemoryBase + 0x980;
+        const ulong batchOut = MemoryBase + 0x9C0;
+        const ulong streamSideband = 1ul << 47;
+        const ulong multipleFrames = 1ul << 12;
+
+        AjmExports.AsyncBatches = true;
+        var contextId = Initialize();
+        Assert.Equal(0, RegisterCodec(contextId, 2));
+        Assert.Equal(0, CreateInstance(contextId, 2, 0x2_0000_0002, InstanceAddress));
+        var instanceId = ReadUInt32(InstanceAddress);
+        InitializeBatch(BatchBufferAddress, 0x200, BatchInfoAddress);
+
+        WriteUInt64(inputDescriptors, inputData);
+        WriteUInt64(inputDescriptors + 8, 0x20);
+        WriteUInt64(inputDescriptors + 16, inputData + 0x20);
+        WriteUInt64(inputDescriptors + 24, 0x10);
+        WriteUInt64(outputDescriptors, outputData);
+        WriteUInt64(outputDescriptors + 8, 0x40);
+        Span<byte> dirty = stackalloc byte[0x40];
+        dirty.Fill(0xAB);
+        Assert.True(_memory.TryWrite(outputData, dirty));
+        Assert.True(_memory.TryWrite(sideband, dirty[..0x20]));
+
+        _ctx[CpuRegister.Rdi] = BatchInfoAddress;
+        _ctx[CpuRegister.Rsi] = instanceId;
+        _ctx[CpuRegister.Rdx] = streamSideband | multipleFrames;
+        _ctx[CpuRegister.Rcx] = inputDescriptors;
+        _ctx[CpuRegister.R8] = 2;
+        _ctx[CpuRegister.R9] = outputDescriptors;
+        WriteStackArgs(outputCount: 1, sidebandAddress: sideband, sidebandSize: 0x20);
+        Assert.Equal(0, AjmExports.AjmBatchJobRunSplit(_ctx));
+
+        // Nothing ran yet, and the job size is accounted for as before.
+        Assert.All(ReadBytes(outputData, 0x40), value => Assert.Equal(0xAB, value));
+        Assert.Equal(80ul, ReadUInt64(BatchInfoAddress + 8));
+
+        // The title reuses the descriptor memory before starting the batch.
+        WriteUInt64(inputDescriptors, 0);
+        WriteUInt64(inputDescriptors + 8, 0);
+        WriteUInt64(outputDescriptors, MemoryBase + 0xF00);
+        WriteUInt64(outputDescriptors + 8, 0x10);
+
+        _ctx[CpuRegister.Rdi] = contextId;
+        _ctx[CpuRegister.Rsi] = BatchInfoAddress;
+        _ctx[CpuRegister.Rdx] = 0;
+        _ctx[CpuRegister.Rcx] = errorAddress;
+        _ctx[CpuRegister.R8] = batchOut;
+        Assert.Equal(0, AjmExports.AjmBatchStart(_ctx));
+
+        _ctx[CpuRegister.Rdi] = contextId;
+        _ctx[CpuRegister.Rsi] = ReadUInt32(batchOut);
+        _ctx[CpuRegister.Rdx] = uint.MaxValue;
+        _ctx[CpuRegister.Rcx] = errorAddress;
+        Assert.Equal(0, AjmExports.AjmBatchWait(_ctx));
+
+        Assert.All(ReadBytes(outputData, 0x40), value => Assert.Equal(0, value));
+        var result = ReadBytes(sideband, 0x20);
+        Assert.Equal(0, BinaryPrimitives.ReadInt32LittleEndian(result));
+        Assert.Equal(0x30, BinaryPrimitives.ReadInt32LittleEndian(result.AsSpan(8)));
+        Assert.Equal(1u, BinaryPrimitives.ReadUInt32LittleEndian(result.AsSpan(24)));
+    }
+
+    /// <summary>Jobs of an asynchronous batch run in the order they were added, and a second wait on it succeeds.</summary>
+    [Fact]
+    public void AnAsyncBatchRunsItsJobsInOrder()
+    {
+        const ulong first = MemoryBase + 0x600;
+        const ulong second = MemoryBase + 0x700;
+        const ulong errorAddress = MemoryBase + 0x980;
+        const ulong batchOut = MemoryBase + 0x9C0;
+
+        AjmExports.AsyncBatches = true;
+        var contextId = Initialize();
+        InitializeBatch(BatchBufferAddress, 0x200, BatchInfoAddress);
+        Span<byte> sentinel = stackalloc byte[48];
+        sentinel.Fill(0xCC);
+        Assert.True(_memory.TryWrite(first, sentinel));
+        Assert.True(_memory.TryWrite(second, sentinel));
+
+        foreach (var address in new[] { first, second })
+        {
+            _ctx[CpuRegister.Rdi] = BatchInfoAddress;
+            _ctx[CpuRegister.Rsi] = address;
+            Assert.Equal(0, AjmExports.AjmBatchJobGetStatistics(_ctx));
+        }
+
+        Assert.All(ReadBytes(first, 48), value => Assert.Equal(0xCC, value));
+
+        _ctx[CpuRegister.Rdi] = contextId;
+        _ctx[CpuRegister.Rsi] = BatchInfoAddress;
+        _ctx[CpuRegister.Rdx] = 0;
+        _ctx[CpuRegister.Rcx] = errorAddress;
+        _ctx[CpuRegister.R8] = batchOut;
+        Assert.Equal(0, AjmExports.AjmBatchStart(_ctx));
+
+        for (var wait = 0; wait < 2; wait++)
+        {
+            _ctx[CpuRegister.Rdi] = contextId;
+            _ctx[CpuRegister.Rsi] = ReadUInt32(batchOut);
+            _ctx[CpuRegister.Rdx] = uint.MaxValue;
+            _ctx[CpuRegister.Rcx] = errorAddress;
+            Assert.Equal(0, AjmExports.AjmBatchWait(_ctx));
+        }
+
+        Assert.All(ReadBytes(first, 48), value => Assert.Equal(0, value));
+        Assert.All(ReadBytes(second, 48), value => Assert.Equal(0, value));
+    }
+
     [Fact]
     public void BatchJobSetGaplessDecode_UsesFifthArgumentForResult()
     {

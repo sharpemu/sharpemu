@@ -33,11 +33,13 @@ internal struct DrawState
     public RenderingState Rendering;
     public GraphicsPrograms Programs;
     public int StartInstanceUserData;
+    public int BaseVertexUserData;
 
-    public static DrawState Create() => new() { PixelActive = true, Programs = null!, StartInstanceUserData = -1 };
+    public static DrawState Create() => new() { PixelActive = true, Programs = null!, StartInstanceUserData = -1, BaseVertexUserData = -1 };
 
-    public void Begin(int startInstanceUserData)
+    public void Begin(int startInstanceUserData, int baseVertexUserData = -1)
     {
+        BaseVertexUserData = baseVertexUserData;
         ColorCount = 0;
         Depth = default;
         DepthResolved = false;
@@ -85,6 +87,8 @@ internal sealed class ResolvedDraw
     public bool PrimitiveRestart;
     public GuestPrimitiveType PrimitiveType;
     public DrawEmission Emission;
+    public uint[]? IndirectOffsets;
+    public uint IndirectBytes;
     public IndexSource Index;
     public ulong TessellationIndexAddress;
     public uint TessellationIndexSize;
@@ -110,8 +114,61 @@ internal sealed class ResolvedDraw
     public Extent3D CopyExtent;
     public ImageAspectFlags CopyAspects;
 
+    // An indexed indirect draw resolved on the plain path (no host index data, no strip, mesh or tessellation): the next draw
+    // under the same registers can take this record with only its own arguments (RenderExecutor.TryRepeatIndexed).
+    public bool RepeatableArguments;
+
+    // The arguments were read on the CPU (DrawIndexedWithCpuArguments); a repeat reads its own the same way.
+    public bool RepeatsCpuArguments;
+
+    public void CopyFrom(ResolvedDraw source)
+    {
+        Sequence = source.Sequence;
+        Kind = source.Kind;
+        Announce = source.Announce;
+        Debug = source.Debug;
+        ResetBindings = source.ResetBindings;
+        TargetsResolved = source.TargetsResolved;
+        SubmitId = source.SubmitId;
+        Draw = source.Draw;
+        State = source.State;
+        Topology = source.Topology;
+        PrimitiveRestart = source.PrimitiveRestart;
+        PrimitiveType = source.PrimitiveType;
+        Emission = source.Emission;
+        Index = source.Index;
+        TessellationIndexAddress = source.TessellationIndexAddress;
+        TessellationIndexSize = source.TessellationIndexSize;
+        TessellationVertexOffset = source.TessellationVertexOffset;
+        Context = source.Context;
+        ContextStamp = source.ContextStamp;
+        DynamicStamp = source.DynamicStamp;
+        TargetVersion = source.TargetVersion;
+        Dynamic = source.Dynamic;
+        WritesMemory = source.WritesMemory;
+        WriteStages = source.WriteStages;
+        SetBindDebug = source.SetBindDebug;
+        SetAutoDebug = source.SetAutoDebug;
+        IndexedTrace = source.IndexedTrace;
+        PacketAddress = source.PacketAddress;
+        Clear = source.Clear;
+        ResolveSource = source.ResolveSource;
+        ResolveDestination = source.ResolveDestination;
+        CopyRead = source.CopyRead;
+        CopyWrite = source.CopyWrite;
+        CopyReadFormat = source.CopyReadFormat;
+        CopyWriteFormat = source.CopyWriteFormat;
+        CopyExtent = source.CopyExtent;
+        CopyAspects = source.CopyAspects;
+        RepeatableArguments = source.RepeatableArguments;
+        RepeatsCpuArguments = source.RepeatsCpuArguments;
+    }
+
     public void Reset()
     {
+        var previous = Kind;
+        RepeatableArguments = false;
+        RepeatsCpuArguments = false;
         Sequence = 0;
         Kind = ResolvedDrawKind.Skipped;
         Announce = false;
@@ -125,6 +182,8 @@ internal sealed class ResolvedDraw
         PrimitiveRestart = false;
         PrimitiveType = default;
         Emission = default;
+        IndirectOffsets = null;
+        IndirectBytes = 0;
         Index = default;
         TessellationIndexAddress = 0;
         TessellationIndexSize = 0;
@@ -140,15 +199,26 @@ internal sealed class ResolvedDraw
         SetAutoDebug = false;
         IndexedTrace = null;
         PacketAddress = 0;
-        Clear = default;
-        ResolveSource = default;
-        ResolveDestination = default;
-        CopyRead = default;
-        CopyWrite = default;
-        CopyReadFormat = default;
-        CopyWriteFormat = default;
-        CopyExtent = default;
-        CopyAspects = default;
+        if (previous == ResolvedDrawKind.ClearColorTargets)
+        {
+            Clear = default;
+        }
+
+        if (previous == ResolvedDrawKind.MultisampleResolve)
+        {
+            ResolveSource = default;
+            ResolveDestination = default;
+        }
+
+        if (previous == ResolvedDrawKind.DepthStencilCopy)
+        {
+            CopyRead = default;
+            CopyWrite = default;
+            CopyReadFormat = default;
+            CopyWriteFormat = default;
+            CopyExtent = default;
+            CopyAspects = default;
+        }
     }
 }
 
@@ -170,6 +240,8 @@ internal sealed class ResolvedDispatch
     public uint GroupsY;
     public uint GroupsZ;
     public ulong IndirectArgumentsAddress;
+    // The indirect arguments count threads the GPU converts to groups (IRenderHost.PrepareThreadDispatch).
+    public bool GpuThreadCounts;
     public MetadataBufferProbe[]? MetadataClear;
     public bool MetadataClearHasExclusiveOr;
     public ConstantFillCandidate? ConstantFill;
@@ -190,6 +262,7 @@ internal sealed class ResolvedDispatch
         GroupsY = 0;
         GroupsZ = 0;
         IndirectArgumentsAddress = 0;
+        GpuThreadCounts = false;
         MetadataClear = null;
         MetadataClearHasExclusiveOr = false;
         ConstantFill = null;

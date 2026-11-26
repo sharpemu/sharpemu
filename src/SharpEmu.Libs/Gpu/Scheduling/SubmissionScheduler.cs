@@ -184,6 +184,10 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
         }
 
         Console.Error.WriteLine($"[GPU][FATAL] {message}");
+        if (message.Contains("DeviceLost", StringComparison.Ordinal))
+        {
+            SharpEmu.Libs.Gpu.Vulkan.DeviceFaultReport.Write();
+        }
         OnFatal(message);
         return new InvalidOperationException(message);
     }
@@ -364,6 +368,13 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
             {
                 tick = _timeline.ReserveTick();
             }
+
+            if (_completed is { } completed)
+            {
+                var reserved = tick;
+                _priority.Enqueue(new TickWork(() => completed(reserved), reserved));
+                Monitor.Pulse(_operationLock);
+            }
         }
 
         _deferredBuffers.Add(_command.Buffer);
@@ -416,7 +427,6 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
             if (submitted)
             {
                 NoteDeferredSubmitted(System.Diagnostics.Stopwatch.GetTimestamp());
-                EnqueueDeferredCompletions();
             }
         }
 
@@ -427,21 +437,6 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
 
         _deferredBuffers.Clear();
         _deferredTicks.Clear();
-    }
-
-    private void EnqueueDeferredCompletions()
-    {
-        if (_completed is not { } completed)
-        {
-            return;
-        }
-
-        foreach (var tick in _deferredTicks)
-        {
-            _priority.Enqueue(new TickWork(() => completed(tick), tick));
-        }
-
-        Monitor.Pulse(_operationLock);
     }
 
     public void EnsureSubmitted(ulong tick)
@@ -825,8 +820,6 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
                     _submitsFolded.Increment();
                     NoteDeferredSubmitted(now);
                 }
-
-                EnqueueDeferredCompletions();
             }
 
             if (submitted && _completed is { } completed)

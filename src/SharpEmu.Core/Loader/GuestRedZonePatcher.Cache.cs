@@ -11,7 +11,7 @@ namespace SharpEmu.Core.Loader;
 
 internal static partial class GuestRedZonePatcher
 {
-    private const int PatchCacheVersion = 1;
+    private const int PatchCacheVersion = 2;
     private const int MaximumPatchCacheBytes = 32 << 20;
     private sealed record CachedSite(ulong Offset, int Length, bool TerminalBranch);
     private sealed record CachedPlan(int Version, string Key, PatchResult Scan, CachedSite[] Sites);

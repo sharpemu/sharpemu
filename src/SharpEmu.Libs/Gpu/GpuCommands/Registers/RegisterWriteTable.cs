@@ -45,6 +45,12 @@ public static class RegisterWriteTable
     // A shader packet without values has no writer; the other banks accept it.
     public static uint WriteShaderPacket(RegisterBanks banks, in PacketContext packet, uint offset, ReadOnlySpan<uint> values)
     {
+        if (!Rendering.RenderTrace.Enabled && RegisterWriters.SameUserScalarPacket(banks, offset, values))
+        {
+            banks.UserDataMarker = UserScalarKind.Unknown;
+            return (uint)values.Length;
+        }
+
         banks.PrepareShaderWrite(offset, (uint)values.Length);
         var consumed = WritePacket(banks, in packet, offset, values, Shader, ShaderIndirect, "shader", emptyIsHandled: false);
         banks.MarkWritten(RegisterStamps.ShaderBitsFor(offset, consumed));

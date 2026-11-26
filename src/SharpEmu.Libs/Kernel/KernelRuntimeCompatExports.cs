@@ -70,8 +70,8 @@ public static partial class KernelRuntimeCompatExports
     private static readonly bool _traceGuestThreads =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_GUEST_THREADS"), "1", StringComparison.Ordinal);
 
-    [ThreadStatic]
-    private static int _shortUsleepCount;
+    private const ulong UsleepStepMicroseconds = 10_000;
+    private const ulong UsleepSpinLimitMicroseconds = 50;
 
     private static readonly bool _stopwatchTicksAreNanoseconds =
         Stopwatch.Frequency == 1_000_000_000L;
@@ -104,27 +104,45 @@ public static partial class KernelRuntimeCompatExports
 
         GuestThreadExecution.Scheduler?.Pump(ctx, "sceKernelUsleep");
 
-        if (micros < 1000)
+        // An audio producer that runs behind the device naps for the time it asks (a timer wait takes about 0.5 ms).
+        if (micros > UsleepSpinLimitMicroseconds && Audio.AudioOut2Exports.TryBeginPreciseNap(micros))
         {
-            // Guest worker pools use usleep(1) as a polling backoff. Do not turn
-            // PS microsecond waits into Windows millisecond sleeps on hot paths.
-            if ((++_shortUsleepCount & 255) == 0)
+            try
             {
-                Thread.Sleep(0);
+                HostHighResolutionSleep.SpinMicroseconds(micros);
+            }
+            finally
+            {
+                Audio.AudioOut2Exports.EndPreciseNap();
+            }
+
+            ctx[CpuRegister.Rax] = 0;
+            return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        }
+
+        if (micros > UsleepSpinLimitMicroseconds)
+        {
+            // The audio producer pacing may shorten the sleep; a sleep that was above the spin limit stays above it, so a nap
+            // just over the limit remains a timer wait instead of becoming a spin.
+            micros = Math.Max(Audio.AudioOut2Exports.ProducerSleepMicroseconds(micros), UsleepSpinLimitMicroseconds + 1);
+        }
+
+        while (micros > 0)
+        {
+            var step = Math.Min(micros, UsleepStepMicroseconds);
+            if (step <= 1)
+            {
+                if (!Thread.Yield())
+                {
+                    Thread.Sleep(0);
+                }
             }
             else
             {
-                Thread.Yield();
+                HostHighResolutionSleep.SleepMicroseconds(step);
             }
-        }
-        else
-        {
-            _shortUsleepCount = 0;
-            // Precise sleep: rounding microseconds up to Thread.Sleep
-            // milliseconds (which itself overshoots by a scheduler quantum)
-            // hard-caps games that pace their frame loop with usleep.
-            micros = Audio.AudioOut2Exports.ProducerSleepMicroseconds(micros);
-            HostTiming.SleepMicroseconds((long)Math.Min(micros, long.MaxValue));
+
+            micros -= step;
         }
 
         ctx[CpuRegister.Rax] = 0;
@@ -833,6 +851,8 @@ public static partial class KernelRuntimeCompatExports
     {
         if (size == 0 || address > ulong.MaxValue - size)
             return false;
+        if (Ampr.AmprExports.ContainsAmmRange(address, size))
+            return true;
         lock (_prtApertureGate)
         {
             return _prtApertures.Any(aperture => address >= aperture.Base &&

@@ -138,7 +138,9 @@ public sealed class GuestPageTracker
         while (remaining != 0)
         {
             var bytes = Math.Min(BlockBytes - offset, remaining);
-            if (Volatile.Read(ref _regions[index]) is not { } region || region.IsModified(WriteOrigin.Cpu, offset, bytes))
+            // A clear summary bit means the block has no CPU-dirty page; IsKnownCpuClean trusts the same bit.
+            if (Volatile.Read(ref _regions[index]) is not { } region ||
+                (_cpuDirtySummary.IsDirty(index) && region.IsModified(WriteOrigin.Cpu, offset, bytes)))
             {
                 return true;
             }
@@ -903,13 +905,19 @@ public sealed class GuestPageTracker
         return pages;
     }
 
+    // 64 blocks per step: a block is known clean when its region is present and its summary bit is clear. The present bit
+    // is set after the region is stored, so a clear one is at worst a region not seen yet.
     private bool IsKnownCpuClean(ulong vaddr, ulong size)
     {
         ValidateRange(vaddr, size);
+        var first = vaddr / BlockBytes;
         var last = (vaddr + size - 1) / BlockBytes;
-        for (var index = vaddr / BlockBytes; index <= last; index++)
+        for (var word = first / 64; word <= last / 64; word++)
         {
-            if (Volatile.Read(ref _regions[index]) == null || _cpuDirtySummary.IsDirty(index))
+            var possiblyDirty = ~(ulong)Volatile.Read(ref _presentRegions[word]) | _cpuDirtySummary.Word((int)word);
+            var low = word == first / 64 ? (int)(first % 64) : 0;
+            var high = word == last / 64 ? (int)(last % 64) : 63;
+            if ((possiblyDirty & (ulong.MaxValue >> (63 - high)) & (ulong.MaxValue << low)) != 0)
             {
                 return false;
             }

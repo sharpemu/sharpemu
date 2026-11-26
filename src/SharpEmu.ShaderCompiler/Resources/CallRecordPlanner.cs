@@ -160,13 +160,28 @@ public static class CallRecordPlanner
     public static bool AddRecordRanges(ShaderResourcePlan plan, int callee, ulong argument, ResourceRuntimeInputs inputs,
         uint userDataBase, List<DeviceAddressRange> ranges)
     {
+        if ((uint)callee >= (uint)plan.CallRecordCallees.Count || plan.CallRecordCallees[callee].BufferWords.Length == 0)
+        {
+            return true;
+        }
+
+        return CompiledDeviceAddressRanges.Configured == CompiledDeviceAddressRanges.Mode.Off
+            ? AddRecordRangesInterpreted(plan, callee, argument, inputs, userDataBase, ranges)
+            : CompiledDeviceAddressRanges.ServeRecord(plan, callee, argument, inputs, userDataBase, ranges);
+    }
+
+    // An evaluator per record; the reference of the compiled records.
+    internal static bool AddRecordRangesInterpreted(ShaderResourcePlan plan, int callee, ulong argument, ResourceRuntimeInputs inputs,
+        uint userDataBase, List<DeviceAddressRange> ranges)
+    {
         const ulong MaxRecordBufferBytes = 1UL << 32;
         if ((uint)callee >= (uint)plan.CallRecordCallees.Count || plan.CallRecordCallees[callee].BufferWords.Length == 0)
         {
             return true;
         }
 
-        var evaluator = new RuntimeValueEvaluator(plan, inputs.WithCallArguments(userDataBase, [argument]));
+        using var scratch = RuntimeEvaluationScratch.Rent();
+        var evaluator = new RuntimeValueEvaluator(scratch, plan, inputs.WithCallArguments(userDataBase, [argument]));
         Span<uint> words = stackalloc uint[4];
         foreach (var buffer in plan.CallRecordCallees[callee].BufferWords)
         {
@@ -189,9 +204,16 @@ public static class CallRecordPlanner
                 continue;
             }
 
+            // Words that describe no buffer (constants in its place, on a record whose callee does not take the path that reads
+            // it): a read-only buffer is not made resident, and a written one leaves the record out, so no store lands through it.
             if (size > MaxRecordBufferBytes || address + size > 1UL << 48)
             {
-                return false;
+                if (buffer.Written)
+                {
+                    return false;
+                }
+
+                continue;
             }
 
             ranges.Add(new DeviceAddressRange(uint.MaxValue, address, size, true, buffer.Written));

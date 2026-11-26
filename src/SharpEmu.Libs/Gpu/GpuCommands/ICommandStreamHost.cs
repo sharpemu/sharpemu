@@ -31,7 +31,14 @@ public readonly record struct DrawIndexedArguments(
     // The guest set no index buffer size: IndexCount is only the range seen so far and
     // must not clamp the count read from the arguments.
     bool UnboundedIndexBuffer = false,
-    int StartInstanceUserData = -1);
+    int StartInstanceUserData = -1,
+    // The indirect packet named a shader register for the base vertex or the start instance: the
+    // value is in that register, and BaseVertex or FirstInstance is 0.
+    bool BaseVertexInRegister = false,
+    bool FirstInstanceInRegister = false,
+    // The vertex program's user data index the indirect packet names for the base vertex, or -1 (StartInstanceUserData
+    // likewise): the draw passes BaseVertex and the program stores it there.
+    int BaseVertexUserData = -1);
 
 // Arguments of a non-indexed draw as the packet stream describes them.
 public readonly record struct DrawAutoArguments(
@@ -43,7 +50,14 @@ public readonly record struct DrawAutoArguments(
     uint FirstInstance,
     DrawOffsetSource OffsetSource,
     int StartInstanceUserData = -1,
-    ulong IndirectArgumentsAddress = 0);
+    // Nonzero when the counts are still in guest memory at this address, laid out as
+    // (vertexCount, instanceCount, firstVertex, firstInstance).
+    ulong IndirectArgumentsAddress = 0,
+    // The indirect packet named a shader register for the start vertex or the start instance: the
+    // value is in that register, and FirstVertex or FirstInstance is 0.
+    bool FirstVertexInRegister = false,
+    bool FirstInstanceInRegister = false,
+    int BaseVertexUserData = -1);
 
 public enum EndOfPipeWriteKind
 {
@@ -80,7 +94,9 @@ public readonly record struct EndOfPipeWrite(
     int FlipMode = 0,
     long FlipArgument = 0,
     ulong FlipRequestId = 0,
-    bool WaitForGpu = false);
+    bool WaitForGpu = false,
+    // SHARPEMU_END_OF_PIPE_SOFT_WAITS: the host names the GPU tick that completes this write.
+    EndOfPipeLanding? Landing = null);
 
 // Everything a packet handler needs from the renderer, the caches, the scheduler and video out.
 public interface ICommandStreamHost
@@ -110,6 +126,9 @@ public interface ICommandStreamHost
     // Draws resolve ahead of the stream on this many worker threads; zero resolves them on the stream thread.
     int ResolveWorkerCount => 0;
 
+    // Accept the complete run or leave every packet for the normal draw handler.
+    bool TryDrawIndexedRun(ulong submitId, in DrawIndexedArguments first, ReadOnlySpan<uint> offsets) => false;
+
     // Reads on this thread now serve a draw at this stream position: a range earlier work may still
     // write refuses with SerialResolveRequiredException, every other read lands in the log.
     void BeginWorkerResolve(long sequence, ResolveReadLog reads)
@@ -123,6 +142,20 @@ public interface ICommandStreamHost
     // At the stream position of the draw: whether the bytes a worker read are what it would read now.
     bool ValidateWorkerReads(ResolveReadLog reads) => true;
 
+    // As BeginWorkerResolve, but a read the worker cannot serve and log refuses the resolve (SerialResolveRequiredException):
+    // a deferred dispatch member rolls back to the command thread instead.
+    void BeginStrictWorkerResolve(long sequence, ResolveReadLog reads) => BeginWorkerResolve(sequence, reads);
+
+    // The deferred dispatch runs of the stream thread, or null.
+    IDeferredDispatchRuns? DispatchRuns => null;
+
+    // SHARPEMU_COMPUTE_TICKETS: the worker rebinds direct dispatches take ahead of the stream, or null.
+    SharpEmu.Libs.Gpu.Pipelines.ComputeTickets? ComputeTickets => null;
+
+    // At a compute ticket's take: whether the bytes its worker read are what the stream would read now. The ticket was
+    // requested ahead of earlier dispatches, so writes they posted since must refuse it.
+    bool ValidateTicketReads(ResolveReadLog reads) => ValidateWorkerReads(reads);
+
     // Runs commands other threads posted to this worker. Called before every packet.
     void RunPendingCommands();
 
@@ -132,6 +165,8 @@ public interface ICommandStreamHost
     void BeginSubmission(int queueId, ulong submissionId, object? geometrySnapshots);
 
     void Flush();
+
+    void FlushSlice() => Flush();
 
     // A frame boundary: submits what the frame recorded. The submitter resumes once it returns, so a
     // host that runs the stream ahead of its recording returns only after the frame is recorded.
@@ -219,8 +254,12 @@ public interface ICommandStreamHost
     // GPU, so the interpreter need not wait for the GPU to read them back first.
     bool ResolvesIndirectDispatchOnGpu => false;
 
-    // True when an indexed indirect draw may be handed over with its arguments still in
-    // guest memory (DrawIndexedArguments.IndirectArgumentsAddress).
+    // True when an indirect dispatch whose arguments count threads (DISPATCH_INITIATOR.USE_THREAD_DIMENSIONS) also keeps
+    // its counts on the GPU (IRenderHost.PrepareThreadDispatch).
+    bool ResolvesIndirectThreadDispatchOnGpu => false;
+
+    // True when an indirect draw may be handed over with its arguments still in guest
+    // memory (the IndirectArgumentsAddress of DrawIndexedArguments and DrawAutoArguments).
     bool ResolvesIndirectDrawOnGpu => false;
 
     // Called when a queue reset packet clears the processor.

@@ -65,6 +65,85 @@ public sealed class PosixMemoryAndSignalTests : IDisposable
     }
 
     [Fact]
+    public void ReadOnlySharedFileMappingReturnsFileBytesAndZeroTail()
+    {
+        using var test = new BackedKernelMemory();
+        var path = Path.GetTempFileName();
+        var data = Enumerable.Range(1, 100).Select(i => (byte)i).ToArray();
+        File.WriteAllBytes(path, data);
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        stream.Position = 5;
+        const int fd = 7001;
+        KernelMemoryCompatExports.RegisterOpenFileForTests(fd, stream);
+        try
+        {
+            SetFileMmapArguments(test.Context, 0x8000, 1, 1, fd, 0);
+            Assert.Equal(0, KernelMemoryCompatExports.PosixMmap(test.Context));
+            var address = test.Context[CpuRegister.Rax];
+            var contents = new byte[0x4000];
+            Assert.True(test.Memory.TryRead(address, contents));
+            Assert.Equal(data, contents[..data.Length]);
+            Assert.All(contents[data.Length..], value => Assert.Equal(0, value));
+            Assert.Equal(5, stream.Position);
+        }
+        finally
+        {
+            KernelMemoryCompatExports.UnregisterOpenFileForTests(fd);
+            stream.Dispose();
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void FileMappingHonoursPageAlignedOffset()
+    {
+        using var test = new BackedKernelMemory();
+        var path = Path.GetTempFileName();
+        var data = new byte[0x4000 + 8];
+        for (var i = 0; i < data.Length; i++)
+            data[i] = (byte)(i < 0x4000 ? 1 : 9);
+        File.WriteAllBytes(path, data);
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
+        const int fd = 7002;
+        KernelMemoryCompatExports.RegisterOpenFileForTests(fd, stream);
+        try
+        {
+            SetFileMmapArguments(test.Context, 0x4000, 3, 2, fd, 0x4000);
+            Assert.Equal(0, KernelMemoryCompatExports.PosixMmap(test.Context));
+            var contents = new byte[16];
+            Assert.True(test.Memory.TryRead(test.Context[CpuRegister.Rax], contents));
+            Assert.Equal(new byte[] { 9, 9, 9, 9, 9, 9, 9, 9, 0, 0, 0, 0, 0, 0, 0, 0 }, contents);
+            SetFileMmapArguments(test.Context, 0x4000, 1, 2, fd, 0x100);
+            Assert.Equal(-1, KernelMemoryCompatExports.PosixMmap(test.Context));
+        }
+        finally
+        {
+            KernelMemoryCompatExports.UnregisterOpenFileForTests(fd);
+            stream.Dispose();
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void FileMappingWithUnknownDescriptorFailsWithEbadf()
+    {
+        using var test = new BackedKernelMemory();
+        SetFileMmapArguments(test.Context, 0x4000, 1, 1, 7999, 0);
+        Assert.Equal(-1, KernelMemoryCompatExports.PosixMmap(test.Context));
+        Assert.Equal(ulong.MaxValue, test.Context[CpuRegister.Rax]);
+    }
+
+    private static void SetFileMmapArguments(CpuContext context, ulong length, int protection, uint flags, int fd, ulong offset)
+    {
+        context[CpuRegister.Rdi] = 0;
+        context[CpuRegister.Rsi] = length;
+        context[CpuRegister.Rdx] = (ulong)protection;
+        context[CpuRegister.Rcx] = flags;
+        context[CpuRegister.R8] = unchecked((ulong)(long)fd);
+        context[CpuRegister.R9] = offset;
+    }
+
+    [Fact]
     public void SignalMaskOperationsPreserveThePreviousMaskAndAllowAnAliasedOutput()
     {
         const ulong address = 0x1000;

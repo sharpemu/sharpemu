@@ -10,18 +10,31 @@ public sealed partial class SpirvModuleBuilder
     private const uint GlslFrexp = 51;
     private const uint SubgroupScope = 3;
     private static readonly uint[] GlslMinMax = [37, 38, 39, 40, 41, 42, 79, 80];
+    private const uint GlslUMin = 38;
 
     private readonly Dictionary<uint, uint> _resultTypes = [];
     private readonly Dictionary<uint, (uint Width, bool Signed)> _integerTypeInfo = [];
     private readonly Dictionary<uint, ulong> _wideConstantValues = [];
     private readonly Dictionary<uint, uint> _floatConstantBits = [];
     private readonly Dictionary<uint, Definition> _definitions = [];
-    private readonly Dictionary<InstructionKey, uint> _blockValues = [];
+    // The current block's expressions. A snapshot (BlockState) and the blocks that inherit all of it share one table: it
+    // is copied before its first change and replaced instead of cleared, so neither a branch nor an inheriting block
+    // entry copies it.
+    private ExpressionTable _blockValues = new();
+    private bool _blockValuesShared;
+    // A copy of a shared table holds all of its entries with the same values: a shared table never changes again, and a
+    // copy only gains entries. A table is cleared only while unshared, so no other table names it as a base.
+    private const int MaxExpressionBases = 32;
+    private int _blockValuesSerial;
+    private int[] _blockValuesBases = [];
+    private int _nextExpressionSerial;
     private readonly HashSet<uint> _localVariables = [];
     private readonly HashSet<uint> _escapedVariables = [];
     private readonly Dictionary<uint, uint> _elementBases = [];
     private readonly HashSet<uint> _scalarPointerTypes = [];
     private readonly HashSet<uint> _inputVariables = [];
+    // Variables nothing writes while the invocation runs: descriptors (UniformConstant) and push constants.
+    private readonly HashSet<uint> _immutableVariables = [];
     private readonly HashSet<uint> _changingInputs = [];
     private readonly Dictionary<uint, uint> _entryValues = [];
     private readonly Dictionary<InstructionKey, uint> _entryOperations = [];
@@ -49,7 +62,59 @@ public sealed partial class SpirvModuleBuilder
 
     private readonly record struct Definition(SpirvOp Opcode, uint Type, uint[] Operands);
 
-    private sealed record BlockState(Dictionary<uint, uint> Values, Dictionary<InstructionKey, uint> Expressions);
+    // ExpressionSerial names the expression table; ExpressionBases are the tables it was copied from, nearest first.
+    private sealed record BlockState(Dictionary<uint, uint> Values, ExpressionTable Expressions,
+        int ExpressionSerial, int[] ExpressionBases);
+
+    // A block expression table: an immutable base, shared with other tables, and the table's own entries, which never
+    // repeat a key of the base. A copy keeps the base and copies only the own entries; once those are many, the copy
+    // folds them into a new base. A table that shares an inherited table of thousands of entries copies a few.
+    private sealed class ExpressionTable
+    {
+        private const int MaxOwnEntries = 512;
+
+        private Dictionary<InstructionKey, uint>? _base;
+        private Dictionary<InstructionKey, uint> _own = [];
+
+        public int Count => (_base?.Count ?? 0) + _own.Count;
+
+        public Dictionary<InstructionKey, uint>? Base => _base;
+
+        public Dictionary<InstructionKey, uint> Own => _own;
+
+        public bool TryGetValue(InstructionKey key, out uint value) =>
+            _own.TryGetValue(key, out value) || (_base is not null && _base.TryGetValue(key, out value));
+
+        public void Set(InstructionKey key, uint value) => _own[key] = value;
+
+        public void Clear()
+        {
+            _base = null;
+            _own.Clear();
+        }
+
+        public ExpressionTable Copy()
+        {
+            if (_own.Count < MaxOwnEntries)
+            {
+                return new ExpressionTable { _base = _base, _own = new Dictionary<InstructionKey, uint>(_own) };
+            }
+
+            if (_base is null)
+            {
+                return new ExpressionTable { _base = new Dictionary<InstructionKey, uint>(_own) };
+            }
+
+            var merged = new Dictionary<InstructionKey, uint>(_base);
+            merged.EnsureCapacity(_base.Count + _own.Count);
+            foreach (var (key, value) in _own)
+            {
+                merged.Add(key, value);
+            }
+
+            return new ExpressionTable { _base = merged };
+        }
+    }
 
     private readonly struct InstructionKey : IEquatable<InstructionKey>
     {
@@ -110,7 +175,8 @@ public sealed partial class SpirvModuleBuilder
             return element;
         }
 
-        NoteVariableUses(operands);
+        // ExtInst's operation number is a literal, even when its value equals a variable id.
+        NoteVariableUses(operands, opcode == SpirvOp.ExtInst ? 1 : -1);
         if (TryFold(opcode, resultType, operands, out var folded) ||
             TrySimplify(opcode, resultType, operands, out folded))
         {
@@ -141,10 +207,16 @@ public sealed partial class SpirvModuleBuilder
 
         var result = EmitResult(_functions, opcode, resultType, operands);
         var key = new InstructionKey(opcode, resultType, operands.ToArray());
-        _blockValues[key] = result;
+        WritableBlockValues().Set(key, result);
         _definitions[result] = new Definition(opcode, resultType, key.Operands);
         return result;
     }
+
+    // Runs before a statement that ends the current block, or a call made through AddStatement, so the emitter can
+    // finish work it keeps for the block (deferred EXEC guards). A call made through AddInstruction does not run it: the
+    // emitter flushes before each call into guest code itself.
+    public Action? BeforeBlockExit { get; set; }
+    private bool _inBlockExit;
 
     public void AddStatement(SpirvOp opcode, params uint[] operands)
     {
@@ -152,6 +224,22 @@ public sealed partial class SpirvModuleBuilder
         {
             AddStore(operands);
             return;
+        }
+
+        if (BeforeBlockExit is not null && !_inBlockExit &&
+            opcode is SpirvOp.SelectionMerge or SpirvOp.LoopMerge or SpirvOp.Branch or SpirvOp.BranchConditional or
+                SpirvOp.Switch or SpirvOp.Return or SpirvOp.ReturnValue or SpirvOp.Kill or SpirvOp.Unreachable or
+                SpirvOp.FunctionCall)
+        {
+            _inBlockExit = true;
+            try
+            {
+                BeforeBlockExit();
+            }
+            finally
+            {
+                _inBlockExit = false;
+            }
         }
 
         NoteVariableUses(operands);
@@ -197,7 +285,7 @@ public sealed partial class SpirvModuleBuilder
         {
             element = EmitResult(_functions, SpirvOp.AccessChain, resultType, operands);
             var key = new InstructionKey(SpirvOp.AccessChain, resultType, operands.ToArray());
-            _blockValues[key] = element;
+            WritableBlockValues().Set(key, element);
             _definitions[element] = new Definition(SpirvOp.AccessChain, resultType, key.Operands);
         }
 
@@ -214,8 +302,27 @@ public sealed partial class SpirvModuleBuilder
             return EntryLoad(resultType, pointer);
         }
 
+        // A load of memory nothing writes is a value: the block values reuse it like arithmetic.
+        if (operands.Length == 1 && IsImmutablePointer(pointer))
+        {
+            var lookup = new InstructionKey(SpirvOp.Load, resultType, operands);
+            if (_blockValues.TryGetValue(lookup, out var loaded))
+            {
+                return loaded;
+            }
+
+            var value = EmitResult(_functions, SpirvOp.Load, resultType, operands);
+            WritableBlockValues().Set(new InstructionKey(SpirvOp.Load, resultType, operands.ToArray()), value);
+            return value;
+        }
+
         if (operands.Length != 1 || !IsTrackedPointer(pointer))
         {
+            if (operands.Length != 1)
+            {
+                InvalidateExplicitAccessMemoryState(pointer);
+            }
+
             return EmitResult(_functions, SpirvOp.Load, resultType, operands);
         }
 
@@ -232,6 +339,11 @@ public sealed partial class SpirvModuleBuilder
         var result = EmitResult(_functions, SpirvOp.Load, resultType, operands);
         _inheritedPointers.Remove(pointer);
         _pendingStores.Remove(pointer);
+        if (_elementBases.TryGetValue(pointer, out var elementBase))
+        {
+            _pendingStores.Remove(elementBase);
+        }
+
         if (_localVariables.Contains(pointer))
         {
             ForgetElements(pointer, keepValues: true);
@@ -246,7 +358,11 @@ public sealed partial class SpirvModuleBuilder
         var pointer = operands[0];
         if (operands.Length != 2 || !IsTrackedPointer(pointer))
         {
-            if (_localVariables.Contains(pointer))
+            if (operands.Length != 2)
+            {
+                InvalidateExplicitAccessMemoryState(pointer);
+            }
+            else if (_localVariables.Contains(pointer))
             {
                 _variableValues.Remove(pointer);
                 _pendingStores.Remove(pointer);
@@ -301,7 +417,33 @@ public sealed partial class SpirvModuleBuilder
         return result;
     }
 
+    // A load, in the current function's entry block, of a word the invocation never writes (the host's shader data), through
+    // constant indices: operations of it and of constants then join the entry too (CanHoistToEntry), once per function.
+    // Zero when the entry block is not open or an index is not a constant.
+    public uint EntryWordLoad(uint resultType, uint pointerType, uint variable, params uint[] constantIndices)
+    {
+        if (!IsEntryAvailable() || constantIndices.Any(index => !_scalarConstantValues.ContainsKey(index)))
+        {
+            return 0;
+        }
+
+        uint[] chain = [variable, .. constantIndices];
+        var key = new InstructionKey(SpirvOp.AccessChain, pointerType, chain);
+        if (!_entryOperations.TryGetValue(key, out var pointer))
+        {
+            pointer = AppendToEntry(SpirvOp.AccessChain, pointerType, chain);
+            _entryOperations[key] = pointer;
+            _definitions[pointer] = new Definition(SpirvOp.AccessChain, pointerType, chain);
+        }
+
+        return EntryLoad(resultType, pointer);
+    }
+
     private bool IsEntryAvailable() => CurrentFunction != 0 && !_entryLabelPending && _entryLabelOffset >= 0;
+
+    private bool IsImmutablePointer(uint pointer) =>
+        _immutableVariables.Contains(pointer) ||
+        (Defines(pointer, SpirvOp.AccessChain, out var chain) && _immutableVariables.Contains(chain.Operands[0]));
 
     private bool CanHoistToEntry(SpirvOp opcode, uint[] operands)
     {
@@ -368,10 +510,12 @@ public sealed partial class SpirvModuleBuilder
     private bool IsTrackedPointer(uint pointer) =>
         IsTrackedVariable(pointer) || (_elementBases.TryGetValue(pointer, out var variable) && IsTrackedVariable(variable));
 
-    private void NoteVariableUses(uint[] operands)
+    private void NoteVariableUses(uint[] operands, int literalIndex = -1)
     {
-        foreach (var operand in operands)
+        for (var index = 0; index < operands.Length; index++)
         {
+            if (index == literalIndex) continue;
+            var operand = operands[index];
             if (_localVariables.Contains(operand))
             {
                 EscapeVariable(operand);
@@ -448,7 +592,8 @@ public sealed partial class SpirvModuleBuilder
                 continue;
             }
 
-            state ??= new BlockState(new Dictionary<uint, uint>(_variableValues), new Dictionary<InstructionKey, uint>(_blockValues));
+            state ??= new BlockState(new Dictionary<uint, uint>(_variableValues), ShareBlockValues(), _blockValuesSerial,
+                _blockValuesBases);
             if (!_incomingStates.TryGetValue(target, out var incoming))
             {
                 incoming = [];
@@ -470,12 +615,24 @@ public sealed partial class SpirvModuleBuilder
         }
 
         var first = incoming[0].State;
-        foreach (var (expression, value) in first.Expressions)
+        if (incoming.Count == 1)
         {
-            if (incoming.All(entry => entry.State.Expressions.TryGetValue(expression, out var other) && other == value))
+            // One predecessor: the block inherits every expression of its state.
+            InheritBlockValues(first);
+        }
+        else if (CommonExpressionBase(incoming) is { } common)
+        {
+            // Every incoming table is this one or a copy of it with more entries: their common expressions are its own.
+            InheritBlockValues(common);
+        }
+        else
+        {
+            if (first.Expressions.Base is { } inherited)
             {
-                _blockValues[expression] = value;
+                InheritHeldExpressions(incoming, inherited);
             }
+
+            InheritHeldExpressions(incoming, first.Expressions.Own);
         }
 
         if (!_loopHeaders.Contains(label))
@@ -492,6 +649,64 @@ public sealed partial class SpirvModuleBuilder
         }
 
         _inheritedLabels[label] = incoming.Count;
+    }
+
+    private void InheritBlockValues(BlockState state)
+    {
+        _blockValues = state.Expressions;
+        _blockValuesShared = true;
+        _blockValuesSerial = state.ExpressionSerial;
+        _blockValuesBases = state.ExpressionBases;
+    }
+
+    // The incoming state whose expression table every incoming table is or was copied from, if one is.
+    private static BlockState? CommonExpressionBase(List<(uint Block, BlockState State)> incoming)
+    {
+        var candidate = incoming[0].State;
+        foreach (var (_, state) in incoming)
+        {
+            if (state.Expressions.Count < candidate.Expressions.Count)
+            {
+                candidate = state;
+            }
+        }
+
+        foreach (var (_, state) in incoming)
+        {
+            if (state.ExpressionSerial != candidate.ExpressionSerial &&
+                Array.IndexOf(state.ExpressionBases, candidate.ExpressionSerial) < 0)
+            {
+                return null;
+            }
+        }
+
+        return candidate;
+    }
+
+    private void InheritHeldExpressions(List<(uint Block, BlockState State)> incoming, Dictionary<InstructionKey, uint> expressions)
+    {
+        foreach (var (expression, value) in expressions)
+        {
+            if (HeldByOthers(incoming, expression, value))
+            {
+                _blockValues.Set(expression, value);
+            }
+        }
+    }
+
+    // Whether every incoming state after the first holds the first state's expression with the same value. A loop, not a
+    // closure and delegate per expression: blocks inherit thousands of expressions.
+    private static bool HeldByOthers(List<(uint Block, BlockState State)> incoming, InstructionKey expression, uint value)
+    {
+        for (var index = 1; index < incoming.Count; index++)
+        {
+            if (!incoming[index].State.Expressions.TryGetValue(expression, out var other) || other != value)
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private uint MergeIncomingValue(uint pointer, uint value, List<(uint Block, BlockState State)> incoming)
@@ -549,6 +764,20 @@ public sealed partial class SpirvModuleBuilder
         _inheritedPointers.Clear();
     }
 
+    private void InvalidateExplicitAccessMemoryState(uint pointer)
+    {
+        if (!IsTrackedPointer(pointer) && !_localVariables.Contains(pointer))
+        {
+            return;
+        }
+
+        // The access bypasses forwarding, but must still end pending-store eligibility.
+        // Preserve evidence of an inherited value already used in this block.
+        var inheritedValueUsed = _inheritedValueUsed;
+        ResetMemoryState();
+        _inheritedValueUsed = inheritedValueUsed;
+    }
+
     private void ResetMemoryState()
     {
         _variableValues.Clear();
@@ -560,7 +789,41 @@ public sealed partial class SpirvModuleBuilder
     private void ResetBlockState()
     {
         ResetMemoryState();
-        _blockValues.Clear();
+        if (_blockValuesShared)
+        {
+            _blockValues = new ExpressionTable();
+            _blockValuesShared = false;
+        }
+        else
+        {
+            _blockValues.Clear();
+        }
+
+        _blockValuesSerial = ++_nextExpressionSerial;
+        _blockValuesBases = [];
+    }
+
+    // The expression table for a snapshot: the live dictionary itself, which is copied before its next change.
+    private ExpressionTable ShareBlockValues()
+    {
+        _blockValuesShared = true;
+        return _blockValues;
+    }
+
+    private ExpressionTable WritableBlockValues()
+    {
+        if (_blockValuesShared)
+        {
+            _blockValues = _blockValues.Copy();
+            _blockValuesShared = false;
+            var bases = new int[Math.Min(_blockValuesBases.Length + 1, MaxExpressionBases)];
+            bases[0] = _blockValuesSerial;
+            Array.Copy(_blockValuesBases, 0, bases, 1, bases.Length - 1);
+            _blockValuesBases = bases;
+            _blockValuesSerial = ++_nextExpressionSerial;
+        }
+
+        return _blockValues;
     }
 
     private void NoteResultType(uint id, uint type) => _resultTypes[id] = type;
@@ -578,6 +841,30 @@ public sealed partial class SpirvModuleBuilder
 
     private bool Defines(uint id, SpirvOp opcode, out Definition definition) =>
         _definitions.TryGetValue(id, out definition) && definition.Opcode == opcode;
+
+    // The largest value a 32-bit unsigned id can hold, from its definition: a constant, a logical right shift by a constant
+    // or an AND with a constant.
+    private ulong UpperBound(uint id)
+    {
+        if (IsIntegerConstant(id, out var value))
+        {
+            return value;
+        }
+
+        if (Defines(id, SpirvOp.ShiftRightLogical, out var shift) && IsIntegerConstant(shift.Operands[1], out var amount) &&
+            amount < 32)
+        {
+            return uint.MaxValue >> (int)amount;
+        }
+
+        if (Defines(id, SpirvOp.BitwiseAnd, out var and))
+        {
+            return Math.Min(IsIntegerConstant(and.Operands[0], out var left) ? left : uint.MaxValue,
+                IsIntegerConstant(and.Operands[1], out var right) ? right : uint.MaxValue);
+        }
+
+        return uint.MaxValue;
+    }
 
     private bool IsIntegerConstant(uint id, out ulong value)
     {
@@ -677,6 +964,10 @@ public sealed partial class SpirvModuleBuilder
                 return true;
             case SpirvOp.ExtInst when operands.Length == 4 && GlslMinMax.Contains(operands[1]) &&
                 operands[2] == operands[3] && HasType(operands[2], resultType):
+                result = operands[2];
+                return true;
+            case SpirvOp.ExtInst when operands.Length == 4 && operands[1] == GlslUMin && IsUnsignedInteger(resultType, 32) &&
+                IsIntegerConstant(operands[3], out var limit) && UpperBound(operands[2]) <= limit:
                 result = operands[2];
                 return true;
             case SpirvOp.IEqual or SpirvOp.INotEqual when operands.Length == 2:
@@ -1136,7 +1427,8 @@ public sealed partial class SpirvModuleBuilder
         var opcode = (SpirvOp)(words[offset] & 0xFFFF);
         if (opcode == SpirvOp.Load)
         {
-            return wordCount == 4 && (_localVariables.Contains(words[offset + 3]) || _elementBases.ContainsKey(words[offset + 3]));
+            // A load without memory operands yields its value and nothing else; no module declares Volatile memory.
+            return wordCount == 4;
         }
 
         if (wordCount < 3)
@@ -1157,11 +1449,21 @@ public sealed partial class SpirvModuleBuilder
         return IsValueOperation(opcode, []);
     }
 
+    // The passes over every function word index ids in arrays (every id is below _nextId); a word at or past it is a
+    // literal that names no variable, chain or definition.
     private HashSet<uint> FindUnreadVariables(out HashSet<uint> unreadPointers)
     {
         var words = _functions;
-        var chainBases = new Dictionary<uint, uint>();
-        var read = new HashSet<uint>();
+        var local = new bool[_nextId];
+        foreach (var variable in _localVariables)
+        {
+            local[variable] = true;
+        }
+
+        // The variable of each access chain into a local variable, once the scan has passed the chain (0: none).
+        var chainBases = new uint[_nextId];
+        var chains = new List<uint>();
+        var read = new bool[_nextId];
         for (var offset = 0; offset < words.Count; offset += (int)(words[offset] >> 16))
         {
             var wordCount = (int)(words[offset] >> 16);
@@ -1174,7 +1476,8 @@ public sealed partial class SpirvModuleBuilder
                 case SpirvOp.Store when wordCount == 3:
                     first = 2;
                     break;
-                case SpirvOp.AccessChain when wordCount >= 4 && _localVariables.Contains(words[offset + 3]):
+                case SpirvOp.AccessChain when wordCount >= 4 && words[offset + 3] < (uint)local.Length && local[words[offset + 3]]:
+                    chains.Add(words[offset + 2]);
                     chainBases[words[offset + 2]] = words[offset + 3];
                     first = 4;
                     break;
@@ -1182,23 +1485,29 @@ public sealed partial class SpirvModuleBuilder
 
             for (var word = first; word < wordCount; word++)
             {
+                if (opcode == SpirvOp.ExtInst && word == 4) continue;
                 var id = words[offset + word];
-                if (_localVariables.Contains(id))
+                if (id >= (uint)local.Length)
                 {
-                    read.Add(id);
+                    continue;
                 }
-                else if (chainBases.TryGetValue(id, out var variable))
+
+                if (local[id])
                 {
-                    read.Add(variable);
+                    read[id] = true;
+                }
+                else if (chainBases[id] != 0)
+                {
+                    read[chainBases[id]] = true;
                 }
             }
         }
 
-        var unread = KeepsUnreadVariables ? [] : new HashSet<uint>(_localVariables.Where(variable => !read.Contains(variable)));
+        var unread = KeepsUnreadVariables ? [] : new HashSet<uint>(_localVariables.Where(variable => !read[variable]));
         unreadPointers = new HashSet<uint>(unread);
-        foreach (var (chain, variable) in chainBases)
+        foreach (var chain in chains)
         {
-            if (unread.Contains(variable))
+            if (unread.Contains(chainBases[chain]))
             {
                 unreadPointers.Add(chain);
             }
@@ -1279,8 +1588,10 @@ public sealed partial class SpirvModuleBuilder
         }
 
         var removed = new bool[starts.Count];
-        var uses = new Dictionary<uint, int>();
-        var definers = new Dictionary<uint, int>();
+        var uses = new int[_nextId];
+        // The instruction (index + 1; 0: none) defining an id whose definition may be removed, and those ids in order.
+        var definers = new int[_nextId];
+        var defined = new List<uint>();
         for (var index = 0; index < starts.Count; index++)
         {
             var offset = starts[index];
@@ -1297,23 +1608,28 @@ public sealed partial class SpirvModuleBuilder
             var first = 1;
             if (IsRemovableDefinition(words, offset, wordCount))
             {
-                definers[words[offset + 2]] = index;
+                definers[words[offset + 2]] = index + 1;
+                defined.Add(words[offset + 2]);
                 first = 3;
             }
 
             for (var word = first; word < wordCount; word++)
             {
+                if (opcode == SpirvOp.ExtInst && word == 4) continue;
                 var id = words[offset + word];
-                uses[id] = uses.GetValueOrDefault(id) + 1;
+                if (id < (uint)uses.Length)
+                {
+                    uses[id]++;
+                }
             }
         }
 
         var pending = new Stack<int>();
-        foreach (var (id, index) in definers)
+        foreach (var id in defined)
         {
-            if (uses.GetValueOrDefault(id) == 0)
+            if (uses[id] == 0)
             {
-                pending.Push(index);
+                pending.Push(definers[id] - 1);
             }
         }
 
@@ -1327,19 +1643,20 @@ public sealed partial class SpirvModuleBuilder
             removed[index] = true;
             var offset = starts[index];
             var wordCount = (int)(words[offset] >> 16);
+            var opcode = (SpirvOp)(words[offset] & 0xFFFF);
             removedIds.Add(words[offset + 2]);
             for (var word = 3; word < wordCount; word++)
             {
+                if (opcode == SpirvOp.ExtInst && word == 4) continue;
                 var id = words[offset + word];
-                if (!uses.TryGetValue(id, out var count))
+                if (id >= (uint)uses.Length || uses[id] == 0)
                 {
                     continue;
                 }
 
-                uses[id] = --count;
-                if (count == 0 && definers.TryGetValue(id, out var definer) && !removed[definer])
+                if (--uses[id] == 0 && definers[id] != 0 && !removed[definers[id] - 1])
                 {
-                    pending.Push(definer);
+                    pending.Push(definers[id] - 1);
                 }
             }
         }

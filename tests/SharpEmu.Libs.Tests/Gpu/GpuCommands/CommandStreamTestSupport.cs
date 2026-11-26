@@ -29,6 +29,10 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     public Func<int, ulong>? ReadOcclusionSamples { get; set; }
 
+    public SharpEmu.Libs.Gpu.Pipelines.ComputeTickets? ComputeTickets { get; set; }
+
+    public IDeferredDispatchRuns? DispatchRuns { get; set; }
+
     public Func<int, bool>? PendingPublications { get; set; }
 
     public Func<ulong, ulong, bool>? GpuWrittenCommandData { get; set; }
@@ -90,6 +94,9 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     public List<DrawAutoArguments> AutoDraws { get; } = new();
 
+    // Runs at every draw, while the interpreter's registers hold the draw's state.
+    public Action? OnDraw { get; set; }
+
     public Queue<Action> PendingCommands { get; } = new();
 
     public int PendingCommandRuns { get; private set; }
@@ -118,6 +125,16 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
         OperandReads.Add(address);
         BeforeOperandRead?.Invoke(address);
         return TryReadGuest(address, destination);
+    }
+
+    // Deterministically inject a completion after the predicate bytes were copied, before requeue.
+    public Action<ulong>? AfterWaitOperandRead { get; set; }
+
+    public bool TryReadGuestWaitOperand(ulong address, Span<byte> destination)
+    {
+        var read = TryReadGuestOperand(address, destination);
+        AfterWaitOperandRead?.Invoke(address);
+        return read;
     }
 
     public bool TryReadGuest(ulong address, Span<byte> destination)
@@ -230,12 +247,14 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
     public void DrawIndexed(ulong submitId, in DrawIndexedArguments arguments)
     {
         IndexedDraws.Add(arguments);
+        OnDraw?.Invoke();
         Calls.Add($"draw_indexed {submitId} {arguments.IndexCount}");
     }
 
     public void DrawAuto(ulong submitId, in DrawAutoArguments arguments)
     {
         AutoDraws.Add(arguments);
+        OnDraw?.Invoke();
         Calls.Add($"draw_auto {submitId} {arguments.VertexCount}");
     }
 
@@ -246,7 +265,17 @@ internal sealed class RecordingCommandStreamHost : ICommandStreamHost
 
     public bool ResolvesIndirectDispatchOnGpu { get; set; }
 
+    public bool ResolvesIndirectThreadDispatchOnGpu { get; set; }
+
     public bool ResolvesIndirectDrawOnGpu { get; set; }
+    public List<uint[]>? IndexedRuns { get; set; }
+
+    public bool TryDrawIndexedRun(ulong submitId, in DrawIndexedArguments first, ReadOnlySpan<uint> offsets)
+    {
+        if (IndexedRuns is null) return false;
+        IndexedRuns.Add(offsets.ToArray());
+        return true;
+    }
 
     public void OnQueueReset(int queueId) => Calls.Add($"queue_reset {queueId}");
 

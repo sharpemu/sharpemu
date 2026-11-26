@@ -74,6 +74,21 @@ public sealed class Gen5ShaderAtomicDecodeTests
     }
 
     [Fact]
+    public void BufferAtomicAndX2_UsesTwoDataRegisters()
+    {
+        // BUFFER_ATOMIC_AND_X2 v[0:1], off, s[8:11], 0 offset:0x18, as the PSR opacity-override shaders encode it.
+        var instruction = DecodeSingle(0xE1640018, 0x80020000);
+
+        Assert.Equal("BufferAtomicAndX2", instruction.Opcode);
+        var control = Assert.IsType<Gen5BufferMemoryControl>(instruction.Control);
+        Assert.Equal(2u, control.DwordCount);
+        Assert.Equal(0u, control.VectorData);
+        Assert.Equal(8u, control.ScalarResource);
+        Assert.Equal(0x18, control.OffsetBytes);
+        Assert.False(control.Glc);
+    }
+
+    [Fact]
     public void BufferAtomicSwapX2_UsesTwoDataRegisters()
     {
         // BUFFER_ATOMIC_SWAP_X2 v[1:2], off, s[0:3], 128 glc

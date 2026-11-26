@@ -244,6 +244,13 @@ public sealed partial class GuestImageCache
         var destination = _slots[destinationImageIdentifier];
         var source = _slots[sourceImageIdentifier];
         WatchImage(destinationImageIdentifier);
+        // A description can match the source at a level its backing does not hold (CachedImage keeps no more levels
+        // than the backing's extent has): the destination keeps what it read from the guest.
+        if (mip >= destination.Backing.MipLevels)
+        {
+            return;
+        }
+
         if (source.IsBufferModified || source.Backing.Samples != destination.Backing.Samples)
         {
             throw SubmissionScheduler.Fatal($"The mip copy source ownership or sample count is invalid: bufferModified={source.IsBufferModified} sourceSamples={source.Backing.Samples} destinationSamples={destination.Backing.Samples}.");
@@ -297,11 +304,11 @@ public sealed partial class GuestImageCache
 
     // A block-compressed image states its pitch and height in texels, and the uncompressed view of its blocks states them in blocks,
     // so a side that is compressed is compared in blocks.
-    private static bool SameMipLayout(in ImageDescription left, in ImageDescription right)
+    private static bool SameMipLayout(in ImageDescription left, in ImageDescription right, int levels = ImageDescription.MaxLevels)
     {
         var leftShift = left.IsBlock ? 2 : 0;
         var rightShift = right.IsBlock ? 2 : 0;
-        for (var level = 0; level < ImageDescription.MaxLevels; level++)
+        for (var level = 0; level < levels; level++)
         {
             var a = left.MipLayout[level];
             var b = right.MipLayout[level];
@@ -446,6 +453,24 @@ public sealed partial class GuestImageCache
         return replacementImageIdentifier;
     }
 
+    // Whether an overlapping cached image counts as used this frame, so it is not safe to park or delete. A recurring alias
+    // counts too, one used in each of the two frames before this one: two aliases of the same memory that a title uses every
+    // frame both stay registered instead of swapping at each one's first use. An image the frame before used but the one
+    // before it did not is parked as before, so the one-off images a title places in the same memory frame after frame do
+    // not pile up (each registered image watches its pages, and a page holds at most 127 watches). The serial overlap and
+    // the render workers' read-only overlap must agree.
+    private bool UsedThisFrameForOverlap(CachedImage cached)
+    {
+        if (!cached.Registered)
+        {
+            return false;
+        }
+
+        var lastUse = _recencyQueue.GetLastUseTick(cached.RecencyEntryIndex);
+        return lastUse >= _collectionTick ||
+               (lastUse + 1 == _collectionTick && cached.PreviousUseTick != ulong.MaxValue && cached.PreviousUseTick + 2 == _collectionTick);
+    }
+
     private OverlapResolution ResolveOverlap(in ImageDescription requested, ImageRole role, ResourceSlotIdentifier cachedImageIdentifier, ResourceSlotIdentifier mergedImageIdentifier)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageOverlap);
@@ -459,8 +484,23 @@ public sealed partial class GuestImageCache
         var currentTick = _scheduler.CurrentTick;
         // A title submits dozens of command buffers per frame, so an image it writes early in a frame and reads late
         // in it is past the removal window in between. As in collection, an image used this frame is not stale.
-        var usedThisFrame = cached.Registered && _recencyQueue.GetLastUseTick(cached.RecencyEntryIndex) >= _collectionTick;
+        var usedThisFrame = UsedThisFrameForOverlap(cached);
         var safeToDelete = !usedThisFrame && currentTick - Math.Min(currentTick, cached.LastAccessTick) > TicksBeforeRemoval;
+        if (requested.FirstLevel != 0 || cachedInfo.FirstLevel != 0)
+        {
+            // An image of a streamed chain's resident levels shares only an identical chain (the
+            // same-backing match). It is a copy of guest memory that a lookup recreates cheaply, so
+            // another resource over its range replaces it; a request for resident levels over
+            // another image is a separate texture (the lookup took the whole chain when that image
+            // holds GPU contents).
+            if (cachedInfo.FirstLevel != 0 && !cached.IsGpuModified)
+            {
+                cached.Binding.NeedsRebind |= cached.Binding.IsBound || cached.Binding.IsTarget;
+                ReleaseImage(cachedImageIdentifier);
+            }
+
+            return new OverlapResolution(mergedImageIdentifier);
+        }
         var requestedBlock = requested.BytesPerBlock * requested.Samples;
         var cachedBlock = cachedInfo.BytesPerBlock * cachedInfo.Samples;
         var requestedBlockExtent = requested.BlockExtent;
@@ -474,6 +514,22 @@ public sealed partial class GuestImageCache
             if (depthImageIdentifier.IsValid)
             {
                 return new OverlapResolution(depthImageIdentifier);
+            }
+
+            // An image of the other block class holds the requested image's blocks (or texels) only in the same tiling with
+            // every level both hold in the same place, as a compressor's view of a texture's blocks is. Otherwise the memory
+            // now holds another resource: a texture's level 0 lies after its smaller levels, where a one-level image has its
+            // own bytes. The image is neither viewed in the other format nor copied across, as a layout mismatch is not.
+            if (requested.IsBlock != cachedInfo.IsBlock &&
+                (requested.TileMode != cachedInfo.TileMode ||
+                 !SameMipLayout(requested, cachedInfo, (int)Math.Min(requested.Resources.Levels, cachedInfo.Resources.Levels))))
+            {
+                if (safeToDelete)
+                {
+                    ParkOrReleaseImage(cachedImageIdentifier);
+                }
+
+                return new OverlapResolution(mergedImageIdentifier);
             }
 
             if (requested.IsBlock && !cachedInfo.IsBlock)
@@ -569,6 +625,66 @@ public sealed partial class GuestImageCache
         }
 
         return new OverlapResolution(mergedImageIdentifier);
+    }
+
+    // Releases the images that a GPU write to their dimension twin left stale; true when one was released.
+    private bool ReleaseStaleDimensionTwins(in ImageQueryResults candidates)
+    {
+        var released = false;
+        foreach (var candidate in candidates)
+        {
+            if (_slots.TryGet(candidate) is { Registered: true, DimensionTwinStale: true })
+            {
+                ReleaseImage(candidate);
+                released = true;
+            }
+        }
+
+        return released;
+    }
+
+    // The image's registered twin when it gives the requested view.
+    private ResourceSlotIdentifier FindDimensionTwin(in ImageQueryResults candidates, CachedImage image, in ImageViewDescription view)
+    {
+        if (image.DimensionTwin is not { Registered: true, DimensionTwinStale: false } twin || !twin.SupportsViewType(view))
+        {
+            return ResourceSlotIdentifier.Invalid;
+        }
+
+        foreach (var candidate in candidates)
+        {
+            if (ReferenceEquals(_slots.TryGet(candidate), twin))
+            {
+                return candidate;
+            }
+        }
+
+        return ResourceSlotIdentifier.Invalid;
+    }
+
+    // An image of the other dimensional type beside the partner, filled from guest memory like any new image.
+    private ResourceSlotIdentifier InsertDimensionTwin(in ImageDescription description, CachedImage partner)
+    {
+        if (partner.DimensionTwin is { } previous)
+        {
+            previous.DimensionTwin = null;
+        }
+
+        var twinIdentifier = InsertImage(description);
+        var twin = _slots[twinIdentifier];
+        twin.Uses = partner.Uses;
+        if (_bufferCache.HasGpuDirtyBytes(twin.Description.Data.Address, twin.Description.Data.Size))
+        {
+            twin.MarkBufferModified();
+        }
+        else
+        {
+            PopulateFromGuest(twinIdentifier, ImageRequest.Refresh(description, UploadRole(twin)), "dimension-twin");
+        }
+
+        twin.DimensionTwin = partner;
+        partner.DimensionTwin = twin;
+        return twinIdentifier;
     }
 
     // Replaces the source with a larger image that starts with the source contents.

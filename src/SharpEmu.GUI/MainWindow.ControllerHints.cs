@@ -6,11 +6,12 @@ using Avalonia.Controls;
 using Avalonia.Layout;
 using Avalonia.Media;
 using SharpEmu.GUI.Controls;
+using SharpEmu.HLE.Host;
 
 namespace SharpEmu.GUI;
 
 /// <summary>
-/// Controller connection state and the PlayStation-style button-hint bar. Hints are shown
+/// Controller connection state and the button-hint bar. Hints are shown
 /// only while a pad is connected and list only the buttons that do something right now.
 /// </summary>
 public partial class MainWindow
@@ -19,6 +20,7 @@ public partial class MainWindow
     private const double MainContentBottomMargin = 24;
 
     private bool _gamepadConnected;
+    private HostGamepadType _gamepadType;
     private string? _hintKey;
 
     private enum HintContext
@@ -33,8 +35,17 @@ public partial class MainWindow
         Trophies,
     }
 
-    private void SetGamepadConnected(bool connected)
+    private void SetGamepadConnected(bool connected, HostGamepadType type = HostGamepadType.Generic)
     {
+        if (_gamepadType != type)
+        {
+            _gamepadType = type;
+            var (left, right) = ShoulderHintLabels(type);
+            ((TextBlock)PageHintL1.Child!).Text = left;
+            ((TextBlock)PageHintR1.Child!).Text = right;
+            _hintKey = null;
+        }
+
         if (connected == _gamepadConnected)
         {
             return;
@@ -158,18 +169,22 @@ public partial class MainWindow
         }
     }
 
-    private static StackPanel HintItem(PadSymbol symbol, string label)
+    private StackPanel HintItem(PadSymbol symbol, string label)
     {
         var item = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 10 };
-        item.Children.Add(new PadGlyph { Symbol = symbol, VerticalAlignment = VerticalAlignment.Center });
+        item.Children.Add(new PadGlyph { Symbol = symbol, GamepadType = _gamepadType, VerticalAlignment = VerticalAlignment.Center });
         item.Children.Add(HintLabel(label));
         return item;
     }
 
-    private static StackPanel ShoulderHintItem(string label)
+    internal static (string Left, string Right) ShoulderHintLabels(HostGamepadType type) =>
+        type == HostGamepadType.Xbox ? ("LB", "RB") : ("L1", "R1");
+
+    private StackPanel ShoulderHintItem(string label)
     {
         var item = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
-        foreach (var text in new[] { "L1", "R1" })
+        var (left, right) = ShoulderHintLabels(_gamepadType);
+        foreach (var text in new[] { left, right })
         {
             item.Children.Add(new Border
             {

@@ -169,29 +169,11 @@ public sealed partial class RenderExecutor
     // Reads the indirect arguments now and draws from them, as the interpreter would have.
     private void DrawIndexedWithCpuArguments(ulong submitId, RegisterBanks banks, in DrawIndexedArguments arguments)
     {
-        Span<byte> bytes = stackalloc byte[(int)IndexedIndirectArgumentsSize];
-        if (!_host.TryReadGuest(arguments.IndirectArgumentsAddress, bytes))
+        if (!TryReadCpuArguments(in arguments, out var resolved))
         {
             throw _host.Fatal($"The indirect draw arguments are unreadable: address=0x{arguments.IndirectArgumentsAddress:X16}.");
         }
 
-        var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(bytes);
-        var elementSize = (GuestIndexType)arguments.IndexTypeAndSize switch
-        {
-            GuestIndexType.Index16 => 2ul,
-            GuestIndexType.Index32 => 4ul,
-            _ => 1ul,
-        };
-        var resolved = arguments with
-        {
-            IndexCount = arguments.UnboundedIndexBuffer ? words[0] : Math.Min(words[0], arguments.IndexCount),
-            InstanceCount = words[1],
-            IndexAddress = arguments.IndexAddress + (words[2] * elementSize),
-            BaseVertex = unchecked((int)words[3]),
-            FirstInstance = words[4],
-            IndirectArgumentsAddress = 0,
-            UnboundedIndexBuffer = false,
-        };
         if (resolved.IndexCount == 0 || resolved.InstanceCount == 0)
         {
             var skipped = _pool.RentDraw();
@@ -203,7 +185,46 @@ public sealed partial class RenderExecutor
         DrawIndexedCore(submitId, banks, in resolved);
     }
 
-    private void DrawIndexedCore(ulong submitId, RegisterBanks banks, in DrawIndexedArguments arguments)
+    // The draw the indirect arguments in guest memory describe.
+    private bool TryReadCpuArguments(in DrawIndexedArguments arguments, out DrawIndexedArguments resolved)
+    {
+        Span<byte> bytes = stackalloc byte[(int)IndexedIndirectArgumentsSize];
+        if (!_host.TryReadGuest(arguments.IndirectArgumentsAddress, bytes))
+        {
+            resolved = default;
+            return false;
+        }
+
+        var words = System.Runtime.InteropServices.MemoryMarshal.Cast<byte, uint>(bytes);
+        var elementSize = (GuestIndexType)arguments.IndexTypeAndSize switch
+        {
+            GuestIndexType.Index16 => 2ul,
+            GuestIndexType.Index32 => 4ul,
+            _ => 1ul,
+        };
+        resolved = arguments with
+        {
+            IndexCount = arguments.UnboundedIndexBuffer ? words[0] : Math.Min(words[0], arguments.IndexCount),
+            InstanceCount = words[1],
+            IndexAddress = arguments.IndexAddress + (words[2] * elementSize),
+            BaseVertex = unchecked((int)words[3]),
+            FirstInstance = words[4],
+            IndirectArgumentsAddress = 0,
+            UnboundedIndexBuffer = false,
+        };
+        return true;
+    }
+
+    internal bool CanGroupIndexed(RegisterBanks banks, in DrawIndexedArguments first) =>
+        CanDrawIndirectOnGpu(banks, in first) && DrawHasTargets(banks) && !MeshDrawTrace.Active;
+
+    internal static bool SafeForRun(ShaderProgramInfo? program) =>
+        program is { UsesDeviceAddresses: false, CallRecordCallees.Count: 0 } && program.Frontend?.RequiresOrderedImagePreparation != true &&
+        !Array.Exists(program.Buffers, static buffer => buffer.Written) && !WritesStorageImage(program) &&
+        program.Bindings?.UsesBindlessHeap != true &&
+        program.Bindings?.Find(SharpEmu.ShaderCompiler.Resources.DescriptorBindingKind.GlobalDataShare) is null;
+
+    internal void DrawIndexedCore(ulong submitId, RegisterBanks banks, in DrawIndexedArguments arguments, uint[]? offsets = null)
     {
         if (MeshDrawTrace.Active) MeshDrawTrace.Write("selection", $"indexed=true count={arguments.IndexCount}");
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawExecutor);
@@ -331,7 +352,7 @@ public sealed partial class RenderExecutor
             expandedIndices is null ? indexSize : (ulong)expandedIndices.Length,
             indexType);
         ref var state = ref record.State;
-        state.Begin(arguments.StartInstanceUserData);
+        state.Begin(arguments.StartInstanceUserData, arguments.BaseVertexUserData);
         if (!TryResolveDrawTargets(banks, in draw, ref state, record))
         {
             TraceDisposition("no-targets");
@@ -359,20 +380,118 @@ public sealed partial class RenderExecutor
 
         TraceDrawState(submitId, banks, in draw, in state);
         var indirect = arguments.OffsetSource == DrawOffsetSource.IndirectArguments;
+        // An offset the indirect packet passes in a named register is 0 in the arguments; a fetch the host replaced adds it
+        // from that register (ResolveVertexOffset(0, ...) and ResolveInstanceOffset are 0 for a program that fetches itself).
         var vertexOffset = indirect
-            ? arguments.BaseVertex
+            ? arguments.BaseVertex + (arguments.BaseVertexInRegister ? ResolveVertexOffset(0, state.Programs.VertexInput) : 0)
             : ResolveVertexOffset(userConfig.IndexOffset, state.Programs.VertexInput) + arguments.BaseVertex;
         var emission = new DrawEmission(
             true,
             vertexOffset,
             0,
-            indirect ? arguments.FirstInstance : ResolveInstanceOffset(state.Programs.VertexInput),
+            indirect
+                ? arguments.FirstInstance + (arguments.FirstInstanceInRegister ? ResolveInstanceOffset(state.Programs.VertexInput) : 0)
+                : ResolveInstanceOffset(state.Programs.VertexInput),
             arguments.IndirectArgumentsAddress);
         record.IndexedTrace = traceSample;
         record.PacketAddress = tracePacket;
         FillDraw(record, banks, in draw, ref state, topology, in emission, in indexSource, primitiveRestart, setBindDebug: true, setAutoDebug: false);
+        // An indirect draw arrives here with its arguments address when the GPU reads them, and without it once
+        // DrawIndexedWithCpuArguments read them.
+        record.RepeatableArguments = indirect && expandedIndices is null && traceSample is null && !RenderTrace.Enabled && !MeshDrawTrace.Active &&
+            state.Programs.MeshInput is null && state.Programs.VertexInput.Tessellation is null &&
+            (GuestPrimitiveType)userConfig.PrimitiveType != GuestPrimitiveType.TriangleStrip &&
+            (GuestIndexType)arguments.IndexTypeAndSize is GuestIndexType.Index16 or GuestIndexType.Index32;
+        record.RepeatsCpuArguments = record.RepeatableArguments && arguments.IndirectArgumentsAddress == 0;
+        if (offsets is not null && !record.WritesMemory && record.WriteStages == PipelineStageFlags.None && record.State.Programs.MeshInput is null &&
+            SafeForRun(state.Programs.VertexInput.Stage.Program) &&
+            (!state.PixelActive || SafeForRun(state.Programs.PixelInput.Stage.Program)))
+        {
+            record.IndirectOffsets = offsets;
+            foreach (uint offset in offsets)
+                record.IndirectBytes = Math.Max(record.IndirectBytes, offset + (uint)IndexedIndirectArgumentsSize);
+        }
         TraceDisposition("recorded");
         Record(record);
+    }
+
+    // A draw issued right after the template's draw under the same registers records the template's record with its own
+    // arguments: index range, counts, offsets and indirect arguments address. Everything else a resolve derives from the
+    // registers and from guest bytes the template's read log covers. False when the draw would leave the path the template
+    // took; the caller then resolves it in full. A draw whose arguments the CPU reads reads its own here, as
+    // DrawIndexedWithCpuArguments does, and records a skipped draw when they draw nothing.
+    internal bool TryRepeatIndexed(ResolvedDraw template, ulong submitId, RegisterBanks banks, in DrawIndexedArguments arguments)
+    {
+        if (!template.RepeatableArguments || template.Kind != ResolvedDrawKind.Draw || template.Index.HostData is not null ||
+            arguments.IndirectArgumentsAddress == 0 || arguments.OffsetSource != DrawOffsetSource.IndirectArguments ||
+            RenderTrace.Enabled || MeshDrawTrace.Active || IndexedDrawTrace.Enabled ||
+            arguments.StartInstanceUserData != template.State.StartInstanceUserData ||
+            arguments.BaseVertexUserData != template.State.BaseVertexUserData || UsesMeshExecution(banks))
+        {
+            return false;
+        }
+
+        IndexType indexType;
+        ulong elementSize;
+        switch ((GuestIndexType)arguments.IndexTypeAndSize)
+        {
+            case GuestIndexType.Index16:
+                indexType = IndexType.Uint16;
+                elementSize = 2;
+                break;
+            case GuestIndexType.Index32:
+                indexType = IndexType.Uint32;
+                elementSize = 4;
+                break;
+            default:
+                return false;
+        }
+
+        if (indexType != template.Index.Type)
+        {
+            return false;
+        }
+
+        var drawn = arguments;
+        if (CanDrawIndirectOnGpu(banks, in arguments))
+        {
+            if (template.RepeatsCpuArguments || arguments.IndexCount == 0 || arguments.InstanceCount == 0)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            if (!template.RepeatsCpuArguments || !TryReadCpuArguments(in arguments, out drawn))
+            {
+                return false;
+            }
+
+            if (drawn.IndexCount == 0 || drawn.InstanceCount == 0)
+            {
+                var skipped = _pool.RentDraw();
+                skipped.ResetBindings = true;
+                Record(skipped);
+                return true;
+            }
+        }
+
+        var vertexInput = template.State.Programs.VertexInput;
+        var record = _pool.RentDraw();
+        record.CopyFrom(template);
+        record.Debug = new DebugInformation(RecordedOperation.DrawIndex, submitId, drawn.IndexCount, 0, 1, drawn.InstanceCount, drawn.IndexAddress);
+        record.SubmitId = submitId;
+        record.Draw = new DrawCall("DrawIndexed", RecordedOperation.DrawIndex, drawn.IndexCount, drawn.InstanceCount, drawn.FirstInstance);
+        record.Index = new IndexSource(true, drawn.IndexAddress, null, elementSize * drawn.IndexCount, indexType);
+        record.Emission = new DrawEmission(
+            true,
+            drawn.BaseVertex + (drawn.BaseVertexInRegister ? ResolveVertexOffset(0, vertexInput) : 0),
+            0,
+            drawn.FirstInstance + (drawn.FirstInstanceInRegister ? ResolveInstanceOffset(vertexInput) : 0),
+            drawn.IndirectArgumentsAddress);
+        record.PacketAddress = drawn.PacketAddress;
+        Record(record);
+        return true;
     }
 
     public void DrawAuto(ulong submitId, RegisterBanks banks, in DrawAutoArguments arguments)
@@ -398,7 +517,12 @@ public sealed partial class RenderExecutor
 
     private bool CanDrawAutoIndirectOnGpu(RegisterBanks banks, ulong argumentsAddress)
     {
-        if (UsesMeshExecution(banks) || Pipelines.ShaderPipelineCache.IsMergedTessellationMask(banks.Context.ShaderStages) ||
+        if (UsesMeshExecution(banks))
+        {
+            return CanDrawMeshAutoIndirectOnGpu(banks, argumentsAddress);
+        }
+
+        if (Pipelines.ShaderPipelineCache.IsMergedTessellationMask(banks.Context.ShaderStages) ||
             (argumentsAddress & 3) != 0 || argumentsAddress > ulong.MaxValue - AutoIndirectArgumentsSize ||
             _host.ClampMappedSize(argumentsAddress, AutoIndirectArgumentsSize) != AutoIndirectArgumentsSize)
         {
@@ -408,6 +532,20 @@ public sealed partial class RenderExecutor
         return (GuestPrimitiveType)banks.UserConfig.PrimitiveType is GuestPrimitiveType.PointList or GuestPrimitiveType.LineList or
             GuestPrimitiveType.LineStrip or GuestPrimitiveType.TriangleList or GuestPrimitiveType.TriangleStrip or
             GuestPrimitiveType.TriangleFan or GuestPrimitiveType.Polygon or GuestPrimitiveType.RectangleList;
+    }
+
+    // A mesh program of a point or triangle list reads the arguments of an automatic indirect
+    // draw on the GPU, which derives its workgroup counts; every other mesh draw reads them here.
+    private bool CanDrawMeshAutoIndirectOnGpu(RegisterBanks banks, ulong argumentsAddress)
+    {
+        if (!_host.SupportsIndirectMeshDraw ||
+            (GuestPrimitiveType)banks.UserConfig.PrimitiveType is not (GuestPrimitiveType.PointList or GuestPrimitiveType.TriangleList) ||
+            (argumentsAddress & 3) != 0 || argumentsAddress > ulong.MaxValue - AutoIndirectArgumentsSize)
+        {
+            return false;
+        }
+
+        return _host.ClampMappedSize(argumentsAddress, AutoIndirectArgumentsSize) == AutoIndirectArgumentsSize;
     }
 
     private void DrawAutoWithCpuArguments(ulong submitId, RegisterBanks banks, in DrawAutoArguments arguments)
@@ -445,7 +583,8 @@ public sealed partial class RenderExecutor
 
         var userConfig = banks.UserConfig;
         var shader = banks.Shader;
-        if (arguments.VertexCount == 0 || arguments.InstanceCount == 0)
+        // An indirect draw's counts are still on the GPU.
+        if (arguments.IndirectArgumentsAddress == 0 && (arguments.VertexCount == 0 || arguments.InstanceCount == 0))
         {
             TraceDrawTargets(banks, "zero-count");
             Record(record);
@@ -498,7 +637,7 @@ public sealed partial class RenderExecutor
         ValidateChangedDrawRegisters(banks);
         var draw = new DrawCall("DrawAuto", RecordedOperation.DrawIndexAuto, arguments.VertexCount, arguments.InstanceCount, arguments.FirstInstance);
         ref var state = ref record.State;
-        state.Begin(arguments.StartInstanceUserData);
+        state.Begin(arguments.StartInstanceUserData, arguments.BaseVertexUserData);
         if (!TryResolveDrawTargets(banks, in draw, ref state, record))
         {
             TraceDrawTargets(banks, "no-targets");
@@ -524,7 +663,17 @@ public sealed partial class RenderExecutor
             return;
         }
 
-        ResolveShaderPrograms(banks, ref state);
+        ResolveShaderPrograms(banks, ref state, indirect: arguments.IndirectArgumentsAddress != 0);
+        if (arguments.IndirectArgumentsAddress != 0 &&
+            (state.Programs.SolidClear is not null || (state.Programs.Available && MayBeMetadataClearQuad(banks, ref state))))
+        {
+            // A clear program stands in for the draw only when the draw has something to draw, and a metadata clear
+            // quad is recognized from its count and positions.
+            Record(record);
+            DrawAutoWithCpuArguments(submitId, banks, in arguments);
+            return;
+        }
+
         var vertexInput = state.Programs.VertexInput;
         var pixelInput = state.Programs.PixelInput;
         var rectangleList = topology == PrimitiveTopology.PatchList;
@@ -553,14 +702,17 @@ public sealed partial class RenderExecutor
 
         TraceDrawState(submitId, banks, in draw, in state);
         var indirect = arguments.OffsetSource == DrawOffsetSource.IndirectArguments;
+        // As for indexed draws: a named register's offset reaches a fetch the host replaced.
         var vertexOffset = indirect
-            ? (int)arguments.FirstVertex
+            ? (int)arguments.FirstVertex + (arguments.FirstVertexInRegister ? ResolveVertexOffset(0, vertexInput) : 0)
             : ResolveVertexOffset(userConfig.IndexOffset, vertexInput) + (int)arguments.FirstVertex;
         var emission = new DrawEmission(
             false,
             0,
             (uint)vertexOffset,
-            indirect ? arguments.FirstInstance : ResolveInstanceOffset(vertexInput),
+            indirect
+                ? arguments.FirstInstance + (arguments.FirstInstanceInRegister ? ResolveInstanceOffset(vertexInput) : 0)
+                : ResolveInstanceOffset(vertexInput),
             arguments.IndirectArgumentsAddress);
         record.PacketAddress = arguments.PacketAddress;
         FillDraw(record, banks, in draw, ref state, topology, in emission, default, primitiveRestart: false, setBindDebug: false, setAutoDebug: true);
@@ -934,6 +1086,10 @@ public sealed partial class RenderExecutor
 
     private const uint TessellationStageBits = 0x7u;
 
+    // Whether the draw's vertex stage is a vertex program of its own: no tessellation, and no mesh stage the guest asks for.
+    internal static bool RunsPlainVertexProgram(uint stages) =>
+        (stages & TessellationStageBits) == 0 && !RequiresMeshExecution(stages);
+
     private bool UsesMeshExecution(RegisterBanks banks) =>
         _pipelines.MeshShadersSupported && RequiresMeshExecution(banks.Context.ShaderStages) &&
         banks.Shader.Vertex.ExportAddress != 0 &&
@@ -954,7 +1110,7 @@ public sealed partial class RenderExecutor
         resolution.ValidatedUserConfigStamp = userConfigStamp;
     }
 
-    private void ResolveShaderPrograms(RegisterBanks banks, ref DrawState state, bool indexed = false)
+    private void ResolveShaderPrograms(RegisterBanks banks, ref DrawState state, bool indexed = false, bool indirect = false)
     {
         if (state.Programs is not null)
         {
@@ -980,11 +1136,14 @@ public sealed partial class RenderExecutor
                 userConfig.PrimitiveType = (uint)GuestPrimitiveType.TriangleList;
             }
 
-            state.Programs = _pipelines.GetMeshGraphicsPrograms(banks, userConfig, targetExportMapping, state.PixelActive, state.Depth.HasTarget);
+            var taskLaunch = indirect && !indexed && MeshTaskLaunch.Active;
+            state.Programs = _pipelines.GetMeshGraphicsPrograms(banks, userConfig, targetExportMapping, state.PixelActive, state.Depth.HasTarget,
+                taskLaunch);
             return;
         }
 
-        state.Programs = _pipelines.GetGraphicsPrograms(banks, targetExportMapping, state.PixelActive, state.Depth.HasTarget, state.StartInstanceUserData);
+        state.Programs = _pipelines.GetGraphicsPrograms(banks, targetExportMapping, state.PixelActive, state.Depth.HasTarget, state.StartInstanceUserData,
+            state.BaseVertexUserData);
     }
 
     [System.Runtime.CompilerServices.InlineArray(RenderingState.ColorAttachmentCapacity)]

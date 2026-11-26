@@ -42,36 +42,61 @@ internal static unsafe class SdlGamepadStateReader
         return SDL_OpenGamepad(selected);
     }
 
+    // SDL's gamepad buttons and the pad buttons they are, for a state read and a button event alike.
+    private static readonly (SDL_GamepadButton Source, HostGamepadButtons Target)[] ButtonMap =
+    [
+        (SDL_GamepadButton.SDL_GAMEPAD_BUTTON_SOUTH, HostGamepadButtons.Cross),
+        (SDL_GamepadButton.SDL_GAMEPAD_BUTTON_EAST, HostGamepadButtons.Circle),
+        (SDL_GamepadButton.SDL_GAMEPAD_BUTTON_WEST, HostGamepadButtons.Square),
+        (SDL_GamepadButton.SDL_GAMEPAD_BUTTON_NORTH, HostGamepadButtons.Triangle),
+        (SDL_GamepadButton.SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, HostGamepadButtons.L1),
+        (SDL_GamepadButton.SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, HostGamepadButtons.R1),
+        (SDL_GamepadButton.SDL_GAMEPAD_BUTTON_LEFT_STICK, HostGamepadButtons.L3),
+        (SDL_GamepadButton.SDL_GAMEPAD_BUTTON_RIGHT_STICK, HostGamepadButtons.R3),
+        (SDL_GamepadButton.SDL_GAMEPAD_BUTTON_BACK, HostGamepadButtons.Create),
+        (SDL_GamepadButton.SDL_GAMEPAD_BUTTON_GUIDE, HostGamepadButtons.Ps),
+        (SDL_GamepadButton.SDL_GAMEPAD_BUTTON_START, HostGamepadButtons.Options),
+        (SDL_GamepadButton.SDL_GAMEPAD_BUTTON_MISC1, HostGamepadButtons.Mic),
+        (SDL_GamepadButton.SDL_GAMEPAD_BUTTON_TOUCHPAD, HostGamepadButtons.TouchPad),
+        (SDL_GamepadButton.SDL_GAMEPAD_BUTTON_DPAD_UP, HostGamepadButtons.Up),
+        (SDL_GamepadButton.SDL_GAMEPAD_BUTTON_DPAD_RIGHT, HostGamepadButtons.Right),
+        (SDL_GamepadButton.SDL_GAMEPAD_BUTTON_DPAD_DOWN, HostGamepadButtons.Down),
+        (SDL_GamepadButton.SDL_GAMEPAD_BUTTON_DPAD_LEFT, HostGamepadButtons.Left),
+    ];
+
+    public static HostGamepadButtons MapButton(byte button)
+    {
+        foreach (var (source, target) in ButtonMap)
+        {
+            if ((byte)source == button)
+            {
+                return target;
+            }
+        }
+
+        return HostGamepadButtons.None;
+    }
+
+    // A trigger past a quarter of its travel is also its digital button.
+    public static bool IsTriggerPressed(byte value) => value > 64;
+
     public static HostGamepadState Read(SDL_Gamepad* gamepad)
     {
         var buttons = HostGamepadButtons.None;
-        AddButton(gamepad, SDL_GamepadButton.SDL_GAMEPAD_BUTTON_SOUTH, HostGamepadButtons.Cross, ref buttons);
-        AddButton(gamepad, SDL_GamepadButton.SDL_GAMEPAD_BUTTON_EAST, HostGamepadButtons.Circle, ref buttons);
-        AddButton(gamepad, SDL_GamepadButton.SDL_GAMEPAD_BUTTON_WEST, HostGamepadButtons.Square, ref buttons);
-        AddButton(gamepad, SDL_GamepadButton.SDL_GAMEPAD_BUTTON_NORTH, HostGamepadButtons.Triangle, ref buttons);
-        AddButton(gamepad, SDL_GamepadButton.SDL_GAMEPAD_BUTTON_LEFT_SHOULDER, HostGamepadButtons.L1, ref buttons);
-        AddButton(gamepad, SDL_GamepadButton.SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER, HostGamepadButtons.R1, ref buttons);
-        AddButton(gamepad, SDL_GamepadButton.SDL_GAMEPAD_BUTTON_LEFT_STICK, HostGamepadButtons.L3, ref buttons);
-        AddButton(gamepad, SDL_GamepadButton.SDL_GAMEPAD_BUTTON_RIGHT_STICK, HostGamepadButtons.R3, ref buttons);
-        AddButton(gamepad, SDL_GamepadButton.SDL_GAMEPAD_BUTTON_BACK, HostGamepadButtons.Create, ref buttons);
-        AddButton(gamepad, SDL_GamepadButton.SDL_GAMEPAD_BUTTON_GUIDE, HostGamepadButtons.Ps, ref buttons);
-        AddButton(gamepad, SDL_GamepadButton.SDL_GAMEPAD_BUTTON_START, HostGamepadButtons.Options, ref buttons);
-        AddButton(gamepad, SDL_GamepadButton.SDL_GAMEPAD_BUTTON_MISC1, HostGamepadButtons.Mic, ref buttons);
-        AddButton(gamepad, SDL_GamepadButton.SDL_GAMEPAD_BUTTON_TOUCHPAD, HostGamepadButtons.TouchPad, ref buttons);
-        AddButton(gamepad, SDL_GamepadButton.SDL_GAMEPAD_BUTTON_DPAD_UP, HostGamepadButtons.Up, ref buttons);
-        AddButton(gamepad, SDL_GamepadButton.SDL_GAMEPAD_BUTTON_DPAD_RIGHT, HostGamepadButtons.Right, ref buttons);
-        AddButton(gamepad, SDL_GamepadButton.SDL_GAMEPAD_BUTTON_DPAD_DOWN, HostGamepadButtons.Down, ref buttons);
-        AddButton(gamepad, SDL_GamepadButton.SDL_GAMEPAD_BUTTON_DPAD_LEFT, HostGamepadButtons.Left, ref buttons);
+        foreach (var (source, target) in ButtonMap)
+        {
+            AddButton(gamepad, source, target, ref buttons);
+        }
 
         var leftTrigger = HostWindowInput.ToTriggerByte(
             SDL_GetGamepadAxis(gamepad, SDL_GamepadAxis.SDL_GAMEPAD_AXIS_LEFT_TRIGGER));
         var rightTrigger = HostWindowInput.ToTriggerByte(
             SDL_GetGamepadAxis(gamepad, SDL_GamepadAxis.SDL_GAMEPAD_AXIS_RIGHT_TRIGGER));
-        if (leftTrigger > 64)
+        if (IsTriggerPressed(leftTrigger))
         {
             buttons |= HostGamepadButtons.L2;
         }
-        if (rightTrigger > 64)
+        if (IsTriggerPressed(rightTrigger))
         {
             buttons |= HostGamepadButtons.R2;
         }
@@ -96,6 +121,7 @@ internal static unsafe class SdlGamepadStateReader
     {
         SDL_GamepadType.SDL_GAMEPAD_TYPE_PS4 => HostGamepadType.DualShock4,
         SDL_GamepadType.SDL_GAMEPAD_TYPE_PS5 => HostGamepadType.DualSense,
+        SDL_GamepadType.SDL_GAMEPAD_TYPE_XBOX360 or SDL_GamepadType.SDL_GAMEPAD_TYPE_XBOXONE => HostGamepadType.Xbox,
         _ => HostGamepadType.Generic,
     };
 

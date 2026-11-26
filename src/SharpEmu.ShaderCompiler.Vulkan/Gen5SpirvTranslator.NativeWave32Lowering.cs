@@ -118,7 +118,13 @@ public static partial class Gen5SpirvTranslator
                     context._uintType,
                     activeLanes,
                     0);
-                var firstActiveLane = context.Ext(73, context._uintType, activeLow);
+                // V_READFIRSTLANE_B32 reads lane 0 when EXEC is empty (RDNA2 ISA 12.8); FindILsb(0) is not a lane.
+                var firstActiveLane = context._module.AddInstruction(
+                    SpirvOp.Select,
+                    context._uintType,
+                    context._module.AddInstruction(SpirvOp.IEqual, context._boolType, activeLow, context.UInt(0)),
+                    context.UInt(0),
+                    context.Ext(73, context._uintType, activeLow));
                 return context._module.AddInstruction(
                     SpirvOp.GroupNonUniformBroadcast,
                     context._uintType,

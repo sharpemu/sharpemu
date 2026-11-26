@@ -5,7 +5,7 @@ using System.Collections.Generic;
 
 namespace SharpEmu.ShaderCompiler.Resources;
 
-internal sealed class MaterializationProgram
+internal sealed partial class MaterializationProgram
 {
     private const ulong AddressMask = 0x0000_FFFF_FFFF_FFFFul;
     private const int MinimumRunWords = 2;
@@ -53,6 +53,11 @@ internal sealed class MaterializationProgram
         public bool[] Absolute = new bool[64];
         public byte[] Bytes = new byte[1024];
         public int Count;
+
+        // Active-source arrays by length: TryRunInto reads its array before the scratch goes back to the thread.
+        private readonly bool[]?[] _activeSources = new bool[]?[65];
+
+        public bool[] ActiveSources(int count) => count < _activeSources.Length ? _activeSources[count] ??= new bool[count] : new bool[count];
 
         public void Ensure(int registers)
         {
@@ -210,6 +215,28 @@ internal sealed class MaterializationProgram
         }
 
         private int LevelOf(int register) => _registerLevels[register];
+
+        // Every register as a node a branch selection evaluates on demand: its constant, step or read.
+        public BranchNode[] Nodes()
+        {
+            var nodes = new BranchNode[_constants.Count];
+            for (var register = 0; register < nodes.Length; register++)
+            {
+                nodes[register] = new BranchNode(BranchNodeKind.Constant, _constants[register], default, default);
+            }
+
+            foreach (var (_, step) in _steps)
+            {
+                nodes[step.Target] = new BranchNode(BranchNodeKind.Step, 0, step, default);
+            }
+
+            foreach (var (_, read) in _reads)
+            {
+                nodes[read.Target] = new BranchNode(BranchNodeKind.Read, 0, default, read);
+            }
+
+            return nodes;
+        }
 
         public bool Register(ScalarValue value, out int register)
         {
@@ -384,7 +411,13 @@ internal sealed class MaterializationProgram
             var levels = new Level[levelCount];
             for (var level = 0; level < levelCount; level++)
             {
-                levels[level] = new Level { Reads = [.. reads[level]], Steps = [.. steps[level]] };
+                ReadStep[] levelReads = [.. reads[level]];
+                if (StaticReadOrder)
+                {
+                    Array.Sort(levelReads, CompareReadOrder);
+                }
+
+                levels[level] = new Level { Reads = levelReads, Steps = [.. steps[level]] };
             }
 
             return new MaterializationProgram(_constants.Count, [.. _constants], [.. _constantValid], levels, sourceWords, tableWords, tableOffsets,
@@ -395,7 +428,7 @@ internal sealed class MaterializationProgram
     internal bool TryRun(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, int additionalTableWords, out List<DescriptorWords> sources,
         out uint[] table, out DeviceAddressRange[] ranges, out bool[] activeSources)
     {
-        activeSources = plan.ResourceBranches.Count != 0 ? RuntimeValueEvaluator.EvaluateActiveSources(plan, inputs) : [];
+        activeSources = plan.ResourceBranches.Count != 0 ? SelectActiveSources(plan, inputs, reuse: null) : [];
         var scratch = _scratch ?? new Scratch();
         _scratch = null;
         try
@@ -427,11 +460,11 @@ internal sealed class MaterializationProgram
 
     internal bool TryRunInto(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, int additionalTableWords, Output output)
     {
-        var activeSources = plan.ResourceBranches.Count != 0 ? RuntimeValueEvaluator.EvaluateActiveSources(plan, inputs) : [];
         var scratch = _scratch ?? new Scratch();
         _scratch = null;
         try
         {
+            var activeSources = plan.ResourceBranches.Count != 0 ? SelectActiveSources(plan, inputs, reuse: scratch) : [];
             Evaluate(inputs, scratch);
             return Emit(plan, additionalTableWords, scratch, activeSources, output);
         }
@@ -547,11 +580,8 @@ internal sealed class MaterializationProgram
         var low = _rangeLow[index];
         var high = _rangeHigh[index];
         var plannedRange = low >= 0 && valid[low] && valid[high];
-        var handleBase = plannedRange ? ((uint)values[low] | ((ulong)(uint)values[high] << 32)) & AddressMask : 0;
-        var firstByte = range.Bounded ? range.FirstByte : Math.Min(range.FirstByte, 0);
-        var baseAddress = plannedRange ? unchecked(handleBase + (ulong)firstByte) & AddressMask : 0;
-        var size = range.Bounded ? range.Extent : DeviceAddressRangePlanner.MaxRangeBytes;
-        return new DeviceAddressRange(range.Handle, baseAddress, plannedRange ? size : 0, plannedRange, range.Written);
+        return DeviceAddressRangePlanner.EvaluateRange(range, plannedRange,
+            plannedRange ? (uint)values[low] : 0, plannedRange ? (uint)values[high] : 0);
     }
 
     private bool Run(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, int additionalTableWords, Scratch scratch, bool[] activeSources,
@@ -660,6 +690,20 @@ internal sealed class MaterializationProgram
         }
     }
 
+    private static readonly bool StaticReadOrder = Environment.GetEnvironmentVariable("SHARPEMU_STATIC_READ_ORDER") != "0";
+
+    private static int CompareReadOrder(ReadStep left, ReadStep right)
+    {
+        var order = left.Low.CompareTo(right.Low);
+        if (order == 0) order = left.High.CompareTo(right.High);
+        if (order == 0) order = left.Offset.CompareTo(right.Offset);
+        if (order == 0) order = left.Records.CompareTo(right.Records);
+        if (order == 0) order = left.Word3.CompareTo(right.Word3);
+        if (order == 0) order = left.Kind.CompareTo(right.Kind);
+        if (order == 0) order = (left.Immediate + left.ConstantOffset).CompareTo(right.Immediate + right.ConstantOffset);
+        return order != 0 ? order : left.Target.CompareTo(right.Target);
+    }
+
     private static void ReadLevel(ReadStep[] reads, ResourceRuntimeInputs inputs, Scratch scratch)
     {
         var values = scratch.Values;
@@ -701,7 +745,7 @@ internal sealed class MaterializationProgram
         var targets = scratch.Targets;
         var bases = scratch.NullBases;
         var absolute = scratch.Absolute;
-        for (var index = 1; index < count; index++)
+        for (var index = StaticReadOrder ? count : 1; index < count; index++)
         {
             var address = addresses[index];
             var target = targets[index];

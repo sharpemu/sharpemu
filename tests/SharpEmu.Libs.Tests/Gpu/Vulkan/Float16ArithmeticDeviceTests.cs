@@ -32,6 +32,10 @@ public sealed class Float16ArithmeticDeviceTests(HeadlessVulkanFixture fixture) 
     [InlineData(0x4000u, 0x4200u, 0x3C00u, 0x4700u)]
     [InlineData(0x3C01u, 0x3BFEu, 0xBC00u, 0x8010u)]
     [InlineData(0x0001u, 0x3C00u, 0x0001u, 0x0002u)]
+    // Results halfway between two subnormals round to the even one.
+    [InlineData(0x0001u, 0x3800u, 0x0001u, 0x0002u)]
+    [InlineData(0x03FFu, 0x3800u, 0x0000u, 0x0200u)]
+    [InlineData(0x8003u, 0x3800u, 0x8000u, 0x8002u)]
     public void FusedAddLiteralRoundsOnlyAfterAddition(uint first, uint second, uint literal, uint expected)
         => CheckResult("VFmaAkF16", first, expected, second, literal);
 

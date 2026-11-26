@@ -280,9 +280,24 @@ public static class ViewFormatRules
             ? swizzle
             : throw UnsupportedColorView("sampled", imageFormat, viewFormat, swizzle);
 
-    public static bool IsSupportedSampledDepthView(Format imageFormat, Format viewFormat, uint swizzle) =>
-        IsSupportedSampledDepthFormat(imageFormat, viewFormat) &&
-        (swizzle == PackDestinationSelect(4, 4, 4, 4) || swizzle == PackDestinationSelect(4, 0, 0, 0) || swizzle == PackDestinationSelect(4, 0, 0, 1));
+    public static bool IsSupportedSampledDepthView(Format imageFormat, Format viewFormat, uint swizzle)
+    {
+        if (!IsSupportedSampledDepthFormat(imageFormat, viewFormat) || (swizzle & ~0xfffu) != 0)
+        {
+            return false;
+        }
+
+        // A depth view has one channel: the swizzle may repeat it and fill the other channels with 0 or 1.
+        for (uint channel = 0; channel < 4; channel++)
+        {
+            if (DestinationSelect(swizzle, channel) is not (0 or 1 or 4))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     public static uint SelectSampledDepthView(Format imageFormat, Format viewFormat, uint swizzle) =>
         IsSupportedSampledDepthView(imageFormat, viewFormat, swizzle)

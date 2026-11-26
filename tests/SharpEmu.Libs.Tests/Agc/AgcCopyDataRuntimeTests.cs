@@ -60,6 +60,35 @@ public sealed class AgcCopyDataRuntimeTests
     }
 
     [Fact]
+    public void MultiAcbSubmit_RunsEachBufferOnTheOwnersComputeQueue()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        const uint expected = 0x1122_3344;
+        var graphicsDwords = WriteWaitThenResult(memory, LabelAddress, expected);
+        var stream = AgcExports.GetHeadlessCommandStreamForTests(memory);
+        SubmitDcb(ctx, memory, GraphicsCommandAddress, graphicsDwords);
+        Assert.Equal(1, stream.Queue.BlockedQueueCount);
+
+        WriteCopyData(memory, ComputeCommandAddress, control: 5u | (2u << 8), source: 0x55, destination: SecondResultAddress);
+        WriteCopyData(memory, LaterComputeCommandAddress, control: 5u | (2u << 8), source: expected, destination: LabelAddress);
+        WriteUInt64(memory, ComputeSubmitAddress, ComputeCommandAddress);
+        WriteUInt64(memory, ComputeSubmitAddress + 8, LaterComputeCommandAddress);
+        WriteUInt32(memory, ComputeSubmitAddress + 16, 6);
+        WriteUInt32(memory, ComputeSubmitAddress + 20, 6);
+        ctx[CpuRegister.Rdi] = FirstComputeOwner;
+        ctx[CpuRegister.Rsi] = ComputeSubmitAddress;
+        ctx[CpuRegister.Rdx] = ComputeSubmitAddress + 16;
+        ctx[CpuRegister.Rcx] = 2;
+
+        Assert.Equal(0, AgcExports.DriverSubmitMultiAcbs(ctx));
+        Assert.Equal(0x55u, ReadUInt32(memory, SecondResultAddress));
+        Assert.Equal(expected, ReadUInt32(memory, LabelAddress));
+        Assert.Equal(0xCAFE_BABEu, ReadUInt32(memory, ResultAddress));
+        Assert.False(stream.Queue.HasPending);
+    }
+
+    [Fact]
     public void MemoryCopy_ReadsAndWritesGuestMemoryInQueueOrder()
     {
         var memory = new FakeCpuMemory(BaseAddress, MemorySize);

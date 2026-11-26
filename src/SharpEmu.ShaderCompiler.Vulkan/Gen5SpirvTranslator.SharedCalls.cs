@@ -680,6 +680,8 @@ public static partial class Gen5SpirvTranslator
                 return false;
             }
 
+            // The body reads and writes the registers of every lane: the EXEC guards deferred in this block land first.
+            FlushDeferredGuards();
             Store(_programCounter, UInt((uint)body.First));
             _module.AddInstruction(SpirvOp.FunctionCall, _voidType, body.Function);
             return true;
@@ -741,6 +743,7 @@ public static partial class Gen5SpirvTranslator
             _module.AddStatement(SpirvOp.SelectionMerge, merge, 0);
             _module.AddStatement(SpirvOp.BranchConditional, enters, call, merge);
             _module.AddLabel(call);
+            FlushDeferredGuards();
             _module.AddInstruction(SpirvOp.FunctionCall, _voidType, function);
             _module.AddStatement(SpirvOp.Branch, merge);
             _module.AddLabel(merge);

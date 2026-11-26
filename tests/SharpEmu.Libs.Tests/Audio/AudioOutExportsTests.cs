@@ -223,12 +223,52 @@ public sealed class AudioOutExportsTests : IDisposable
         Assert.Equal(samples, Assert.Single(Assert.Single(_streams).Submissions));
     }
 
+    [Theory]
+    [InlineData(4, 0)]
+    [InlineData(10, 2)]
+    public void ControllerPortsPlayOnTheirControllerPairAndNotOnTheSpeakers(int portType, int pair)
+    {
+        var controller = new RecordingAudioStream();
+        AudioOutExports.SetControllerFactoryForTests(_ => controller);
+        var handle = OpenPort(bufferLength: 2, portType);
+        Span<byte> source = stackalloc byte[8];
+        BinaryPrimitives.WriteInt16LittleEndian(source, 16384);
+        BinaryPrimitives.WriteInt16LittleEndian(source[2..], -16384);
+        BinaryPrimitives.WriteInt16LittleEndian(source[4..], 8192);
+        BinaryPrimitives.WriteInt16LittleEndian(source[6..], -8192);
+        Assert.True(_memory.TryWrite(FirstSourceAddress, source));
+
+        Assert.Equal(0, SubmitSingle(handle, FirstSourceAddress));
+
+        Assert.Empty(_streams);
+        var expected = new float[8];
+        expected[pair] = 0.5f;
+        expected[pair + 1] = -0.5f;
+        expected[4 + pair] = 0.25f;
+        expected[4 + pair + 1] = -0.25f;
+        var submitted = Assert.Single(controller.Submissions);
+        Assert.Equal(expected, System.Runtime.InteropServices.MemoryMarshal.Cast<byte, float>(submitted.AsSpan()).ToArray());
+    }
+
+    [Fact]
+    public void ControllerPortsWithoutAControllerStaySilent()
+    {
+        AudioOutExports.SetControllerFactoryForTests(_ => null);
+        var handle = OpenPort(bufferLength: 2, portType: 10);
+        Assert.True(handle > 0);
+        Assert.True(_memory.TryWrite(FirstSourceAddress, new byte[] { 1, 0, 2, 0, 3, 0, 4, 0 }));
+
+        Assert.Equal(0, SubmitSingle(handle, FirstSourceAddress));
+
+        Assert.Empty(_streams);
+    }
+
     public void Dispose() => AudioOutExports.ResetForTests();
 
-    private int OpenPort(uint bufferLength)
+    private int OpenPort(uint bufferLength, int portType = 0)
     {
         _ctx[CpuRegister.Rdi] = 1;
-        _ctx[CpuRegister.Rsi] = 0;
+        _ctx[CpuRegister.Rsi] = (ulong)portType;
         _ctx[CpuRegister.Rdx] = 0;
         _ctx[CpuRegister.Rcx] = bufferLength;
         _ctx[CpuRegister.R8] = 48000;

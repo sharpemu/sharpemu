@@ -15,4 +15,13 @@ public readonly record struct IndirectMeshDrawRequest(
     bool PointList, uint PrimitivesPerGroup, MeshExecutionLimits Limits)
 {
     public const uint MaximumIndexCapacity = 1 << 20;
+
+    // An automatic draw reads no index buffer; its arguments are (vertexCount, instanceCount, firstVertex, firstInstance).
+    public bool Automatic => IndexElementSize == 0;
+
+    // The draw's mesh program is task-launched (MeshTaskLaunch): the task stage converts the arguments.
+    public bool TaskLaunched { get; init; }
+
+    public static IndirectMeshDrawRequest ForAutomaticDraw(ulong argumentsAddress, bool pointList, uint primitivesPerGroup,
+        MeshExecutionLimits limits) => new(argumentsAddress, 0, 0, 0, pointList, primitivesPerGroup, limits);
 }

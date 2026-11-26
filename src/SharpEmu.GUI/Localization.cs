@@ -74,6 +74,23 @@ public sealed class Localization : INotifyPropertyChanged
 
     public string Format(string key, params object?[] args) => string.Format(Get(key), args);
 
+    public IReadOnlyDictionary<string, string> WithPrefix(string prefix)
+    {
+        var result = new Dictionary<string, string>(StringComparer.Ordinal);
+        foreach (var source in new[] { _fallbackStrings, _strings })
+        {
+            foreach (var (key, value) in source)
+            {
+                if (key.StartsWith(prefix, StringComparison.Ordinal))
+                {
+                    result[key] = value;
+                }
+            }
+        }
+
+        return result;
+    }
+
     /// <summary>
     /// Languages available either embedded in the binary or as a loose
     /// override file, sorted by code. A loose file's declared name wins when

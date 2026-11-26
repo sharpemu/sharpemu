@@ -132,8 +132,9 @@ public static partial class Gen5SpirvTranslator
             });
             StoreV(registers.HullVertexVector, IAdd(Load(_uintType, vertex), TessellationWord(Gen5TessellationData.VertexOffset)), false);
             StoreV(registers.HullLocalVector, local, false);
-            var instance = IAdd(TessellationWord(Gen5TessellationData.InstanceId),
-                _module.AddInstruction(SpirvOp.UDiv, _uintType, inputPatch, perInstance));
+            // The hardware numbers the instances of a draw from zero. A start instance reaches a program only
+            // through the user data register its draw packet names.
+            var instance = _module.AddInstruction(SpirvOp.UDiv, _uintType, inputPatch, perInstance);
             foreach (var register in registers.HullInstanceVectors)
                 StoreV(register, instance, false);
         }

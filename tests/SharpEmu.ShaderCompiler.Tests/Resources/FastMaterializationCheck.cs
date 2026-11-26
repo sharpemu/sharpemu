@@ -85,6 +85,11 @@ internal static class FastMaterializationCheck
         {
             throw new InvalidOperationException($"The fast table, user data or ranges differ: hash=0x{plan.Hash:X16}.");
         }
+
+        if (!expected.Heaps.AsSpan().SequenceEqual(fast.Heaps))
+        {
+            throw new InvalidOperationException($"The fast bindless heaps differ: hash=0x{plan.Hash:X16}.");
+        }
     }
 
     private static void Same(string what, ShaderResourcePlan plan, uint[][] expected, uint[][] actual)

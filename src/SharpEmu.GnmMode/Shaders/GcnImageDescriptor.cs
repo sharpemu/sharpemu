@@ -67,6 +67,7 @@ public static class GcnImageDescriptor
     internal static void ResetLayouts()
     {
         ColorTargets.Clear();
+        HostLayoutTargets.Reset();
         LinearPitches.Clear();
         DepthTargets.Clear();
         ReportedDepthCopies.Clear();
@@ -178,6 +179,11 @@ public static class GcnImageDescriptor
         return new ImageRequest(description, default, ImageRole.DepthTarget);
     }
 
+    // A GCN texture is converted into a linear chain the translator writes whole, so every level
+    // is there: it never takes the resident-levels image of a streamed texture.
+    private static TextureRequestResolution WholeChain(TextureRequestResolution resolution) =>
+        resolution with { Request = ImageRequestBuilders.WithWholeMipChain(resolution.Request) };
+
     internal static TextureRequestResolution ResolveTexture(ReadOnlySpan<uint> words, in ShaderImageShape shape,
         ulong shaderHash, int imageIndex)
     {
@@ -187,7 +193,7 @@ public static class GcnImageDescriptor
             linear.Width == descriptor.Width + 1 && linear.Height == descriptor.Height + 1 &&
             linear.Format == descriptor.Format && TileGeometry.TryGetElementLayout(linear.Format, out var element))
         {
-            var pitched = ImageRequestBuilders.Texture(words, shape, shaderHash, imageIndex);
+            var pitched = WholeChain(ImageRequestBuilders.Texture(words, shape, shaderHash, imageIndex));
             var pitchedRequest = pitched.Request;
             var size = (linear.Pitch + (ulong)element.TexelWidth - 1) / element.TexelWidth *
                 ((linear.Height + (ulong)element.TexelHeight - 1) / element.TexelHeight) * element.Bytes;
@@ -197,7 +203,7 @@ public static class GcnImageDescriptor
             return pitched with { Request = pitchedRequest };
         }
         if (descriptor.TileMode != GuestTileMode.RenderTarget)
-            return ImageRequestBuilders.Texture(words, shape, shaderHash, imageIndex);
+            return WholeChain(ImageRequestBuilders.Texture(words, shape, shaderHash, imageIndex));
 
         // GNM placements can be 32 KiB aligned. Only known GPU attachments use the
         // shared host layout; CPU-resident GCN tiles still require a real detiler.
@@ -205,7 +211,7 @@ public static class GcnImageDescriptor
         var address = (descriptor.BaseAddress + 0xFFFFUL) & ~0xFFFFUL;
         aligned[0] = (uint)(address >> 8);
         aligned[1] = (aligned[1] & ~63u) | (uint)(address >> 40);
-        var resolution = ImageRequestBuilders.Texture(aligned, shape, shaderHash, imageIndex);
+        var resolution = WholeChain(ImageRequestBuilders.Texture(aligned, shape, shaderHash, imageIndex));
         var request = resolution.Request;
         request.Description.Data = request.Description.Data with { Address = descriptor.BaseAddress };
         return resolution with { Request = request };

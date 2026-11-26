@@ -14,6 +14,9 @@ namespace SharpEmu.Libs.Tests.Gpu.Pipelines;
 public sealed class ComputeRejectionPolicyTests
 {
     private const string Variable = "SHARPEMU_STRICT_COMPUTE";
+    // The rejected plans below read an image descriptor at an index the host cannot evaluate. Null bindless descriptors,
+    // on by default, would read it as null instead, so these tests turn them off.
+    private const string BindlessNullVariable = "SHARPEMU_BINDLESS_NULL";
     private const ulong CodeAddress = PipelineTestGuest.MemoryBase + 0x1000;
     private const ulong HeaderAddress = PipelineTestGuest.MemoryBase + 0x8000;
 
@@ -57,9 +60,11 @@ public sealed class ComputeRejectionPolicyTests
     public void ComputeRejectionUsesTheConfiguredPolicy(string? value, bool rejectPlan)
     {
         var previous = Environment.GetEnvironmentVariable(Variable);
+        var previousBindlessNull = Environment.GetEnvironmentVariable(BindlessNullVariable);
         try
         {
             Environment.SetEnvironmentVariable(Variable, value);
+            Environment.SetEnvironmentVariable(BindlessNullVariable, "0");
             using var fatal = new FatalScope();
             var guest = new PipelineTestGuest();
             guest.RegisterProgram(CodeAddress, HeaderAddress, rejectPlan
@@ -92,6 +97,37 @@ public sealed class ComputeRejectionPolicyTests
         finally
         {
             Environment.SetEnvironmentVariable(Variable, previous);
+            Environment.SetEnvironmentVariable(BindlessNullVariable, previousBindlessNull);
+        }
+    }
+
+    // Planning a large program takes seconds, so a rejected program is not planned again: the second lookup reads code
+    // that would now plan, and still gets the first rejection.
+    [Fact]
+    public void ARejectedPlanIsNotPlannedAgain()
+    {
+        var previousBindlessNull = Environment.GetEnvironmentVariable(BindlessNullVariable);
+        try
+        {
+            Environment.SetEnvironmentVariable(BindlessNullVariable, "0");
+            using var fatal = new FatalScope();
+            var guest = new PipelineTestGuest();
+            guest.RegisterProgram(CodeAddress, HeaderAddress, [0x7E100500, 0xF42C0402, 0x10000000, 0xF0000108, 0x00040000, 0xBF810000]);
+            var source = guest.Source(CodeAddress, ShaderStage.Compute, []);
+            var cursor = 0u;
+            Assert.False(guest.Programs.TryGetProgram(source, PipelineTestGuest.ComputeOptions(32), false, ref cursor,
+                out _, out _, out var first));
+            Assert.Contains("resource plan is invalid", first);
+
+            guest.WriteWords(CodeAddress, 0xBF810000, 0xBF810000, 0xBF810000, 0xBF810000, 0xBF810000, 0xBF810000);
+            Assert.False(guest.Programs.TryGetProgram(source, PipelineTestGuest.ComputeOptions(32), false, ref cursor,
+                out _, out _, out var second));
+            Assert.Equal(first, second);
+            Assert.Empty(guest.Compiler.Requests);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(BindlessNullVariable, previousBindlessNull);
         }
     }
 

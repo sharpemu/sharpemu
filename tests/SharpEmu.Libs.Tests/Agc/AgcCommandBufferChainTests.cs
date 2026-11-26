@@ -126,6 +126,8 @@ public sealed class AgcCommandBufferChainTests
         Assert.Equal(0x2F20_0123u, ReadUInt32(memory, FirstLinkAddress + 12));
     }
 
+    // The free space truncates the cursor distance to 32 bits, so an allocator
+    // whose down cursor is null still has room. Unreal Engine writes its jumps and submission prologues through one.
     [Fact]
     public void JumpPatchSetTarget_BindsTheTargetOfAJumpWrittenWithANullTarget()
     {
@@ -166,20 +168,83 @@ public sealed class AgcCommandBufferChainTests
     }
 
     [Fact]
-    public void AcbJump_AlwaysEncodesChainMode()
+    public void DcbJump_WritesThroughAnAllocatorWithANullDownCursor()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+
+        WriteUInt64(memory, CommandBufferAddress + 0x10, FirstLinkAddress);
+        WriteUInt64(memory, CommandBufferAddress + 0x18, 0);
+        ctx[CpuRegister.Rdi] = CommandBufferAddress;
+        ctx[CpuRegister.Rsi] = 1; // chain
+        ctx[CpuRegister.Rdx] = 0;
+        ctx[CpuRegister.Rcx] = SecondLinkAddress;
+        ctx[CpuRegister.R8] = 0x40;
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.DcbJump(ctx));
+        Assert.Equal(FirstLinkAddress, ctx[CpuRegister.Rax]);
+        Assert.Equal(FirstLinkAddress + 16, ReadUInt64(memory, CommandBufferAddress + 0x10));
+    }
+
+    [Theory]
+    [InlineData(0u, 0x0F30_0123u)]
+    [InlineData(2u, 0x2F30_0123u)]
+    public void AcbJump_EncodesCachePolicyAndSizeAndAlwaysChains(uint cachePolicy, uint control)
     {
         var memory = new FakeCpuMemory(BaseAddress, MemorySize);
         var ctx = new CpuContext(memory, Generation.Gen5);
 
         PointCommandBufferAt(memory, FirstLinkAddress);
         ctx[CpuRegister.Rdi] = CommandBufferAddress;
-        ctx[CpuRegister.Rsi] = SecondLinkAddress;
-        ctx[CpuRegister.Rdx] = 0x123;
+        ctx[CpuRegister.Rsi] = cachePolicy;
+        ctx[CpuRegister.Rdx] = SecondLinkAddress;
+        ctx[CpuRegister.Rcx] = 0x123;
 
         Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.AcbJump(ctx));
         Assert.Equal(FirstLinkAddress, ctx[CpuRegister.Rax]);
         Assert.Equal(unchecked((uint)SecondLinkAddress), ReadUInt32(memory, FirstLinkAddress + 4));
-        Assert.Equal(0x0F30_0123u, ReadUInt32(memory, FirstLinkAddress + 12));
+        Assert.Equal(control, ReadUInt32(memory, FirstLinkAddress + 12));
+    }
+
+    // The ABI is (acb, cachePolicy, target, sizeDwords); the target follows the cache policy.
+    [Fact]
+    public void AcbJump_ReadsTargetAndSizeAfterTheCachePolicy()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+
+        PointCommandBufferAt(memory, FirstLinkAddress);
+        ctx[CpuRegister.Rdi] = CommandBufferAddress;
+        ctx[CpuRegister.Rsi] = 2;
+        ctx[CpuRegister.Rdx] = SecondLinkAddress;
+        ctx[CpuRegister.Rcx] = 0x456;
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.AcbJump(ctx));
+        Assert.Equal(FirstLinkAddress, ctx[CpuRegister.Rax]);
+        Assert.Equal(unchecked((uint)SecondLinkAddress), ReadUInt32(memory, FirstLinkAddress + 4));
+        Assert.Equal((uint)(SecondLinkAddress >> 32), ReadUInt32(memory, FirstLinkAddress + 8));
+        var control = ReadUInt32(memory, FirstLinkAddress + 12);
+        Assert.Equal(2u, (control >> 28) & 0x3u);
+        Assert.Equal(1u, (control >> 20) & 0x1u);
+        Assert.Equal(0x456u, control & 0xFFFFFu);
+    }
+
+    [Fact]
+    public void AcbJump_RejectsAnOutOfRangeCachePolicy()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, MemorySize);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+
+        PointCommandBufferAt(memory, FirstLinkAddress);
+        ctx[CpuRegister.Rdi] = CommandBufferAddress;
+        ctx[CpuRegister.Rsi] = 4;
+        ctx[CpuRegister.Rdx] = SecondLinkAddress;
+        ctx[CpuRegister.Rcx] = 0x456;
+
+        AgcExports.AcbJump(ctx);
+
+        Assert.Equal(0ul, ctx[CpuRegister.Rax]);
+        Assert.Equal(0u, ReadUInt32(memory, FirstLinkAddress));
     }
 
     [Fact]

@@ -72,6 +72,25 @@ public sealed class AgcSetShRegisterRangeTests
         Assert.Equal(0x5566_7788u, ReadUInt32(memory, PacketAddress + 20));
     }
 
+    [Fact]
+    public void CxRegisterDirectGetSize_EqualsBytesConsumedByEmitter()
+    {
+        var memory = new FakeCpuMemory(BaseAddress, 0x1000);
+        var ctx = new CpuContext(memory, Generation.Gen5);
+        WriteUInt64(memory, CommandBufferAddress + 0x10, PacketAddress);
+        WriteUInt64(memory, CommandBufferAddress + 0x18, PacketAddress + 0x100);
+
+        var size = AgcExports.DcbSetCxRegisterDirectGetSize(ctx);
+        ctx[CpuRegister.Rdi] = CommandBufferAddress;
+        ctx[CpuRegister.Rsi] = (0x1122_3344UL << 32) | 0x0201;
+
+        Assert.Equal((int)OrbisGen2Result.ORBIS_GEN2_OK, AgcExports.DcbSetCxRegisterDirect(ctx));
+        Assert.Equal(PacketAddress, ctx[CpuRegister.Rax]);
+        Assert.Equal(PacketAddress + (ulong)size, ReadUInt64(memory, CommandBufferAddress + 0x10));
+        Assert.Equal(0x0201u, ReadUInt32(memory, PacketAddress + 4));
+        Assert.Equal(0x1122_3344u, ReadUInt32(memory, PacketAddress + 8));
+    }
+
     [Theory]
     [InlineData(1u)]
     [InlineData(64u)]
@@ -91,8 +110,9 @@ public sealed class AgcSetShRegisterRangeTests
         Assert.Equal(PacketAddress + 8, context[CpuRegister.Rax]);
         Assert.Equal(1, memory.CopyCalls);
         Assert.Equal((PacketAddress + 16, sourceAddress, (ulong)valueCount * 4), memory.LastCopy);
-        Assert.Equal(2, memory.ReadCalls);
-        Assert.Equal(4, memory.WriteCalls);
+        // One read of the buffer state, then the cursor and the marker with its header in one write each.
+        Assert.Equal(1, memory.ReadCalls);
+        Assert.Equal(2, memory.WriteCalls);
         Assert.Equal(0xC0001000u, ReadUInt32(memory, PacketAddress));
         Assert.Equal(0x6875000Du, ReadUInt32(memory, PacketAddress + 4));
         Assert.Equal(0xC0007600u | (valueCount << 16), ReadUInt32(memory, PacketAddress + 8));
@@ -136,8 +156,9 @@ public sealed class AgcSetShRegisterRangeTests
 
         Assert.Equal(PacketAddress + 8, context[CpuRegister.Rax]);
         Assert.Equal(0, memory.CopyCalls);
-        Assert.Equal(2, memory.ReadCalls);
-        Assert.Equal(4, memory.WriteCalls);
+        // One read of the buffer state, then the cursor and the marker with its header in one write each.
+        Assert.Equal(1, memory.ReadCalls);
+        Assert.Equal(2, memory.WriteCalls);
         Assert.Equal(0xC0001000u, ReadUInt32(memory, PacketAddress));
         Assert.Equal(0x6875000Du, ReadUInt32(memory, PacketAddress + 4));
         Assert.Equal(0xC0007600u | (valueCount << 16), ReadUInt32(memory, PacketAddress + 8));

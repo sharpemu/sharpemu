@@ -86,6 +86,23 @@ public static partial class AgcExports
         return ReturnPointer(ctx, commandAddress);
     }
 
+    // Matches the packet DcbEventWrite writes: 4 dwords for the two event types that carry an address, 2 for the rest.
+    [SysAbiExport(
+        Nid = "C4l9fB17t8w",
+        ExportName = "sceAgcDcbEventWriteGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbEventWriteGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = (uint)(ctx[CpuRegister.Rdi] & 0xFF) switch
+        {
+            0x38 or 0x39 => 4u * sizeof(uint),
+            <= 0x3F => 2u * sizeof(uint),
+            _ => 0,
+        };
+        return (int)ctx[CpuRegister.Rax];
+    }
+
     [SysAbiExport(
         Nid = "MWiElSNE8j8",
         ExportName = "sceAgcDcbWaitUntilSafeForRendering",

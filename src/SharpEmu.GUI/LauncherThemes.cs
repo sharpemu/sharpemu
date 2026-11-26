@@ -326,6 +326,49 @@ internal static class LauncherThemes
             ? brush
             : Brushes.Transparent;
 
+    public static LauncherPalette Resolve(LauncherAppearance appearance) =>
+        AdjustContrast(
+            IsCustom(appearance.Theme)
+                ? Derive(appearance.CustomBackground, appearance.CustomAccent)
+                : Find(appearance.Theme),
+            appearance.Contrast);
+
+    public static string EmulatorPalette(GuiSettings settings)
+    {
+        var palette = Resolve(new LauncherAppearance(
+            settings.LauncherTheme,
+            settings.CustomThemeBackground,
+            settings.CustomThemeAccent,
+            settings.GlassOpacity,
+            settings.ThemeContrast));
+        return string.Join(',',
+            palette.Background, palette.Menu, palette.Card, palette.Elevated, palette.RaisedHover,
+            palette.Text, palette.SecondaryText, palette.Muted, palette.Faint,
+            palette.Accent, palette.AccentForeground);
+    }
+
+    public static SharpEmu.Libs.Overlay.OverlayPalette CurrentOverlayPalette()
+    {
+        SkiaSharp.SKColor Read(string key, SkiaSharp.SKColor fallback) =>
+            Brush(key) is ISolidColorBrush { Color: var color }
+                ? new SkiaSharp.SKColor(color.R, color.G, color.B)
+                : fallback;
+
+        var graphite = SharpEmu.Libs.Overlay.OverlayPalette.Graphite;
+        return new SharpEmu.Libs.Overlay.OverlayPalette(
+            Read("BgBrush", graphite.Background),
+            Read("GameOptionsMenuBrush", graphite.Menu),
+            Read("CardBrush", graphite.Card),
+            Read("ElevatedBrush", graphite.Elevated),
+            Read("RaisedHoverBrush", graphite.Raised),
+            Read("TextBrush", graphite.Text),
+            Read("SecondaryTextBrush", graphite.Secondary),
+            Read("MutedBrush", graphite.Muted),
+            Read("FaintBrush", graphite.Faint),
+            Read("AccentBrush", graphite.Accent),
+            Read("AccentForegroundBrush", graphite.AccentForeground));
+    }
+
     public static void Apply(LauncherAppearance appearance)
     {
         if (Avalonia.Application.Current is not { } app)
@@ -333,11 +376,7 @@ internal static class LauncherThemes
             return;
         }
 
-        var palette = AdjustContrast(
-            IsCustom(appearance.Theme)
-                ? Derive(appearance.CustomBackground, appearance.CustomAccent)
-                : Find(appearance.Theme),
-            appearance.Contrast);
+        var palette = Resolve(appearance);
         var background = Color.Parse(palette.Background);
         var overlay = Color.Parse(palette.Overlay);
         var field = Color.Parse(palette.Field);

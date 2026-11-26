@@ -7,10 +7,20 @@ namespace SharpEmu.ShaderCompiler.Resources;
 
 public sealed record ResourceBranchBlock(ScalarValue? Condition, int[] Successors, uint[] Sources)
 {
+    // SHARPEMU_BRANCHES_WITH_WRITES (on by default; =0 turns it off): a shader that writes memory keeps its blocks too
+    // when every write goes through a static buffer descriptor or to LDS or scratch; each dispatch checks those
+    // buffers' records against the words its predicates read (ResourceBranchWriteGuard). Tests set the override.
+    private static readonly bool WritesConfigured = Environment.GetEnvironmentVariable("SHARPEMU_BRANCHES_WITH_WRITES") != "0";
+    [ThreadStatic] internal static bool? WritesOverride;
+    internal static bool WritesAllowed => WritesOverride ?? WritesConfigured;
+
+    internal static bool Writes(ShaderResourcePlan plan) =>
+        plan.Memory.Entries.Any(access => access.Access is MemoryAccess.Write or MemoryAccess.Atomic);
+
     internal static IReadOnlyList<ResourceBranchBlock> Build(ShaderResourcePlan plan, Func<ScalarValue, ScalarValue> rewrite)
     {
         // A shader write can change a predicate through an alias or a later loop iteration.
-        if (plan.Memory.Entries.Any(access => access.Access is MemoryAccess.Write or MemoryAccess.Atomic)) return [];
+        if (Writes(plan) && WrittenBuffers(plan) is null) return [];
         var instructions = plan.Graph.Program.Instructions;
         if (instructions.Any(instruction => instruction.Opcode is "SSetpcB64" or "SSwappcB64" or "SRfeB64" or
             "SCbranchJoin" or "SCbranchIFork" or "SCbranchGFork")) return [];
@@ -70,5 +80,24 @@ public sealed record ResourceBranchBlock(ScalarValue? Condition, int[] Successor
         }
 
         return hasCondition ? blocks : [];
+    }
+
+    // The static buffers a shader writes through, when writes are allowed and every write and atomic goes through one of
+    // them or to LDS or scratch, which no scalar load reads; otherwise null.
+    internal static uint[]? WrittenBuffers(ShaderResourcePlan plan)
+    {
+        if (!WritesAllowed) return null;
+        var buffers = new SortedSet<uint>();
+        foreach (var access in plan.Memory.Entries)
+        {
+            if (access.Access is not (MemoryAccess.Write or MemoryAccess.Atomic) ||
+                access.Kind is MemoryResourceKind.LocalDataShare or MemoryResourceKind.Scratch) continue;
+            if (access.Kind != MemoryResourceKind.Buffer || access.DeviceDescriptor ||
+                access.BufferDescriptor is not { Provenance: BufferDescriptorProvenance.Static } descriptor ||
+                descriptor.StaticResource >= plan.Info.Buffers.Count) return null;
+            buffers.Add(descriptor.StaticResource);
+        }
+
+        return [.. buffers];
     }
 }

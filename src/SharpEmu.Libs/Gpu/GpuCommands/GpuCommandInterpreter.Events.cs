@@ -41,6 +41,11 @@ public sealed partial class GpuCommandInterpreter
         RequireHeader(packet, PacketHeader.Make(6, PacketOpcode.EventWriteEndOfPipe));
         var control = payload[0];
         var destination = payload[1] | ((ulong)(payload[2] & 0xFFFFu) << 32);
+        if (EndOfPipeIsObservable(destination, payload[2]) && YieldsToOlderWork())
+        {
+            return 5;
+        }
+
         WriteEndOfPipe(
             is64Bit: true,
             cachePolicy: (control >> 25) & 0x3u,
@@ -62,6 +67,11 @@ public sealed partial class GpuCommandInterpreter
         RequireHeader(packet, 0xC003_4802u);
         var control = payload[0];
         var destination = payload[1] | ((ulong)(payload[2] & 0xFFFFu) << 32);
+        if (EndOfPipeIsObservable(destination, payload[2]) && YieldsToOlderWork())
+        {
+            return 4;
+        }
+
         WriteEndOfPipe(
             is64Bit: false,
             cachePolicy: (control >> 25) & 0x3u,
@@ -76,6 +86,10 @@ public sealed partial class GpuCommandInterpreter
             interruptContextId: 0);
         return 4;
     }
+
+    // An end-of-pipe event the CPU can observe: it writes a label (a data source and a destination) or raises an interrupt.
+    private static bool EndOfPipeIsObservable(ulong destination, uint selectors) =>
+        ((selectors >> 24) & 0x7u) != 0 || (destination != 0 && ((selectors >> 29) & 0x7u) != 0);
 
     // Native release-memory body: event control, then destination and selectors.
     internal uint ReleaseMemoryNativePacket(in PacketContext packet, ReadOnlySpan<uint> payload)

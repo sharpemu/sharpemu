@@ -364,17 +364,76 @@ public sealed class ImageRequestBuildersTests : IClassFixture<HeadlessVulkanFixt
         Assert.Equal(ImageRequestBuilders.DestinationSwizzle(new TextureDescriptorWords(words)), resolution.Swizzle);
     }
 
+    // A T# addresses memory in 256-byte units, so a view may start inside a larger allocation at an
+    // offset smaller than the layout alignment; the tiled offsets stay relative to that base.
+    [Theory]
+    [InlineData(0x5032B23800UL)]
+    [InlineData(0x5032B23100UL)]
+    [InlineData(0x5032B23000UL)]
+    public void Texture_Tiled4KBAcceptsAnyDescriptorAddress(ulong address)
+    {
+        var words = RegisterWords.Texture(address, GuestPixelFormat.Bits16_16_16_16Float, 32, 16,
+            GuestImageType.Color2D, GuestTileMode.Standard4KB);
+
+        var description = ImageRequestBuilders.Texture(words, Sampled2D).Request.Description;
+
+        Assert.Equal(address, description.Data.Address);
+        Assert.Equal(0x1000UL, description.Data.Size);
+        Assert.Equal(GuestTileMode.Standard4KB, description.TileMode);
+        Assert.Equal(0UL, description.MipLayout[0].Offset);
+    }
+
     [Fact]
     public void Texture_MipWindowFollowsTheDescriptor()
     {
         var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits8_8_8_8UNorm, 64, 64, baseLevel: 1, lastLevel: 2, maxMip: 2);
         var request = ImageRequestBuilders.Texture(words, Sampled2D).Request;
 
-        Assert.Equal(3u, request.Description.Resources.Levels);
+        // The image holds the levels from the descriptor's base; the layout still describes the chain.
+        Assert.Equal(1u, request.Description.FirstLevel);
+        Assert.Equal(2u, request.Description.Resources.Levels);
         Assert.True(request.Description.MipLayout[2].Size > 0);
         Assert.NotEqual(request.Description.MipLayout[1].Offset, request.Description.MipLayout[2].Offset);
-        Assert.Equal(1u, request.View.BaseLevel);
+        Assert.Equal(0u, request.View.BaseLevel);
         Assert.Equal(2u, request.View.LevelCount);
+
+        var whole = ImageRequestBuilders.WithWholeMipChain(request);
+        Assert.Equal(0u, whole.Description.FirstLevel);
+        Assert.Equal(3u, whole.Description.Resources.Levels);
+        Assert.Equal(1u, whole.View.BaseLevel);
+        Assert.Equal(2u, whole.View.LevelCount);
+    }
+
+    // A streamed 2048x2048 BC7 chain whose descriptor starts at mip 3 (as Ghost of Yotei's village
+    // textures are sampled) is a 256x256 image of nine levels, not the twelve-level chain.
+    [Fact]
+    public void Texture_StreamedChainHoldsOnlyItsResidentLevels()
+    {
+        var words = RegisterWords.Texture(Base, GuestPixelFormat.Bc7UNorm, 2048, 2048, tile: GuestTileMode.Standard4KB,
+            baseLevel: 3, lastLevel: 11, maxMip: 11);
+        var request = ImageRequestBuilders.Texture(words, Sampled2D).Request;
+
+        Assert.Equal(3u, request.Description.FirstLevel);
+        Assert.Equal(new SubresourceCount(9, 1), request.Description.Resources);
+        Assert.Equal(new Extent3D(256, 256, 1), request.Description.HostExtent);
+        Assert.Equal(new Extent3D(2048, 2048, 1), request.Description.Extent);
+        Assert.Equal(0u, request.View.BaseLevel);
+        Assert.Equal(9u, request.View.LevelCount);
+    }
+
+    // Storage, volume and level-0 views keep the whole chain: they write or address every level.
+    [Fact]
+    public void Texture_StorageAndBaseLevelZeroKeepTheWholeChain()
+    {
+        var words = RegisterWords.Texture(Base, GuestPixelFormat.Bits8_8_8_8UNorm, 64, 64, baseLevel: 1, lastLevel: 2, maxMip: 2);
+        var storage = ImageRequestBuilders.Texture(words, Sampled2D with { Storage = true }).Request;
+        Assert.Equal(0u, storage.Description.FirstLevel);
+        Assert.Equal(3u, storage.Description.Resources.Levels);
+
+        var level0 = ImageRequestBuilders.Texture(
+            RegisterWords.Texture(Base, GuestPixelFormat.Bits8_8_8_8UNorm, 64, 64, lastLevel: 2, maxMip: 2), Sampled2D).Request;
+        Assert.Equal(0u, level0.Description.FirstLevel);
+        Assert.Equal(3u, level0.Description.Resources.Levels);
     }
 
     [Fact]

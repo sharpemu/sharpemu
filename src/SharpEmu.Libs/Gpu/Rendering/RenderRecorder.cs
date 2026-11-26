@@ -28,11 +28,78 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
     private readonly KeptPipeline _pipeline = new();
     private readonly InPlaceDraw _inPlace = new();
     private long _sequence;
+    private static int _meshDrawsOverLimits;
     private static readonly ThreadCounter _inPlaceDraws = new();
     private static readonly ThreadCounter _inPlaceRefused = new();
 
+    private static readonly ThreadCounter _drawReplays = new();
+    private static readonly ThreadCounter _drawReplayMisses = new();
+    private static readonly bool DrawReplayEnabled = Environment.GetEnvironmentVariable("SHARPEMU_DRAW_REPLAY") != "0";
+    private readonly Dictionary<ShaderProgramInfo, bool> _replayablePrograms = new(ReferenceEqualityComparer.Instance);
+    private readonly Dictionary<ShaderProgramInfo, bool> _tableReplayablePrograms = new(ReferenceEqualityComparer.Instance);
+    private bool _replayValid;
+    private long _replaySequence;
+    private ShaderStageResources _replayVertex;
+    private ShaderStageResources _replayPixel;
+    private VertexInputBuffer[] _replayVertexBuffers = [];
+    private VertexAttributeResource[] _replayVertexAttributes = [];
+    private bool _replayPixelActive;
+
+    private static readonly string[] ReplayMissNames =
+        ["sequence", "pixel_active", "vertex_program", "vertex_images", "vertex_samplers", "vertex_buffers", "vertex_table", "vertex_extras",
+         "vertex_ranges", "vertex_heaps", "vertex_mips",
+         "pixel_program", "pixel_images", "pixel_samplers", "pixel_buffers", "pixel_table", "pixel_extras", "pixel_ranges", "pixel_heaps", "pixel_mips",
+         "vertex_input", "targets", "host"];
+    private static readonly ThreadCounter[] _replayMisses = Array.ConvertAll(ReplayMissNames, _ => new ThreadCounter());
+
+    private static bool ReplayMiss(int reason)
+    {
+        _replayMisses[reason].Increment();
+        _drawReplayMisses.Increment();
+        return false;
+    }
+
+    private static string TakeReplayMisses()
+    {
+        var parts = new List<string>();
+        for (var index = 0; index < ReplayMissNames.Length; index++)
+        {
+            var count = _replayMisses[index].Take();
+            if (count != 0)
+            {
+                parts.Add(FormattableString.Invariant($"{ReplayMissNames[index]}:{count}"));
+            }
+        }
+
+        return parts.Count == 0 ? "none" : string.Join(",", parts);
+    }
+
+    private static readonly string[] SealRefusalNames = ["kind", "writes", "trace", "tessellation", "targets", "vertex", "pixel", "sequence"];
+    private static readonly ThreadCounter[] _sealRefusals = Array.ConvertAll(SealRefusalNames, _ => new ThreadCounter());
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _unreplayablePrograms = new();
+
+    private static string TakeSealRefusals()
+    {
+        var parts = new List<string>();
+        for (var index = 0; index < SealRefusalNames.Length; index++)
+        {
+            var count = _sealRefusals[index].Take();
+            if (count != 0)
+            {
+                parts.Add(FormattableString.Invariant($"{SealRefusalNames[index]}:{count}"));
+            }
+        }
+
+        return parts.Count == 0 ? "none" : string.Join(",", parts);
+    }
+
+    private static string DescribeUnreplayablePrograms() =>
+        _unreplayablePrograms.IsEmpty ? "none" : string.Join(",", _unreplayablePrograms.Select(pair => FormattableString.Invariant($"{pair.Key}:{pair.Value}")));
+
     public static string TakeInPlaceReport() => FormattableString.Invariant(
-        $"in_place={_inPlaceDraws.Take()} in_place_refused={_inPlaceRefused.Take()}");
+        $"in_place={_inPlaceDraws.Take()} in_place_refused={_inPlaceRefused.Take()} draw_replays={_drawReplays.Take()} draw_replay_misses={_drawReplayMisses.Take()} ") +
+        "replay_seal_refused=" + TakeSealRefusals() + " replay_miss=" + TakeReplayMisses() + " unreplayable_programs=" + DescribeUnreplayablePrograms() +
+        " " + TakeDispatchReplayReport();
 
     private sealed class InPlaceDraw
     {
@@ -48,21 +115,72 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         public bool DepthResolved;
         public readonly ResourceSlotIdentifier[] Found = new ResourceSlotIdentifier[RenderingState.ColorAttachmentCapacity];
         public ResourceSlotIdentifier FoundDepth;
+        public readonly ColorTargetResolution[] FoundResolutions = new ColorTargetResolution[RenderingState.ColorAttachmentCapacity];
+        public readonly uint[] FoundSlots = new uint[RenderingState.ColorAttachmentCapacity];
+        public bool FoundDepthTarget;
+        public DepthTargetState FoundDepthState;
         public uint AcquiredCount;
         public readonly ImageView[] Views = new ImageView[RenderingState.ColorAttachmentCapacity];
         public readonly uint[] Slots = new uint[RenderingState.ColorAttachmentCapacity];
         public ImageView DepthView;
-        public bool DepthMetadataClear;
         public RenderingState Rendering;
     }
+
+    private static readonly bool InPlaceByTargets = Environment.GetEnvironmentVariable("SHARPEMU_INPLACE_BY_TARGETS") != "0";
 
     private bool RepeatsPreviousTargets(ResolvedDraw record, in DrawState state, DrawScopeToken token)
     {
         var kept = _inPlace;
-        return kept.Valid && token.IsActive && token == kept.Token && !ImageClearTrace.Enabled && record.ContextStamp == kept.ContextStamp &&
-            record.DynamicStamp == kept.DynamicStamp && record.TargetVersion == kept.TargetVersion && state.PixelActive == kept.PixelActive &&
-            state.Programs.Vertex.Id == kept.VertexProgram && state.Programs.Pixel.Id == kept.PixelProgram && state.ColorCount == kept.FoundCount &&
-            state.DepthResolved == kept.DepthResolved;
+        if (!kept.Valid || !token.IsActive || token != kept.Token || ImageClearTrace.Enabled || state.PixelActive != kept.PixelActive ||
+            state.ColorCount != kept.FoundCount || state.DepthResolved != kept.DepthResolved)
+        {
+            return false;
+        }
+
+        if (!InPlaceByTargets)
+        {
+            return record.ContextStamp == kept.ContextStamp && record.DynamicStamp == kept.DynamicStamp && record.TargetVersion == kept.TargetVersion &&
+                state.Programs.Vertex.Id == kept.VertexProgram && state.Programs.Pixel.Id == kept.PixelProgram;
+        }
+
+        for (var index = 0; index < state.ColorCount; index++)
+        {
+            if (state.Colors[index].Slot != kept.FoundSlots[index] || !SameColorTarget(in state.Colors[index].Resolution, in kept.FoundResolutions[index]))
+            {
+                return false;
+            }
+        }
+
+        return state.Depth.HasTarget == kept.FoundDepthTarget && (!state.Depth.HasTarget || SameDepthAttachment(in state.Depth.Target, in kept.FoundDepthState));
+    }
+
+    private static bool SameColorTarget(in ColorTargetResolution current, in ColorTargetResolution kept) =>
+        current.BaseAddress == kept.BaseAddress && current.BackingSize == kept.BackingSize &&
+        current.Extent.Width == kept.Extent.Width && current.Extent.Height == kept.Extent.Height &&
+        current.BaseMipLevel == kept.BaseMipLevel && current.BaseArrayLayer == kept.BaseArrayLayer && current.Samples == kept.Samples &&
+        current.ExportMapping.Packed == kept.ExportMapping.Packed && current.MetadataClearSupported == kept.MetadataClearSupported &&
+        current.MetadataFixedClearSupported == kept.MetadataFixedClearSupported &&
+        current.ColorClearValue.Uint32_0 == kept.ColorClearValue.Uint32_0 && current.ColorClearValue.Uint32_1 == kept.ColorClearValue.Uint32_1 &&
+        current.ColorClearValue.Uint32_2 == kept.ColorClearValue.Uint32_2 && current.ColorClearValue.Uint32_3 == kept.ColorClearValue.Uint32_3 &&
+        GuestImageCache.SameRequest(current.Request, kept.Request);
+
+    private static bool SameDepthTarget(in DepthTargetResolution current, in DepthTargetResolution kept) =>
+        current.Format == kept.Format && current.Width == kept.Width && current.Height == kept.Height && current.Samples == kept.Samples &&
+        current.HasStencil == kept.HasStencil && current.HasHtile == kept.HasHtile && current.DepthAddress == kept.DepthAddress &&
+        current.DepthSize == kept.DepthSize && current.StencilAddress == kept.StencilAddress && current.StencilSize == kept.StencilSize &&
+        current.HtileAddress == kept.HtileAddress && current.HtileSize == kept.HtileSize && current.DepthClearEnabled == kept.DepthClearEnabled &&
+        current.StencilClearEnabled == kept.StencilClearEnabled && current.DepthWriteDisabled == kept.DepthWriteDisabled &&
+        current.StencilWriteDisabled == kept.StencilWriteDisabled && GuestImageCache.SameRequest(current.Request, kept.Request);
+
+    private static bool SameDepthAttachment(in DepthTargetState current, in DepthTargetState kept)
+    {
+        var format = current.Target.Format;
+        return SameDepthTarget(current.Target, kept.Target) &&
+            current.State.AttachmentWriteAspects(format) == kept.State.AttachmentWriteAspects(format) &&
+            current.State.DepthClearEnabled == kept.State.DepthClearEnabled &&
+            current.State.DepthClearValue.Equals(kept.State.DepthClearValue) &&
+            current.State.StencilClearEnabled == kept.State.StencilClearEnabled &&
+            current.State.StencilClearValue == kept.State.StencilClearValue;
     }
 
     private void RestoreFoundTargets(ref DrawState state)
@@ -105,7 +223,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         if (state.Depth.HasTarget)
         {
             state.Depth.View = kept.DepthView;
-            state.Depth.MetadataClear = kept.DepthMetadataClear;
+            state.Depth.MetadataClear = false;
             _host.KeepDepthAttachment(in state.Depth);
         }
 
@@ -120,7 +238,12 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         for (var index = 0; index < state.ColorCount; index++)
         {
             kept.Found[index] = state.Colors[index].Image;
+            kept.FoundResolutions[index] = state.Colors[index].Resolution;
+            kept.FoundSlots[index] = state.Colors[index].Slot;
         }
+
+        kept.FoundDepthTarget = state.Depth.HasTarget;
+        kept.FoundDepthState = state.Depth.Target;
 
         kept.DepthResolved = state.DepthResolved;
         kept.FoundDepth = state.DepthResolved ? state.Depth.Image : default;
@@ -145,8 +268,26 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         }
 
         kept.DepthView = state.Depth.View;
-        kept.DepthMetadataClear = state.Depth.MetadataClear;
         kept.Rendering = state.Rendering;
+    }
+
+    private void BeginDrawRendering(ref DrawState state, bool reusedAttachments)
+    {
+        // Binding resources can end the scope after attachment reuse. Its metadata load clears
+        // already ran, so reopening the scope must preserve the pixels drawn since then.
+        if (reusedAttachments && _host.DrawScope.Scope != _inPlace.Token.Scope)
+        {
+            for (var index = 0; index < state.Rendering.ColorAttachmentCount; index++)
+            {
+                ref var color = ref state.Rendering.ColorAttachments[index];
+                color = color with { IsClear = false };
+            }
+
+            ref var depth = ref state.Rendering.DepthStencilAttachment;
+            depth = depth with { DepthClear = state.Depth.Target.State.DepthClearEnabled };
+        }
+
+        _host.BeginRendering(in state.Rendering);
     }
 
     private struct VertexBufferRange
@@ -192,6 +333,30 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
 
     private void RecordDraw(ResolvedDraw record)
     {
+        var offsets = record.IndirectOffsets;
+        RecordDraw(record, out var issuedRun);
+        if (issuedRun || offsets is null) return;
+
+        var first = record.Emission;
+        try
+        {
+            record.IndirectOffsets = null;
+            foreach (var offset in offsets.AsSpan(1))
+            {
+                record.Emission = first with { IndirectArgumentsAddress = first.IndirectArgumentsAddress + offset };
+                RecordDraw(record, out _);
+            }
+        }
+        finally
+        {
+            record.IndirectOffsets = offsets;
+            record.Emission = first;
+        }
+    }
+
+    private void RecordDraw(ResolvedDraw record, out bool issuedRun)
+    {
+        issuedRun = false;
         if (record.Announce)
         {
             if (!_host.IsRecording)
@@ -249,7 +414,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
                     NoteFoundTargets(ref state);
                 }
 
-                RecordDrawCommands(record, ref state, inPlace);
+                RecordDrawCommands(record, ref state, inPlace, out issuedRun);
                 break;
             }
         }
@@ -364,8 +529,9 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         }
     }
 
-    private void RecordDrawCommands(ResolvedDraw record, ref DrawState state, bool inPlace)
+    private void RecordDrawCommands(ResolvedDraw record, ref DrawState state, bool inPlace, out bool issuedRun)
     {
+        issuedRun = false;
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.DrawResourcePreparation);
         var submitId = record.SubmitId;
         ref readonly var draw = ref record.Draw;
@@ -378,10 +544,26 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         ref readonly var indexSource = ref record.Index;
         using var preparation = _host.BeginPreparation();
         using var indirectMesh = meshInput is not null && emission.IndirectArgumentsAddress != 0
-            ? _host.PrepareIndirectMeshDraw(new IndirectMeshDrawRequest(emission.IndirectArgumentsAddress,
-                indexSource.Address, draw.Count, indexSource.Type == IndexType.Uint16 ? 2u : 4u,
-                topology == PrimitiveTopology.PointList, meshInput.Geometry.InputPrimitiveCountPerWorkgroup, meshInput.Execution))
+            ? _host.PrepareIndirectMeshDraw(emission.Indexed
+                ? new IndirectMeshDrawRequest(emission.IndirectArgumentsAddress,
+                    indexSource.Address, draw.Count, indexSource.Type == IndexType.Uint16 ? 2u : 4u,
+                    topology == PrimitiveTopology.PointList, meshInput.Geometry.InputPrimitiveCountPerWorkgroup, meshInput.Execution)
+                : IndirectMeshDrawRequest.ForAutomaticDraw(emission.IndirectArgumentsAddress,
+                    topology == PrimitiveTopology.PointList, meshInput.Geometry.InputPrimitiveCountPerWorkgroup, meshInput.Execution)
+                    with { TaskLaunched = meshInput.Geometry.TaskLaunched })
             : null;
+        // Only an automatic indirect draw resolves a task-launched program; anything else is a broken join.
+        if (meshInput is { Geometry.TaskLaunched: true } && (emission.IndirectArgumentsAddress == 0 || emission.Indexed))
+        {
+            throw _host.Fatal("A task-launched mesh program reached a draw that is not automatic and indirect.");
+        }
+
+        if (meshInput is null && indirectMesh is null && TryReplayDraw(record, ref state, inPlace, vertexInput, pixelInput, in indexSource, in emission, in draw))
+        {
+            return;
+        }
+
+        _replayValid = false;
         var meshVertexCount = draw.Count;
         if (MeshDrawTrace.Active)
             MeshDrawTrace.Write("programs", $"mesh={meshInput is not null} vertexHash=0x{vertexInput.Stage.Program?.Hash:X16} pixelHash=0x{pixelInput.Stage.Program?.Hash:X16} pixelActive={state.PixelActive}");
@@ -484,6 +666,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
             _host.PrepareDeviceAddresses();
         }
 
+        var owners = _host.BufferOwnerGeneration;
         _host.BindResources(vertexBindings);
         if (pixelBindings is not null)
         {
@@ -492,12 +675,15 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
 
         var vertexBuffers = meshInput is null ? AcquireVertexBuffers(vertexInput) : default;
         var indexBuffer = meshInput is null ? AcquireIndexBuffer(in indexSource) : default;
+        var indirectBytes = record.IndirectOffsets is not null ? record.IndirectBytes :
+            emission.Indexed ? RenderExecutor.IndexedIndirectArgumentsSize : RenderExecutor.AutoIndirectArgumentsSize;
         var indirectArguments = meshInput is null && emission.IndirectArgumentsAddress != 0
             ? _host.ObtainBuffer(emission.IndirectArgumentsAddress,
-                emission.Indexed ? RenderExecutor.IndexedIndirectArgumentsSize : RenderExecutor.AutoIndirectArgumentsSize, isWritten: false)
+                indirectBytes, isWritten: false)
             : default;
         RenderExecutor.DropUnwrittenColorTargets(context, ref state, pixelProgram);
-        if (inPlace && TryRestoreAttachments(ref state))
+        var reusedAttachments = inPlace && TryRestoreAttachments(ref state);
+        if (reusedAttachments)
         {
             _inPlaceDraws.Increment();
         }
@@ -510,6 +696,35 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
 
             state.Rendering = AcquireAttachments(ref state);
         }
+
+        // An owner bound above can be merged by a later stage or acquisition; bind and acquire the buffers again
+        // until none changes, so the draw records no retired owner.
+        for (var attempt = 0; _host.BufferOwnerGeneration != owners; attempt++)
+        {
+            if (attempt == 8)
+            {
+                throw _host.Fatal("Buffer owners kept changing while a draw was prepared.");
+            }
+
+            owners = _host.BufferOwnerGeneration;
+            _host.RebindBuffers(vertexBindings);
+            if (pixelBindings is not null)
+            {
+                _host.RebindBuffers(pixelBindings);
+            }
+
+            if (meshInput is null)
+            {
+                vertexBuffers = AcquireVertexBuffers(vertexInput);
+                indexBuffer = AcquireIndexBuffer(in indexSource);
+                if (emission.IndirectArgumentsAddress != 0)
+                {
+                    indirectArguments = _host.ObtainBuffer(emission.IndirectArgumentsAddress,
+                        indirectBytes, isWritten: false);
+                }
+            }
+        }
+
         var pipeline = ResolvePipeline(record, ref state, vertexInput, state.PixelActive ? pixelInput : null);
         if (record.SetBindDebug)
         {
@@ -551,7 +766,7 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
 
         var imageSnapshot = _host.BeginImageSnapshot(pixelBindings);
         indirectMesh?.Prepare();
-        _host.BeginRendering(in state.Rendering);
+        BeginDrawRendering(ref state, reusedAttachments);
         if (MeshDrawTrace.Active) MeshDrawTrace.Write("rendering", $"width={state.Rendering.Width} height={state.Rendering.Height} layers={state.Rendering.Layers} colors={state.ColorCount}");
         _host.BindPipeline(PipelineBindPoint.Graphics, in pipeline);
         if (record.SetAutoDebug)
@@ -575,7 +790,18 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         }
         else if (emission.IndirectArgumentsAddress != 0 && emission.Indexed)
         {
-            _host.DrawIndexedIndirect(indirectArguments);
+            var targets = DrawState.BoundColors(ref state);
+            issuedRun = imageSnapshot == 0 && record.IndirectOffsets is not null && _host.CanShareIndexedBindings(vertexBindings, targets, in state.Depth) &&
+                (pixelBindings is null || _host.CanShareIndexedBindings(pixelBindings, targets, in state.Depth));
+            if (issuedRun)
+            {
+                foreach (var offset in record.IndirectOffsets!)
+                    _host.DrawIndexedIndirect(indirectArguments with { Offset = indirectArguments.Offset + offset });
+            }
+            else
+            {
+                _host.DrawIndexedIndirect(indirectArguments);
+            }
         }
         else if (emission.IndirectArgumentsAddress != 0)
         {
@@ -607,12 +833,342 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         else
         {
             KeepTargets(record, ref state);
+            if (meshInput is null && indirectMesh is null && imageSnapshot == 0)
+            {
+                SealReplay(record, in state, vertexInput, pixelInput);
+            }
         }
 
         if (record.SetAutoDebug)
         {
             SetDrawDebugPhase(submitId, in draw, 0x700);
         }
+    }
+
+    private bool IsReplayable(ShaderProgramInfo? program)
+    {
+        if (program is null)
+        {
+            return false;
+        }
+
+        if (_replayablePrograms.TryGetValue(program, out var known))
+        {
+            return known;
+        }
+
+        var reason = UnreplayableReason(program);
+        var replayable = reason is null;
+        if (!replayable)
+        {
+            _unreplayablePrograms.AddOrUpdate(reason!, 1, static (_, count) => count + 1);
+        }
+
+        _replayablePrograms[program] = replayable;
+        return replayable;
+    }
+
+    // A compute program whose one replay refusal is its flattened table seals a replay basis too: a dispatch whose table
+    // alone differs replays with the table uploaded again and only that descriptor pushed.
+    private bool IsDispatchReplayable(ShaderProgramInfo? program)
+    {
+        if (IsReplayable(program))
+        {
+            return true;
+        }
+
+        if (program is null)
+        {
+            return false;
+        }
+
+        if (_tableReplayablePrograms.TryGetValue(program, out var known))
+        {
+            return known;
+        }
+
+        var replayable = program.Bindings?.Find(ShaderCompiler.Resources.DescriptorBindingKind.FlattenedResourceTable) is not null &&
+            UnreplayableReason(program, ignoreFlattenedTable: true) is null;
+        _tableReplayablePrograms[program] = replayable;
+        return replayable;
+    }
+
+    // Why a program cannot seal a replay basis, or null.
+    private static string? UnreplayableReason(ShaderProgramInfo program, bool ignoreFlattenedTable = false)
+    {
+        var layout = program.Bindings;
+        return layout is null ? "no_layout"
+            : layout.UsesBindlessHeap ? "bindless"
+            : program.UsesDeviceAddresses ? "device_addresses"
+            : program.CallRecordCallees.Count != 0 || layout.CallTargetCount != 0 || layout.CallArgumentCount != 0 ? "calls"
+            : layout.UsesTessellationData ? "tessellation"
+            : program.Frontend is { RequiresOrderedImagePreparation: true } ? "frontend"
+            : layout.Find(ShaderCompiler.Resources.DescriptorBindingKind.ShaderData) is not null ? "shader_data"
+            : !ignoreFlattenedTable && layout.Find(ShaderCompiler.Resources.DescriptorBindingKind.FlattenedResourceTable) is not null ? "flattened_table"
+            : layout.Find(ShaderCompiler.Resources.DescriptorBindingKind.CallRecords) is not null ||
+              layout.Find(ShaderCompiler.Resources.DescriptorBindingKind.CallMarks) is not null ? "call_records"
+            : layout.Find(ShaderCompiler.Resources.DescriptorBindingKind.GlobalDataShare) is not null ? "gds"
+            : layout.Find(ShaderCompiler.Resources.DescriptorBindingKind.DeviceAddressFallback) is not null ? "device_address_fallback"
+            : null;
+    }
+
+    // StageInputMismatch's checks after the flattened table, for a stage whose table differs.
+    private static int StageInputMismatchAfterTable(in ShaderStageResources current, in ShaderStageResources kept)
+    {
+        var resources = current.Resources;
+        var keptResources = kept.Resources;
+        if (!ReferenceEquals(resources.DeviceAddressRanges, keptResources.DeviceAddressRanges) &&
+            !resources.DeviceAddressRanges.AsSpan().SequenceEqual(keptResources.DeviceAddressRanges))
+        {
+            return 6;
+        }
+
+        if (resources.Heaps.Length != 0 || keptResources.Heaps.Length != 0)
+        {
+            return 7;
+        }
+
+        return ReferenceEquals(resources.MipStatistics, keptResources.MipStatistics) ||
+            (resources.MipStatistics ?? []).AsSpan().SequenceEqual(keptResources.MipStatistics ?? [])
+            ? -1
+            : 8;
+    }
+
+    private static bool SameWordSets(uint[][] current, uint[][] kept)
+    {
+        if (ReferenceEquals(current, kept))
+        {
+            return true;
+        }
+
+        if (current.Length != kept.Length)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < current.Length; index++)
+        {
+            if (!ReferenceEquals(current[index], kept[index]) && !current[index].AsSpan().SequenceEqual(kept[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static int StageInputMismatch(in ShaderStageResources current, in ShaderStageResources kept, bool compareThreadLimits = true)
+    {
+        if (!ReferenceEquals(current.Program, kept.Program) || current.ShaderBase != kept.ShaderBase)
+        {
+            return 0;
+        }
+
+        if ((compareThreadLimits && current.ThreadLimits != kept.ThreadLimits) || current.MeshDraw != kept.MeshDraw || current.TessellationData is { Length: > 0 } ||
+            kept.TessellationData is { Length: > 0 } ||
+            !(current.CallArguments ?? []).AsSpan().SequenceEqual(kept.CallArguments ?? []))
+        {
+            return 5;
+        }
+
+        var resources = current.Resources;
+        var keptResources = kept.Resources;
+        if (ReferenceEquals(resources, keptResources))
+        {
+            return -1;
+        }
+
+        if (!SameWordSets(resources.Images, keptResources.Images))
+        {
+            return 1;
+        }
+
+        if (!SameWordSets(resources.Samplers, keptResources.Samplers))
+        {
+            return 2;
+        }
+
+        if (!SameWordSets(resources.Buffers, keptResources.Buffers))
+        {
+            return 3;
+        }
+
+        if (!resources.FlattenedResourceTable.AsSpan().SequenceEqual(keptResources.FlattenedResourceTable))
+        {
+            return 4;
+        }
+
+        if (!ReferenceEquals(resources.DeviceAddressRanges, keptResources.DeviceAddressRanges) &&
+            !resources.DeviceAddressRanges.AsSpan().SequenceEqual(keptResources.DeviceAddressRanges))
+        {
+            return 6;
+        }
+
+        if (resources.Heaps.Length != 0 || keptResources.Heaps.Length != 0)
+        {
+            return 7;
+        }
+
+        return ReferenceEquals(resources.MipStatistics, keptResources.MipStatistics) ||
+            (resources.MipStatistics ?? []).AsSpan().SequenceEqual(keptResources.MipStatistics ?? [])
+            ? -1
+            : 8;
+    }
+
+    private bool SameVertexInput(VertexInputInfo vertexInput) =>
+        vertexInput.Tessellation is null &&
+        (ReferenceEquals(vertexInput.Buffers, _replayVertexBuffers) || vertexInput.Buffers.AsSpan().SequenceEqual(_replayVertexBuffers)) &&
+        (ReferenceEquals(vertexInput.Attributes, _replayVertexAttributes) || vertexInput.Attributes.AsSpan().SequenceEqual(_replayVertexAttributes));
+
+    private void SealReplay(ResolvedDraw record, in DrawState state, VertexInputInfo vertexInput, PixelInputInfo pixelInput)
+    {
+        _replayValid = false;
+        if (!DrawReplayEnabled)
+        {
+            return;
+        }
+
+        var refusal = record.Kind != ResolvedDrawKind.Draw ? 0
+            : record.WritesMemory ? 1
+            : record.IndexedTrace is not null ? 2
+            : vertexInput.Tessellation is not null ? 3
+            : !_inPlace.Valid ? 4
+            : !IsReplayable(vertexInput.Stage.Program) ? 5
+            : state.PixelActive && !IsReplayable(pixelInput.Stage.Program) ? 6
+            : -1;
+        var sequence = _host.CurrentItemSequence;
+        if (refusal < 0 && sequence == 0)
+        {
+            refusal = 7;
+        }
+
+        if (refusal >= 0)
+        {
+            _sealRefusals[refusal].Increment();
+            return;
+        }
+
+        _replayVertex = vertexInput.Stage;
+        _replayPixel = state.PixelActive ? pixelInput.Stage : default;
+        _replayVertexBuffers = vertexInput.Buffers;
+        _replayVertexAttributes = vertexInput.Attributes;
+        _replayPixelActive = state.PixelActive;
+        _replaySequence = sequence;
+        _replayValid = true;
+        _host.SealDrawReplay();
+    }
+
+    private bool TryReplayDraw(ResolvedDraw record, ref DrawState state, bool inPlace, VertexInputInfo vertexInput, PixelInputInfo pixelInput,
+        in IndexSource indexSource, in DrawEmission emission, in DrawCall draw)
+    {
+        if (record.IndirectOffsets is not null || !DrawReplayEnabled || !_replayValid || !inPlace || record.Kind != ResolvedDrawKind.Draw || record.WritesMemory ||
+            record.WriteStages != PipelineStageFlags.None || record.IndexedTrace is not null || MeshDrawTrace.Active)
+        {
+            return false;
+        }
+
+        var sequence = _host.CurrentItemSequence;
+        if (sequence == 0 || sequence != _replaySequence + 1)
+        {
+            return ReplayMiss(0);
+        }
+
+        if (state.PixelActive != _replayPixelActive)
+        {
+            return ReplayMiss(1);
+        }
+
+        if (StageInputMismatch(vertexInput.Stage, _replayVertex) is var vertexMismatch and >= 0)
+        {
+            return ReplayMiss(2 + vertexMismatch);
+        }
+
+        if (state.PixelActive && StageInputMismatch(pixelInput.Stage, _replayPixel) is var pixelMismatch and >= 0)
+        {
+            return ReplayMiss(11 + pixelMismatch);
+        }
+
+        if (!SameVertexInput(vertexInput))
+        {
+            return ReplayMiss(20);
+        }
+
+        RenderExecutor.DropUnwrittenColorTargets(record.Context, ref state, state.PixelActive ? pixelInput.Stage.Program : null);
+        if (!TryRestoreAttachments(ref state))
+        {
+            return ReplayMiss(21);
+        }
+
+        var indexBuffer = AcquireIndexBuffer(in indexSource);
+        var indirectArguments = emission.IndirectArgumentsAddress != 0
+            ? _host.ObtainBuffer(emission.IndirectArgumentsAddress,
+                emission.Indexed ? RenderExecutor.IndexedIndirectArgumentsSize : RenderExecutor.AutoIndirectArgumentsSize, isWritten: false)
+            : default;
+        var pipeline = ResolvePipeline(record, ref state, vertexInput, state.PixelActive ? pixelInput : null);
+        if (!_host.TryReplayDraw(in pipeline, vertexInput.Stage.Resources.UserData,
+                state.PixelActive ? pixelInput.Stage.Resources.UserData : ReadOnlySpan<uint>.Empty))
+        {
+            return ReplayMiss(22);
+        }
+
+        NoteSampledTextures(vertexInput.Stage);
+        if (state.PixelActive)
+        {
+            NoteSampledTextures(pixelInput.Stage);
+        }
+
+        var submitId = record.SubmitId;
+        if (record.SetBindDebug)
+        {
+            SetDrawDebugPhase(submitId, in draw, 0x100);
+        }
+
+        if (record.SetAutoDebug)
+        {
+            SetDrawDebugPhase(submitId, in draw, 0x400);
+        }
+
+        if (indexBuffer.Size != 0)
+        {
+            _host.BindIndexBuffer(indexBuffer.Binding, indexBuffer.Type);
+        }
+
+        _host.SetDynamicState(in record.Dynamic);
+        BeginDrawRendering(ref state, reusedAttachments: true);
+        _host.BindPipeline(PipelineBindPoint.Graphics, in pipeline);
+        if (record.SetAutoDebug)
+        {
+            SetDrawDebugPhase(submitId, in draw, 0x500);
+        }
+
+        if (emission.IndirectArgumentsAddress != 0 && emission.Indexed)
+        {
+            _host.DrawIndexedIndirect(indirectArguments);
+        }
+        else if (emission.IndirectArgumentsAddress != 0)
+        {
+            _host.DrawIndirect(indirectArguments);
+        }
+        else
+        {
+            EmitDraw(record.PrimitiveType, vertexInput, in draw, in emission);
+        }
+
+        if (record.SetAutoDebug)
+        {
+            SetDrawDebugPhase(submitId, in draw, 0x600);
+        }
+
+        KeepTargets(record, ref state);
+        if (record.SetAutoDebug)
+        {
+            SetDrawDebugPhase(submitId, in draw, 0x700);
+        }
+
+        _replaySequence = sequence;
+        _host.SealDrawReplay();
+        _drawReplays.Increment();
+        return true;
     }
 
     private void DrawMeshTasks(ResolvedDraw record, MeshDrawConfiguration mesh, uint meshVertexCount)
@@ -627,9 +1183,17 @@ internal sealed partial class RenderRecorder : IResolvedCommandSink
         if (groupCount > mesh.Execution.MaxGroupCountX || draw.InstanceCount > mesh.Execution.MaxGroupCountY ||
             totalGroupCount > mesh.Execution.MaxGroupTotalCount)
         {
-            throw _host.Fatal($"The mesh draw exceeds device group limits: groups={groupCount}/{mesh.Execution.MaxGroupCountX} " +
-                $"instances={draw.InstanceCount}/{mesh.Execution.MaxGroupCountY} " +
-                $"total={totalGroupCount}/{mesh.Execution.MaxGroupTotalCount}.");
+            // Left out, as the GPU preparation leaves out an indirect draw over the limits.
+            var left = Interlocked.Increment(ref _meshDrawsOverLimits);
+            if ((left & (left - 1)) == 0)
+            {
+                Console.Error.WriteLine($"[GPU][WARN] A mesh draw over the device group limits was left out ({left} so far): " +
+                    $"groups={groupCount}/{mesh.Execution.MaxGroupCountX} instances={draw.InstanceCount}/{mesh.Execution.MaxGroupCountY} " +
+                    $"total={totalGroupCount}/{mesh.Execution.MaxGroupTotalCount} vertices={draw.Count} " +
+                    $"hash=0x{(record.State.Programs.VertexInput.Stage.Program?.Hash ?? 0ul):X16}.");
+            }
+
+            return;
         }
 
         if (RenderTrace.Enabled)

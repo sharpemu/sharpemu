@@ -106,6 +106,9 @@ public sealed unsafe partial class CachedImage : IDisposable
 
     // Set while descriptor set 1 holds a view of this image: told when its layout, contents or registration change.
     public Action<CachedImage>? HeapChanged;
+    // Set when the image is deleted while descriptor set 1 still holds its view; frees the slot after the current tick.
+    // The heap runs it once it has rewritten the last element that names the image.
+    public Action? DeferredErase;
     public bool Registered;
     public uint QueryEpoch;
     public ulong WatchBegin;
@@ -113,8 +116,16 @@ public sealed unsafe partial class CachedImage : IDisposable
     public ResourceSlotIdentifier DepthOwner;
     public ulong LastAccessTick;
     public int RecencyEntryIndex;
+    // The frame of the use before the last one (collection ticks), or ulong.MaxValue for none. An image used in each of the
+    // two frames before the current one is a recurring alias, which an overlapping request keeps registered.
+    public ulong PreviousUseTick = ulong.MaxValue;
     public bool Parked;
     public ulong ParkedTick;
+
+    // The image of the other dimensional type (1D or 2D) over the same single-row memory. Both are kept while they hold the
+    // same contents; a GPU write to either leaves the other stale, and the cache replaces the stale one on its next lookup.
+    public CachedImage? DimensionTwin;
+    public bool DimensionTwinStale;
 
     public CachedImage(GpuDeviceInfo device, SubmissionScheduler scheduler, IGuestBackedSpace guestBacking, in ImageDescription description,
         ImageBackingPool? pool = null, Action? reportAllocationFailure = null)
@@ -133,7 +144,7 @@ public sealed unsafe partial class CachedImage : IDisposable
 
         Backing.Format = Description.PixelFormat;
         Backing.ImageType = HostImageType(Description.Type);
-        Backing.Extent = Description.Extent;
+        Backing.Extent = Description.HostExtent;
         Backing.GuestPitch = Description.Pitch;
         Backing.Layers = Description.IsVolume ? 1 : Description.Resources.Layers;
         Backing.MipLevels = Math.Min(Description.Resources.Levels, MipChainLevels(Backing.ImageType, Backing.Extent));
@@ -187,20 +198,30 @@ public sealed unsafe partial class CachedImage : IDisposable
         };
         var allocated = Result.ErrorOutOfDeviceMemory;
         var allocationAttempted = false;
-        for (uint index = 0; index < device.MemoryTypeCount; index++)
+        // Device-local memory first. When it is exhausted, any other type the image allows: system memory the device reads
+        // over the bus is slow but keeps the run going, as GpuBuffer.RankMemoryTypes does for buffers.
+        for (var deviceLocalPass = 1; deviceLocalPass >= 0 && allocated != Result.Success; deviceLocalPass--)
         {
-            if ((requirements.MemoryTypeBits & (1u << (int)index)) == 0 ||
-                (device.GetMemoryTypeFlags(index) & MemoryPropertyFlags.DeviceLocalBit) == 0)
+            for (uint index = 0; index < device.MemoryTypeCount; index++)
             {
-                continue;
-            }
+                var deviceLocal = (device.GetMemoryTypeFlags(index) & MemoryPropertyFlags.DeviceLocalBit) != 0;
+                if ((requirements.MemoryTypeBits & (1u << (int)index)) == 0 || deviceLocal != (deviceLocalPass == 1))
+                {
+                    continue;
+                }
 
-            allocateInfo.MemoryTypeIndex = index;
-            allocationAttempted = true;
-            allocated = device.AllocateMemory(allocateInfo, out Backing.Memory);
-            if (allocated == Result.Success)
-            {
-                break;
+                allocateInfo.MemoryTypeIndex = index;
+                allocationAttempted = true;
+                allocated = device.AllocateMemory(allocateInfo, out Backing.Memory);
+                if (allocated == Result.Success)
+                {
+                    if (!deviceLocal)
+                    {
+                        ReportSystemMemoryImage(create, requirements.Size, index);
+                    }
+
+                    break;
+                }
             }
         }
 
@@ -214,12 +235,25 @@ public sealed unsafe partial class CachedImage : IDisposable
             Backing.Handle = default;
             Backing.Memory = default;
             reportAllocationFailure?.Invoke();
-            throw CreateFailure(create, !allocationAttempted ? "select_device_local_memory_type" :
+            throw CreateFailure(create, !allocationAttempted ? "select_memory_type" :
                 allocated != Result.Success ? "vkAllocateMemory" : "vkBindImageMemory",
                 bindingResult, requirements.Size, requirements.MemoryTypeBits);
         }
 
         Backing.AllocationSize = requirements.Size;
+    }
+
+    private static int _systemMemoryImageReports;
+
+    private static void ReportSystemMemoryImage(in ImageCreateInfo create, ulong size, uint memoryType)
+    {
+        if (Interlocked.Increment(ref _systemMemoryImageReports) <= 16)
+        {
+            Console.Error.WriteLine(
+                $"[GPU][WARN] Device-local memory is exhausted; the image is in system memory: extent={create.Extent.Width}x" +
+                $"{create.Extent.Height}x{create.Extent.Depth} format={create.Format} layers={create.ArrayLayers} " +
+                $"levels={create.MipLevels} bytes={size} memory_type={memoryType}");
+        }
     }
 
     private static Exception CreateFailure(in ImageCreateInfo create, string operation, Result result,
@@ -470,6 +504,11 @@ public sealed unsafe partial class CachedImage : IDisposable
     {
         RawWriteAfterGpuWrite = false;
         _gpuModified = true;
+        if (DimensionTwin is { } twin)
+        {
+            twin.DimensionTwinStale = true;
+        }
+
         _bufferHoldsGpuContents = false;
         GpuWriteSequence = Interlocked.Increment(ref _gpuWriteCounter);
         _guestPieceHashes = null;
@@ -477,6 +516,20 @@ public sealed unsafe partial class CachedImage : IDisposable
     }
 
     public void ClearGpuModified() => _gpuModified = false;
+
+    private ulong _readbackUntilFrame;
+
+    internal bool HasReadbackWindow { get; private set; }
+
+    internal ulong ReadbackUntilFrame
+    {
+        get => _readbackUntilFrame;
+        set
+        {
+            _readbackUntilFrame = value;
+            HasReadbackWindow = true;
+        }
+    }
 
     public bool IsBufferModified => _bufferModified;
 
@@ -499,14 +552,25 @@ public sealed unsafe partial class CachedImage : IDisposable
 
     public bool IsWatched => WatchBegin != 0 && WatchEnd != 0;
 
-    public ulong AccountedSize => Backing.Exists ? (Description.Data.Size + 1023) & ~1023UL : 0;
+    public ulong AccountedSize => Backing.Exists ? (Description.HeldGuestSize + 1023) & ~1023UL : 0;
+
+    // The leading bytes of Description.Data the image's levels read from guest memory. An image of a
+    // streamed texture's resident levels reads only the part that holds them; the unmapped rest of
+    // its range is not read or hashed. Set by the upload that stages that part.
+    internal ulong GuestReadSize
+    {
+        get => _guestReadSize != 0 ? Math.Min(_guestReadSize, Description.Data.Size) : Description.Data.Size;
+        set => _guestReadSize = value;
+    }
+
+    private ulong _guestReadSize;
 
     // Hashes the first and last partial tracker page of the guest data through the backing alias.
     public ulong HashGuestEdges()
     {
         const ulong pageMask = TrackerLayout.PageBytes - 1;
         var range = Description.Data;
-        var end = range.End;
+        var end = range.Address + GuestReadSize;
         var headEnd = Math.Min(end, (range.Address + pageMask) & ~pageMask);
         var tailBegin = Math.Max(range.Address, end & ~pageMask);
         var headSize = headEnd - range.Address;

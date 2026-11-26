@@ -69,7 +69,8 @@ public sealed partial class GuestImageCache
 
     public static string TakeSliceLookupReport() =>
         "lookup_fail=" + TakeCounts(SliceLookupFailures, SliceLookupFailureNames) + " lookup_fail_role=" + TakeCounts(SliceLookupRoleFailures, SliceLookupRoleNames) +
-        FormattableString.Invariant($" parks={Interlocked.Exchange(ref _parks, 0)} park_releases={Interlocked.Exchange(ref _parkReleases, 0)} unparks={Interlocked.Exchange(ref _unparks, 0)} park_expiries={Interlocked.Exchange(ref _parkExpiries, 0)}");
+        FormattableString.Invariant($" parks={Interlocked.Exchange(ref _parks, 0)} park_releases={Interlocked.Exchange(ref _parkReleases, 0)} unparks={Interlocked.Exchange(ref _unparks, 0)} park_expiries={Interlocked.Exchange(ref _parkExpiries, 0)}") +
+        " metadata_changes=" + TakeMetadataChangeReport();
 
     private static string TakeCounts(long[] counters, string[] names)
     {
@@ -234,7 +235,8 @@ public sealed partial class GuestImageCache
 
         ref readonly var cachedInfo = ref cached.Description;
         var currentTick = _scheduler.CurrentTick;
-        var safeToDelete = currentTick - Math.Min(currentTick, cached.LastAccessTick) > TicksBeforeRemoval;
+        var usedThisFrame = UsedThisFrameForOverlap(cached);
+        var safeToDelete = !usedThisFrame && currentTick - Math.Min(currentTick, cached.LastAccessTick) > TicksBeforeRemoval;
         if (requested.Data.Address == cachedInfo.Data.Address &&
             requested.BlockExtent.Width == cachedInfo.BlockExtent.Width && requested.BlockExtent.Height == cachedInfo.BlockExtent.Height &&
             requested.BytesPerBlock * requested.Samples == cachedInfo.BytesPerBlock * cachedInfo.Samples)
@@ -518,6 +520,12 @@ public sealed partial class GuestImageCache
             return false;
         }
 
+        // A sample that would record the pending HTile clear first is the render thread's (AcquireTextureCore).
+        if (hasData && request.Role == ImageRole.Texture && SampleClearsDepth(image))
+        {
+            return false;
+        }
+
         view = image.GetOrCreateView(request.View);
         return true;
     }
@@ -709,7 +717,10 @@ public sealed partial class GuestImageCache
         };
     }
 
-    public bool ValidateSliceImages(List<ImageSliceUse> uses, ulong lookupGeneration, long metadataGeneration)
+    // depthClears are the depth views whose pending HTILE clear the segment's join applies itself: a depth use of one of them
+    // passes when only clear-state events reached its metadata, even with a covered slice still waiting on a clear.
+    public bool ValidateSliceImages(List<ImageSliceUse> uses, ulong lookupGeneration, long metadataGeneration,
+        IReadOnlyList<(ResourceSlotIdentifier Image, ImageViewDescription View)>? depthClears = null)
     {
         using var held = _lock.Read();
         foreach (var use in uses)
@@ -736,14 +747,38 @@ public sealed partial class GuestImageCache
                 return SliceLookupFailed(SliceLookupFailure.ChangedAtJoin, use.Request.Role);
             }
 
-            if ((use.Request.Description.HasMetadata && !MetadataUnchangedSince(metadataGeneration, use.Request.Description.Metadata.Range.Address)) ||
-                (image.Description.HasMetadata && !MetadataUnchangedSince(metadataGeneration, image.Description.Metadata.Range.Address)))
+            var requestChanged = use.Request.Description.HasMetadata &&
+                                 !MetadataUnchangedSince(metadataGeneration, use.Request.Description.Metadata.Range.Address);
+            var imageChanged = image.Description.HasMetadata &&
+                               !MetadataUnchangedSince(metadataGeneration, image.Description.Metadata.Range.Address);
+            if ((requestChanged || imageChanged) &&
+                !ConsumedClearsOnly(in use, image, metadataGeneration, requestChanged, imageChanged,
+                    use.Request.Role == ImageRole.DepthTarget && HasDepthClear(depthClears, use.Image, use.Request.View)))
             {
                 return SliceLookupFailed(SliceLookupFailure.MetadataChangedAtJoin, use.Request.Role);
             }
         }
 
         return true;
+    }
+
+    private static bool HasDepthClear(IReadOnlyList<(ResourceSlotIdentifier Image, ImageViewDescription View)>? clears, ResourceSlotIdentifier image,
+        in ImageViewDescription view)
+    {
+        if (clears is null)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < clears.Count; index++)
+        {
+            if (clears[index].Image == image && clears[index].View == view)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     // Applies in stream order what a slice's recording thread only read: recency, refreshes from

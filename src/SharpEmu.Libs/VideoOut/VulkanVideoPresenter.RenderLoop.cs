@@ -378,7 +378,8 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             if (acquireResult == Result.Timeout)
             {
-                ReleaseUnsubmittedPresentationResources(
+                DropPresentationAfterAcquireTimeout(
+                    in presentation,
                     frameSlot,
                     ownsPresentedGuestImageVersion,
                     presentedGuestImage);
@@ -467,6 +468,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw new InvalidOperationException(
                     $"Unsupported translated guest draw: {presentation.DrawKind}.");
             }
+
+            RecordOverlayLayers(imageIndex, frameSlot);
 
             if (PerfOverlay.DrawOnScreen)
             {
