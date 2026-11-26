@@ -138,6 +138,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var now = Environment.TickCount64;
+            _arenaPool?.TrimUnderPressure(now);
             _hostBufferPool.TrimIdleSpills(now);
             _arenaPool?.TrimIdle(now);
             using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.QueueRelay))

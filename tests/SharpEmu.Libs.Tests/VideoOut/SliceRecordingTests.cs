@@ -32,6 +32,35 @@ public sealed class SliceRecordingTests : IClassFixture<HeadlessVulkanFixture>
     public SliceRecordingTests(HeadlessVulkanFixture fixture) => _vulkan = fixture.Vulkan;
 
     [Fact]
+    public void LowMemoryReleasesOnlyCompletedSpareChunks()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        harness.Run(() =>
+        {
+            var available = 4L << 30;
+            using var pool = new SliceArenaPool(harness.Device, harness.Scheduler, () => new(-1, available, 16L << 30));
+            var held = pool.Rent(1);
+            var spares = Enumerable.Range(0, 12).Select(_ => pool.Rent(1)).ToArray();
+            foreach (var spare in spares) pool.Return(spare);
+            var now = Environment.TickCount64 + 6000;
+            pool.TrimUnderPressure(now);
+            Assert.Equal(13, pool.ChunkCount);
+            available = 1L << 30;
+            pool.TrimUnderPressure(now + 1000);
+            pool.TrimUnderPressure(now + 1500);
+
+            Assert.Equal(11, pool.ChunkCount);
+            pool.TrimUnderPressure(now + 2000);
+            pool.TrimUnderPressure(now + 3000);
+            Assert.Equal(9, pool.ChunkCount);
+            held.Buffer.Mapped[0] = 123;
+            Assert.Equal(123, held.Buffer.Mapped[0]);
+            pool.Return(held);
+        });
+    }
+
+    [Fact]
     public void UnresolvedDrawsReachTheJoinerInOrderWithoutAllocatingRecordingBuffers()
     {
         var presenter = RuntimeHelpers.GetUninitializedObject(PresenterUnderTest.PresenterType);

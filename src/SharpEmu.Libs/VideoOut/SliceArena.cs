@@ -5,6 +5,8 @@ using System.Collections.Concurrent;
 using System.IO.Hashing;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Logging;
+using HostDiagnostics = SharpEmu.HLE.Diagnostics;
 using VkBuffer = Silk.NET.Vulkan.Buffer;
 
 namespace SharpEmu.Libs.VideoOut;
@@ -32,11 +34,15 @@ internal sealed class SliceArenaPool : IDisposable
     private readonly ConcurrentBag<SliceArenaChunk> _free = new();
     private readonly List<SliceArenaChunk> _all = new();
     private long _nextTrim;
+    private readonly Func<HostMemoryAvailability> _readMemory;
+    private long _nextPressureCheck;
+    private long _lastGrowth;
 
-    public SliceArenaPool(GpuDeviceInfo device, SubmissionScheduler scheduler)
+    public SliceArenaPool(GpuDeviceInfo device, SubmissionScheduler scheduler, Func<HostMemoryAvailability>? readMemory = null)
     {
         _device = device;
         _scheduler = scheduler;
+        _readMemory = readMemory ?? HostDiagnostics.GcFootprint.ReadMemory;
     }
 
     public int ChunkCount
@@ -68,6 +74,7 @@ internal sealed class SliceArenaPool : IDisposable
         lock (_all)
         {
             _all.Add(chunk);
+            if (size == ChunkBytes) Volatile.Write(ref _lastGrowth, Environment.TickCount64);
         }
 
         return chunk;
@@ -91,6 +98,26 @@ internal sealed class SliceArenaPool : IDisposable
         }
 
         chunk.Buffer.Dispose();
+    }
+
+    // Only returned chunks are eligible: recorded slices return theirs on GPU completion.
+    // Give bursts time to settle before surrendering at most two chunks in a render iteration.
+    internal void TrimUnderPressure(long now)
+    {
+        if (now < _nextPressureCheck) return;
+        _nextPressureCheck = now + 1000;
+        const int spareChunks = 8;
+        if (now - Volatile.Read(ref _lastGrowth) < 5000 || _free.Count <= spareChunks) return;
+
+        var memory = _readMemory();
+        var low = Math.Clamp(memory.TotalPhysicalBytes / 16, 512L << 20, 2L << 30);
+        if (memory.TotalPhysicalBytes <= 0 || memory.AvailablePhysicalBytes < 0 || memory.AvailablePhysicalBytes > low)
+            return;
+        for (var i = 0; i < 2 && _free.Count > spareChunks && _free.TryTake(out var chunk); i++)
+        {
+            lock (_all) _all.Remove(chunk);
+            chunk.Buffer.Dispose();
+        }
     }
 
     internal void TrimIdle(long now)
