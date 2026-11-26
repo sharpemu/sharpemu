@@ -235,6 +235,30 @@ public sealed class SliceRecordingTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public void SliceArenaTrimsCompletedIdleChunksAndPreservesAnOutstandingRental()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        harness.Run(() =>
+        {
+            using var pool = new SliceArenaPool(harness.Device, harness.Scheduler);
+            var held = pool.Rent(1);
+            var first = pool.Rent(1);
+            var second = pool.Rent(1);
+            var third = pool.Rent(1);
+            pool.Return(first, 0);
+            pool.Return(second, 0);
+            pool.Return(third, 0);
+            pool.TrimIdle(0);
+            Assert.Equal(4, pool.ChunkCount);
+            pool.TrimIdle(VulkanHostBufferPool.SpillIdleMilliseconds);
+            Assert.Equal(2, pool.ChunkCount);
+            Assert.Equal(SliceArenaPool.ChunkBytes, (ulong)held.Buffer.Mapped.Length);
+            pool.Return(held);
+        });
+    }
+
+    [Fact]
     public void SliceArena_PacksAlignedReservationsAndHandsItsChunksOver()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;

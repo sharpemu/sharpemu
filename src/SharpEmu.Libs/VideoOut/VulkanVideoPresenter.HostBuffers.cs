@@ -65,14 +65,14 @@ internal static unsafe partial class VulkanVideoPresenter
             return allocation.Buffer;
         }
 
-        internal void RecycleHostBuffer(VkBuffer buffer, DeviceMemory memory)
+        internal void RecycleHostBuffer(VkBuffer buffer, DeviceMemory memory, bool spill = false)
         {
             if (buffer.Handle == 0)
             {
                 return;
             }
 
-            if (_hostBufferPool.Return(buffer, memory))
+            if (_hostBufferPool.Return(buffer, memory, spill ? Environment.TickCount64 : null))
             {
                 return;
             }

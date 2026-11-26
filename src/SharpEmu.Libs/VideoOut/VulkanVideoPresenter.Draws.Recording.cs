@@ -297,7 +297,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             foreach (var (buffer, memory) in resources.OverflowBuffers ?? [])
             {
-                RecycleHostBuffer(buffer, memory);
+                RecycleHostBuffer(buffer, memory, spill: true);
             }
         }
     }

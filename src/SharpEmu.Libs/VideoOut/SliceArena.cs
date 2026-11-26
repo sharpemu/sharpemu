@@ -13,6 +13,7 @@ internal sealed class SliceArenaChunk(GpuBuffer buffer)
 {
     public readonly GpuBuffer Buffer = buffer;
     public ulong Offset;
+    public long ReturnedAt;
 }
 
 internal readonly record struct SliceArenaReservation(SliceArenaChunk Chunk, ulong Offset, ulong Size)
@@ -30,6 +31,7 @@ internal sealed class SliceArenaPool : IDisposable
     private readonly SubmissionScheduler _scheduler;
     private readonly ConcurrentBag<SliceArenaChunk> _free = new();
     private readonly List<SliceArenaChunk> _all = new();
+    private long _nextTrim;
 
     public SliceArenaPool(GpuDeviceInfo device, SubmissionScheduler scheduler)
     {
@@ -54,6 +56,12 @@ internal sealed class SliceArenaPool : IDisposable
         {
             return chunk;
         }
+        if (minimumBytes <= ChunkBytes)
+        {
+            // A sweep briefly owns the free chunks it examines. Recheck before growing the pool.
+            lock (_all)
+                if (_free.TryTake(out chunk)) return chunk;
+        }
 
         var size = Math.Max(ChunkBytes, (minimumBytes + ChunkBytes - 1) / ChunkBytes * ChunkBytes);
         chunk = new SliceArenaChunk(new GpuBuffer(_device, _scheduler, GpuBufferUsage.Upload, 0, GpuBuffer.AddressedFlags, size));
@@ -65,11 +73,14 @@ internal sealed class SliceArenaPool : IDisposable
         return chunk;
     }
 
-    public void Return(SliceArenaChunk chunk)
+    public void Return(SliceArenaChunk chunk) => Return(chunk, Environment.TickCount64);
+
+    internal void Return(SliceArenaChunk chunk, long returnedAt)
     {
         chunk.Offset = 0;
         if (chunk.Buffer.Size == ChunkBytes)
         {
+            chunk.ReturnedAt = returnedAt;
             _free.Add(chunk);
             return;
         }
@@ -80,6 +91,31 @@ internal sealed class SliceArenaPool : IDisposable
         }
 
         chunk.Buffer.Dispose();
+    }
+
+    internal void TrimIdle(long now)
+    {
+        if (now < _nextTrim) return;
+        _nextTrim = now + VulkanHostBufferPool.SpillIdleMilliseconds;
+        HashSet<SliceArenaChunk>? expired = null;
+        lock (_all)
+        {
+            var count = _free.Count;
+            if (count < 2) return;
+            var keep = new List<SliceArenaChunk>(count);
+            for (var i = 0; i < count && _free.TryTake(out var chunk); i++)
+            {
+                // Keep one spare. TryTake transfers ownership, just as it does for a renter.
+                if (i == 0 || now - chunk.ReturnedAt < VulkanHostBufferPool.SpillIdleMilliseconds)
+                    keep.Add(chunk);
+                else
+                    (expired ??= []).Add(chunk);
+            }
+            foreach (var chunk in keep) _free.Add(chunk);
+            if (expired is null) return;
+            _all.RemoveAll(expired.Contains);
+        }
+        foreach (var chunk in expired) chunk.Buffer.Dispose();
     }
 
     public void Dispose()
