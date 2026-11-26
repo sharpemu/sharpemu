@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Numerics;
+
 namespace SharpEmu.Libs.Gpu.Rendering;
 
 public enum PendingWriteKind : byte
@@ -46,7 +48,7 @@ public sealed class PendingGpuWrites
     private static long _scannedEntries;
     private static readonly long[] _pendingByKind = new long[(int)PendingWriteKind.Count];
 
-    private sealed class Entry(ulong address, ulong size, Level level, long sequence)
+    private sealed class Entry(ulong address, ulong size, Level level, long sequence, bool compact)
     {
         public readonly ulong Address = address;
         public readonly ulong Size = size;
@@ -54,29 +56,59 @@ public sealed class PendingGpuWrites
         public long Sequence = sequence;
         public long Oldest = sequence;
         public PendingWriteKind Kind;
-        private readonly List<long> _sequences = [sequence];
+        private List<long>? _sequences = compact ? null : [sequence];
+        // Nonnegative bits describe the complete, unpruned history, relative to the first sequence.
+        // Promotion freezes the bits before merging them into the ordered history under its lock.
+        private readonly long _first = sequence;
+        private long _window = compact ? 1 : -1;
         private long _prunedThrough;
 
         public void NoteSequence(long value, long released)
         {
-            lock (_sequences)
+            var bits = Volatile.Read(ref _window);
+            if (bits >= 0 && released < _first &&
+                value >= _first && value - _first < 63)
             {
-                if (_sequences.Count != 0 && _sequences[0] <= released)
+                var bit = 1L << (int)(value - _first);
+                while (bits >= 0)
                 {
-                    var through = _sequences.BinarySearch(released);
+                    var found = Interlocked.CompareExchange(ref _window, bits | bit, bits);
+                    if (found == bits)
+                    {
+                        return;
+                    }
+                    bits = found;
+                }
+            }
+            lock (this)
+            {
+                // The common short history needs neither a List nor its backing array.
+                var sequences = _sequences ??= [_first];
+                if (_window >= 0)
+                {
+                    var extras = (ulong)Interlocked.Exchange(ref _window, -1) & ~1UL;
+                    while (extras != 0)
+                    {
+                        sequences.Add(_first + BitOperations.TrailingZeroCount(extras));
+                        extras &= extras - 1;
+                    }
+                }
+                if (sequences.Count != 0 && sequences[0] <= released)
+                {
+                    var through = sequences.BinarySearch(released);
                     var count = through >= 0 ? through + 1 : ~through;
-                    _prunedThrough = Math.Max(_prunedThrough, _sequences[count - 1]);
-                    _sequences.RemoveRange(0, count);
+                    _prunedThrough = Math.Max(_prunedThrough, sequences[count - 1]);
+                    sequences.RemoveRange(0, count);
                 }
 
-                if (_sequences.Count == 0 || value > _sequences[^1])
+                if (sequences.Count == 0 || value > sequences[^1])
                 {
-                    _sequences.Add(value);
+                    sequences.Add(value);
                 }
                 else
                 {
-                    var index = _sequences.BinarySearch(value);
-                    if (index < 0) _sequences.Insert(~index, value);
+                    var index = sequences.BinarySearch(value);
+                    if (index < 0) sequences.Insert(~index, value);
                 }
             }
         }
@@ -86,12 +118,21 @@ public sealed class PendingGpuWrites
             var oldest = Volatile.Read(ref Oldest);
             var newest = Volatile.Read(ref Sequence);
             if ((oldest > after && oldest < before) || (newest > after && newest < before)) return true;
-            lock (_sequences)
+            var bits = Volatile.Read(ref _window);
+            if (bits >= 0)
+            {
+                if (before <= _first || after >= _first + 62 || after >= before) return false;
+                var low = after < _first ? 0 : (int)(after - _first + 1);
+                var high = (int)Math.Min(before - _first, 63);
+                return ((ulong)bits & (ulong.MaxValue << low) & ((1UL << high) - 1)) != 0;
+            }
+            lock (this)
             {
                 if (after < _prunedThrough) return true;
-                var index = _sequences.BinarySearch(after);
+                var sequences = _sequences!;
+                var index = sequences.BinarySearch(after);
                 index = index >= 0 ? index + 1 : ~index;
-                return index < _sequences.Count && _sequences[index] < before;
+                return index < sequences.Count && sequences[index] < before;
             }
         }
 
@@ -270,7 +311,8 @@ public sealed class PendingGpuWrites
             }
 
             var fine = ((address + size - 1) >> FineShift) - (address >> FineShift) < MaxFineBlocks;
-            var entry = new Entry(address, size, fine ? _fine : _coarse, sequence) { Kind = kind };
+            var compact = sequence is > 0 and < long.MaxValue - 63;
+            var entry = new Entry(address, size, fine ? _fine : _coarse, sequence, compact) { Kind = kind };
             _entries.Add((address, size), entry);
             if (fine)
             {

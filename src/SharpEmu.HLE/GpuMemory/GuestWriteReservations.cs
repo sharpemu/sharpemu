@@ -28,6 +28,10 @@ internal sealed class GuestWriteReservations
     private readonly object _gate = new();
     private readonly List<CpuReservation> _cpu = [];
     private readonly List<Claim> _gpu = [];
+    // The gate publishes direct claims. Their owner can retire one without competing for the gate.
+    private Claim _directClaim;
+    private long _directId;
+    private int _sleepers;
     private long _nextClaim;
     private long _nextCpuAttempt;
 
@@ -125,9 +129,13 @@ internal sealed class GuestWriteReservations
         public void Dispose() => owner?.Release(id);
     }
 
-    internal readonly struct GpuClaim(GuestWriteReservations owner, long id) : IDisposable
+    internal readonly struct GpuClaim(GuestWriteReservations owner, long id, bool direct) : IDisposable
     {
-        public void Dispose() => owner?.ReleaseGpu(id);
+        public void Dispose()
+        {
+            if (direct) owner.ReleaseDirectClaim(id);
+            else owner?.ReleaseGpu(id);
+        }
     }
 
     internal CpuAttempt BeginCpuAttempt(ulong address, ulong size)
@@ -333,7 +341,14 @@ internal sealed class GuestWriteReservations
             }
             var id = unchecked(++_nextClaim);
             if (id == 0) id = unchecked(++_nextClaim);
-            _gpu.Add(new Claim(id, start, end, thread));
+            var claim = new Claim(id, start, end, thread);
+            var direct = id > 0 && Volatile.Read(ref _directId) == 0;
+            if (direct)
+            {
+                _directClaim = claim;
+                Volatile.Write(ref _directId, id);
+            }
+            else _gpu.Add(claim);
             for (var index = 0; index < _cpu.Count; index++)
             {
                 var attempt = _cpu[index];
@@ -341,7 +356,7 @@ internal sealed class GuestWriteReservations
                 attempt.Invalidated = true;
                 _cpu[index] = attempt;
             }
-            return new GpuClaim(this, id);
+            return new GpuClaim(this, id, direct);
         }
     }
 
@@ -352,7 +367,15 @@ internal sealed class GuestWriteReservations
     {
         if (ReservedOverlap(start, end) || (cpu && GpuOverlap(start, end, thread)))
         {
-            Monitor.Wait(_gate, 10);
+            Interlocked.Increment(ref _sleepers);
+            try
+            {
+                // Pair the waiter publication with direct retirement. Either it will pulse us
+                // under the gate or we see that its claim has already gone before waiting.
+                if (ReservedOverlap(start, end) || (cpu && GpuOverlap(start, end, thread)))
+                    Monitor.Wait(_gate, 10);
+            }
+            finally { Interlocked.Decrement(ref _sleepers); }
             return;
         }
 
@@ -394,6 +417,8 @@ internal sealed class GuestWriteReservations
     // A GPU owner may perform a managed store inside its own claim, but not another thread's claim.
     private bool GpuOverlap(ulong start, ulong end, int exceptThread)
     {
+        if (Volatile.Read(ref _directId) > 0 && _directClaim.Thread != exceptThread &&
+            Overlaps(start, end, _directClaim.Start, _directClaim.End)) return true;
         foreach (var claim in _gpu)
             if (claim.Thread != exceptThread && Overlaps(start, end, claim.Start, claim.End)) return true;
         return false;
@@ -566,6 +591,17 @@ internal sealed class GuestWriteReservations
                 return;
             }
         }
+    }
+
+    private void ReleaseDirectClaim(long id)
+    {
+        // The negative id holds the range stable until its slot counts are released.
+        if (Interlocked.CompareExchange(ref _directId, -id, id) != id) return;
+        var walk = new SlotWalk(_directClaim.Start, _directClaim.End);
+        while (walk.Next(out var slot)) Interlocked.Decrement(ref _slots[slot].Claims);
+        Interlocked.Exchange(ref _directId, 0);
+        if (Volatile.Read(ref _sleepers) != 0)
+            lock (_gate) Monitor.PulseAll(_gate);
     }
 
     private void ReleaseGpu(long id)

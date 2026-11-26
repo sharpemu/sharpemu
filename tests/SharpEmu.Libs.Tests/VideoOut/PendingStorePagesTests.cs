@@ -62,6 +62,29 @@ public sealed class PendingStorePagesTests
 
     // The bucket counts never hide a page the dictionary holds.
     [Fact]
+    public void CollidingPagesKeepTheirOwnCountsWhenTheFirstSlotDrains()
+    {
+        const ulong first = 7;
+        static ulong BucketOf(ulong page) => unchecked(page * 0x9E3779B97F4A7C15UL) >> 52;
+        var collision = first + 1;
+        while (BucketOf(first) != BucketOf(collision)) collision++;
+        var pages = new PendingStorePages();
+        pages.Add(first * Page, 4, false);
+        pages.Add(collision * Page, 4, false);
+        pages.Add(first * Page, 4, false);
+        pages.Remove(first * Page, 4, false);
+        Assert.True(pages.Overlaps(first * Page, 4));
+        pages.Remove(first * Page, 4, false);
+        Assert.False(pages.Overlaps(first * Page, 4));
+        Assert.True(pages.Overlaps(collision * Page, 4));
+        pages.Add(first * Page, 4, false);
+        pages.Remove(collision * Page, 4, false);
+        Assert.True(pages.Overlaps(first * Page, 4));
+        pages.Remove(first * Page, 4, false);
+        Assert.True(pages.IsEmpty);
+    }
+
+    [Fact]
     public void TheBucketCountsAgreeWithTheDictionary()
     {
         var pages = new PendingStorePages();

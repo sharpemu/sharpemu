@@ -15,6 +15,26 @@ public sealed unsafe partial class GuestSpaceOwnerTests
     private const ulong ProtectionBlockBytes = 4 * 1024 * 1024;
 
     [Fact]
+    public void ProtectionHintCannotProtectAReleasedView()
+    {
+        if (!Supported) return;
+        var host = HostViewMemory.Create();
+        using var owner = new GuestSpaceOwner(host, BackingSize);
+        var address = AcquireRange(owner, host, HoleSize(host));
+        Assert.True(owner.MapShared(address, Page, 0, HostPageProtection.ReadWrite, out _));
+        Assert.True(owner.SetTransientAccess(address, Page, HostPageProtection.ReadOnly));
+        Assert.True(owner.SetTransientAccess(address, Page, HostPageProtection.ReadWrite));
+        Assert.True(owner.UnmapShared(address, Page));
+        // A hole needs no native protection. A stale positive hint would try to change the hole.
+        Assert.True(owner.SetTransientAccess(address, Page, HostPageProtection.ReadOnly));
+        Assert.True(owner.MapShared(address, Page, 0, HostPageProtection.ReadWrite, out _));
+        Assert.True(owner.SetTransientAccess(address, Page, HostPageProtection.ReadOnly));
+        Assert.True(owner.SetTransientAccess(address, Page, HostPageProtection.ReadWrite));
+        *(ulong*)address = Marker;
+        Assert.Equal(Marker, *(ulong*)owner.AliasBase);
+    }
+
+    [Fact]
     public void ProtectionWaitsUntilAMappingIsPublished()
     {
         if (!Supported) return;

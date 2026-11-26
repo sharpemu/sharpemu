@@ -9,6 +9,22 @@ namespace SharpEmu.Libs.Tests.Gpu.Rendering;
 public sealed class PendingGpuWritesTests
 {
     [Fact]
+    public void OutOfOrderMarksAndGapsSurviveConcurrentPromotion()
+    {
+        var pending = new PendingGpuWrites();
+        const ulong address = 0x10000;
+        pending.Mark(address, 4, 100);
+        Parallel.ForEach(new long[] { 102, 120, 110, 120, 162, 164 }, sequence => pending.Mark(address, 4, sequence));
+        foreach (var value in new long[] { 100, 102, 110, 120, 162, 164 })
+            Assert.True(pending.HasPendingBetween(address, 4, value - 1, value + 1));
+        Assert.False(pending.HasPendingBetween(address, 4, 120, 162));
+        pending.Release(162);
+        pending.Mark(address, 4, 165);
+        Assert.True(pending.HasPendingBetween(address, 4, 163, 165));
+        Assert.False(pending.HasPendingBetween(address, 4, 162, 164));
+    }
+
+    [Fact]
     public void AMarkedRangeIsPendingForOverlappingReadsOnly()
     {
         var pending = new PendingGpuWrites();

@@ -29,6 +29,32 @@ public sealed class GuestWriteReservationsTests
     }
 
     [Fact]
+    public async Task CopiedGpuClaimCannotRetireANewerClaimInTheSameSlot()
+    {
+        var owner = new GuestWriteReservations();
+        var first = owner.BeginGpuClaim(Address, 16);
+        var copy = first;
+        using var other = owner.BeginGpuClaim(Address + 0x4000, 16);
+        first.Dispose();
+        var current = owner.BeginGpuClaim(Address, 16);
+        var blocked = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        owner.CpuAttemptWaitingForTest = () => blocked.TrySetResult(true);
+        var cpu = Task.Run(() =>
+        {
+            using var attempt = owner.BeginCpuAttempt(Address, 16);
+            return attempt.TryReserve();
+        });
+        try
+        {
+            await blocked.Task.WaitAsync(Deadline);
+            copy.Dispose();
+            Assert.False(cpu.IsCompleted);
+        }
+        finally { current.Dispose(); }
+        Assert.True(await cpu.WaitAsync(Deadline));
+    }
+
+    [Fact]
     public void InvalidatedTokenStaysInvalidUntilAFreshAttemptIsAdmitted()
     {
         var owner = new GuestWriteReservations();
