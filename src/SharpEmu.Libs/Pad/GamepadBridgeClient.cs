@@ -16,12 +16,15 @@ internal sealed class GamepadBridgeClient : IDisposable
 
     private readonly IDisposable? _section;
     private ulong _readIndex;
+    private readonly GamepadBridgeControllerLink _link;
 
     internal GamepadBridgeClient(GamepadBridgeMemory memory, IDisposable? section = null)
     {
         Memory = memory;
         _section = section;
-        Output = new GamepadBridgeOutputWriter(memory);
+        var writer = new GamepadBridgeOutputWriter(memory);
+        Output = writer;
+        _link = new GamepadBridgeControllerLink(memory, writer);
         // Events from before the child started are not replayed.
         _readIndex = memory.WrittenEvents;
     }
@@ -33,6 +36,9 @@ internal sealed class GamepadBridgeClient : IDisposable
     public GamepadBridgeMemory Memory { get; }
 
     public IHostGamepadOutput Output { get; }
+
+    /// <summary>How the child's controller audio reaches the launcher's pad.</summary>
+    internal IHostControllerLink ControllerLink => _link;
 
     public static GamepadBridgeClient? TryOpenFromEnvironment()
     {
@@ -52,5 +58,9 @@ internal sealed class GamepadBridgeClient : IDisposable
     /// <summary>Copies the events since the last call, in order; 0 when there are none.</summary>
     public int ReadEvents(Span<BridgeEvent> destination) => Memory.ReadEvents(ref _readIndex, destination);
 
-    public void Dispose() => _section?.Dispose();
+    public void Dispose()
+    {
+        _link.Close();
+        _section?.Dispose();
+    }
 }

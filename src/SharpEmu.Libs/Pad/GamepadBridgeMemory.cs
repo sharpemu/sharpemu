@@ -14,28 +14,31 @@ namespace SharpEmu.Libs.Pad;
 /// commands (rumble, adaptive triggers, lightbar) here for the launcher to apply.
 ///
 /// Offsets (the section is <see cref="Size"/> bytes, zeroed when created):
-///   0     header: magic, version, size
+///   0     header: magic, version, size, then (written by the launcher) the DualSense pads it can reach (see <see cref="AudioPadsOffset"/>)
 ///   64    input slot, written by the launcher under a seqlock: int sequence, int reserved, then <see cref="InputPayload"/>
 ///   640   event ring, written by the launcher: ulong written count (+ padding to 64 bytes), then 128 entries of
 ///         <see cref="BridgeEvent"/>; the child keeps its own read index
+///   8192  controller audio slots (control block + PCM ring each, see GamepadBridgeMemory.Pcm.cs)
 ///   4800  output groups, written by the child, each 128 bytes under its own seqlock and carrying its own increasing
-///         command sequence: rumble, haptic rumble, trigger rumble, adaptive trigger, lightbar
+///         command sequence: rumble, haptic rumble, trigger rumble, adaptive trigger, lightbar, raw controller effect report
 /// A seqlock slot: a writer makes the sequence odd, writes the payload, and makes it even again; a reader retries
 /// when it saw an odd sequence or a sequence that changed while it copied.
 /// </summary>
-internal sealed unsafe class GamepadBridgeMemory
+internal sealed unsafe partial class GamepadBridgeMemory
 {
     public const uint Magic = 0x42475053; // "SPGB"
-    public const uint Version = 1;
-    public const int Size = 8192;
+    public const uint Version = 2;
+    public const int Size = PcmOffset + PcmSlotCount * PcmSlotStride;
     public const int HeaderSize = 64;
+    /// <summary>One byte, <see cref="HostControllerPads"/> flags, published by the launcher.</summary>
+    public const int AudioPadsOffset = 12;
     public const int InputOffset = 64;
     public const int RingOffset = 640;
     public const int RingCapacity = 128;
     public const int RingEntriesOffset = RingOffset + 64;
     public const int OutputOffset = RingEntriesOffset + RingCapacity * 32; // 4800
     public const int OutputGroupSize = 128;
-    public const int OutputGroupCount = 5;
+    public const int OutputGroupCount = 6;
     public const int SlotHeaderSize = 8;
     public const int MaxNameBytes = 95;
     public const int DefaultReadAttempts = 256;
@@ -61,6 +64,13 @@ internal sealed unsafe class GamepadBridgeMemory
         Volatile.Read(ref *(uint*)_base) == Magic &&
         Unsafe.ReadUnaligned<uint>(_base + 4) == Version &&
         Unsafe.ReadUnaligned<int>(_base + 8) == Size;
+
+    /// <summary>The DualSense pads the launcher can reach for controller audio; the launcher updates it as pads come and go.</summary>
+    public HostControllerPads AudioPads
+    {
+        get => (HostControllerPads)Volatile.Read(ref *(_base + AudioPadsOffset));
+        set => Volatile.Write(ref *(_base + AudioPadsOffset), (byte)value);
+    }
 
     // ---- seqlock -------------------------------------------------------------------------------------------------
 
@@ -432,6 +442,37 @@ internal struct LightbarCommand
     public byte Red, Green, Blue;
 }
 
+/// <summary>A raw DualSense output report for the launcher to send with SDL (the controller audio routing).</summary>
+[StructLayout(LayoutKind.Sequential, Pack = 1)]
+internal unsafe struct ControllerEffectCommand
+{
+    public const int MaxReportBytes = 64;
+
+    public uint Sequence;
+    public byte Length;
+    public fixed byte Data[MaxReportBytes];
+
+    public static ControllerEffectCommand From(uint sequence, ReadOnlySpan<byte> report)
+    {
+        if (report.Length > MaxReportBytes)
+        {
+            throw new ArgumentException("The controller effect report is too long.", nameof(report));
+        }
+
+        var command = new ControllerEffectCommand { Sequence = sequence, Length = (byte)report.Length };
+        report.CopyTo(new Span<byte>(command.Data, MaxReportBytes));
+        return command;
+    }
+
+    public byte[] GetReport()
+    {
+        fixed (byte* data = Data)
+        {
+            return new ReadOnlySpan<byte>(data, Math.Min((int)Length, MaxReportBytes)).ToArray();
+        }
+    }
+}
+
 /// <summary>The child's <see cref="IHostGamepadOutput"/>: each call becomes a new command of its group.</summary>
 internal sealed class GamepadBridgeOutputWriter : IHostGamepadOutput
 {
@@ -440,6 +481,7 @@ internal sealed class GamepadBridgeOutputWriter : IHostGamepadOutput
     public const int GroupTriggerRumble = 2;
     public const int GroupAdaptive = 3;
     public const int GroupLightbar = 4;
+    public const int GroupControllerEffect = 5;
 
     private readonly GamepadBridgeMemory _memory;
     private readonly uint[] _sequences = new uint[GamepadBridgeMemory.OutputGroupCount];
@@ -518,6 +560,17 @@ internal sealed class GamepadBridgeOutputWriter : IHostGamepadOutput
             _memory.WriteOutput(GroupLightbar, new LightbarCommand { Sequence = ++_sequences[GroupLightbar], Reset = 1 });
         }
     }
+
+    /// <summary>Asks the launcher to send a raw DualSense output report to the pad (at most 64 bytes).</summary>
+    public void SendControllerEffect(ReadOnlySpan<byte> report)
+    {
+        lock (_gate)
+        {
+            _memory.WriteOutput(
+                GroupControllerEffect,
+                ControllerEffectCommand.From(++_sequences[GroupControllerEffect], report));
+        }
+    }
 }
 
 /// <summary>
@@ -534,8 +587,11 @@ internal sealed class GamepadBridgeOutputReader
         _memory = memory;
     }
 
-    /// <summary>Applies the new commands to <paramref name="target"/>; returns how many groups it applied.</summary>
-    public int Poll(IHostGamepadOutput target)
+    /// <summary>
+    /// Applies the new commands to <paramref name="target"/> (and the controller effect to <paramref name="effects"/>, when
+    /// there is one); returns how many groups it applied.
+    /// </summary>
+    public int Poll(IHostGamepadOutput target, IHostControllerEffectSink? effects = null)
     {
         var count = 0;
         if (_memory.TryReadOutput<RumbleCommand>(GamepadBridgeOutputWriter.GroupRumble, out var rumble) &&
@@ -588,6 +644,21 @@ internal sealed class GamepadBridgeOutputReader
             count++;
         }
 
+        if (effects is not null &&
+            _memory.TryReadOutput<ControllerEffectCommand>(GamepadBridgeOutputWriter.GroupControllerEffect, out var effect) &&
+            effect.Sequence != _applied[GamepadBridgeOutputWriter.GroupControllerEffect])
+        {
+            _applied[GamepadBridgeOutputWriter.GroupControllerEffect] = effect.Sequence;
+            effects.SendControllerEffect(effect.GetReport());
+            count++;
+        }
+
         return count;
     }
+}
+
+/// <summary>Where the launcher sends the child's raw controller effect reports.</summary>
+internal interface IHostControllerEffectSink
+{
+    void SendControllerEffect(ReadOnlySpan<byte> report);
 }

@@ -95,6 +95,7 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
             Console.Error.WriteLine($"[LOADER][WARN] SDL initial fullscreen sync failed: {GetError()}");
         }
         HostWindowInput.Connect(_bridge is null ? this : _bridge.Output);
+        HostControllerLink.Connect(_bridge?.ControllerLink);
         if (!GamepadBridgeClient.IsConfigured)
         {
             OpenFirstGamepad();
@@ -324,6 +325,7 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
         SDL_ShowCursor();
         HostWindowInput.Disconnect();
         CloseGamepad();
+        HostControllerLink.Connect(null);
         _bridge?.Dispose();
         if (_window is not null)
         {

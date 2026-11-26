@@ -4,6 +4,7 @@
 using System.Globalization;
 using System.Runtime.Versioning;
 using SharpEmu.HLE.Host;
+using SharpEmu.HLE.Host.Sdl;
 using SDL;
 using static SDL.SDL3;
 
@@ -36,6 +37,8 @@ public sealed unsafe class GamepadBridgeHost : IDisposable
     private TouchContactIds _touchIds = new();
     private string _gamepadName = string.Empty;
     private long _nextOpenAttempt;
+    private long _nextAudioProbe;
+    private readonly GamepadBridgePcmPump[] _pcmPumps;
     private volatile bool _stop;
     private bool _disposed;
 
@@ -44,6 +47,12 @@ public sealed unsafe class GamepadBridgeHost : IDisposable
         _section = section;
         _output = new SdlGamepadOutput(_gate);
         _outputReader = new GamepadBridgeOutputReader(section.Memory);
+        _pcmPumps = new GamepadBridgePcmPump[GamepadBridgeMemory.PcmSlotCount];
+        for (var slot = 0; slot < _pcmPumps.Length; slot++)
+        {
+            _pcmPumps[slot] = new GamepadBridgePcmPump(section.Memory, slot, SdlControllerLink.Instance.TryOpenBluetoothStream);
+        }
+
         _thread = new Thread(Run, 256 * 1024)
         {
             IsBackground = true,
@@ -138,6 +147,11 @@ public sealed unsafe class GamepadBridgeHost : IDisposable
         finally
         {
             CloseGamepad(announce: false);
+            foreach (var pump in _pcmPumps)
+            {
+                pump.Dispose();
+            }
+
             _section.Memory.WriteDisconnected();
             SDL_QuitSubSystem(InitFlags);
         }
@@ -162,11 +176,36 @@ public sealed unsafe class GamepadBridgeHost : IDisposable
         if (_gamepad is null)
         {
             _section.Memory.WriteDisconnected();
+            PublishAudioPads(force: false);
             return;
         }
 
         _section.Memory.WriteInput(SdlGamepadStateReader.ReadFull(_gamepad, _touchIds), _gamepadName);
-        _outputReader.Poll(_output);
+        PublishAudioPads(force: false);
+        _outputReader.Poll(_output, _output);
+        foreach (var pump in _pcmPumps)
+        {
+            pump.Poll();
+        }
+    }
+
+    // The DualSense pads the child's controller audio may use (it sees no gamepad itself): re-checked a few times a
+    // second and right after the pad opens or closes, and only written when it changed.
+    private void PublishAudioPads(bool force)
+    {
+        var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        if (!force && now < _nextAudioProbe)
+        {
+            return;
+        }
+
+        _nextAudioProbe = now + System.Diagnostics.Stopwatch.Frequency / 4;
+        var pads = _gamepad is null ? HostControllerPads.None : SdlControllerLink.Instance.QueryPads();
+        if (pads != _section.Memory.AudioPads)
+        {
+            _section.Memory.AudioPads = pads;
+            Console.Error.WriteLine($"[LOADER][INFO] gamepad bridge: controller audio pads: {pads}");
+        }
     }
 
     // The gamepad events SdlHostWindow turns into pad changes (a button, a trigger crossing its button threshold, a
@@ -264,6 +303,7 @@ public sealed unsafe class GamepadBridgeHost : IDisposable
             _output.Type = SdlGamepadStateReader.MapGamepadType(SDL_GetRealGamepadType(gamepad));
         }
 
+        PublishAudioPads(force: true);
         Console.Error.WriteLine(
             $"[LOADER][INFO] gamepad bridge: gamepad connected: {_gamepadName} " +
             $"type={_output.Type} connection={SdlGamepadStateReader.GetConnection(gamepad)}");
@@ -278,10 +318,18 @@ public sealed unsafe class GamepadBridgeHost : IDisposable
 
         lock (_gate)
         {
+            foreach (var pump in _pcmPumps)
+            {
+                pump.Release();
+            }
+
+            _output.RestoreAudioRoute();
             SDL_CloseGamepad(_gamepad);
             _gamepad = null;
             _output.Reset();
         }
+
+        PublishAudioPads(force: true);
 
         if (announce)
         {

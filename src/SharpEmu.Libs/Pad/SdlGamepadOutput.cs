@@ -11,7 +11,7 @@ namespace SharpEmu.Libs.Pad;
 /// The output side of one open SDL gamepad: rumble, trigger rumble, DualSense adaptive triggers and the lightbar.
 /// The SDL window drives it directly; the gamepad bridge's launcher side drives it from the child's commands.
 /// </summary>
-internal sealed unsafe class SdlGamepadOutput : IHostGamepadOutput
+internal sealed unsafe class SdlGamepadOutput : IHostGamepadOutput, IHostControllerEffectSink
 {
     private const uint OutputDurationMs = 5_000;
 
@@ -23,6 +23,7 @@ internal sealed unsafe class SdlGamepadOutput : IHostGamepadOutput
     private byte _hapticLargeRumble;
     private byte _hapticSmallRumble;
     private long _hapticRumbleExpires;
+    private bool _speakerRouted;
 
     /// <param name="gate">The lock that also guards the owner's use of <see cref="Gamepad"/>.</param>
     public SdlGamepadOutput(object gate)
@@ -47,6 +48,7 @@ internal sealed unsafe class SdlGamepadOutput : IHostGamepadOutput
         _hapticLargeRumble = 0;
         _hapticSmallRumble = 0;
         _hapticRumbleExpires = 0;
+        _speakerRouted = false;
     }
 
     public void SetRumble(byte largeMotor, byte smallMotor)
@@ -182,6 +184,51 @@ internal sealed unsafe class SdlGamepadOutput : IHostGamepadOutput
     }
 
     public void ResetLightbar() => SetLightbar(0, 0, 64);
+
+    /// <summary>
+    /// Sends a raw DualSense output report the child built (the controller audio routing) to the open pad. The routing
+    /// state is remembered so <see cref="RestoreAudioRoute"/> can undo a speaker route the child never took back.
+    /// </summary>
+    public void SendControllerEffect(ReadOnlySpan<byte> report)
+    {
+        lock (_gate)
+        {
+            if (!IsGamepadConnected() || report.IsEmpty)
+            {
+                return;
+            }
+
+            bool sent;
+            fixed (byte* data = report)
+            {
+                sent = SDL_SendGamepadEffect(Gamepad, (nint)data, report.Length);
+            }
+
+            if (!sent)
+            {
+                Console.Error.WriteLine("[LOADER][WARN] gamepad bridge: the controller effect report was refused");
+            }
+            else if ((report[0] & 0x80) != 0)
+            {
+                _speakerRouted = DualSenseAudioRoute.IsSpeakerRoute(report);
+            }
+        }
+    }
+
+    /// <summary>Puts the front audio pair back on the headphone jack when the speaker route is still on (call under the gate).</summary>
+    public void RestoreAudioRoute()
+    {
+        if (_speakerRouted && IsGamepadConnected())
+        {
+            var report = DualSenseAudioRoute.Report(speaker: false);
+            fixed (byte* data = report)
+            {
+                SDL_SendGamepadEffect(Gamepad, (nint)data, report.Length);
+            }
+        }
+
+        _speakerRouted = false;
+    }
 
     private bool IsGamepadConnected() => Gamepad is not null && SDL_GamepadConnected(Gamepad);
 
