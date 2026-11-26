@@ -23,6 +23,7 @@ internal sealed class EmulatorProcess : IDisposable
         line.Contains(" window ready:", StringComparison.Ordinal);
 
     private const uint ExtendedStartupInfoPresent = 0x00080000;
+    private const uint CreateUnicodeEnvironment = 0x00000400;
     private const uint CreateNoWindow = 0x08000000;
     private const int StartfUseStdHandles = 0x00000100;
     private const uint HandleFlagInherit = 0x00000001;
@@ -38,6 +39,10 @@ internal sealed class EmulatorProcess : IDisposable
     private readonly object _sync = new();
     private nint _processHandle;
     private nint _jobHandle;
+    private IDisposable? _gamepadBridge;
+    // Holds the handles the sandboxed child inherited (its game archive) until it exits.
+    private IDisposable? _sandbox;
+    private SandboxJobMonitor? _sandboxMonitor;
     private Process? _fallbackProcess;
     private bool _running;
     private bool _stopRequested;
@@ -46,6 +51,9 @@ internal sealed class EmulatorProcess : IDisposable
     public event Action<string, bool>? OutputReceived;
 
     public event Action<int>? Exited;
+
+    /// <summary>Raised once per run, when the sandbox refused the game's first attempt to start another process.</summary>
+    public event Action? SandboxActionBlocked;
 
     public bool IsRunning
     {
@@ -57,6 +65,12 @@ internal sealed class EmulatorProcess : IDisposable
             }
         }
     }
+
+    /// <summary>
+    /// The launcher's choice for the next start: the "Run games in a sandbox" setting, or false for a one-off launch
+    /// without it. An explicit SHARPEMU_SANDBOX=0/1 in the environment overrides it (<see cref="SandboxLaunchPolicy"/>).
+    /// </summary>
+    public bool SandboxEnabled { get; set; } = SandboxLaunchPolicy.GuiDefault;
 
     public void Start(string exePath, IReadOnlyList<string> arguments, string? workingDirectory,
         IReadOnlyDictionary<string, string?>? environment = null)
@@ -197,6 +211,7 @@ internal sealed class EmulatorProcess : IDisposable
         process.BeginErrorReadLine();
     }
 
+    [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     private unsafe void StartWindows(string exePath, IReadOnlyList<string> arguments, string? workingDirectory)
     {
         nint stdoutRead = 0;
@@ -207,13 +222,32 @@ internal sealed class EmulatorProcess : IDisposable
         nint mitigationPolicies = 0;
         nint processHandle = 0;
         nint threadHandle = 0;
+        nint sandboxJob = 0;
+        WindowsAppContainerSandbox? sandbox = null;
+        SandboxJobMonitor? sandboxMonitor = null;
+        SharpEmu.Libs.Pad.GamepadBridgeHost? gamepadBridge = null;
 
         try
         {
+            // The child runs in an AppContainer limited to the folders of this launch when the GUI setting is on
+            // (default) or SHARPEMU_SANDBOX=1; SHARPEMU_SANDBOX=0 forces it off. Failing to set that up fails the
+            // launch: it never falls back to an unconfined child.
+            if (SandboxLaunchPolicy.ShouldSandbox(SandboxEnabled, Environment.GetEnvironmentVariable(SandboxLaunchPolicy.Variable)))
+            {
+                sandbox = WindowsAppContainerSandbox.Create(new SandboxInputs(
+                    Path.GetDirectoryName(exePath) ?? Environment.CurrentDirectory,
+                    SharpEmu.Libs.SharpEmuPaths.DataRoot,
+                    arguments.LastOrDefault(static argument => !argument.StartsWith("--", StringComparison.Ordinal)),
+                    null,
+                    arguments,
+                    Environment.GetEnvironmentVariable));
+            }
+
+            // The sandboxed child's pipe ends are not inheritable until the CreateProcessW call below (InheritListedHandles).
             var security = new SecurityAttributes
             {
                 Size = Marshal.SizeOf<SecurityAttributes>(),
-                InheritHandle = 1,
+                InheritHandle = sandbox is null ? 1 : 0,
             };
             if (!CreatePipe(out stdoutRead, out stdoutWrite, ref security, 0) ||
                 !CreatePipe(out stderrRead, out stderrWrite, ref security, 0))
@@ -227,10 +261,11 @@ internal sealed class EmulatorProcess : IDisposable
                 throw new InvalidOperationException($"Could not configure emulator output pipes (Win32 error {Marshal.GetLastWin32Error()}).");
             }
 
+            var attributeCount = sandbox is null ? 1 : WindowsAppContainerSandbox.AttributeCount;
             nuint attributeListSize = 0;
-            _ = InitializeProcThreadAttributeList(0, 1, 0, ref attributeListSize);
+            _ = InitializeProcThreadAttributeList(0, attributeCount, 0, ref attributeListSize);
             attributeList = Marshal.AllocHGlobal((nint)attributeListSize);
-            if (!InitializeProcThreadAttributeList(attributeList, 1, 0, ref attributeListSize))
+            if (!InitializeProcThreadAttributeList(attributeList, attributeCount, 0, ref attributeListSize))
             {
                 throw new InvalidOperationException($"Could not initialize process mitigation attributes (Win32 error {Marshal.GetLastWin32Error()}).");
             }
@@ -252,6 +287,22 @@ internal sealed class EmulatorProcess : IDisposable
                 throw new InvalidOperationException($"Could not apply process mitigations (Win32 error {Marshal.GetLastWin32Error()}).");
             }
 
+            if (sandbox is not null)
+            {
+                sandbox.AddSecurityCapabilities(attributeList);
+                // The AppContainer child sees no controller: this process reads it and shares it (see GamepadBridgeHost).
+                // The launcher's own menu polling stops meanwhile, so one thread uses SDL gamepads.
+                gamepadBridge = SharpEmu.Libs.Pad.GamepadBridgeHost.TryStart();
+                if (gamepadBridge is null)
+                {
+                    sandbox.AddHandleList(attributeList, stdoutWrite, stderrWrite);
+                }
+                else
+                {
+                    sandbox.AddHandleList(attributeList, stdoutWrite, stderrWrite, gamepadBridge.Handle);
+                }
+            }
+
             var startup = new StartupInfoEx();
             startup.StartupInfo.Size = Marshal.SizeOf<StartupInfoEx>();
             startup.StartupInfo.Flags = StartfUseStdHandles;
@@ -266,17 +317,20 @@ internal sealed class EmulatorProcess : IDisposable
             lock (EnvironmentGate)
             {
                 var previousValue = Environment.GetEnvironmentVariable(MitigatedChildEnvironment);
+                IDisposable? inheritScope = null;
                 try
                 {
                     Environment.SetEnvironmentVariable(MitigatedChildEnvironment, "1");
+                    inheritScope = sandbox?.InheritListedHandles();
                     if (!CreateProcessW(
                             null,
                             commandLine,
                             0,
                             0,
                             true,
-                            ExtendedStartupInfoPresent | CreateNoWindow | WindowsGuestAddressReservation.CreateSuspended,
-                            0,
+                            ExtendedStartupInfoPresent | CreateNoWindow | WindowsGuestAddressReservation.CreateSuspended |
+                                (sandbox is null ? 0 : CreateUnicodeEnvironment),
+                            sandbox?.CreateEnvironmentBlock(gamepadBridge is null ? null : [gamepadBridge.ChildEnvironment]) ?? 0,
                             string.IsNullOrWhiteSpace(workingDirectory)
                                 ? Path.GetDirectoryName(exePath) ?? Environment.CurrentDirectory
                                 : workingDirectory,
@@ -288,20 +342,39 @@ internal sealed class EmulatorProcess : IDisposable
                 }
                 finally
                 {
+                    inheritScope?.Dispose();
                     Environment.SetEnvironmentVariable(MitigatedChildEnvironment, previousValue);
                 }
             }
 
             processHandle = processInfo.Process;
             threadHandle = processInfo.Thread;
+            // The sandboxed child joins its one-process job while still suspended, so no guest code runs outside it.
+            if (sandbox is not null)
+            {
+                sandboxJob = sandbox.CreateConfinedJob(processHandle, out sandboxMonitor);
+                if (sandboxMonitor is not null)
+                {
+                    sandboxMonitor.ProcessLaunchBlocked += count =>
+                    {
+                        if (count == 1)
+                        {
+                            // A PS5 game cannot start a Windows program: the attempt means a modified dump. Stop it.
+                            Stop();
+                            SandboxActionBlocked?.Invoke();
+                        }
+                    };
+                }
+            }
+
             WindowsGuestAddressReservation.PrepareAndResume(processHandle, threadHandle);
             CloseHandle(stdoutWrite);
             stdoutWrite = 0;
             CloseHandle(stderrWrite);
             stderrWrite = 0;
 
-            var jobHandle = CreateJobObjectW(0, null);
-            if (jobHandle != 0 &&
+            var jobHandle = sandboxJob != 0 ? sandboxJob : CreateJobObjectW(0, null);
+            if (sandboxJob == 0 && jobHandle != 0 &&
                 (!TryEnableKillOnJobClose(jobHandle) || !AssignProcessToJobObject(jobHandle, processHandle)))
             {
                 CloseHandle(jobHandle);
@@ -315,6 +388,18 @@ internal sealed class EmulatorProcess : IDisposable
                 _running = true;
             }
             processHandle = 0;
+            sandboxJob = 0;
+            // The bridge lives as long as the child: it is disposed when the child exits (OnExited) or is stopped.
+            lock (_sync)
+            {
+                _gamepadBridge = gamepadBridge;
+                _sandbox = sandbox;
+                _sandboxMonitor = sandboxMonitor;
+            }
+
+            gamepadBridge = null;
+            sandbox = null;
+            sandboxMonitor = null;
 
             StartPipeReader(stdoutRead, isError: false);
             stdoutRead = 0;
@@ -333,6 +418,13 @@ internal sealed class EmulatorProcess : IDisposable
         }
         finally
         {
+            sandboxMonitor?.Dispose();
+            gamepadBridge?.Dispose();
+            sandbox?.Dispose();
+            if (sandboxJob != 0)
+            {
+                CloseHandle(sandboxJob);
+            }
             if (threadHandle != 0)
             {
                 CloseHandle(threadHandle);
@@ -419,6 +511,9 @@ internal sealed class EmulatorProcess : IDisposable
     private void OnExited(int nativeExitCode)
     {
         int exitCode;
+        IDisposable? bridge;
+        IDisposable? sandboxMonitor;
+        IDisposable? sandbox;
         lock (_sync)
         {
             if (!_running)
@@ -441,8 +536,17 @@ internal sealed class EmulatorProcess : IDisposable
 
             _fallbackProcess?.Dispose();
             _fallbackProcess = null;
+            bridge = _gamepadBridge;
+            _gamepadBridge = null;
+            sandbox = _sandbox;
+            _sandbox = null;
+            sandboxMonitor = _sandboxMonitor;
+            _sandboxMonitor = null;
         }
 
+        bridge?.Dispose();
+        sandboxMonitor?.Dispose();
+        sandbox?.Dispose();
         Exited?.Invoke(exitCode);
     }
 

@@ -93,6 +93,12 @@ public sealed class GuiSettings
     public bool CheckForUpdatesOnStartup { get; set; } = true;
 
     /// <summary>
+    /// Run games in a Windows AppContainer sandbox (Windows only). On by default; SHARPEMU_SANDBOX=0/1 in the
+    /// environment overrides it (<see cref="SharpEmu.HLE.Host.Windows.SandboxLaunchPolicy"/>).
+    /// </summary>
+    public bool RunInSandbox { get; set; } = true;
+
+    /// <summary>
     /// Discord application ID used for Rich Presence; the default is the
     /// SharpEmu application. Override to rebrand what Discord shows as
     /// "Playing …" (register at discord.com/developers/applications).

@@ -476,6 +476,14 @@
   "Options.GnmMode.TrophyKey.Desc": "Chave de troféus da PS4 para nomes e descrições de troféus encriptados. Utilizada nas listas de troféus e notificações de desbloqueio do GnmMode. Guardada localmente; reinicie o jogo em execução após a alterar.",
   "Options.GnmMode.TrophyKey.Placeholder": "32 carateres hexadecimais",
   "Options.GnmMode.TrophyKey.Invalid": "Introduza exatamente 32 carateres hexadecimais (0–9, A–F) ou esvazie o campo para remover a chave. A chave válida anterior é mantida até que o valor introduzido seja válido.",
+  "Options.Sandbox.Label": "Executar os jogos numa sandbox (recomendado)",
+  "Options.Sandbox.Desc": "Impede que um jogo modificado leia os seus ficheiros, use a internet ou inicie programas. Apenas Windows.",
+  "Options.SandboxCleanup.Label": "Remover as permissões da sandbox",
+  "Options.SandboxCleanup.Desc": "Remove as permissões de pasta que a sandbox adicionou, por exemplo antes de desinstalar. São adicionadas de novo no próximo arranque com sandbox.",
+  "Options.SandboxCleanup.Button": "Remover",
+  "Options.SandboxCleanup.Running": "Feche o jogo antes de remover as permissões da sandbox.",
+  "Options.SandboxCleanup.Done": "Permissões da sandbox removidas.",
+  "Options.SandboxCleanup.Failed": "Algumas permissões da sandbox não puderam ser removidas; veja as linhas acima.",
 
   "Trophies.Title": "Troféus",
   "Trophies.None": "Este jogo não tem troféus.",
@@ -531,5 +539,16 @@
   "Overlay.Ime.Space": "Espaço",
   "Overlay.Ime.Cursor": "Cursor",
   "Overlay.Ime.Select": "Selecionar",
-  "Overlay.Ime.Type": "Escreva com o teclado"
+  "Overlay.Ime.Type": "Escreva com o teclado",
+  "Sandbox.BlockedTitle": "A sandbox parou o jogo",
+  "Sandbox.BlockedMessage": "Este jogo tentou iniciar outro programa. A sandbox bloqueou-o e parou o jogo. O dump foi provavelmente modificado. Execute apenas dumps feitos por si a partir da sua própria consola.",
+  "Sandbox.BlockedOk": "OK",
+  "Sandbox.Cancel": "Cancelar",
+  "Sandbox.OffTitle": "Desativar a sandbox?",
+  "Sandbox.OffMessage": "Sem a sandbox, um jogo modificado pode ler os seus ficheiros, usar a internet e iniciar programas. Desative-a apenas para um jogo cuja origem seja de confiança.",
+  "Sandbox.OffConfirm": "Desativar",
+  "Sandbox.VolumeTitle": "Este jogo está numa unidade {0}",
+  "Sandbox.VolumeMessage": "A sandbox não consegue abrir jogos em unidades exFAT (discos externos, pens USB). Compacte o jogo como .zar para o jogar a partir desta unidade.",
+  "Sandbox.VolumeConvert": "Compactar como .zar",
+  "Sandbox.VolumePlayWithout": "Jogar sem sandbox"
 }

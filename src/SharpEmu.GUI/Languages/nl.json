@@ -475,6 +475,14 @@
   "Options.GnmMode.TrophyKey.Desc": "PS4-trofeesleutel voor versleutelde trofeenamen en beschrijvingen. Gebruikt door de trofeelijsten en ontgrendelingsmeldingen van GnmMode. Wordt lokaal opgeslagen; herstart een actief spel na een wijziging.",
   "Options.GnmMode.TrophyKey.Placeholder": "32 hexadecimale tekens",
   "Options.GnmMode.TrophyKey.Invalid": "Voer precies 32 hexadecimale tekens (0–9, A–F) in of wis het veld om de sleutel te verwijderen. De vorige geldige sleutel blijft behouden totdat de invoer geldig is.",
+  "Options.Sandbox.Label": "Games in een sandbox uitvoeren (aanbevolen)",
+  "Options.Sandbox.Desc": "Voorkomt dat een aangepaste game je bestanden leest, internet gebruikt of programma's start. Alleen Windows.",
+  "Options.SandboxCleanup.Label": "Sandboxrechten verwijderen",
+  "Options.SandboxCleanup.Desc": "Verwijdert de maprechten die de sandbox heeft toegevoegd, bijvoorbeeld voor het verwijderen van SharpEmu. Ze worden opnieuw toegevoegd bij de volgende start in de sandbox.",
+  "Options.SandboxCleanup.Button": "Verwijderen",
+  "Options.SandboxCleanup.Running": "Sluit de game voordat je de sandboxrechten verwijdert.",
+  "Options.SandboxCleanup.Done": "Sandboxrechten verwijderd.",
+  "Options.SandboxCleanup.Failed": "Sommige sandboxrechten konden niet worden verwijderd; zie de regels hierboven.",
 
   "Trophies.Title": "Trofeeën",
   "Trophies.None": "Deze game heeft geen trofeeën.",
@@ -530,5 +538,16 @@
   "Overlay.Ime.Space": "Spatie",
   "Overlay.Ime.Cursor": "Cursor",
   "Overlay.Ime.Select": "Selecteren",
-  "Overlay.Ime.Type": "Typ met je toetsenbord"
+  "Overlay.Ime.Type": "Typ met je toetsenbord",
+  "Sandbox.BlockedTitle": "De sandbox heeft de game gestopt",
+  "Sandbox.BlockedMessage": "Deze game probeerde een ander programma te starten. De sandbox heeft dat geblokkeerd en de game gestopt. De dump is waarschijnlijk aangepast. Start alleen dumps die je zelf van je eigen console hebt gemaakt.",
+  "Sandbox.BlockedOk": "OK",
+  "Sandbox.Cancel": "Annuleren",
+  "Sandbox.OffTitle": "Sandbox uitschakelen?",
+  "Sandbox.OffMessage": "Zonder sandbox kan een aangepaste game je bestanden lezen, internet gebruiken en programma's starten. Schakel hem alleen uit voor een game waarvan je de herkomst vertrouwt.",
+  "Sandbox.OffConfirm": "Uitschakelen",
+  "Sandbox.VolumeTitle": "Deze game staat op een {0}-schijf",
+  "Sandbox.VolumeMessage": "De sandbox kan geen games openen op exFAT-schijven (externe schijven, USB-sticks). Zet de game om naar .zar om hem vanaf deze schijf te spelen.",
+  "Sandbox.VolumeConvert": "Omzetten naar .zar",
+  "Sandbox.VolumePlayWithout": "Spelen zonder sandbox"
 }

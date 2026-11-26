@@ -1673,6 +1673,11 @@ public static class AvPlayerExports
             Trace($"replacement_source materialized bytes={size}");
             return true;
         }
+        catch (UnauthorizedAccessException)
+        {
+            SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(materializedPath);
+            return false;
+        }
         finally
         {
             ArrayPool<byte>.Shared.Return(hostBuffer);
@@ -2621,6 +2626,11 @@ public static class AvPlayerExports
                                              UnauthorizedAccessException or
                                              UriFormatException)
         {
+            if (exception is UnauthorizedAccessException)
+            {
+                SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(app0);
+            }
+
             return null;
         }
     }

@@ -244,6 +244,11 @@ public static class SaveDataExports
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
+            if (exception is UnauthorizedAccessException)
+            {
+                SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked((UnauthorizedAccessException)exception);
+            }
+
             return SetReturn(ctx, OrbisSaveDataErrorInternal);
         }
     }
@@ -354,6 +359,11 @@ public static class SaveDataExports
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
+            if (exception is UnauthorizedAccessException)
+            {
+                SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked((UnauthorizedAccessException)exception);
+            }
+
             return SetReturn(ctx, OrbisSaveDataErrorInternal);
         }
     }
@@ -424,6 +434,11 @@ public static class SaveDataExports
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
+            if (exception is UnauthorizedAccessException)
+            {
+                SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked((UnauthorizedAccessException)exception);
+            }
+
             return SetReturn(ctx, OrbisSaveDataErrorInternal);
         }
     }
@@ -501,6 +516,11 @@ public static class SaveDataExports
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
+            if (exception is UnauthorizedAccessException)
+            {
+                SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked((UnauthorizedAccessException)exception);
+            }
+
             return SetReturn(ctx, OrbisSaveDataErrorInternal);
         }
     }
@@ -521,6 +541,11 @@ public static class SaveDataExports
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
+            if (exception is UnauthorizedAccessException)
+            {
+                SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked((UnauthorizedAccessException)exception);
+            }
+
             // Report zero on an unreadable tree rather than fail the query.
         }
 
@@ -631,6 +656,11 @@ public static class SaveDataExports
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
+            if (exception is UnauthorizedAccessException)
+            {
+                SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked((UnauthorizedAccessException)exception);
+            }
+
             // Report zero on an unreadable tree.
         }
 
@@ -689,6 +719,11 @@ public static class SaveDataExports
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
+            if (exception is UnauthorizedAccessException)
+            {
+                SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked((UnauthorizedAccessException)exception);
+            }
+
             return 0;
         }
     }
@@ -701,6 +736,11 @@ public static class SaveDataExports
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
+            if (exception is UnauthorizedAccessException)
+            {
+                SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked((UnauthorizedAccessException)exception);
+            }
+
             return DateTime.UtcNow;
         }
     }
@@ -721,8 +761,9 @@ public static class SaveDataExports
         {
             return SetReturn(ctx, OrbisSaveDataErrorInternal);
         }
-        catch (UnauthorizedAccessException)
+        catch (UnauthorizedAccessException unauthorized)
         {
+            SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(unauthorized);
             return SetReturn(ctx, OrbisSaveDataErrorInternal);
         }
     }
@@ -824,8 +865,9 @@ public static class SaveDataExports
         {
             return SetReturn(ctx, OrbisSaveDataErrorInternal);
         }
-        catch (UnauthorizedAccessException)
+        catch (UnauthorizedAccessException unauthorized)
         {
+            SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(unauthorized);
             return SetReturn(ctx, OrbisSaveDataErrorInternal);
         }
     }
@@ -954,8 +996,9 @@ public static class SaveDataExports
         {
             return SetReturn(ctx, OrbisSaveDataErrorInternal);
         }
-        catch (UnauthorizedAccessException)
+        catch (UnauthorizedAccessException unauthorized)
         {
+            SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(unauthorized);
             return SetReturn(ctx, OrbisSaveDataErrorInternal);
         }
         catch (ArgumentException)
@@ -1317,6 +1360,11 @@ public static class SaveDataExports
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
+                if (exception is UnauthorizedAccessException)
+                {
+                    SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked((UnauthorizedAccessException)exception);
+                }
+
                 TraceSaveData($"migration_failed root='{root}' error='{exception.Message}'");
             }
         }
@@ -1499,6 +1547,11 @@ public static class SaveDataExports
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
+            if (exception is UnauthorizedAccessException)
+            {
+                SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked((UnauthorizedAccessException)exception);
+            }
+
             return null;
         }
     }
@@ -1539,6 +1592,11 @@ public static class SaveDataExports
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
+            if (exception is UnauthorizedAccessException)
+            {
+                SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked((UnauthorizedAccessException)exception);
+            }
+
             return false;
         }
     }
@@ -1675,6 +1733,11 @@ public static class SaveDataExports
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
+            if (ex is UnauthorizedAccessException)
+            {
+                SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked((UnauthorizedAccessException)ex);
+            }
+
             return ctx.SetReturn(OrbisSaveDataErrorInternal);
         }
     }
@@ -1821,6 +1884,11 @@ public static class SaveDataExports
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
+            if (ex is UnauthorizedAccessException)
+            {
+                SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked((UnauthorizedAccessException)ex);
+            }
+
             return ctx.SetReturn(OrbisSaveDataErrorInternal);
         }
     }

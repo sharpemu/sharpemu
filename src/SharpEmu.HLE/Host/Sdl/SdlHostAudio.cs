@@ -67,59 +67,46 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
     {
         channels = 0;
         EnsureInitialized();
-        IHostAudioStream stream;
-        string outputName;
-        if (TryFindDualSense(SDL_JoystickConnectionState.SDL_JOYSTICK_CONNECTION_WIRED, out var pad) &&
-            TryFindControllerDevice(out var device, out var deviceName))
+        // Which pad there is, and the way to reach it, belong to whoever owns the gamepads: this process's SDL, or the
+        // sandbox launcher behind the bridge (the AppContainer child sees no gamepad; its audio devices work as usual).
+        var link = HostControllerLink.Current ?? SdlControllerLink.Instance;
+        var pads = link.QueryPads();
+        SDL_AudioDeviceID device = default;
+        string? deviceName = null;
+        var wiredDeviceFound = (pads & HostControllerPads.WiredDualSense) != 0 &&
+                               TryFindControllerDevice(out device, out deviceName);
+        IHostAudioStream? bluetooth = null;
+        var kind = ControllerAudioSelection.Choose(pads, wiredDeviceFound, bluetoothAvailable: false);
+        if (kind == ControllerOutputKind.None && (pads & HostControllerPads.BluetoothDualSense) != 0)
         {
-            stream = new AudioStream(device, sampleRate, 4, HostPcmFormat.Float32, maxQueuedBytes, reportsClock: false, dropOldest: true);
-            outputName = $"\"{deviceName}\"";
-        }
-        else if (TryFindDualSense(SDL_JoystickConnectionState.SDL_JOYSTICK_CONNECTION_WIRELESS, out pad) &&
-                 SdlDualSenseBluetooth.TryOpen(pad, sampleRate, maxQueuedBytes, routeSpeaker) is { } bluetooth)
-        {
-            stream = bluetooth;
-            outputName = "DualSense over Bluetooth";
-        }
-        else
-        {
-            return null;
+            bluetooth = link.TryOpenBluetoothStream(sampleRate, maxQueuedBytes, routeSpeaker);
+            kind = ControllerAudioSelection.Choose(pads, wiredDeviceFound, bluetoothAvailable: bluetooth is not null);
         }
 
-        var routed = routeSpeaker && SendControllerEffect(pad, ControllerAudioRoute(speaker: true));
+        IHostAudioStream stream;
+        string outputName;
+        HostControllerPads pad;
+        switch (kind)
+        {
+            case ControllerOutputKind.WiredDevice:
+                stream = new AudioStream(device, sampleRate, 4, HostPcmFormat.Float32, maxQueuedBytes, reportsClock: false, dropOldest: true);
+                outputName = $"\"{deviceName}\"";
+                pad = HostControllerPads.WiredDualSense;
+                break;
+            case ControllerOutputKind.Bluetooth:
+                stream = bluetooth!;
+                outputName = "DualSense over Bluetooth";
+                pad = HostControllerPads.BluetoothDualSense;
+                break;
+            default:
+                return null;
+        }
+
+        var routed = routeSpeaker && link.SendEffect(pad, DualSenseAudioRoute.Report(speaker: true));
         channels = 4;
         Console.Error.WriteLine(
             $"[LOADER][INFO] Controller audio: {outputName} (speaker {(routed ? "routed" : "not routed")})");
-        return new ControllerAudioStream(stream, pad, routed);
-    }
-
-    private static bool TryFindDualSense(SDL_JoystickConnectionState connection, out SDL_JoystickID pad)
-    {
-        pad = default;
-        var found = 0;
-        SDL_LockJoysticks();
-        try
-        {
-            using var gamepads = SDL_GetGamepads();
-            for (var index = 0; gamepads is not null && index < gamepads.Count; index++)
-            {
-                var id = gamepads[index];
-                var gamepad = SDL_GetGamepadFromID(id);
-                if (gamepad is not null &&
-                    SDL_GetGamepadTypeForID(id) == SDL_GamepadType.SDL_GAMEPAD_TYPE_PS5 &&
-                    SDL_GetGamepadConnectionState(gamepad) == connection)
-                {
-                    pad = id;
-                    found++;
-                }
-            }
-        }
-        finally
-        {
-            SDL_UnlockJoysticks();
-        }
-
-        return found == 1;
+        return new ControllerAudioStream(stream, link, pad, routed);
     }
 
     private static bool TryFindControllerDevice(out SDL_AudioDeviceID device, out string? deviceName)
@@ -147,49 +134,8 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
         return found == 1;
     }
 
-    // The pad's audio routing, in its output report: with the speaker, the right channel of the front pair plays on the
-    // speaker and the headphone jack is muted (audio control and speaker volume valid, speaker volume 0x64, output path
-    // 0x30, speaker preamp +6 dB: the values Linux's driver uses without headphones); without it, the front pair goes
-    // back to the headphone jack. Plugged-in headphones are not detected.
-    private static byte[] ControllerAudioRoute(bool speaker)
-    {
-        var report = new byte[38];
-        report[0] = 0x80;
-        if (speaker)
-        {
-            report[0] |= 0x20;
-            report[1] = 0x80;
-            report[5] = 0x64;
-            report[7] = 0x30;
-            report[37] = 0x02;
-        }
-
-        return report;
-    }
-
-    private static bool SendControllerEffect(SDL_JoystickID pad, byte[] report)
-    {
-        SDL_LockJoysticks();
-        try
-        {
-            var gamepad = SDL_GetGamepadFromID(pad);
-            if (gamepad is null)
-            {
-                return false;
-            }
-
-            fixed (byte* data = report)
-            {
-                return SDL_SendGamepadEffect(gamepad, (nint)data, report.Length);
-            }
-        }
-        finally
-        {
-            SDL_UnlockJoysticks();
-        }
-    }
-
-    private sealed class ControllerAudioStream(IHostAudioStream inner, SDL_JoystickID pad, bool speakerRouted) : IHostAudioStream
+    private sealed class ControllerAudioStream(
+        IHostAudioStream inner, IHostControllerLink link, HostControllerPads pad, bool speakerRouted) : IHostAudioStream
     {
         private int _disposed;
 
@@ -207,7 +153,7 @@ internal sealed unsafe class SdlHostAudio : IHostPcmAudioOutput
             inner.Dispose();
             if (speakerRouted)
             {
-                SendControllerEffect(pad, ControllerAudioRoute(speaker: false));
+                link.SendEffect(pad, DualSenseAudioRoute.Report(speaker: false));
             }
         }
     }

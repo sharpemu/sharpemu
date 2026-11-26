@@ -454,6 +454,14 @@
   "Dialog.LogFiles": "Pliki logów",
 
   "Options.About": "O programie",
+  "Options.Sandbox.Label": "Uruchamiaj gry w piaskownicy (zalecane)",
+  "Options.Sandbox.Desc": "Uniemożliwia zmodyfikowanej grze czytanie twoich plików, korzystanie z internetu i uruchamianie programów. Tylko Windows.",
+  "Options.SandboxCleanup.Label": "Usuń uprawnienia piaskownicy",
+  "Options.SandboxCleanup.Desc": "Usuwa uprawnienia do folderów dodane przez piaskownicę, na przykład przed odinstalowaniem. Zostaną dodane ponownie przy następnym uruchomieniu w piaskownicy.",
+  "Options.SandboxCleanup.Button": "Usuń",
+  "Options.SandboxCleanup.Running": "Zamknij grę przed usunięciem uprawnień piaskownicy.",
+  "Options.SandboxCleanup.Done": "Uprawnienia piaskownicy usunięte.",
+  "Options.SandboxCleanup.Failed": "Nie udało się usunąć niektórych uprawnień piaskownicy; zobacz wiersze powyżej.",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "Kod źródłowy, zgłoszenia i rozwój projektu.",
   "About.Github.LatestCommitLabel": "Najnowszy commit",
@@ -532,5 +540,16 @@
   "Overlay.Ime.Space": "Spacja",
   "Overlay.Ime.Cursor": "Kursor",
   "Overlay.Ime.Select": "Wybierz",
-  "Overlay.Ime.Type": "Pisz na klawiaturze"
+  "Overlay.Ime.Type": "Pisz na klawiaturze",
+  "Sandbox.BlockedTitle": "Piaskownica zatrzymała grę",
+  "Sandbox.BlockedMessage": "Ta gra próbowała uruchomić inny program. Piaskownica go zablokowała i zatrzymała grę. Zrzut został prawdopodobnie zmodyfikowany. Uruchamiaj tylko zrzuty wykonane samodzielnie z własnej konsoli.",
+  "Sandbox.BlockedOk": "OK",
+  "Sandbox.Cancel": "Anuluj",
+  "Sandbox.OffTitle": "Wyłączyć piaskownicę?",
+  "Sandbox.OffMessage": "Bez piaskownicy zmodyfikowana gra może czytać twoje pliki, korzystać z internetu i uruchamiać programy. Wyłączaj ją tylko dla gry z zaufanego źródła.",
+  "Sandbox.OffConfirm": "Wyłącz",
+  "Sandbox.VolumeTitle": "Ta gra jest na dysku {0}",
+  "Sandbox.VolumeMessage": "Piaskownica nie może otwierać gier na dyskach exFAT (dyski zewnętrzne, pendrive'y). Spakuj grę jako .zar, aby grać w nią z tego dysku.",
+  "Sandbox.VolumeConvert": "Spakuj jako .zar",
+  "Sandbox.VolumePlayWithout": "Graj bez piaskownicy"
 }

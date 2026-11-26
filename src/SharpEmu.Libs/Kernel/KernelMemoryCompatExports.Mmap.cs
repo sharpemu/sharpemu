@@ -126,6 +126,11 @@ public static partial class KernelMemoryCompatExports
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ObjectDisposedException)
         {
+            if (ex is UnauthorizedAccessException denied)
+            {
+                SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(denied);
+            }
+
             return MemoryBadDescriptor;
         }
     }

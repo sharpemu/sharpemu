@@ -1722,6 +1722,25 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                       Classes="optionToggle"
                                       IsChecked="True" />
                       </local:SettingRow>
+
+                      <!-- Windows only: IsVisible is cleared in code-behind elsewhere. -->
+                      <local:SettingRow x:Name="SandboxRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Options.Sandbox.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.Sandbox.Desc], Source={x:Static local:Localization.Instance}}">
+                        <ToggleSwitch x:Name="SandboxToggle"
+                                      Classes="optionToggle"
+                                      IsChecked="True" />
+                      </local:SettingRow>
+
+                      <local:SettingRow x:Name="SandboxCleanupRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Options.SandboxCleanup.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.SandboxCleanup.Desc], Source={x:Static local:Localization.Instance}}">
+                        <Button x:Name="SandboxCleanupButton"
+                                Classes="ghost"
+                                Content="{Binding [Options.SandboxCleanup.Button], Source={x:Static local:Localization.Instance}}" />
+                      </local:SettingRow>
                     </StackPanel>
                   </Border>
 

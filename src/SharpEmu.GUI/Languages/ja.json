@@ -475,6 +475,14 @@
   "Options.GnmMode.TrophyKey.Desc": "暗号化されたトロフィー名と説明に使用するPS4トロフィーキーです。GnmModeのトロフィー一覧と獲得通知に使用されます。ローカルに保存されます。変更後は実行中のゲームを再起動してください。",
   "Options.GnmMode.TrophyKey.Placeholder": "32桁の16進数",
   "Options.GnmMode.TrophyKey.Invalid": "16進数（0–9、A–F）を正確に32桁入力してください。キーを削除するには欄を空にしてください。入力が有効になるまで、以前の有効なキーが保持されます。",
+  "Options.Sandbox.Label": "ゲームをサンドボックスで実行する（推奨）",
+  "Options.Sandbox.Desc": "改変されたゲームによるファイルの読み取り、インターネットの利用、プログラムの起動を防ぎます。Windows のみ。",
+  "Options.SandboxCleanup.Label": "サンドボックスの権限を削除",
+  "Options.SandboxCleanup.Desc": "サンドボックスが追加したフォルダーの権限を削除します（アンインストール前など）。次回サンドボックスで起動したときに再び追加されます。",
+  "Options.SandboxCleanup.Button": "削除",
+  "Options.SandboxCleanup.Running": "サンドボックスの権限を削除する前にゲームを終了してください。",
+  "Options.SandboxCleanup.Done": "サンドボックスの権限を削除しました。",
+  "Options.SandboxCleanup.Failed": "一部のサンドボックスの権限を削除できませんでした。上の行を確認してください。",
 
   "Trophies.Title": "トロフィー",
   "Trophies.None": "このゲームにはトロフィーがありません。",
@@ -530,5 +538,16 @@
   "Overlay.Ime.Space": "スペース",
   "Overlay.Ime.Cursor": "カーソル",
   "Overlay.Ime.Select": "選択",
-  "Overlay.Ime.Type": "キーボードで入力"
+  "Overlay.Ime.Type": "キーボードで入力",
+  "Sandbox.BlockedTitle": "サンドボックスがゲームを停止しました",
+  "Sandbox.BlockedMessage": "このゲームは別のプログラムを起動しようとしました。サンドボックスがこれをブロックし、ゲームを停止しました。ダンプが改変されている可能性があります。自分のコンソールから自分で作成したダンプだけを実行してください。",
+  "Sandbox.BlockedOk": "OK",
+  "Sandbox.Cancel": "キャンセル",
+  "Sandbox.OffTitle": "サンドボックスをオフにしますか？",
+  "Sandbox.OffMessage": "サンドボックスがないと、改変されたゲームがファイルの読み取り、インターネットの利用、プログラムの起動を行えます。入手元を信頼できるゲームでのみオフにしてください。",
+  "Sandbox.OffConfirm": "オフにする",
+  "Sandbox.VolumeTitle": "このゲームは {0} ドライブにあります",
+  "Sandbox.VolumeMessage": "サンドボックスは exFAT ドライブ（外付けドライブ、USB メモリ）上のゲームを開けません。このドライブからプレイするには、ゲームを .zar に変換してください。",
+  "Sandbox.VolumeConvert": ".zar に変換",
+  "Sandbox.VolumePlayWithout": "サンドボックスなしでプレイ"
 }

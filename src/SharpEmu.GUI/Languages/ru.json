@@ -454,6 +454,14 @@
   "Dialog.LogFiles": "Логи",
 
   "Options.About": "О программе",
+  "Options.Sandbox.Label": "Запускать игры в песочнице (рекомендуется)",
+  "Options.Sandbox.Desc": "Не даёт изменённой игре читать ваши файлы, выходить в интернет или запускать программы. Только Windows.",
+  "Options.SandboxCleanup.Label": "Удалить разрешения песочницы",
+  "Options.SandboxCleanup.Desc": "Удаляет разрешения на папки, добавленные песочницей, например перед удалением программы. Они будут добавлены снова при следующем запуске в песочнице.",
+  "Options.SandboxCleanup.Button": "Удалить",
+  "Options.SandboxCleanup.Running": "Закройте игру перед удалением разрешений песочницы.",
+  "Options.SandboxCleanup.Done": "Разрешения песочницы удалены.",
+  "Options.SandboxCleanup.Failed": "Некоторые разрешения песочницы не удалось удалить; см. строки выше.",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "Исходный код, отчёты об ошибках и разработка проекта.",
   "About.Github.LatestCommitLabel": "Последний коммит",
@@ -533,5 +541,16 @@
   "Overlay.Ime.Space": "Пробел",
   "Overlay.Ime.Cursor": "Курсор",
   "Overlay.Ime.Select": "Выбрать",
-  "Overlay.Ime.Type": "Печатайте на клавиатуре"
+  "Overlay.Ime.Type": "Печатайте на клавиатуре",
+  "Sandbox.BlockedTitle": "Песочница остановила игру",
+  "Sandbox.BlockedMessage": "Эта игра попыталась запустить другую программу. Песочница заблокировала это и остановила игру. Скорее всего, дамп был изменён. Запускайте только дампы, сделанные вами с вашей собственной консоли.",
+  "Sandbox.BlockedOk": "ОК",
+  "Sandbox.Cancel": "Отмена",
+  "Sandbox.OffTitle": "Отключить песочницу?",
+  "Sandbox.OffMessage": "Без песочницы изменённая игра может читать ваши файлы, выходить в интернет и запускать программы. Отключайте её только для игры из надёжного источника.",
+  "Sandbox.OffConfirm": "Отключить",
+  "Sandbox.VolumeTitle": "Эта игра находится на диске {0}",
+  "Sandbox.VolumeMessage": "Песочница не может открывать игры на дисках exFAT (внешние диски, USB-флешки). Упакуйте игру в .zar, чтобы играть в неё с этого диска.",
+  "Sandbox.VolumeConvert": "Упаковать в .zar",
+  "Sandbox.VolumePlayWithout": "Играть без песочницы"
 }

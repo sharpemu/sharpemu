@@ -1462,6 +1462,7 @@ public static partial class AmprExports
         }
         catch (UnauthorizedAccessException)
         {
+            SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(hostPath);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
         }
         catch (IOException)
@@ -1509,6 +1510,7 @@ public static partial class AmprExports
         }
         catch (UnauthorizedAccessException)
         {
+            SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(cachePath);
             result = (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
             return false;
         }
@@ -1524,6 +1526,7 @@ public static partial class AmprExports
             }
             catch (UnauthorizedAccessException)
             {
+                SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(cachePath);
                 result = (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
                 return false;
             }

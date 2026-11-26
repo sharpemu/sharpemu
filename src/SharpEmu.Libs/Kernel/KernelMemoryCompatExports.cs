@@ -1606,6 +1606,11 @@ public static partial class KernelMemoryCompatExports
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
+            if (ex is UnauthorizedAccessException)
+            {
+                SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(hostPath);
+            }
+
             LogOpenTrace($"_open fail path='{guestPath}' host='{hostPath}' flags=0x{flags:X8} ex={ex.GetType().Name}: {ex.Message}");
             return ex is UnauthorizedAccessException
                 ? (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT
@@ -2155,6 +2160,7 @@ public static partial class KernelMemoryCompatExports
         }
         catch (UnauthorizedAccessException)
         {
+            SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(hostPath);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
         }
         catch (IOException)
@@ -2226,6 +2232,7 @@ public static partial class KernelMemoryCompatExports
         }
         catch (UnauthorizedAccessException)
         {
+            SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(hostPath);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
         }
         catch (IOException)
@@ -2276,6 +2283,7 @@ public static partial class KernelMemoryCompatExports
         }
         catch (UnauthorizedAccessException)
         {
+            SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(hostPath);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
         }
         catch (IOException)
@@ -5359,6 +5367,11 @@ public static partial class KernelMemoryCompatExports
                 // verified, treat it as an escape rather than let the exception
                 // crash the syscall (ResolveGuestPath runs outside the callers'
                 // try blocks).
+                if (ex is UnauthorizedAccessException)
+                {
+                    SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(current);
+                }
+
                 return true;
             }
         }
@@ -7024,6 +7037,11 @@ public static partial class KernelMemoryCompatExports
                 {
                     size = -1;
                 }
+                catch (UnauthorizedAccessException)
+                {
+                    SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(hostPath);
+                    size = -1;
+                }
             }
 
             LogIoTrace("fstat", hostPath!, $"fd={fd} size={size} dir={(isDirectory ? 1 : 0)}");
@@ -7116,6 +7134,11 @@ public static partial class KernelMemoryCompatExports
             _aprFileSizeCache.TryAdd(cachePath, size);
             return true;
         }
+        catch (UnauthorizedAccessException)
+        {
+            SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(cachePath);
+            return false;
+        }
         catch
         {
             return false;
@@ -7138,6 +7161,11 @@ public static partial class KernelMemoryCompatExports
             var size = isDirectory ? 65536L : new FileInfo(hostPath).Length;
             return TryWriteKernelStat(ctx, statAddress, isDirectory, size, lastAccessUtc, lastWriteUtc, creationUtc, hostPath);
         }
+        catch (UnauthorizedAccessException)
+        {
+            SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(hostPath);
+            return false;
+        }
         catch
         {
             return false;
@@ -7154,7 +7182,7 @@ public static partial class KernelMemoryCompatExports
         }
 
         var size = isDirectory ? 65536L : (long)archive.GetFileSize(node);
-        var archiveTime = File.GetLastWriteTimeUtc(archive.Path);
+        var archiveTime = InheritedFiles.GetStamp(archive.Path).LastWriteTimeUtc;
         return TryWriteKernelStat(ctx, statAddress, isDirectory, size, archiveTime, archiveTime, archiveTime, hostPath);
     }
 
@@ -7302,9 +7330,19 @@ public static partial class KernelMemoryCompatExports
         // sent GTA's fiWriteAsyncDataWorker down a path that treated the fd as
         // a pointer (AV at 0xB1 on /download0/cloudcache/).
         // Under an app0 mounted from an archive the listing is the union of the cache folder and the archive.
-        var onDisk = Directory.Exists(hostPath)
-            ? Directory.EnumerateFileSystemEntries(hostPath).Select(Path.GetFileName)
-            : [];
+        IEnumerable<string?> onDisk = [];
+        try
+        {
+            if (Directory.Exists(hostPath))
+            {
+                onDisk = Directory.EnumerateFileSystemEntries(hostPath).Select(Path.GetFileName).ToArray();
+            }
+        }
+        catch (UnauthorizedAccessException)
+        {
+            SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(hostPath);
+        }
+
         var children = onDisk
             .Concat(GameFileOverlay.List(hostPath))
             .Concat(App0Archive.List(hostPath).Select(static entry => entry.Name))
@@ -8092,6 +8130,11 @@ public static partial class KernelMemoryCompatExports
         }
         catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
         {
+            if (exception is UnauthorizedAccessException)
+            {
+                SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(hostPath);
+            }
+
             LogOpenTrace($"utimes failed path='{guestPath}' host='{hostPath}' error={exception.Message}");
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
         }

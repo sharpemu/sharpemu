@@ -18,10 +18,11 @@ internal readonly record struct SdlHdrState(
 
 internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
 {
-    private const SDL_InitFlags InitFlags = SDL_InitFlags.SDL_INIT_VIDEO | SDL_InitFlags.SDL_INIT_GAMEPAD;
+    // A sandboxed child opens no SDL gamepad: the launcher reads the pad and hands it over (GamepadBridgeClient).
+    private static readonly SDL_InitFlags InitFlags = SDL_InitFlags.SDL_INIT_VIDEO |
+        (GamepadBridgeClient.IsConfigured ? 0 : SDL_InitFlags.SDL_INIT_GAMEPAD);
     private static readonly long CursorHideDelayTicks = 2 * Stopwatch.Frequency;
     private static readonly long InputPollTicks = Stopwatch.Frequency / 250;
-    private const uint OutputDurationMs = 5_000;
 
     private readonly HostVideoOptions _options;
     private readonly Action? _toggleBackendHud;
@@ -30,14 +31,10 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
     private bool _textInputActive;
     private SDL_Gamepad* _gamepad;
     private readonly Pad.TouchContactIds _touchIds = new();
-    private HostGamepadType _gamepadType;
-    private byte _leftTriggerRumble;
-    private byte _rightTriggerRumble;
-    private byte _padLargeRumble;
-    private byte _padSmallRumble;
-    private byte _hapticLargeRumble;
-    private byte _hapticSmallRumble;
-    private long _hapticRumbleExpires;
+    private readonly SdlGamepadOutput _output;
+    private readonly GamepadBridgeClient? _bridge;
+    private readonly BridgeEvent[] _bridgeEvents = new BridgeEvent[64];
+    private bool _bridgeConnected;
     private int _closeRequested;
     private bool _closedByUser;
     private bool _fullscreen;
@@ -57,7 +54,18 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
     {
         _options = options.Normalize();
         _toggleBackendHud = toggleBackendHud;
-        SdlGamepadStateReader.EnableSonyHidApi();
+        _output = new SdlGamepadOutput(_gamepadGate);
+        if (GamepadBridgeClient.IsConfigured)
+        {
+            _bridge = GamepadBridgeClient.TryOpenFromEnvironment();
+            Console.Error.WriteLine(_bridge is not null
+                ? "[LOADER][INFO] gamepad bridge: on"
+                : "[LOADER][WARN] gamepad bridge: the section could not be opened; no gamepad");
+        }
+        else
+        {
+            SdlGamepadStateReader.EnableSonyHidApi();
+        }
         if (!SDL_InitSubSystem(InitFlags))
         {
             throw new InvalidOperationException($"SDL video initialization failed: {GetError()}");
@@ -86,8 +94,12 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
         {
             Console.Error.WriteLine($"[LOADER][WARN] SDL initial fullscreen sync failed: {GetError()}");
         }
-        HostWindowInput.Connect(this);
-        OpenFirstGamepad();
+        HostWindowInput.Connect(_bridge is null ? this : _bridge.Output);
+        HostControllerLink.Connect(_bridge?.ControllerLink);
+        if (!GamepadBridgeClient.IsConfigured)
+        {
+            OpenFirstGamepad();
+        }
 
         Console.Error.WriteLine(
             $"[LOADER][INFO] SDL3 window ready: mode={_options.WindowMode} " +
@@ -220,139 +232,22 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
 
     public void Close() => Volatile.Write(ref _closeRequested, 1);
 
-    public void SetRumble(byte largeMotor, byte smallMotor)
-    {
-        lock (_gamepadGate)
-        {
-            _padLargeRumble = largeMotor;
-            _padSmallRumble = smallMotor;
-            ApplyRumble();
-        }
-    }
+    public void SetRumble(byte largeMotor, byte smallMotor) => _output.SetRumble(largeMotor, smallMotor);
 
-    public void SetHapticRumble(byte largeMotor, byte smallMotor, uint durationMs)
-    {
-        lock (_gamepadGate)
-        {
-            _hapticLargeRumble = largeMotor;
-            _hapticSmallRumble = smallMotor;
-            _hapticRumbleExpires = Environment.TickCount64 + durationMs;
-            ApplyRumble();
-        }
-    }
+    public void SetHapticRumble(byte largeMotor, byte smallMotor, uint durationMs) =>
+        _output.SetHapticRumble(largeMotor, smallMotor, durationMs);
 
-    private void ApplyRumble()
-    {
-        if (!IsGamepadConnected())
-        {
-            return;
-        }
-
-        var hapticRemaining = _hapticRumbleExpires - Environment.TickCount64;
-        var hapticActive = hapticRemaining > 0;
-        var large = Math.Max(_padLargeRumble, hapticActive ? _hapticLargeRumble : (byte)0);
-        var small = Math.Max(_padSmallRumble, hapticActive ? _hapticSmallRumble : (byte)0);
-        var duration = (_padLargeRumble | _padSmallRumble) == 0 && hapticActive
-            ? (uint)hapticRemaining
-            : OutputDurationMs;
-        SDL_RumbleGamepad(
-            _gamepad,
-            ExpandByte(large),
-            ExpandByte(small),
-            duration);
-    }
-
-    public void SetTriggerRumble(byte? leftTrigger, byte? rightTrigger)
-    {
-        lock (_gamepadGate)
-        {
-            if (IsGamepadConnected())
-            {
-                if (leftTrigger is { } left)
-                {
-                    _leftTriggerRumble = left;
-                }
-                if (rightTrigger is { } right)
-                {
-                    _rightTriggerRumble = right;
-                }
-
-                SDL_RumbleGamepadTriggers(
-                    _gamepad,
-                    ExpandByte(_leftTriggerRumble),
-                    ExpandByte(_rightTriggerRumble),
-                    OutputDurationMs);
-            }
-        }
-    }
+    public void SetTriggerRumble(byte? leftTrigger, byte? rightTrigger) =>
+        _output.SetTriggerRumble(leftTrigger, rightTrigger);
 
     public void SetAdaptiveTriggerEffect(
         HostAdaptiveTriggerEffect? leftTrigger,
-        HostAdaptiveTriggerEffect? rightTrigger)
-    {
-        lock (_gamepadGate)
-        {
-            if (!IsGamepadConnected())
-            {
-                return;
-            }
+        HostAdaptiveTriggerEffect? rightTrigger) =>
+        _output.SetAdaptiveTriggerEffect(leftTrigger, rightTrigger);
 
-            if (_gamepadType != HostGamepadType.DualSense)
-            {
-                if (leftTrigger is { } fallbackLeft)
-                {
-                    _leftTriggerRumble = fallbackLeft.FallbackStrength;
-                }
-                if (rightTrigger is { } fallbackRight)
-                {
-                    _rightTriggerRumble = fallbackRight.FallbackStrength;
-                }
+    public void SetLightbar(byte red, byte green, byte blue) => _output.SetLightbar(red, green, blue);
 
-                SDL_RumbleGamepadTriggers(
-                    _gamepad,
-                    ExpandByte(_leftTriggerRumble),
-                    ExpandByte(_rightTriggerRumble),
-                    OutputDurationMs);
-                return;
-            }
-
-            Span<byte> state = stackalloc byte[47];
-            state.Clear();
-            if (rightTrigger is { } nativeRight)
-            {
-                state[0] |= 0x04;
-                nativeRight.CopyTo(state[10..21]);
-            }
-            if (leftTrigger is { } nativeLeft)
-            {
-                state[0] |= 0x08;
-                nativeLeft.CopyTo(state[21..32]);
-            }
-
-            if (state[0] == 0)
-            {
-                return;
-            }
-
-            fixed (byte* data = state)
-            {
-                SDL_SendGamepadEffect(_gamepad, (nint)data, state.Length);
-            }
-        }
-    }
-
-    public void SetLightbar(byte red, byte green, byte blue)
-    {
-        lock (_gamepadGate)
-        {
-            if (IsGamepadConnected())
-            {
-                SDL_SetGamepadLED(_gamepad, red, green, blue);
-            }
-        }
-    }
-
-    public void ResetLightbar() => SetLightbar(0, 0, 64);
+    public void ResetLightbar() => _output.ResetLightbar();
 
     public void Run(
         Action initialize,
@@ -430,6 +325,8 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
         SDL_ShowCursor();
         HostWindowInput.Disconnect();
         CloseGamepad();
+        HostControllerLink.Connect(null);
+        _bridge?.Dispose();
         if (_window is not null)
         {
             SDL_DestroyWindow(_window);
@@ -535,6 +432,67 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
                     break;
             }
         }
+
+        PumpBridgeEvents();
+    }
+
+    // The bridge's counterpart of the gamepad events above: the launcher queued each button change, trigger crossing
+    // and sensor reading as it saw it, and they are applied here in that order, so a press and its release between two
+    // polls still reach the pad and the motion orientation integrates every reading over its own interval.
+    private void PumpBridgeEvents()
+    {
+        if (_bridge is null)
+        {
+            return;
+        }
+
+        int count;
+        while ((count = _bridge.ReadEvents(_bridgeEvents)) > 0)
+        {
+            for (var index = 0; index < count; index++)
+            {
+                ref readonly var entry = ref _bridgeEvents[index];
+                if (entry.Kind == BridgeEvent.KindButton)
+                {
+                    HostWindowInput.SetGamepadButton((HostGamepadButtons)entry.Button, entry.Down != 0);
+                }
+                else if (entry.Kind is BridgeEvent.KindGyro or BridgeEvent.KindAccel)
+                {
+                    HostWindowInput.ApplyGamepadMotion(
+                        entry.Kind == BridgeEvent.KindGyro, entry.X, entry.Y, entry.Z, entry.TimestampNanoseconds);
+                }
+            }
+        }
+    }
+
+    private void SampleBridgeGamepad()
+    {
+        if (_bridge is null || !_bridge.TryReadState(out var state, out var name))
+        {
+            return;
+        }
+
+        if (!state.Connected)
+        {
+            if (_bridgeConnected)
+            {
+                _bridgeConnected = false;
+                Console.Error.WriteLine("[LOADER][INFO] gamepad bridge: gamepad disconnected");
+            }
+
+            HostWindowInput.ClearGamepad();
+            return;
+        }
+
+        if (!_bridgeConnected)
+        {
+            _bridgeConnected = true;
+            Console.Error.WriteLine(
+                $"[LOADER][INFO] gamepad bridge: gamepad connected: {name ?? "SDL gamepad"} " +
+                $"type={state.Type} connection={state.Connection}");
+        }
+
+        HostWindowInput.SetGamepad(name, state);
     }
 
     private void SyncTextInput()
@@ -806,14 +764,14 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
                 return;
             }
 
-            _gamepadType = SdlGamepadStateReader.MapGamepadType(SDL_GetRealGamepadType(_gamepad));
-            EnableSensor(SDL_SensorType.SDL_SENSOR_ACCEL);
-            EnableSensor(SDL_SensorType.SDL_SENSOR_GYRO);
+            _output.Gamepad = _gamepad;
+            _output.Type = SdlGamepadStateReader.MapGamepadType(SDL_GetRealGamepadType(_gamepad));
+            SdlGamepadStateReader.EnableSensors(_gamepad);
         }
 
         Console.Error.WriteLine(
             $"[LOADER][INFO] SDL gamepad connected: {DescribeGamepad()} " +
-            $"type={_gamepadType} connection={SdlGamepadStateReader.GetConnection(_gamepad)}");
+            $"type={_output.Type} connection={SdlGamepadStateReader.GetConnection(_gamepad)}");
         SampleGamepad();
     }
 
@@ -827,14 +785,7 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
                 _gamepad = null;
             }
 
-            _gamepadType = HostGamepadType.Generic;
-            _leftTriggerRumble = 0;
-            _rightTriggerRumble = 0;
-            _padLargeRumble = 0;
-            _padSmallRumble = 0;
-            _hapticLargeRumble = 0;
-            _hapticSmallRumble = 0;
-            _hapticRumbleExpires = 0;
+            _output.Reset();
         }
 
         HostWindowInput.ClearGamepad();
@@ -842,6 +793,12 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
 
     private void SampleGamepad(bool updateDevices = true)
     {
+        if (_bridge is not null)
+        {
+            SampleBridgeGamepad();
+            return;
+        }
+
         lock (_gamepadGate)
         {
             if (!IsGamepadConnected())
@@ -852,95 +809,16 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
 
             if (updateDevices)
                 SDL_UpdateGamepads();
-            var state = SdlGamepadStateReader.Read(_gamepad) with
-            {
-                Motion = ReadMotion(),
-                Touch = ReadTouch(),
-            };
+            var state = SdlGamepadStateReader.ReadFull(_gamepad, _touchIds);
             HostWindowInput.SetGamepad(
                 DescribeGamepad(),
                 state);
         }
     }
 
-    private void EnableSensor(SDL_SensorType sensor)
-    {
-        if (SDL_GamepadHasSensor(_gamepad, sensor))
-        {
-            SDL_SetGamepadSensorEnabled(_gamepad, sensor, true);
-        }
-    }
-
-    private HostMotionState ReadMotion()
-    {
-        Span<float> acceleration = stackalloc float[3];
-        Span<float> angularVelocity = stackalloc float[3];
-        acceleration.Clear();
-        angularVelocity.Clear();
-        var hasAcceleration = false;
-        var hasAngularVelocity = false;
-        fixed (float* data = acceleration)
-        {
-            hasAcceleration = SDL_GamepadHasSensor(_gamepad, SDL_SensorType.SDL_SENSOR_ACCEL) &&
-                SDL_GetGamepadSensorData(_gamepad, SDL_SensorType.SDL_SENSOR_ACCEL, data, acceleration.Length);
-        }
-        fixed (float* data = angularVelocity)
-        {
-            hasAngularVelocity = SDL_GamepadHasSensor(_gamepad, SDL_SensorType.SDL_SENSOR_GYRO) &&
-                SDL_GetGamepadSensorData(_gamepad, SDL_SensorType.SDL_SENSOR_GYRO, data, angularVelocity.Length);
-        }
-
-        return new HostMotionState(
-            hasAcceleration || hasAngularVelocity,
-            acceleration[0],
-            acceleration[1],
-            acceleration[2],
-            angularVelocity[0],
-            angularVelocity[1],
-            angularVelocity[2]);
-    }
-
-    private HostTouchState ReadTouch()
-    {
-        if (SDL_GetNumGamepadTouchpads(_gamepad) <= 0)
-        {
-            return default;
-        }
-
-        return new HostTouchState(ReadTouchPoint(0), ReadTouchPoint(1));
-    }
-
-    private HostTouchPoint ReadTouchPoint(int finger)
-    {
-        var point = ReadRawTouchPoint(finger);
-        return point with { Id = _touchIds.Track(finger, point.Active) };
-    }
-
-    private HostTouchPoint ReadRawTouchPoint(int finger)
-    {
-        if (SDL_GetNumGamepadTouchpadFingers(_gamepad, 0) <= finger)
-        {
-            return default;
-        }
-
-        SDLBool down = false;
-        float x = 0;
-        float y = 0;
-        float pressure = 0;
-        if (!SDL_GetGamepadTouchpadFinger(_gamepad, 0, finger, &down, &x, &y, &pressure))
-        {
-            return default;
-        }
-
-        return new HostTouchPoint(down, (byte)finger, Math.Clamp(x, 0, 1), Math.Clamp(y, 0, 1));
-    }
-
     private bool IsGamepadConnected() => _gamepad is not null && SDL_GamepadConnected(_gamepad);
 
-    private string DescribeGamepad() =>
-        Marshal.PtrToStringUTF8((nint)Unsafe_SDL_GetGamepadName(_gamepad)) ?? "SDL gamepad";
-
-    private static ushort ExpandByte(byte value) => (ushort)(value * 257);
+    private string DescribeGamepad() => SdlGamepadStateReader.GetName(_gamepad);
 
     private static bool TryMapVirtualKey(SDL_Keycode key, out int virtualKey)
     {

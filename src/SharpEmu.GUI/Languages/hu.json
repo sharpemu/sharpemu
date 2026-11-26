@@ -476,6 +476,14 @@
   "Options.GnmMode.TrophyKey.Desc": "PS4-trófeakulcs a titkosított trófeanevekhez és leírásokhoz. A GnmMode trófealistái és feloldási értesítései használják. Helyben kerül mentésre; módosítás után indítsd újra a futó játékot.",
   "Options.GnmMode.TrophyKey.Placeholder": "32 hexadecimális karakter",
   "Options.GnmMode.TrophyKey.Invalid": "Adj meg pontosan 32 hexadecimális karaktert (0–9, A–F), vagy ürítsd ki a mezőt a kulcs eltávolításához. Az előző érvényes kulcs megmarad, amíg a bevitt érték nem érvényes.",
+  "Options.Sandbox.Label": "Játékok futtatása sandboxban (ajánlott)",
+  "Options.Sandbox.Desc": "Megakadályozza, hogy egy módosított játék olvassa a fájljaidat, használja az internetet vagy programokat indítson. Csak Windows.",
+  "Options.SandboxCleanup.Label": "Sandbox-engedélyek eltávolítása",
+  "Options.SandboxCleanup.Desc": "Eltávolítja a sandbox által hozzáadott mappaengedélyeket, például eltávolítás előtt. A következő sandboxos indításkor újra hozzáadódnak.",
+  "Options.SandboxCleanup.Button": "Eltávolítás",
+  "Options.SandboxCleanup.Running": "Zárd be a játékot a sandbox-engedélyek eltávolítása előtt.",
+  "Options.SandboxCleanup.Done": "A sandbox-engedélyek eltávolítva.",
+  "Options.SandboxCleanup.Failed": "Néhány sandbox-engedélyt nem sikerült eltávolítani; lásd a fenti sorokat.",
 
   "Trophies.Title": "Trófeák",
   "Trophies.None": "Ennek a játéknak nincsenek trófeái.",
@@ -531,5 +539,16 @@
   "Overlay.Ime.Space": "Szóköz",
   "Overlay.Ime.Cursor": "Kurzor",
   "Overlay.Ime.Select": "Kiválasztás",
-  "Overlay.Ime.Type": "Gépelj a billentyűzeteddel"
+  "Overlay.Ime.Type": "Gépelj a billentyűzeteddel",
+  "Sandbox.BlockedTitle": "A sandbox leállította a játékot",
+  "Sandbox.BlockedMessage": "Ez a játék megpróbált elindítani egy másik programot. A sandbox ezt letiltotta és leállította a játékot. A dumpot valószínűleg módosították. Csak olyan dumpokat futtass, amelyeket te magad készítettél a saját konzolodról.",
+  "Sandbox.BlockedOk": "OK",
+  "Sandbox.Cancel": "Mégse",
+  "Sandbox.OffTitle": "Kikapcsolod a sandboxot?",
+  "Sandbox.OffMessage": "Sandbox nélkül egy módosított játék olvashatja a fájljaidat, használhatja az internetet és programokat indíthat. Csak olyan játéknál kapcsold ki, amelynek a forrásában megbízol.",
+  "Sandbox.OffConfirm": "Kikapcsolás",
+  "Sandbox.VolumeTitle": "Ez a játék egy {0} meghajtón van",
+  "Sandbox.VolumeMessage": "A sandbox nem tud játékokat megnyitni exFAT meghajtókon (külső meghajtók, USB-kulcsok). Csomagold a játékot .zar formátumba, hogy erről a meghajtóról játszhass vele.",
+  "Sandbox.VolumeConvert": "Csomagolás .zar formátumba",
+  "Sandbox.VolumePlayWithout": "Játék sandbox nélkül"
 }

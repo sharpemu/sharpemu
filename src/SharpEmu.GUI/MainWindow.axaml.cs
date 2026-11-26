@@ -22,6 +22,7 @@ using SharpEmu.GnmMode;
 using SharpEmu.GnmMode.Libraries.Np;
 using SharpEmu.HLE.FileSystem;
 using SharpEmu.HLE.Host;
+using SharpEmu.HLE.Host.Windows;
 using SharpEmu.Libs.Pad;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.Logging;
@@ -226,7 +227,8 @@ public partial class MainWindow : Window
         string ConsoleLanguage,
         EffectiveLaunchSettings Settings,
         IReadOnlyDictionary<string, string?> Environment,
-        GnmLoadExecRequest? LoadExec = null);
+        GnmLoadExecRequest? LoadExec = null,
+        bool WithoutSandbox = false);
 
     public MainWindow()
     {
@@ -401,6 +403,10 @@ public partial class MainWindow : Window
             _settings.CheckForUpdatesOnStartup = AutoUpdateToggle.IsChecked == true;
             ScheduleSettingsSave();
         };
+        SandboxRow.IsVisible = OperatingSystem.IsWindows();
+        SandboxToggle.IsCheckedChanged += (_, _) => OnSandboxToggleChanged();
+        SandboxCleanupRow.IsVisible = OperatingSystem.IsWindows();
+        SandboxCleanupButton.Click += (_, _) => OnSandboxCleanupClicked();
         InitializeThemeControls();
         ConsoleLanguageBox.SelectionChanged += (_, _) =>
         {
@@ -1560,6 +1566,7 @@ public partial class MainWindow : Window
         SetLibraryLayout(string.Equals(_settings.LibraryLayout, "Grid", StringComparison.OrdinalIgnoreCase));
         DiscordToggle.IsChecked = _settings.DiscordRichPresence;
         AutoUpdateToggle.IsChecked = _settings.CheckForUpdatesOnStartup;
+        SetSandboxToggle(_settings.RunInSandbox);
         SyncThemeControls();
         DefaultProfileBox.Text = _settings.DefaultProfile;
         GnmTrophyPackageReader.Configure(_settings.GnmTrophyKey);
@@ -2587,8 +2594,18 @@ public partial class MainWindow : Window
         }
 
         var versions = GameVersions.PackableForGame(_allGames, selected);
-        if (await SelectGameVersionAsync(versions, forPacking: selected.HasMultipleVersions) is not { } game ||
-            Path.GetDirectoryName(game.Path) is not { } gameFolder)
+        if (await SelectGameVersionAsync(versions, forPacking: selected.HasMultipleVersions) is not { } game)
+        {
+            return;
+        }
+
+        await PackGameAsZarAsync(game);
+    }
+
+    // Asks where to put the .zar, then packs the game's folder with the progress sheet.
+    private async Task PackGameAsZarAsync(GameEntry game)
+    {
+        if (Path.GetDirectoryName(game.Path) is not { } gameFolder)
         {
             return;
         }
@@ -3125,7 +3142,9 @@ public partial class MainWindow : Window
             _runningGameTitleId,
             _settings.ConsoleLanguage,
             effective,
-            configuration.BuildEnvironment(_settings));
+            configuration.BuildEnvironment(_settings),
+            WithoutSandbox: _launchWithoutSandboxOnce);
+        _launchWithoutSandboxOnce = false;
 
         StartPendingSession();
     }
@@ -3223,9 +3242,11 @@ public partial class MainWindow : Window
             return;
         }
 
-        var process = new EmulatorProcess();
+        // The setting, unless this launch was chosen to run without the sandbox once; SHARPEMU_SANDBOX=0/1 still wins.
+        var process = new EmulatorProcess { SandboxEnabled = _settings.RunInSandbox && !launch.WithoutSandbox };
         process.OutputReceived += OnEmulatorOutput;
         process.Exited += code => Dispatcher.UIThread.Post(() => OnEmulatorExited(code));
+        process.SandboxActionBlocked += () => Dispatcher.UIThread.Post(ShowSandboxBlockedWarning);
 
         try
         {
@@ -3256,12 +3277,34 @@ public partial class MainWindow : Window
                 Localization.Instance.Format("Launch.StartFailed", exception.Message),
                 ErrorLineBrush);
             OnEmulatorExited(3);
+            if (exception is SandboxVolumeException { GameProblem: { } problem })
+            {
+                ShowSandboxVolumeDialog(launch, problem);
+            }
         }
     }
 
     private List<string> BuildEmulatorArguments(PendingLaunch launch) =>
         new LaunchConfiguration(launch.Settings, []).BuildArguments(
             launch.EbootPath, launch.ConsoleLanguage);
+
+    // The sandbox refused the game its first attempt to start another program: say so in the console and in a sheet.
+    private async void ShowSandboxBlockedWarning()
+    {
+        AppendConsoleLine(Localization.Instance.Get("Sandbox.BlockedMessage"), ErrorLineBrush);
+        // The game window is in front of the launcher, so the sheet alone would go unseen.
+        if (OperatingSystem.IsWindows())
+        {
+            WindowsBalloonNotification.TryShow(
+                Localization.Instance.Get("Sandbox.BlockedTitle"), Localization.Instance.Get("Sandbox.BlockedMessage"));
+            if (TryGetPlatformHandle() is { } handle)
+            {
+                WindowsBalloonNotification.FlashTaskbarButton(handle.Handle);
+            }
+        }
+
+        await Sheets.ShowAsync(new SandboxWarningDialog());
+    }
 
     private void OnEmulatorOutput(string line, bool isError)
     {

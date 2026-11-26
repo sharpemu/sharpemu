@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Runtime.InteropServices;
 using SharpEmu.HLE.Host;
 using SDL;
 using static SDL.SDL3;
@@ -143,5 +144,94 @@ internal static unsafe class SdlGamepadStateReader
         {
             buttons |= target;
         }
+    }
+
+    public static string GetName(SDL_Gamepad* gamepad) =>
+        Marshal.PtrToStringUTF8((nint)Unsafe_SDL_GetGamepadName(gamepad)) ?? "SDL gamepad";
+
+    public static void EnableSensors(SDL_Gamepad* gamepad)
+    {
+        EnableSensor(gamepad, SDL_SensorType.SDL_SENSOR_ACCEL);
+        EnableSensor(gamepad, SDL_SensorType.SDL_SENSOR_GYRO);
+    }
+
+    private static void EnableSensor(SDL_Gamepad* gamepad, SDL_SensorType sensor)
+    {
+        if (SDL_GamepadHasSensor(gamepad, sensor))
+        {
+            SDL_SetGamepadSensorEnabled(gamepad, sensor, true);
+        }
+    }
+
+    // The state of the gamepad with its motion sensors and touchpad, as the window and the bridge both sample it.
+    public static HostGamepadState ReadFull(SDL_Gamepad* gamepad, TouchContactIds touchIds) =>
+        Read(gamepad) with
+        {
+            Motion = ReadMotion(gamepad),
+            Touch = ReadTouch(gamepad, touchIds),
+        };
+
+    public static HostMotionState ReadMotion(SDL_Gamepad* gamepad)
+    {
+        Span<float> acceleration = stackalloc float[3];
+        Span<float> angularVelocity = stackalloc float[3];
+        acceleration.Clear();
+        angularVelocity.Clear();
+        var hasAcceleration = false;
+        var hasAngularVelocity = false;
+        fixed (float* data = acceleration)
+        {
+            hasAcceleration = SDL_GamepadHasSensor(gamepad, SDL_SensorType.SDL_SENSOR_ACCEL) &&
+                SDL_GetGamepadSensorData(gamepad, SDL_SensorType.SDL_SENSOR_ACCEL, data, acceleration.Length);
+        }
+        fixed (float* data = angularVelocity)
+        {
+            hasAngularVelocity = SDL_GamepadHasSensor(gamepad, SDL_SensorType.SDL_SENSOR_GYRO) &&
+                SDL_GetGamepadSensorData(gamepad, SDL_SensorType.SDL_SENSOR_GYRO, data, angularVelocity.Length);
+        }
+
+        return new HostMotionState(
+            hasAcceleration || hasAngularVelocity,
+            acceleration[0],
+            acceleration[1],
+            acceleration[2],
+            angularVelocity[0],
+            angularVelocity[1],
+            angularVelocity[2]);
+    }
+
+    public static HostTouchState ReadTouch(SDL_Gamepad* gamepad, TouchContactIds touchIds)
+    {
+        if (SDL_GetNumGamepadTouchpads(gamepad) <= 0)
+        {
+            return default;
+        }
+
+        return new HostTouchState(ReadTouchPoint(gamepad, touchIds, 0), ReadTouchPoint(gamepad, touchIds, 1));
+    }
+
+    private static HostTouchPoint ReadTouchPoint(SDL_Gamepad* gamepad, TouchContactIds touchIds, int finger)
+    {
+        var point = ReadRawTouchPoint(gamepad, finger);
+        return point with { Id = touchIds.Track(finger, point.Active) };
+    }
+
+    private static HostTouchPoint ReadRawTouchPoint(SDL_Gamepad* gamepad, int finger)
+    {
+        if (SDL_GetNumGamepadTouchpadFingers(gamepad, 0) <= finger)
+        {
+            return default;
+        }
+
+        SDLBool down = false;
+        float x = 0;
+        float y = 0;
+        float pressure = 0;
+        if (!SDL_GetGamepadTouchpadFinger(gamepad, 0, finger, &down, &x, &y, &pressure))
+        {
+            return default;
+        }
+
+        return new HostTouchPoint(down, (byte)finger, Math.Clamp(x, 0, 1), Math.Clamp(y, 0, 1));
     }
 }

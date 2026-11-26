@@ -454,6 +454,14 @@
   "Dialog.LogFiles": "Logifailid",
 
   "Options.About": "Teave",
+  "Options.Sandbox.Label": "Käivita mängud liivakastis (soovitatav)",
+  "Options.Sandbox.Desc": "Takistab muudetud mängul sinu faile lugemast, internetti kasutamast või programme käivitamast. Ainult Windows.",
+  "Options.SandboxCleanup.Label": "Eemalda liivakasti õigused",
+  "Options.SandboxCleanup.Desc": "Eemaldab kaustaõigused, mille liivakast lisas, näiteks enne desinstallimist. Need lisatakse uuesti järgmisel liivakastis käivitamisel.",
+  "Options.SandboxCleanup.Button": "Eemalda",
+  "Options.SandboxCleanup.Running": "Sulge mäng enne liivakasti õiguste eemaldamist.",
+  "Options.SandboxCleanup.Done": "Liivakasti õigused eemaldatud.",
+  "Options.SandboxCleanup.Failed": "Mõnda liivakasti õigust ei õnnestunud eemaldada; vaata ülalolevaid ridu.",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "Lähtekood, vearaportid ja projekti arendus.",
   "About.Github.LatestCommitLabel": "Viimane muudatus (commit)",
@@ -532,5 +540,16 @@
   "Overlay.Ime.Space": "Tühik",
   "Overlay.Ime.Cursor": "Kursor",
   "Overlay.Ime.Select": "Vali",
-  "Overlay.Ime.Type": "Kirjuta klaviatuuriga"
+  "Overlay.Ime.Type": "Kirjuta klaviatuuriga",
+  "Sandbox.BlockedTitle": "Liivakast peatas mängu",
+  "Sandbox.BlockedMessage": "See mäng püüdis käivitada teist programmi. Liivakast blokeeris selle ja peatas mängu. Tõmmist on tõenäoliselt muudetud. Käivita ainult tõmmiseid, mille tegid ise oma konsoolilt.",
+  "Sandbox.BlockedOk": "OK",
+  "Sandbox.Cancel": "Tühista",
+  "Sandbox.OffTitle": "Kas lülitada liivakast välja?",
+  "Sandbox.OffMessage": "Ilma liivakastita saab muudetud mäng lugeda sinu faile, kasutada internetti ja käivitada programme. Lülita see välja ainult mängu puhul, mille päritolu usaldad.",
+  "Sandbox.OffConfirm": "Lülita välja",
+  "Sandbox.VolumeTitle": "See mäng on {0}-kettal",
+  "Sandbox.VolumeMessage": "Liivakast ei saa avada mänge exFAT-ketastel (välised kettad, USB-mälupulgad). Paki mäng .zar-failiks, et seda sellelt kettalt mängida.",
+  "Sandbox.VolumeConvert": "Paki .zar-failiks",
+  "Sandbox.VolumePlayWithout": "Mängi ilma liivakastita"
 }

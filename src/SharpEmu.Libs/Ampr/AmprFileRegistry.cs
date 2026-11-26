@@ -299,6 +299,11 @@ internal static class AmprFileRegistry
             }
             catch (Exception exception) when (exception is IOException or UnauthorizedAccessException)
             {
+                if (exception is UnauthorizedAccessException denied)
+                {
+                    SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(denied);
+                }
+
                 // The walk is an opportunistic warm-up reached synchronously from
                 // sceAmprCommandBufferConstructor; a dump that moves or a mount
                 // that hiccups must not fault the guest export. The background

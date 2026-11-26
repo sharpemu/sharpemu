@@ -186,6 +186,11 @@ public static class LibcStdioExports
         catch (Exception ex) when (
             ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
+            if (ex is UnauthorizedAccessException)
+            {
+                SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(hostPath);
+            }
+
             if (_traceStdio)
             {
                 Console.Error.WriteLine(
@@ -1093,6 +1098,11 @@ public static class LibcStdioExports
         catch (Exception ex) when (
             ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
         {
+            if (ex is UnauthorizedAccessException)
+            {
+                SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(hostPath);
+            }
+
             if (_traceStdio)
             {
                 Console.Error.WriteLine(

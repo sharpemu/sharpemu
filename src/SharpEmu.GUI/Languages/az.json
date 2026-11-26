@@ -455,6 +455,14 @@
   "Dialog.LogFiles": "Jurnal faylları",
 
   "Options.About": "Haqqında",
+  "Options.Sandbox.Label": "Oyunları qum qutusunda işə sal (tövsiyə olunur)",
+  "Options.Sandbox.Desc": "Dəyişdirilmiş oyunun fayllarını oxumasına, internetdən istifadə etməsinə və proqram başlatmasına mane olur. Yalnız Windows.",
+  "Options.SandboxCleanup.Label": "Qum qutusu icazələrini sil",
+  "Options.SandboxCleanup.Desc": "Qum qutusunun qovluqlara əlavə etdiyi icazələri silir, məsələn, proqramı silməzdən əvvəl. Növbəti qum qutusu başlanğıcında yenidən əlavə olunur.",
+  "Options.SandboxCleanup.Button": "Sil",
+  "Options.SandboxCleanup.Running": "Qum qutusu icazələrini silməzdən əvvəl oyunu bağla.",
+  "Options.SandboxCleanup.Done": "Qum qutusu icazələri silindi.",
+  "Options.SandboxCleanup.Failed": "Bəzi qum qutusu icazələri silinə bilmədi; yuxarıdakı sətirlərə bax.",
   "About.Github.Label": "GitHub",
   "About.Github.Desc": "Mənbə kodu, problemlər və layihənin inkişafı.",
   "About.Github.LatestCommitLabel": "Son kod dəyişikliyi",
@@ -533,5 +541,16 @@
   "Overlay.Ime.Space": "Boşluq",
   "Overlay.Ime.Cursor": "Kursor",
   "Overlay.Ime.Select": "Seç",
-  "Overlay.Ime.Type": "Klaviatura ilə yazın"
+  "Overlay.Ime.Type": "Klaviatura ilə yazın",
+  "Sandbox.BlockedTitle": "Qum qutusu oyunu dayandırdı",
+  "Sandbox.BlockedMessage": "Bu oyun başqa bir proqramı başlatmağa cəhd etdi. Qum qutusu bunu blokladı və oyunu dayandırdı. Dump çox güman ki, dəyişdirilib. Yalnız öz konsolundan özün çıxardığın dumpları işə sal.",
+  "Sandbox.BlockedOk": "OK",
+  "Sandbox.Cancel": "Ləğv et",
+  "Sandbox.OffTitle": "Qum qutusu söndürülsün?",
+  "Sandbox.OffMessage": "Qum qutusu olmadan dəyişdirilmiş oyun fayllarını oxuya, internetdən istifadə edə və proqramlar başlada bilər. Onu yalnız mənbəyinə etibar etdiyin oyun üçün söndür.",
+  "Sandbox.OffConfirm": "Söndür",
+  "Sandbox.VolumeTitle": "Bu oyun {0} diskindədir",
+  "Sandbox.VolumeMessage": "Qum qutusu exFAT disklərindəki (xarici disklər, USB fləşlər) oyunları aça bilmir. Bu diskdən oynamaq üçün oyunu .zar olaraq paketlə.",
+  "Sandbox.VolumeConvert": ".zar olaraq paketlə",
+  "Sandbox.VolumePlayWithout": "Qum qutusu olmadan oyna"
 }
