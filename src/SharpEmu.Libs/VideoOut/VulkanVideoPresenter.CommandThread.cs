@@ -895,6 +895,15 @@ internal static partial class VulkanVideoPresenter
 
                 _units.Add(new Unit { Item = item });
             }
+
+            // The producer has temporarily run dry. Give an already substantial tail to
+            // a free lane while the render thread consumes older units. Keep larger tails
+            // eligible for the balanced split in RunBatch.
+            if (slicesAhead < workers && _unitHead < _units.Count &&
+                _cutting?.Items.Count is >= RestChunkItems and < 2 * RestChunkItems)
+            {
+                CloseSlice();
+            }
         }
 
         private bool RefillDraining()

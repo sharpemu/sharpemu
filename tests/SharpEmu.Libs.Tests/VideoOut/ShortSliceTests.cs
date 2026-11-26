@@ -118,6 +118,46 @@ public sealed class ShortSliceTests(HeadlessVulkanFixture fixture) : IClassFixtu
     }
 
     [Fact]
+    public void OccupiedLanesKeepShortGroupAndPartialTailInTheirOriginalPositions()
+    {
+        if (!GatePrerequisites.Ready(fixture.Vulkan)) return;
+        using var presenter = new PresenterUnderTest(fixture.Vulkan!);
+        presenter.Run(() =>
+        {
+            using var cutter = new Cutter(presenter, workers: 1);
+            for (var i = 0; i < 8; i++) cutter.Add(i);
+            cutter.Call(() => cutter.Executed.Add(8));
+            cutter.Add(9);
+            cutter.Add(10);
+            cutter.Call(() => cutter.Executed.Add(11));
+            for (var i = 12; i < 48; i++) cutter.Add(i);
+            Assert.Equal(new[] { 8 }, cutter.Cut().Select(slice => slice.Count));
+            Assert.Equal(48, cutter.Run());
+            Assert.Equal(Enumerable.Range(0, 48), cutter.Executed);
+        });
+    }
+
+    [Theory]
+    [InlineData(31, true, false)]
+    [InlineData(32, true, true)]
+    [InlineData(63, true, true)]
+    [InlineData(32, false, false)]
+    public void PartialTailCanStartWhileOlderWorkIsPending(int items, bool earlier, bool eligible)
+    {
+        if (!GatePrerequisites.Ready(fixture.Vulkan)) return;
+        using var presenter = new PresenterUnderTest(fixture.Vulkan!);
+        presenter.Run(() =>
+        {
+            using var cutter = new Cutter(presenter);
+            if (earlier) cutter.Call(() => cutter.Executed.Add(-1));
+            for (var i = 0; i < items; i++) cutter.Add(i);
+            Assert.Equal(eligible ? new[] { items } : [], cutter.Cut().Select(slice => slice.Count));
+            Assert.Equal(items + (earlier ? 1 : 0), cutter.Run());
+            Assert.Equal(Enumerable.Range(earlier ? -1 : 0, items + (earlier ? 1 : 0)), cutter.Executed);
+        });
+    }
+
+    [Fact]
     public void ClaimedShortGroupJoinsBetweenTheTwoGuestStores()
     {
         if (!GatePrerequisites.Ready(fixture.Vulkan)) return;
