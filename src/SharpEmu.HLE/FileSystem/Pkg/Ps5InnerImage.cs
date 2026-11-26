@@ -13,7 +13,9 @@ internal sealed record Ps5InnerFile(string[] Components, long Logical, long Size
 // or Kraken-compressed, as NAPS describes. The inner superblock, inodes and directories sit after
 // the last file in logical order, so they are found by decoding that tail and looking for a
 // superblock whose size matches the NAPS mount size. Blocks are decoded one at a time (the last one
-// is cached) so an image of any size needs a few hundred KiB of memory.
+// is cached) so an image of any size needs a few hundred KiB of memory per BlockReader. The block
+// table is immutable after Open; only a reader holds decode state, so one reader per thread can
+// decode the same image in parallel.
 internal sealed class Ps5InnerImage
 {
     private const int InnerInodeSize = 0xA8;
@@ -30,9 +32,8 @@ internal sealed class Ps5InnerImage
     // NAPS file-offset entries: logical offsets of file boundaries.
     private readonly ulong[] _boundaries;
 
-    private int _cachedIndex = -1;
-    private byte[] _decoded = [];
-    private byte[] _payload = [];
+    // Reader behind ReadAt and CopyTo; not shared with the parallel extraction workers.
+    private readonly BlockReader _defaultReader;
 
     internal readonly record struct UBlock(long Logical, long OnDisk, uint Compressed, uint Uncompressed, bool Kraken, uint EvenComp, uint Flags);
 
@@ -42,6 +43,7 @@ internal sealed class Ps5InnerImage
         _blocks = blocks;
         _boundaries = boundaries;
         Mount = mount;
+        _defaultReader = new BlockReader(this);
     }
 
     // Logical size of the inner image.
@@ -227,26 +229,10 @@ internal sealed class Ps5InnerImage
     }
 
     // Streams logical bytes to `sink` one block at a time.
-    public void CopyTo(long logical, long size, SpanAction sink)
-    {
-        if (logical < 0 || size < 0 || size > long.MaxValue - logical)
-        {
-            throw new InvalidDataException("A logical range of the inner image overflows.");
-        }
+    public void CopyTo(long logical, long size, SpanAction sink) => _defaultReader.CopyTo(logical, size, sink);
 
-        var position = logical;
-        var end = logical + size;
-        while (position < end)
-        {
-            var index = FindBlock(position);
-            var block = _blocks[index];
-            var within = (int)(position - block.Logical);
-            var count = (int)Math.Min(block.Uncompressed - within, end - position);
-            LoadBlock(index);
-            sink(_decoded.AsSpan(within, count));
-            position += count;
-        }
-    }
+    // A reader with its own decode buffers, for one thread of a parallel extraction.
+    internal BlockReader CreateReader() => new(this);
 
     public delegate void SpanAction(ReadOnlySpan<byte> chunk);
 
@@ -280,51 +266,84 @@ internal sealed class Ps5InnerImage
         return index;
     }
 
-    private void LoadBlock(int index)
+    // Decode state of one thread: the last decoded block and its stored payload.
+    internal sealed class BlockReader
     {
-        if (_cachedIndex == index)
-        {
-            return;
-        }
+        private readonly Ps5InnerImage _owner;
+        private int _cachedIndex = -1;
+        private byte[] _decoded = [];
+        private byte[] _payload = [];
 
-        _cachedIndex = -1;
-        var block = _blocks[index];
-        if (_decoded.Length != block.Uncompressed)
-        {
-            _decoded = new byte[block.Uncompressed];
-        }
+        internal BlockReader(Ps5InnerImage owner) => _owner = owner;
 
-        if (block.Compressed == 0)
+        // Streams logical bytes to `sink` one block at a time.
+        public void CopyTo(long logical, long size, SpanAction sink)
         {
-            Array.Clear(_decoded);
-        }
-        else
-        {
-            if (_payload.Length != block.Compressed)
+            if (logical < 0 || size < 0 || size > long.MaxValue - logical)
             {
-                _payload = new byte[block.Compressed];
+                throw new InvalidDataException("A logical range of the inner image overflows.");
             }
 
-            _image.ReadExactAt(_payload, block.OnDisk);
-            if (_payload.Length == _decoded.Length)
+            var position = logical;
+            var end = logical + size;
+            while (position < end)
             {
-                _payload.CopyTo(_decoded, 0);
+                var index = _owner.FindBlock(position);
+                var block = _owner._blocks[index];
+                var within = (int)(position - block.Logical);
+                var count = (int)Math.Min(block.Uncompressed - within, end - position);
+                LoadBlock(index);
+                sink(_decoded.AsSpan(within, count));
+                position += count;
+            }
+        }
+
+        private void LoadBlock(int index)
+        {
+            if (_cachedIndex == index)
+            {
+                return;
+            }
+
+            _cachedIndex = -1;
+            var block = _owner._blocks[index];
+            if (_decoded.Length != block.Uncompressed)
+            {
+                _decoded = new byte[block.Uncompressed];
+            }
+
+            if (block.Compressed == 0)
+            {
+                Array.Clear(_decoded);
             }
             else
             {
-                try
+                if (_payload.Length != block.Compressed)
                 {
-                    Kraken.DecodeBlock(_payload, block.Flags, block.EvenComp, _decoded);
+                    _payload = new byte[block.Compressed];
                 }
-                catch (InvalidDataException exception)
+
+                _owner._image.ReadExactAt(_payload, block.OnDisk);
+                if (_payload.Length == _decoded.Length)
                 {
-                    throw new InvalidDataException(
-                        $"{exception.Message} (block at logical 0x{block.Logical:X}, stored at 0x{block.OnDisk:X}, {block.Compressed} -> {block.Uncompressed} bytes, flags 0x{block.Flags:X}).");
+                    _payload.CopyTo(_decoded, 0);
+                }
+                else
+                {
+                    try
+                    {
+                        Kraken.DecodeBlock(_payload, block.Flags, block.EvenComp, _decoded);
+                    }
+                    catch (InvalidDataException exception)
+                    {
+                        throw new InvalidDataException(
+                            $"{exception.Message} (block at logical 0x{block.Logical:X}, stored at 0x{block.OnDisk:X}, {block.Compressed} -> {block.Uncompressed} bytes, flags 0x{block.Flags:X}).");
+                    }
                 }
             }
-        }
 
-        _cachedIndex = index;
+            _cachedIndex = index;
+        }
     }
 
     // Builds the logical-to-stored block list from the CblockInfo records.
