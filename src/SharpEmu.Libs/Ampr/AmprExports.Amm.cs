@@ -21,9 +21,16 @@ public static partial class AmprExports
     private const ulong AmmRecordSize = 0x20;
     private const uint AmmMapRecordType = 1;
     private const uint AmmUnmapRecordType = 2;
+    private const uint AmmPrtApertureRecordType = 3;
     private const int AmmUsageDirect = 0;
     private const int AmmUsageAuto = 1;
     private const ulong AmmMapFixed = 0x10;
+    // AGC memory types a PRT allocation names, and the protection bits it may carry.
+    private const int AmmPrtMemoryTypeMin = 11;
+    private const int AmmPrtMemoryTypeMax = 20;
+    private const int AmmPrtProtectionMask = 0x3F3;
+    // A CPU, AMPR or ACP write also grants the matching read access.
+    private const int AmmPrtReadGrants = 0x141;
     private const int KernelEperm = unchecked((int)0x80020001);
     private const int KernelEfault = unchecked((int)0x8002000E);
     private const int KernelEbusy = unchecked((int)0x80020010);
@@ -40,6 +47,8 @@ public static partial class AmprExports
     {
         public ulong RecordOffset;
         public bool Unmap;
+        // Set for MapAsPrt: the range only declares a PRT aperture, so nothing is backed for it.
+        public bool PrtAperture;
         public ulong Address;
         public ulong Size;
         public int Protection;
@@ -197,6 +206,44 @@ public static partial class AmprExports
     public static int AmmCommandBufferUnmap(CpuContext ctx) =>
         AppendAmmCommand(ctx, unmap: true, ctx[CpuRegister.Rsi], ctx[CpuRegister.Rdx], 0);
 
+    // MapAsPrt takes (buffer, va, size) and declares where a partially resident range will live. The
+    // AMM area is reserved whole at the first AMM call and its unmapped pages read as zeros, so the
+    // declaration itself backs nothing; sceAmprAmmCommandBufferAllocatePaForPrt maps the chunks that
+    // become resident. Titles reserve ranges of tens of GiB here, so allocating eagerly would fail.
+    [SysAbiExport(
+        Nid = "ZJCgt+aPHAU",
+        ExportName = "sceAmprAmmCommandBufferMapAsPrt",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int AmmCommandBufferMapAsPrt(CpuContext ctx) =>
+        AppendAmmCommand(ctx, unmap: false, ctx[CpuRegister.Rsi], ctx[CpuRegister.Rdx], 0, prtAperture: true);
+
+    // AllocatePaForPrt takes (buffer, va, size, memory type, protection): the chunk's pages are
+    // allocated physically and mapped at va. The memory type only describes the pages to AGC, so it
+    // is validated and not passed on; the protection becomes the mapping's access rights.
+    [SysAbiExport(
+        Nid = "d3lKWPM6odc",
+        ExportName = "sceAmprAmmCommandBufferAllocatePaForPrt",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAmpr")]
+    public static int AmmCommandBufferAllocatePaForPrt(CpuContext ctx)
+    {
+        var memoryType = unchecked((int)ctx[CpuRegister.Rcx]);
+        var protection = unchecked((int)ctx[CpuRegister.R8]);
+        if (memoryType is < AmmPrtMemoryTypeMin or > AmmPrtMemoryTypeMax ||
+            (protection & ~AmmPrtProtectionMask) != 0)
+        {
+            return SetAmmResult(ctx, KernelEinval);
+        }
+
+        return AppendAmmCommand(
+            ctx,
+            unmap: false,
+            ctx[CpuRegister.Rsi],
+            ctx[CpuRegister.Rdx],
+            protection | ((protection >> 1) & AmmPrtReadGrants));
+    }
+
     [SysAbiExport(
         Nid = "lwS-7y3jcBI",
         ExportName = "sceAmprAmmSubmitCommandBuffer",
@@ -254,7 +301,14 @@ public static partial class AmprExports
         return AppendAmmCommand(ctx, unmap: false, ctx[CpuRegister.Rsi], ctx[CpuRegister.Rcx], unchecked((int)ctx[CpuRegister.R9]), offset);
     }
 
-    private static int AppendAmmCommand(CpuContext ctx, bool unmap, ulong address, ulong size, int protection, ulong? directOffset = null)
+    private static int AppendAmmCommand(
+        CpuContext ctx,
+        bool unmap,
+        ulong address,
+        ulong size,
+        int protection,
+        ulong? directOffset = null,
+        bool prtAperture = false)
     {
         var commandBuffer = ctx[CpuRegister.Rdi];
         if (commandBuffer == 0 || size == 0 || address % AmmPageSize != 0 || size % AmmPageSize != 0 ||
@@ -275,7 +329,9 @@ public static partial class AmprExports
 
         Span<byte> record = stackalloc byte[(int)AmmRecordSize];
         record.Clear();
-        BinaryPrimitives.WriteUInt32LittleEndian(record, unmap ? AmmUnmapRecordType : AmmMapRecordType);
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            record,
+            prtAperture ? AmmPrtApertureRecordType : unmap ? AmmUnmapRecordType : AmmMapRecordType);
         BinaryPrimitives.WriteUInt32LittleEndian(record[0x04..], unchecked((uint)protection));
         BinaryPrimitives.WriteUInt64LittleEndian(record[0x08..], address);
         BinaryPrimitives.WriteUInt64LittleEndian(record[0x10..], size);
@@ -296,6 +352,7 @@ public static partial class AmprExports
             {
                 RecordOffset = recordOffset,
                 Unmap = unmap,
+                PrtAperture = prtAperture,
                 Address = address,
                 Size = size,
                 Protection = protection,
@@ -303,7 +360,7 @@ public static partial class AmprExports
             });
         }
 
-        TraceAmpr(ctx, unmap ? "amm_unmap" : "amm_map", commandBuffer, address, size);
+        TraceAmpr(ctx, prtAperture ? "amm_prt" : unmap ? "amm_unmap" : "amm_map", commandBuffer, address, size);
         return SetAmmResult(ctx, 0);
     }
 
@@ -314,6 +371,13 @@ public static partial class AmprExports
             if (!TryReserveAmmArea(ctx))
             {
                 return KernelEbusy;
+            }
+
+            if (command.PrtAperture)
+            {
+                // The aperture is part of the area reserved at the first AMM call; its unmapped
+                // pages already read as zeros, so there is nothing to map for the declaration.
+                return 0;
             }
 
             // A map over mapped pages replaces them, so both commands first return the range to the area.
