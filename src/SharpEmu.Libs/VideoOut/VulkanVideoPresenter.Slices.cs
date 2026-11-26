@@ -282,6 +282,7 @@ internal static unsafe partial class VulkanVideoPresenter
         public bool NeedsBdaSweep;
         public bool NeedsBdaTouch;
         public long BufferSerial;
+        public long? CleanBufferEpoch;
         public long? ReadsVersion;
         public long ReadPublications;
         public long ReadFrontendVersion;
@@ -965,10 +966,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     _bufferCache.SynchronizeBuffersInRange(address, size);
                 }
 
-                foreach (var use in requests.Buffers)
-                {
-                    _bufferCache.ApplySliceUse(in use);
-                }
+                _bufferCache.ApplyRecordedBufferUses(requests.Buffers, requests.BufferSerial, requests.CleanBufferEpoch, _guestPublications);
             }
             finally
             {
@@ -1175,6 +1173,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             var segment = new SliceSegment { First = first };
             segment.Requests.BufferSerial = _buffers.Serial;
+            segment.Requests.CleanBufferEpoch = _bufferCache.CpuDirtyEpoch;
             segment.Requests.LookupGeneration = _imageCache.LookupGeneration;
             segment.Requests.MetadataGeneration = _imageCache.MetadataGeneration;
             _segment = segment;
@@ -1330,9 +1329,16 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw Serial("buffer lookup", resumable: true);
             }
 
+            // Memo hits above prove plain reads clean already. A dirty persistent read on a miss
+            // requires a fresh range check at join, even if the CPU epoch itself did not move.
+            var requests = Requests;
+            if (requests.CleanBufferEpoch >= 0 && !isWritten && !isTexelBuffer && !invalidateImages &&
+                _bufferCache.MayHaveCpuDirtyPages(address, size))
+                requests.CleanBufferEpoch = -1;
+
             entry = new SliceUseEntry(address, size, isWritten, isTexelBuffer, invalidateImages, _buffers, buffer);
             NoteSliceWrite(buffer, isWritten);
-            Requests.AddBuffer(new BufferSliceUse(address, size, isWritten, isTexelBuffer, invalidateImages, buffer));
+            requests.AddBuffer(new BufferSliceUse(address, size, isWritten, isTexelBuffer, invalidateImages, buffer));
             return (buffer, buffer.Offset(address), buffer.Size - buffer.Offset(address));
         }
 

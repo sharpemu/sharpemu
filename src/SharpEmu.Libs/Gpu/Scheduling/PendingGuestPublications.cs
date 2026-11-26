@@ -113,11 +113,24 @@ internal sealed class PendingGuestPublications
     // Read without the lock; Index replaces the array under the lock.
     internal Entry[] PendingDumps => _dumps;
 
-    private bool DumpOverlap(ulong address, ulong size, bool skipGpuSlots, out ulong tick)
+    // For an ordinary buffer read both callbacks are no-ops if no dump overlaps. Test the
+    // same immutable membership used by OverlapTick, including GPU slots which need an overlay.
+    internal bool TryGetClearReadSnapshot(ulong address, ulong size, out Entry[] snapshot)
+    {
+        snapshot = _dumps;
+        return _failure is null && (snapshot.Length == 0 || !DumpOverlap(snapshot, address, size, false, out _));
+    }
+
+    internal bool MayNeedNewOverlay(Entry[] checkedSnapshot)
+    {
+        var current = _dumps;
+        return current.Length != 0 && !ReferenceEquals(current, checkedSnapshot);
+    }
+
+    private bool DumpOverlap(Entry[] dumps, ulong address, ulong size, bool skipGpuSlots, out ulong tick)
     {
         var found = false;
         tick = 0;
-        var dumps = _dumps;
         if (dumps.Length == 0) return false;
         var reuse = ReusePublicationGaps;
         if (!reuse)
@@ -166,7 +179,7 @@ internal sealed class PendingGuestPublications
     internal bool HasOverlap(ulong address, ulong size, bool includeLabels = true, bool skipGpuSlots = false)
     {
         if (size == 0 || address > ulong.MaxValue - size) return false;
-        if (!includeLabels && _failure is null) return DumpOverlap(address, size, skipGpuSlots, out _);
+        if (!includeLabels && _failure is null) return DumpOverlap(_dumps, address, size, skipGpuSlots, out _);
         if (!MayOverlap(address, size)) return false;
         lock (_gate)
         {
@@ -360,7 +373,7 @@ internal sealed class PendingGuestPublications
         if (size == 0 || address > ulong.MaxValue - size) return 0;
         if (!includeLabels && _failure is null)
         {
-            DumpOverlap(address, size, skipGpuSlots, out var dumpTick);
+            DumpOverlap(_dumps, address, size, skipGpuSlots, out var dumpTick);
             return dumpTick;
         }
         if (!MayOverlap(address, size)) return 0;

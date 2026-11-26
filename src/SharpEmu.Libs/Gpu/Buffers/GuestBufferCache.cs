@@ -2694,6 +2694,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         {
             _bufferPages.Set(buffer.CpuAddress, buffer.Size, covered: true);
             _registry.RegisterBuffer(bufferIdentifier, _retirementPolicy.CurrentTick);
+            buffer.CacheIdentifier = bufferIdentifier;
             _registrationGeneration++;
             var addresses = new ulong[sizePages];
             for (ulong page = 0; page < sizePages; page++)
@@ -2707,6 +2708,7 @@ public sealed unsafe partial class GuestBufferCache : IGuestBufferStore, IDispos
         {
             _bufferPages.Set(buffer.CpuAddress, buffer.Size, covered: false);
             _registry.BeginRetirement(bufferIdentifier);
+            buffer.CacheIdentifier = ResourceSlotIdentifier.Invalid;
             _unregistrations++;
             _bdaPageTable.Fill(first * sizeof(ulong), sizePages * sizeof(ulong), 0);
         }

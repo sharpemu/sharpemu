@@ -13,6 +13,29 @@ namespace SharpEmu.Libs.Tests.Gpu.Scheduling;
 [Collection(SchedulingStateCollection.Name)]
 public sealed class PendingGuestPublicationTests
 {
+    [Fact]
+    public void PlainBufferReadTracksLateGpuOverlaysAndPropagatesPublicationFailure()
+    {
+        var publications = new PendingGuestPublications();
+        const ulong address = 0x10000;
+        var label = publications.AddAfterPending(1, address, 4, 1, requireCompletion: true)!;
+        Assert.True(publications.TryGetClearReadSnapshot(address, 16, out var snapshot));
+        Assert.False(publications.MayNeedNewOverlay(snapshot));
+        var disjoint = publications.Add(1, address + 16, 8);
+        Assert.True(publications.TryGetClearReadSnapshot(address, 16, out snapshot));
+        var dump = publications.Add(1, address, 4);
+        dump.GpuSlot = 3;
+        Assert.True(publications.MayNeedNewOverlay(snapshot));
+        Assert.False(publications.TryGetClearReadSnapshot(address, 16, out _));
+        publications.Publish(dump, static () => { });
+        publications.Publish(disjoint, static () => { });
+        Assert.False(publications.MayNeedNewOverlay(snapshot));
+        publications.Publish(label, static () => { });
+        publications.Fail(new InvalidOperationException("Device lost."));
+        Assert.False(publications.TryGetClearReadSnapshot(address, 16, out _));
+        Assert.Throws<InvalidOperationException>(() => publications.OverlapTick(address, 16, includeLabels: false));
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

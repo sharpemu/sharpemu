@@ -3,6 +3,7 @@
 
 using SharpEmu.HLE.Diagnostics;
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.Libs.Gpu.Scheduling;
 
 namespace SharpEmu.Libs.Gpu.Buffers;
 
@@ -220,6 +221,51 @@ public sealed unsafe partial class GuestBufferCache
         OverlayGuestPublications?.Invoke(buffer, buffer.Offset(use.Address), use.Address, use.Size);
         _heldSliceUses.Increment();
         return true;
+    }
+
+    internal long CpuDirtyEpoch => _tracker.CpuDirtyEpoch;
+
+    // Only the presenter supplies this proof. Its two read callbacks complete or overlay
+    // overlapping dumps. Writes, texel reads and invalidations retain their ordered effects.
+    internal int ApplyRecordedBufferUses(List<BufferSliceUse> uses, long serial, long? cleanEpoch,
+        PendingGuestPublications publications)
+    {
+        if (!cleanEpoch.HasValue || !HeldSliceUses || ObtainMemoUse != ObtainMemoMode.On)
+        {
+            foreach (var use in uses) ApplySliceUse(in use);
+            return 0;
+        }
+
+        var held = 0;
+        var previousOwner = ResourceSlotIdentifier.Invalid;
+        foreach (var use in uses)
+        {
+            // A preceding full obtain can merge owners, submit or upload. Recheck at the position of each use.
+            if (use.Written || use.Texel || use.InvalidateImages || serial != RegistrationSerial ||
+                !use.Buffer.CacheIdentifier.IsValid || !publications.TryGetClearReadSnapshot(use.Address, use.Size, out var readDumps) ||
+                (cleanEpoch.Value != CpuDirtyEpoch && _tracker.MayHaveCpuDirtyPages(use.Address, use.Size)))
+            {
+                ApplySliceUse(in use);
+                previousOwner = ResourceSlotIdentifier.Invalid;
+                continue;
+            }
+
+            // No collection tick can change between consecutive fast reads on this thread.
+            if (previousOwner != use.Buffer.CacheIdentifier)
+            {
+                previousOwner = use.Buffer.CacheIdentifier;
+                TouchBuffer(previousOwner);
+            }
+            // A dump may have arrived since the completion check, as in TryHoldSliceUse.
+            if (publications.MayNeedNewOverlay(readDumps))
+            {
+                OverlayGuestPublications?.Invoke(use.Buffer, use.Buffer.Offset(use.Address), use.Address, use.Size);
+                previousOwner = ResourceSlotIdentifier.Invalid;
+            }
+            held++;
+        }
+        if (held != 0) _heldSliceUses.Add(held);
+        return held;
     }
 
     public void ApplySliceUse(in BufferSliceUse use)

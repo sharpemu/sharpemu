@@ -555,6 +555,46 @@ public sealed class SliceRecordingTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public void DirtyPersistentWorkerReadIsUploadedEvenWhenTheEpochStaysStillUntilJoin()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var presenter = new PresenterUnderTest(_vulkan!);
+        var harness = presenter.Harness;
+        var cache = harness.Cache;
+        cache.ObtainMemoUse = GuestBufferCache.ObtainMemoMode.On;
+        var address = harness.MapBacked(0x10000, ImageCacheTestSupport.ReadWrite);
+        var size = 2 * GuestBufferCache.CachingPageSize;
+        var buffer = presenter.Run(() => cache.ObtainBuffer(address, size, false, allowStream: false).Buffer);
+        var bytes = Enumerable.Repeat((byte)0xAC, (int)size).ToArray();
+        Assert.True(harness.Store.MarkCpuWrite(address, size));
+        harness.Write(address, bytes);
+        presenter.Run(() =>
+        {
+            var snapshot = cache.RefreshSnapshot();
+            var host = RuntimeHelpers.GetUninitializedObject(PresenterUnderTest.RecordingHostType);
+            SetHostField(host, "_worker", true);
+            SetHostField(host, "_presenter", presenter.Instance);
+            SetHostField(host, "_bufferCache", cache);
+            SetHostField(host, "_buffers", snapshot);
+            var segment = Activator.CreateInstance(SegmentType, true)!;
+            SetHostField(host, "_segment", segment);
+            var requests = SegmentType.GetField("Requests")!.GetValue(segment)!;
+            var epoch = requests.GetType().GetField("CleanBufferEpoch")!;
+            epoch.SetValue(requests, cache.CpuDirtyEpoch);
+            var pubs = presenter.GetField<PendingGuestPublications>("_guestPublications");
+            Assert.False(cache.PrefersStreamCopy(address, size, false));
+            PresenterUnderTest.RecordingHostType.GetMethod("ObtainBufferRangeForSlice", PresenterUnderTest.InstanceMembers)!
+                .Invoke(host, [address, size, false, false, false]);
+            var uses = (List<BufferSliceUse>)requests.GetType().GetField("Buffers")!.GetValue(requests)!;
+            Assert.Same(buffer, Assert.Single(uses).Buffer);
+            Assert.Equal(-1L, (long)epoch.GetValue(requests)!);
+            Assert.Equal(0, cache.ApplyRecordedBufferUses(uses, snapshot.Serial, (long)epoch.GetValue(requests)!, pubs));
+        });
+        Assert.Equal(bytes, harness.ReadBack(buffer, buffer.Offset(address), size));
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void WorkerBufferUseCacheNeverHandsOutABufferAMergeRetired()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
