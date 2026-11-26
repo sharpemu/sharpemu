@@ -413,6 +413,16 @@ internal sealed partial class RenderRecorder
             return false;
         }
 
+        // Every buffer it writes has to be a whole metadata surface: a store anywhere else is not a clear, and neither
+        // is a small buffer that only starts where a surface's metadata was registered.
+        foreach (var probe in probes)
+        {
+            if (probe.Written && !_host.CoversMetadata(probe.Address, probe.Size))
+            {
+                return false;
+            }
+        }
+
         foreach (var probe in probes)
         {
             if (probe.Written && _host.ClearMetadata(probe.Address))

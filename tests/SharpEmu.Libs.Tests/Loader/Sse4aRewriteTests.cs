@@ -11,7 +11,7 @@ using Xunit;
 
 namespace SharpEmu.Libs.Tests.Loader;
 
-public sealed unsafe class Sse4aExtractRewriteTests
+public sealed unsafe class Sse4aRewriteTests
 {
     // Buffer layout in qwords: 0-3 destination YMM, 4-7 control YMM, 8-11 unrelated YMM,
     // 12 RAX, 13 RDX, then outputs from 16: destination, control, unrelated, RAX, RDX, RCX, flags before, flags after.
@@ -66,6 +66,44 @@ public sealed unsafe class Sse4aExtractRewriteTests
         }
     }
 
+    private static readonly (ulong Destination, ulong Source)[] InsertPairs =
+    [
+        (0xA00E_8965_2C7A_6E65, 0x0123_4567_89AB_CDEF), (0, ulong.MaxValue), (ulong.MaxValue, 0),
+    ];
+
+    [Fact]
+    public void InsertMatchesRecoveryForEveryEncoding()
+    {
+        if (!IsSupportedHost) return;
+        for (var length = 0; length < 64; length++)
+        for (var index = 0; index < 64; index++)
+        {
+            using var harness = new Harness(Instruction.Create(Code.Insertq_xmm_xmm_imm8_imm8, Register.XMM2, Register.XMM5, length, index));
+            foreach (var (destination, source) in InsertPairs)
+            {
+                harness.Run(destination, source, aliased: false);
+                harness.AssertResult(Sse4aBitFieldEmulator.InsertBitField(destination, source, length, index),
+                    $"insert length={length} index={index} destination=0x{destination:X16} source=0x{source:X16}");
+            }
+        }
+    }
+
+    [Fact]
+    public void InsertReadsTheSourceBeforeWritingAnAliasedDestination()
+    {
+        if (!IsSupportedHost) return;
+        foreach (var (length, index) in new[] { (8, 8), (16, 48), (0, 0), (20, 50) })
+        {
+            using var harness = new Harness(Instruction.Create(Code.Insertq_xmm_xmm_imm8_imm8, Register.XMM2, Register.XMM2, length, index));
+            foreach (var value in Values)
+            {
+                harness.Run(value, 0, aliased: true);
+                harness.AssertResult(Sse4aBitFieldEmulator.InsertBitField(value, value, length, index),
+                    $"aliased insert length={length} index={index} value=0x{value:X16}");
+            }
+        }
+    }
+
     private static bool IsSupportedHost => Avx.IsSupported;
 
     private sealed class Harness : IDisposable
@@ -77,7 +115,7 @@ public sealed unsafe class Sse4aExtractRewriteTests
 
         public Harness(Instruction extract)
         {
-            Assert.True(Sse4aExtractRewrite.CanRewrite(extract));
+            Assert.True(Sse4aRewrite.CanRewrite(extract));
             MemoryOperand Slot(int qword) => new(Register.RCX, qword * 8);
             var instructions = new List<Instruction>
             {
@@ -93,7 +131,7 @@ public sealed unsafe class Sse4aExtractRewriteTests
                 Instruction.Create(Code.Pop_r64, Register.R9),
             };
             extract.IP = 0x1000;
-            instructions.AddRange(Sse4aExtractRewrite.Expand([extract]));
+            instructions.AddRange(Sse4aRewrite.Expand([extract]));
             instructions.AddRange(
             [
                 Instruction.Create(Code.Pushfq),

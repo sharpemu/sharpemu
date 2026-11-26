@@ -128,6 +128,63 @@ public static class KernelSemaphoreCompatExports
             "sceKernelWaitSema");
     }
 
+    // The POSIX sem_* calls follow libc: 0, or -1 with errno set (FreeBSD numbers). Mono's mono_os_sem_timedwait
+    // takes sem_trywait failing with anything but EAGAIN or EINTR as fatal, and an SCE code left errno at 0
+    // ("sem_trywait failed with No error"), which killed the Mono thread and left Wukong's UObjects half-built.
+    private const int ErrnoEfault = 14;
+    private const int ErrnoEinval = 22;
+    private const int ErrnoEagain = 35;
+    private const int ErrnoEtimedout = 60;
+
+    // Set while a POSIX sem_* export runs its core, so a wait that blocks answers its resume the libc way too.
+    [ThreadStatic]
+    private static bool _posixLibcCall;
+
+    private static int LibcCall(CpuContext ctx, Func<CpuContext, int> core, bool tryWait = false)
+    {
+        var previous = _posixLibcCall;
+        _posixLibcCall = true;
+        int result;
+        try
+        {
+            result = core(ctx);
+        }
+        finally
+        {
+            _posixLibcCall = previous;
+        }
+
+        return LibcResult(ctx, result, tryWait);
+    }
+
+    private static int LibcResult(CpuContext ctx, int result, bool tryWait = false)
+    {
+        if (result == 0)
+        {
+            ctx[CpuRegister.Rax] = 0;
+            return 0;
+        }
+
+        var errno = result switch
+        {
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY or (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN => tryWait ? ErrnoEagain : 16,
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT => ErrnoEtimedout,
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT or (int)KernelBadAddress => ErrnoEfault,
+            (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT or (int)OrbisGen2Result.ORBIS_GEN2_ERROR_NOT_FOUND or
+                (int)KernelNoSuchObject or (int)KernelInvalidArgument => ErrnoEinval,
+            _ when ((uint)result & 0xFFFF_0000u) == 0x8002_0000u => result & 0xFFFF,
+            _ => ErrnoEinval,
+        };
+        return LibcFailure(ctx, errno);
+    }
+
+    private static int LibcFailure(CpuContext ctx, int errno)
+    {
+        _ = KernelRuntimeCompatExports.TrySetErrno(ctx, errno);
+        ctx[CpuRegister.Rax] = unchecked((ulong)-1L);
+        return -1;
+    }
+
     private static int WaitSemaphoreCore(
         CpuContext ctx,
         KernelSemaphoreState semaphore,
@@ -138,6 +195,8 @@ public static class KernelSemaphoreCompatExports
         uint timeoutUsec,
         string operationName)
     {
+        var takeLatePost = _posixTimedWait;
+        var libc = _posixLibcCall;
         lock (semaphore.Gate)
         {
             if (semaphore.Count >= needCount)
@@ -201,13 +260,27 @@ public static class KernelSemaphoreCompatExports
             lock (semaphore.Gate)
             {
                 semaphore.WaitingThreads = Math.Max(0, semaphore.WaitingThreads - 1);
+                // FreeBSD libc's sem_timedwait (sem_new.c) re-checks the count
+                // after the kernel wait times out and takes a unit posted meanwhile instead of failing. Mono retires a
+                // thread-pool worker whose park times out; a post made to wake it in that gap stayed in the count while
+                // the worker exited, so the queued work had no thread and Wukong's level load never finished.
+                if (takeLatePost && semaphore.WaitingThreads == 0 && semaphore.Count >= needCount)
+                {
+                    semaphore.Count -= needCount;
+                    if (_traceSema)
+                    {
+                        TraceSemaphore($"wait-late-take handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} count={semaphore.Count}");
+                    }
+
+                    return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+                }
             }
 
             if (_traceSema)
             {
                 TraceSemaphore($"wait-timeout handle=0x{handle:X8} name='{semaphore.Name}' need={needCount} count={semaphore.Count}");
             }
-            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
+            return libc ? LibcFailure(ctx, ErrnoEtimedout) : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_TIMED_OUT;
         }
 
         if (GuestThreadExecution.RequestCurrentThreadBlock(
@@ -472,7 +545,9 @@ public static class KernelSemaphoreCompatExports
         ExportName = "sem_init",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixSemInit(CpuContext ctx)
+    public static int PosixSemInit(CpuContext ctx) => LibcCall(ctx, PosixSemInitCore);
+
+    private static int PosixSemInitCore(CpuContext ctx)
     {
         var semaphoreAddress = ctx[CpuRegister.Rdi];
         var initialCountValue = ctx[CpuRegister.Rdx];
@@ -522,7 +597,7 @@ public static class KernelSemaphoreCompatExports
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        return PosixSemInit(ctx);
+        return PosixSemInitCore(ctx);
     }
 
     [SysAbiExport(
@@ -530,7 +605,9 @@ public static class KernelSemaphoreCompatExports
         ExportName = "sem_wait",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixSemWait(CpuContext ctx)
+    public static int PosixSemWait(CpuContext ctx) => LibcCall(ctx, PosixSemWaitCore);
+
+    private static int PosixSemWaitCore(CpuContext ctx)
     {
         if (!TryGetPosixSemaphoreHandle(ctx, ctx[CpuRegister.Rdi], out var handle))
         {
@@ -548,14 +625,16 @@ public static class KernelSemaphoreCompatExports
         ExportName = "scePthreadSemWait",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PthreadSemWait(CpuContext ctx) => PosixSemWait(ctx);
+    public static int PthreadSemWait(CpuContext ctx) => PosixSemWaitCore(ctx);
 
     [SysAbiExport(
         Nid = "WBWzsRifCEA",
         ExportName = "sem_trywait",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixSemTryWait(CpuContext ctx)
+    public static int PosixSemTryWait(CpuContext ctx) => LibcCall(ctx, PosixSemTryWaitCore, tryWait: true);
+
+    private static int PosixSemTryWaitCore(CpuContext ctx)
     {
         if (!TryGetPosixSemaphoreHandle(ctx, ctx[CpuRegister.Rdi], out var handle))
         {
@@ -574,7 +653,7 @@ public static class KernelSemaphoreCompatExports
         LibraryName = "libKernel")]
     public static int PthreadSemTryWait(CpuContext ctx)
     {
-        var result = PosixSemTryWait(ctx);
+        var result = PosixSemTryWaitCore(ctx);
         return result == (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY
             ? SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_TRY_AGAIN)
             : result;
@@ -614,26 +693,82 @@ public static class KernelSemaphoreCompatExports
         ExportName = "sem_timedwait",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixSemTimedWait(CpuContext ctx)
+    public static int PosixSemTimedWait(CpuContext ctx) => LibcCall(ctx, PosixSemTimedWaitCore);
+
+    // abs_timeout is a CLOCK_REALTIME timespec, not the SCE wait's pointer to a relative microsecond count: read as
+    // one, the low bits of tv_sec made a wait of about half an hour and the remaining time was written over tv_sec.
+    private static int PosixSemTimedWaitCore(CpuContext ctx)
     {
-        var timeoutAddress = ctx[CpuRegister.Rsi];
-        if (!TryGetPosixSemaphoreHandle(ctx, ctx[CpuRegister.Rdi], out var handle))
+        var deadlineAddress = ctx[CpuRegister.Rsi];
+        if (!TryGetPosixSemaphoreHandle(ctx, ctx[CpuRegister.Rdi], out var handle) ||
+            !_semaphores.TryGetValue(handle, out var semaphore))
         {
             return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        ctx[CpuRegister.Rdi] = handle;
-        ctx[CpuRegister.Rsi] = 1;
-        ctx[CpuRegister.Rdx] = timeoutAddress;
-        return KernelWaitSema(ctx);
+        if (deadlineAddress == 0 ||
+            !KernelMemoryCompatExports.TryReadUInt64Compat(ctx, deadlineAddress, out var rawSeconds) ||
+            !KernelMemoryCompatExports.TryReadUInt64Compat(ctx, deadlineAddress + sizeof(long), out var rawNanoseconds))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        var seconds = unchecked((long)rawSeconds);
+        var nanoseconds = unchecked((long)rawNanoseconds);
+        if (nanoseconds is < 0 or >= 1_000_000_000)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        KernelRuntimeCompatExports.GetClockTime(0, out var nowSeconds, out var nowNanoseconds);
+        var deltaSeconds = seconds - nowSeconds;
+        uint timeoutUsec;
+        if (deltaSeconds < 0)
+        {
+            timeoutUsec = 0;
+        }
+        else if (deltaSeconds > uint.MaxValue / 1_000_000L + 1)
+        {
+            timeoutUsec = uint.MaxValue;
+        }
+        else
+        {
+            var remainingNanoseconds = deltaSeconds * 1_000_000_000L + nanoseconds - nowNanoseconds;
+            var remainingUsec = remainingNanoseconds <= 0 ? 0 : (remainingNanoseconds + 999L) / 1_000L;
+            timeoutUsec = (uint)Math.Min(remainingUsec, uint.MaxValue);
+        }
+
+        _posixTimedWait = true;
+        try
+        {
+            return WaitSemaphoreCore(
+                ctx,
+                semaphore,
+                handle,
+                needCount: 1,
+                hasTimeout: true,
+                timeoutAddress: 0,
+                timeoutUsec,
+                "sem_timedwait");
+        }
+        finally
+        {
+            _posixTimedWait = false;
+        }
     }
+
+    // Set while sem_timedwait runs KernelWaitSema, so a timed-out wait follows libc (see ResumeWait).
+    [ThreadStatic]
+    private static bool _posixTimedWait;
 
     [SysAbiExport(
         Nid = "IKP8typ0QUk",
         ExportName = "sem_post",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixSemPost(CpuContext ctx)
+    public static int PosixSemPost(CpuContext ctx) => LibcCall(ctx, PosixSemPostCore);
+
+    private static int PosixSemPostCore(CpuContext ctx)
     {
         if (!TryGetPosixSemaphoreHandle(ctx, ctx[CpuRegister.Rdi], out var handle))
         {
@@ -650,14 +785,16 @@ public static class KernelSemaphoreCompatExports
         ExportName = "scePthreadSemPost",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PthreadSemPost(CpuContext ctx) => PosixSemPost(ctx);
+    public static int PthreadSemPost(CpuContext ctx) => PosixSemPostCore(ctx);
 
     [SysAbiExport(
         Nid = "Bq+LRV-N6Hk",
         ExportName = "sem_getvalue",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixSemGetValue(CpuContext ctx)
+    public static int PosixSemGetValue(CpuContext ctx) => LibcCall(ctx, PosixSemGetValueCore);
+
+    private static int PosixSemGetValueCore(CpuContext ctx)
     {
         var semaphoreAddress = ctx[CpuRegister.Rdi];
         var valueAddress = ctx[CpuRegister.Rsi];
@@ -684,7 +821,9 @@ public static class KernelSemaphoreCompatExports
         ExportName = "sem_destroy",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixSemDestroy(CpuContext ctx)
+    public static int PosixSemDestroy(CpuContext ctx) => LibcCall(ctx, PosixSemDestroyCore);
+
+    private static int PosixSemDestroyCore(CpuContext ctx)
     {
         var semaphoreAddress = ctx[CpuRegister.Rdi];
         if (!TryGetPosixSemaphoreHandle(ctx, semaphoreAddress, out var handle))
@@ -707,7 +846,7 @@ public static class KernelSemaphoreCompatExports
         ExportName = "scePthreadSemDestroy",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PthreadSemDestroy(CpuContext ctx) => PosixSemDestroy(ctx);
+    public static int PthreadSemDestroy(CpuContext ctx) => PosixSemDestroyCore(ctx);
 
     private static bool TryGetPosixSemaphoreHandle(CpuContext ctx, ulong semaphoreAddress, out uint handle)
     {

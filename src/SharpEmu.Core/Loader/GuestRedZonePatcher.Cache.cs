@@ -25,7 +25,7 @@ internal static partial class GuestRedZonePatcher
         hash.AppendData(typeof(GuestRedZonePatcher).Module.ModuleVersionId.ToByteArray());
         hash.AppendData(typeof(Iced.Intel.Decoder).Module.ModuleVersionId.ToByteArray());
         hash.AppendData([(byte)PatchCacheVersion, (byte)(protectRedZone ? 1 : 0),
-            (byte)(ShaInstructionRewrite.IsRequired ? 1 : 0), (byte)(Sse4aExtractRewrite.IsRequired ? 1 : 0)]);
+            (byte)(ShaInstructionRewrite.IsRequired ? 1 : 0), (byte)(Sse4aRewrite.IsRequired ? 1 : 0)]);
         foreach (var id in appliedPatchIds ?? [])
         {
             hash.AppendData(Encoding.UTF8.GetBytes(id));
@@ -57,7 +57,7 @@ internal static partial class GuestRedZonePatcher
                 return false;
             var executableBytes = ExecutableBytes(headers);
             var counts = new[] { plan.Scan.Functions, plan.Scan.RedZoneFunctions, plan.Scan.Instructions,
-                plan.Scan.ShaInstructionCount, plan.Scan.ExtractCandidates, plan.Scan.UnrelocatableSites,
+                plan.Scan.ShaInstructionCount, plan.Scan.Sse4aCandidates, plan.Scan.UnrelocatableSites,
                 plan.Scan.ControlFlowRefusals, plan.Scan.BranchTargetRefusals, plan.Scan.StackRefusals,
                 plan.Scan.TooShortRefusals, plan.Scan.IndirectBranchRefusals };
             if ((ulong)plan.Sites.Length > executableBytes / MinimumJumpBytes ||

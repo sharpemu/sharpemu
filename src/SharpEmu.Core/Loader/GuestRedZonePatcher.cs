@@ -90,7 +90,7 @@ internal static partial class GuestRedZonePatcher
 
         var protectRedZone = OperatingSystem.IsWindows() &&
             !string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_RED_ZONE_PATCH"), "1", StringComparison.Ordinal);
-        var rewriteInstructions = ShaInstructionRewrite.IsRequired || Sse4aExtractRewrite.IsRequired;
+        var rewriteInstructions = ShaInstructionRewrite.IsRequired || Sse4aRewrite.IsRequired;
         if (!protectRedZone && !rewriteInstructions)
         {
             return default;
@@ -144,7 +144,7 @@ internal static partial class GuestRedZonePatcher
         }
         requiredBytes = AlignUp(checked(requiredBytes +
             (ulong)scan.ShaInstructionCount * ShaInstructionRewrite.MaximumExpansionBytes +
-            (ulong)scan.ExtractCandidates * Sse4aExtractRewrite.MaximumExpansionBytes), PageSize);
+            (ulong)scan.Sse4aCandidates * Sse4aRewrite.MaximumExpansionBytes), PageSize);
         if (!TryAllocateTrampolines(
                 physicalMemory,
                 imageBase,
@@ -162,7 +162,7 @@ internal static partial class GuestRedZonePatcher
         var trampolineEnd = trampolineBase + requiredBytes;
         var patched = 0;
         var failed = 0;
-        var extractRewrites = 0;
+        var sse4aRewrites = 0;
         var previousEnd = 0UL;
         var patchProgress = large ? new Progress(hostName, "patch", sites.Count) : null;
         foreach (var site in sites)
@@ -188,8 +188,8 @@ internal static partial class GuestRedZonePatcher
 
             previousEnd = site.Address + (ulong)site.ByteLength;
             patched++;
-            extractRewrites += site.Instructions.Count(static instruction =>
-                Sse4aExtractRewrite.IsRequired && Sse4aExtractRewrite.CanRewrite(instruction));
+            sse4aRewrites += site.Instructions.Count(static instruction =>
+                Sse4aRewrite.IsRequired && Sse4aRewrite.CanRewrite(instruction));
         }
 
         var result = scan with
@@ -204,7 +204,7 @@ internal static partial class GuestRedZonePatcher
             TooShortRefusals = scan.TooShortRefusals,
             IndirectBranchRefusals = scan.IndirectBranchRefusals,
             TrampolineBytes = trampolineCursor - trampolineBase,
-            ExtractRewrites = extractRewrites,
+            Sse4aRewrites = sse4aRewrites,
         };
         Console.Error.WriteLine(
             $"[LOADER] {hostName} red-zone patch: functions={result.Functions} red_zone={result.RedZoneFunctions} " +
@@ -216,10 +216,10 @@ internal static partial class GuestRedZonePatcher
             $"sha_rewrites={result.ShaInstructionCount} " +
             $"trampolines=0x{trampolineBase:X16}+0x{result.TrampolineBytes:X} " +
             $"cache={cacheStatus} ms={System.Diagnostics.Stopwatch.GetElapsedTime(started).TotalMilliseconds:F1}.");
-        if (Sse4aExtractRewrite.IsRequired)
+        if (Sse4aRewrite.IsRequired)
         {
             Console.Error.WriteLine(
-                $"[LOADER] {hostName} SSE4a EXTRQ rewrite: patched={extractRewrites} candidates={result.ExtractCandidates}.");
+                $"[LOADER] {hostName} SSE4a EXTRQ/INSERTQ rewrite: patched={sse4aRewrites} candidates={result.Sse4aCandidates}.");
         }
 
         return result;
@@ -243,7 +243,7 @@ internal static partial class GuestRedZonePatcher
         var unrelocatableSites = 0;
         var refusalCounts = new int[6];
         var shaInstructionCount = 0;
-        var extractCandidates = 0;
+        var sse4aCandidates = 0;
         var branchTargets = new HashSet<ulong>();
         var candidateFunctions = new List<(List<DecodedInstruction> Instructions, bool UsesRedZone, bool CanBorrowFollowingInstructions)>();
 
@@ -326,8 +326,8 @@ internal static partial class GuestRedZonePatcher
         // Collect incoming branches from all functions and segments before replacing bytes.
         foreach (var (decoded, usesRedZone, canBorrowFollowingInstructions) in candidateFunctions)
         {
-            extractCandidates += decoded.Count(static entry =>
-                Sse4aExtractRewrite.IsRequired && Sse4aExtractRewrite.CanRewrite(entry.Instruction));
+            sse4aCandidates += decoded.Count(static entry =>
+                Sse4aRewrite.IsRequired && Sse4aRewrite.CanRewrite(entry.Instruction));
             // An unresolved indirect jump can enter the middle of a span.
             var groupInstructions = !decoded.Any(static entry => entry.Instruction.FlowControl == FlowControl.IndirectBranch);
             var lastSiteEnd = 0UL;
@@ -393,7 +393,7 @@ internal static partial class GuestRedZonePatcher
             TooShortRefusals = refusalCounts[(int)SpanRefusal.TooShort],
             IndirectBranchRefusals = refusalCounts[(int)SpanRefusal.IndirectBranch],
             ShaInstructionCount = shaInstructionCount,
-            ExtractCandidates = extractCandidates,
+            Sse4aCandidates = sse4aCandidates,
         };
         return sites;
     }
@@ -1554,7 +1554,7 @@ internal static partial class GuestRedZonePatcher
     // Instructions replaced by a software expansion inside the trampoline.
     internal static bool CanRewriteInstruction(in Instruction instruction) =>
         (ShaInstructionRewrite.IsRequired && ShaInstructionRewrite.CanRewrite(instruction)) ||
-        (Sse4aExtractRewrite.IsRequired && Sse4aExtractRewrite.CanRewrite(instruction));
+        (Sse4aRewrite.IsRequired && Sse4aRewrite.CanRewrite(instruction));
 
     private static IList<Instruction> ExpandRewrites(IList<Instruction> instructions)
     {
@@ -1563,7 +1563,7 @@ internal static partial class GuestRedZonePatcher
             instructions = ShaInstructionRewrite.Expand(instructions);
         }
 
-        return Sse4aExtractRewrite.IsRequired ? Sse4aExtractRewrite.Expand(instructions) : instructions;
+        return Sse4aRewrite.IsRequired ? Sse4aRewrite.Expand(instructions) : instructions;
     }
 
     private static bool IsRelocatableDirectBranch(in Instruction instruction) =>
@@ -1867,9 +1867,9 @@ internal static partial class GuestRedZonePatcher
 
         public int ShaInstructionCount { get; init; }
 
-        public int ExtractCandidates { get; init; }
+        public int Sse4aCandidates { get; init; }
 
-        public int ExtractRewrites { get; init; }
+        public int Sse4aRewrites { get; init; }
 
         public int PatchedSites { get; init; }
 

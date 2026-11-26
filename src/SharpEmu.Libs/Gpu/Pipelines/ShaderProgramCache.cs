@@ -2756,6 +2756,7 @@ internal sealed partial class ShaderProgramCache
             VertexOffsetScalarRegister = entry.EmbeddedFetch?.VertexOffsetScalarRegister ?? ShaderProgramInfo.NoScalarRegister,
             InstanceOffsetScalarRegister = entry.EmbeddedFetch?.InstanceOffsetScalarRegister ?? ShaderProgramInfo.NoScalarRegister,
             UsesDeviceAddresses = info.UsesDeviceAddresses,
+            WritesDeviceAddresses = info.WritesDeviceAddresses,
             DeviceAddressReadsBounded = entry.Plan.DeviceAddressReadsBounded,
             DeviceAddressReadsWindowed = entry.Plan.DeviceAddressReadsWindowed,
             DeviceAddressWindowBytes = entry.Plan.DeviceAddressWindowBytes,

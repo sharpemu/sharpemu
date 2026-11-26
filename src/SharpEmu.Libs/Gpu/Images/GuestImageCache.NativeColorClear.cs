@@ -236,8 +236,10 @@ public sealed unsafe partial class GuestImageCache
         var code = operation.MetadataCode;
         var color = operation.Color;
         // Consume the code first: an image whose range covers the slice takes the fill as a write to its memory,
-        // and the clear's ownership must have the last word.
-        _bufferCache.FillBuffer(address, sliceSize, uint.MaxValue, false);
+        // and the clear's ownership must have the last word. The consumed code must reach the backing: the next
+        // inspection reads it there, and a fill left on the GPU (metadata that overlaps GPU-owned image bytes, as
+        // transient-heap aliases do) let it read the old code and clear the slice again over newer writes.
+        _bufferCache.FillDccMetadata(address, sliceSize, uint.MaxValue);
         using (var held = _lock.Hold())
         {
             var image = _slots[imageIdentifier];

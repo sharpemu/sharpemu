@@ -133,6 +133,143 @@ public static partial class HttpExports
         return context.SetReturn(0);
     }
 
+    [Flags]
+    internal enum HttpUriBuildOption : uint
+    {
+        Scheme = 0x01,
+        HostName = 0x02,
+        Port = 0x04,
+        Path = 0x08,
+        UserName = 0x10,
+        Password = 0x20,
+        Query = 0x40,
+        Fragment = 0x80,
+    }
+
+    [SysAbiExport(
+        Nid = "5LZA+KPISVA",
+        ExportName = "sceHttpUriBuild",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceHttp")]
+    public static int BuildHttpUri(CpuContext context)
+    {
+        var outputAddress = context[CpuRegister.Rdi];
+        var requiredSizeAddress = context[CpuRegister.Rsi];
+        var outputCapacity = context[CpuRegister.Rdx];
+        var elementAddress = context[CpuRegister.Rcx];
+        var options = (HttpUriBuildOption)unchecked((uint)context[CpuRegister.R8]);
+        if (elementAddress == 0)
+        {
+            return context.SetReturn(HttpErrorInvalidValue);
+        }
+
+        Span<byte> elementBytes = stackalloc byte[Marshal.SizeOf<HttpUriComponents>()];
+        if (!context.Memory.TryRead(elementAddress, elementBytes))
+        {
+            return context.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        var element = MemoryMarshal.Read<HttpUriComponents>(elementBytes);
+        ReadOnlySpan<(ulong Address, HttpUriBuildOption Option)> sources =
+        [
+            (element.SchemeAddress, HttpUriBuildOption.Scheme),
+            (element.UserNameAddress, HttpUriBuildOption.UserName),
+            (element.PasswordAddress, HttpUriBuildOption.Password),
+            (element.HostNameAddress, HttpUriBuildOption.HostName),
+            (element.PathAddress, HttpUriBuildOption.Path),
+            (element.QueryAddress, HttpUriBuildOption.Query),
+            (element.FragmentAddress, HttpUriBuildOption.Fragment),
+        ];
+        var components = new string?[sources.Length];
+        for (var componentIndex = 0; componentIndex < sources.Length; componentIndex++)
+        {
+            var (address, option) = sources[componentIndex];
+            if ((options & option) == 0 || address == 0)
+            {
+                continue;
+            }
+
+            var readResult = ReadUriSource(context.Memory, address, out var component);
+            if (readResult != 0)
+            {
+                return context.SetReturn(readResult);
+            }
+
+            components[componentIndex] = component;
+        }
+
+        var (scheme, userName, password, hostName, path, query, fragment) =
+            (components[0], components[1], components[2], components[3], components[4], components[5], components[6]);
+        var uri = new StringBuilder();
+        if (scheme is not null)
+        {
+            uri.Append(scheme).Append(':');
+            if (element.IsOpaque == 0)
+            {
+                uri.Append("//");
+            }
+        }
+
+        if (element.IsOpaque == 0)
+        {
+            if (userName is not null)
+            {
+                uri.Append(userName);
+                if (password is not null)
+                {
+                    uri.Append(':').Append(password);
+                }
+
+                uri.Append('@');
+            }
+
+            uri.Append(hostName);
+            if ((options & HttpUriBuildOption.Port) != 0 && element.Port != 0)
+            {
+                uri.Append(':').Append(element.Port);
+            }
+        }
+
+        uri.Append(path);
+        // sceHttpUriParse keeps the '?' and '#' delimiters in these components.
+        if (!string.IsNullOrEmpty(query))
+        {
+            uri.Append(query[0] == '?' ? "" : "?").Append(query);
+        }
+
+        if (!string.IsNullOrEmpty(fragment))
+        {
+            uri.Append(fragment[0] == '#' ? "" : "#").Append(fragment);
+        }
+
+        var uriBytes = Encoding.Latin1.GetBytes(uri.Append('\0').ToString());
+        TraceHttp("uri_build", 0, outputAddress, outputCapacity, (ulong)options, (ulong)uriBytes.Length);
+        if (requiredSizeAddress != 0)
+        {
+            Span<byte> sizeBytes = stackalloc byte[sizeof(ulong)];
+            BinaryPrimitives.WriteUInt64LittleEndian(sizeBytes, (ulong)uriBytes.Length);
+            if (!TryWriteUriBytes(context.Memory, requiredSizeAddress, sizeBytes))
+            {
+                return context.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+        }
+
+        if (outputAddress != 0)
+        {
+            if (outputCapacity < (ulong)uriBytes.Length)
+            {
+                return context.SetReturn(HttpErrorOutOfMemory);
+            }
+
+            if (!TryWriteUriBytes(context.Memory, outputAddress, uriBytes))
+            {
+                return context.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+        }
+
+        return context.SetReturn(0);
+    }
+
     private static bool TryWriteUriBytes(ICpuMemory memory, ulong address, ReadOnlySpan<byte> bytes) =>
         address <= ulong.MaxValue - (ulong)(bytes.Length - 1) && memory.TryWrite(address, bytes);
 

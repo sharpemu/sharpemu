@@ -419,14 +419,29 @@ public static class KernelPthreadCompatExports
         ExportName = "pthread_mutex_trylock",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixPthreadMutexTrylock(CpuContext ctx) => PthreadMutexLockCore(ctx, ctx[CpuRegister.Rdi], tryOnly: true);
+    public static int PosixPthreadMutexTrylock(CpuContext ctx) => PosixErrno(ctx, PthreadMutexLockCore(ctx, ctx[CpuRegister.Rdi], tryOnly: true));
+
+    // The POSIX mutex calls share the sce cores, which answer with SCE kernel errors
+    // (0x8002xxxx), while POSIX returns the errno itself. Mono's mono_os_mutex_trylock takes EBUSY (16) as "held" and
+    // aborts on anything else, so 0x80020010 halted the game. Only for calls that return at once (trylock, unlock).
+    private static int PosixErrno(CpuContext ctx, int result)
+    {
+        if (((uint)result & 0xFFFF_0000u) != 0x8002_0000u)
+        {
+            return result;
+        }
+
+        var errno = result & 0xFFFF;
+        ctx[CpuRegister.Rax] = (ulong)errno;
+        return errno;
+    }
 
     [SysAbiExport(
         Nid = "2Z+PpY6CaJg",
         ExportName = "pthread_mutex_unlock",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libKernel")]
-    public static int PosixPthreadMutexUnlock(CpuContext ctx) => PthreadMutexUnlockCore(ctx, ctx[CpuRegister.Rdi], requireOwner: true);
+    public static int PosixPthreadMutexUnlock(CpuContext ctx) => PosixErrno(ctx, PthreadMutexUnlockCore(ctx, ctx[CpuRegister.Rdi], requireOwner: true));
 
     private static int PthreadGetthreadidCore(CpuContext ctx)
     {

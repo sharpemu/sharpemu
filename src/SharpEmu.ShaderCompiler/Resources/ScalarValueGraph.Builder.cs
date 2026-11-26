@@ -561,6 +561,17 @@ public sealed partial class ScalarValueGraph
             }
 
             var destinationRegister = destination.Value;
+            if (opcode.StartsWith("SCmpk", StringComparison.Ordinal))
+            {
+                // A SOPK compare's SDST field names the register it compares with SIMM16 (zero-extended for the
+                // unsigned forms): it writes SCC only. Treated as an unknown ALU op, it clobbered that register and
+                // SCC, and every resource chosen behind such a compare became an invalid handle.
+                var immediate = (uint)instruction.Sources[0].Value & 0xFFFFu;
+                var constant = opcode.EndsWith("I32", StringComparison.Ordinal) ? unchecked((uint)(short)immediate) : immediate;
+                state.Scc = Compare(opcode["SCmp".Length..], state.Scalars[destinationRegister], _graph.Constant(constant));
+                return;
+            }
+
             switch (opcode)
             {
                 case "SMovB32":
