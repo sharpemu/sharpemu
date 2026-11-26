@@ -888,7 +888,7 @@ internal static partial class VulkanVideoPresenter
                     continue;
                 }
 
-                if (_cutting is not null && FlushCutting())
+                if (_cutting is not null && FlushCutting(slicesAhead, workers))
                 {
                     slicesAhead++;
                 }
@@ -910,10 +910,18 @@ internal static partial class VulkanVideoPresenter
             return _draining.Count != 0;
         }
 
-        private bool FlushCutting()
+        private bool FlushCutting(int slicesAhead = 0, int workers = 0)
         {
             var slice = _cutting!;
             if (slice.Items.Count >= MinimumSliceItems)
+            {
+                CloseSlice();
+                return true;
+            }
+
+            // Each unjoined slice occupies at most one lane. Only start a short one when
+            // there is spare capacity and earlier work to overlap. FIFO keeps older slices first.
+            if (slicesAhead < workers && _unitHead < _units.Count && WorthRecordingShortGroup(slice))
             {
                 CloseSlice();
                 return true;
@@ -926,6 +934,20 @@ internal static partial class VulkanVideoPresenter
             }
 
             _serialItems.Add(slice.Items.Count);
+            return false;
+        }
+
+        private static bool WorthRecordingShortGroup(RenderSlice slice)
+        {
+            // Amortize the extra cut, validation, prologue and submit. Recording a draw inline
+            // costs at least two dispatches; a barrier alone costs very little.
+            var weight = 0;
+            foreach (var item in slice.Items)
+            {
+                if (item.Work is AgcExports.GlobalBarrierWork) continue;
+                weight += item.Work!.IsDispatch ? 1 : 2;
+                if (weight >= 4) return true;
+            }
             return false;
         }
 
