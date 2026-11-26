@@ -72,11 +72,14 @@ internal static unsafe partial class VulkanVideoPresenter
     private sealed class StagePreparationSet
     {
         public StagePreparationMemo? Last;
-        public readonly Dictionary<ulong, StagePreparationMemo> ByContent = new();
+        public Dictionary<ulong, StagePreparationMemo> ByContent = new();
+        // A lookup promotes an entry from the previous generation.
+        public Dictionary<ulong, StagePreparationMemo>? Aged;
     }
 
     private sealed class StagePreparationMemo
     {
+        public ulong ContentKey;
         public uint[][] Images = [];
         public uint[][] Samplers = [];
         public uint[][] Buffers = [];
@@ -325,6 +328,62 @@ internal static unsafe partial class VulkanVideoPresenter
         private Dictionary<ShaderProgramInfo, StagePreparationSet>? _stagePreparations;
         private XxHash3? _contentHasher;
 
+        // Rotate at most once per period on the recording host that owns these caches.
+        private const long MemoAgingMilliseconds = 30_000;
+        private long _memoAgedAt = Environment.TickCount64;
+        private Dictionary<ImageBindingKey, ImageBindingMemo>? _imageBindingMemosAged;
+
+        private void AgeDrawMemos()
+        {
+            var now = Environment.TickCount64;
+            if (now - _memoAgedAt < MemoAgingMilliseconds)
+            {
+                return;
+            }
+
+            _memoAgedAt = now;
+            _imageBindingMemosAged = _imageBindingMemos is { Count: > 0 } images ? images : null;
+            if (_imageBindingMemosAged is not null)
+            {
+                _imageBindingMemos = new Dictionary<ImageBindingKey, ImageBindingMemo>();
+            }
+
+            if (_stagePreparations is not { } all)
+            {
+                return;
+            }
+
+            foreach (var set in all.Values)
+            {
+                if (set.Aged is { } dropped)
+                {
+                    foreach (var memo in dropped.Values)
+                    {
+                        memo.Invalidate();
+                    }
+
+                    if (set.Last is { Valid: false })
+                    {
+                        set.Last = null;
+                    }
+                }
+
+                if (set.ByContent.Count == 0)
+                {
+                    set.Aged = null;
+                    continue;
+                }
+
+                set.Aged = set.ByContent;
+                set.ByContent = new Dictionary<ulong, StagePreparationMemo>();
+                // The last memo serves its program's repeat draws without a content lookup, so it stays current.
+                if (set.Last is { } last && set.Aged.Remove(last.ContentKey))
+                {
+                    set.ByContent[last.ContentKey] = last;
+                }
+            }
+        }
+
         private StagePreparationSet StagePreparationsOf(ShaderProgramInfo program)
         {
             var all = _stagePreparations ??= new Dictionary<ShaderProgramInfo, StagePreparationSet>(ReferenceEqualityComparer.Instance);
@@ -386,7 +445,12 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var key = ContentKeyOf(snapshot, shaderBase);
-            if (set.ByContent.TryGetValue(key, out var found) && found.ShaderBase == shaderBase &&
+            if (!set.ByContent.TryGetValue(key, out var found) && set.Aged is { } aged && aged.Remove(key, out found))
+            {
+                set.ByContent[key] = found;
+            }
+
+            if (found is not null && found.ShaderBase == shaderBase &&
                 SameWords(snapshot.Images, found.Images) && SameWords(snapshot.Samplers, found.Samplers) && IsFreshStagePreparation(found))
             {
                 found.Images = snapshot.Images;
@@ -566,7 +630,12 @@ internal static unsafe partial class VulkanVideoPresenter
         private void NoteStagePreparation(StagePreparationSet set, PreparedStageBindings prepared, ResourceSnapshot snapshot, ulong shaderBase)
         {
             var key = ContentKeyOf(snapshot, shaderBase);
-            if (!set.ByContent.TryGetValue(key, out var memo))
+            if (!set.ByContent.TryGetValue(key, out var memo) && set.Aged is { } aged && aged.Remove(key, out memo))
+            {
+                set.ByContent[key] = memo;
+            }
+
+            if (memo is null)
             {
                 if (set.ByContent.Count >= StagePreparationCapacity)
                 {
@@ -584,6 +653,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 set.ByContent[key] = memo;
             }
 
+            memo.ContentKey = key;
             var images = prepared.Descriptors.Images;
             if (memo.Textures.Length != images.Length)
             {
@@ -659,6 +729,12 @@ internal static unsafe partial class VulkanVideoPresenter
             var memos = _imageBindingMemos ??= new Dictionary<ImageBindingKey, ImageBindingMemo>();
             ref var memo = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrNullRef(memos, key);
             var known = !System.Runtime.CompilerServices.Unsafe.IsNullRef(ref memo);
+            if (!known && _imageBindingMemosAged is { } agedBindings && agedBindings.Remove(key, out var kept))
+            {
+                memos[key] = kept;
+                memo = ref System.Runtime.InteropServices.CollectionsMarshal.GetValueRefOrNullRef(memos, key);
+                known = true;
+            }
             var originalResolution = known
                 ? memo.OriginalResolution
                 : program.Frontend is { } frontend
@@ -1010,6 +1086,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 foreach (var words in snapshot.Images)
                     frontendReady &= frontend.PrepareTexture(words);
             }
+
+            AgeDrawMemos();
 
             var preparations = StagePreparationsOf(program);
             var movieActive = _presenter._hostMovieFramePixels is not null;

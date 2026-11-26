@@ -13,6 +13,36 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 public sealed unsafe partial class RenderHostDeviceTests
 {
     [Fact]
+    public void StagePreparationsPromoteReusedEntriesAndInvalidateExpiredEntries()
+    {
+        if (!Ready()) return;
+        using var presenter = new PresenterUnderTest(_vulkan!);
+        presenter.LoadRenderingCommands();
+        var program = FixedProgramProvider.EmptyProgram(ShaderStageKind.Compute, 0xB6,
+            new ShaderResourceInfo { Images = [SampledImage] });
+        var words = new uint[8];
+        void Bind(ulong address) => BindOneImage(presenter, program, words, address);
+        void Rotate() => presenter.SetField("_memoAgedAt", Environment.TickCount64 - 30_000);
+        Bind(0x1000);
+        var set = presenter.GetField<IDictionary>("_stagePreparations")[program]!;
+        var last = set.GetType().GetField("Last")!;
+        var expired = last.GetValue(set)!;
+        Bind(0x2000);
+        var promoted = last.GetValue(set)!;
+        Bind(0x3000);
+        Rotate();
+        Bind(0x2000);
+        Assert.Same(promoted, last.GetValue(set));
+        var valid = promoted.GetType().GetField("Valid")!;
+        Assert.True((bool)valid.GetValue(expired)!);
+        Rotate();
+        Bind(0x2000);
+        Assert.False((bool)valid.GetValue(expired)!);
+        Assert.True((bool)valid.GetValue(promoted)!);
+        presenter.Harness.Shutdown();
+    }
+
+    [Fact]
     public void StagePreparation_RecapturedBindingsSurviveSubmissionRecycling()
     {
         if (!Ready()) return;
