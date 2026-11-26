@@ -146,7 +146,7 @@ public sealed unsafe class ImageBackingPool : IDisposable
         _device.FreeMemory(entry.Memory);
     }
 
-    internal ulong Trim(uint heap, ulong target, long returnedThrough, int limit = int.MaxValue)
+    internal ulong Trim(uint? heap, ulong target, long returnedThrough, int limit = int.MaxValue)
     {
         using var held = _gate.EnterScope();
         ulong freed = 0;
@@ -156,7 +156,7 @@ public sealed unsafe class ImageBackingPool : IDisposable
             var (key, entry) = node.Value;
             if (entry.ReturnedAt > returnedThrough)
                 break;
-            if (entry.Heap == heap)
+            if (heap is null || entry.Heap == heap)
             {
                 _order.Remove(node);
                 RemoveFromStack(key, entry);

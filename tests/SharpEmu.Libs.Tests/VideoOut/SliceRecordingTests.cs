@@ -33,6 +33,28 @@ public sealed class SliceRecordingTests : IClassFixture<HeadlessVulkanFixture>
     public SliceRecordingTests(HeadlessVulkanFixture fixture) => _vulkan = fixture.Vulkan;
 
     [Fact]
+    public void SliceSurplusRetainsRentedChunksAndRecentBursts()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        harness.Run(() =>
+        {
+            using var pool = new SliceArenaPool(harness.Device, harness.Scheduler);
+            var held = pool.Rent(1);
+            held.Buffer.Mapped[0] = 19;
+            var spare = Enumerable.Range(0, 16).Select(_ => pool.Rent(1)).ToArray();
+            foreach (var chunk in spare) pool.Return(chunk);
+            var now = Environment.TickCount64 + 6000;
+            pool.TrimSurplus(now);
+            Assert.Equal(17, pool.ChunkCount);
+            pool.TrimSurplus(now + 5000);
+            Assert.Equal(9, pool.ChunkCount);
+            Assert.Equal(19, held.Buffer.Mapped[0]);
+            pool.Return(held);
+        });
+    }
+
+    [Fact]
     public void LowMemoryReleasesOnlyCompletedSpareChunks()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;

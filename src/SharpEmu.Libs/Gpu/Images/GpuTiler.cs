@@ -250,7 +250,7 @@ public sealed unsafe class GpuTiler : IDisposable
         buffer.Dispose();
     }
 
-    internal ulong TrimIdleScratch(uint heap, ulong target, long returnedThrough, int limit = int.MaxValue)
+    internal ulong TrimIdleScratch(uint? heap, ulong target, long returnedThrough, int limit = int.MaxValue)
     {
         if (target == 0 || limit <= 0)
             return 0;
@@ -264,7 +264,7 @@ public sealed unsafe class GpuTiler : IDisposable
                     var (buffer, returnedAt) = pooled[i];
                     if (returnedAt > returnedThrough)
                         break;
-                    if (_device.GetMemoryHeapIndex(buffer.MemoryTypeIndex) != heap)
+                    if (heap is not null && _device.GetMemoryHeapIndex(buffer.MemoryTypeIndex) != heap)
                     {
                         i++;
                         continue;

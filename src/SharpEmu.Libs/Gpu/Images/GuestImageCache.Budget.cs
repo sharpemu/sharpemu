@@ -14,6 +14,18 @@ public sealed partial class GuestImageCache
     private long _pendingBudgetBytes;
     private List<ResourceSlotIdentifier>? _budgetCandidates;
 
+    private long _nextIdleSweep;
+
+    internal (ulong Scratch, ulong Images) TrimExpiredPools(long now)
+    {
+        if (now < _nextIdleSweep) return default;
+        _nextIdleSweep = now + 500;
+        // Only completed returns enter these pools. Keep recent bursts.
+        var cutoff = now - 10_000;
+        return (_tiler.TrimIdleScratch(null, 64 * MiB, cutoff, 2),
+            _backingPool?.Trim(null, 64 * MiB, cutoff, 4) ?? 0);
+    }
+
     private bool ShouldScanImages(ulong tick, bool endsFrame)
     {
         _device.Residency?.Advance((long)tick);

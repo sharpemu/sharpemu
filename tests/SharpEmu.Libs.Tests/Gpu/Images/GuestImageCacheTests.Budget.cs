@@ -11,6 +11,32 @@ namespace SharpEmu.Libs.Tests.Gpu.Images;
 
 public sealed partial class GuestImageCacheTests
 {
+    [Fact]
+    public void CompletedPoolsExpireWithoutBudgetPressureAndRecreateOnDemand()
+    {
+        if (!GatePrerequisites.Ready(_vulkan) || !ImageBackingPool.Enabled) return;
+        using var harness = new CacheHarness(_vulkan);
+        var request = Color32(harness.MapBacked(0x10000, ReadWrite));
+        var id = harness.Acquire(ref request);
+        var cache = harness.Images;
+        harness.Worker.Run(() =>
+        {
+            cache.DeleteImageForTest(id);
+            cache.TilerForTest.GetScratchBuffer(8UL << 20);
+            Assert.Equal((0UL, 0UL), cache.TrimExpiredPools(Environment.TickCount64));
+        });
+        harness.Finish();
+        harness.Worker.Run(() =>
+        {
+            var released = cache.TrimExpiredPools(Environment.TickCount64 + 12_000);
+            Assert.True(released.Scratch >= 8UL << 20);
+            Assert.True(released.Images > 0);
+        });
+        Assert.True(harness.Acquire(ref request).IsValid);
+        harness.Worker.Run(() => cache.TilerForTest.GetScratchBuffer(8UL << 20));
+        harness.Finish();
+    }
+
     [Theory]
     [InlineData(4096, 256)]
     [InlineData(8192, 512)]

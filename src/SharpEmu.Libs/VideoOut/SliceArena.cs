@@ -37,6 +37,33 @@ internal sealed class SliceArenaPool : IDisposable
     private readonly Func<HostMemoryAvailability> _readMemory;
     private long _nextPressureCheck;
     private long _lastGrowth;
+    private long _nextSurplusSample;
+    private long _surplusWindowEnd;
+    private int _minimumIdle;
+
+    internal void TrimSurplus(long now)
+    {
+        if (now < _nextSurplusSample) return;
+        _nextSurplusSample = now + 500;
+        var idle = _free.Count;
+        if (_surplusWindowEnd == 0 || now - Volatile.Read(ref _lastGrowth) < 5000)
+        {
+            _surplusWindowEnd = now + 5000;
+            _minimumIdle = idle;
+            return;
+        }
+        _minimumIdle = Math.Min(_minimumIdle, idle);
+        if (now < _surplusWindowEnd) return;
+        // A busy pool can cycle every chunk even with persistent surplus. Keep eight for short bursts.
+        var release = Math.Min(8, _minimumIdle - 8);
+        _surplusWindowEnd = now + 5000;
+        for (var i = 0; i < release && _free.TryTake(out var chunk); i++)
+        {
+            lock (_all) _all.Remove(chunk);
+            chunk.Buffer.Dispose();
+        }
+        _minimumIdle = _free.Count;
+    }
 
     public SliceArenaPool(GpuDeviceInfo device, SubmissionScheduler scheduler, Func<HostMemoryAvailability>? readMemory = null)
     {
