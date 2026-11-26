@@ -531,5 +531,8 @@
   "Overlay.Ime.Space": "Espace",
   "Overlay.Ime.Cursor": "Curseur",
   "Overlay.Ime.Select": "Sélectionner",
-  "Overlay.Ime.Type": "Tapez avec votre clavier"
+  "Overlay.Ime.Type": "Tapez avec votre clavier",
+  "Sandbox.BlockedTitle": "Le bac à sable a bloqué une action",
+  "Sandbox.BlockedMessage": "Ce jeu a tenté une action bloquée par le bac à sable (lancer un autre programme). Le dump a peut-être été modifié. N’exécutez que des dumps faits depuis votre propre console.",
+  "Sandbox.BlockedOk": "OK"
 }

@@ -27,6 +27,8 @@ internal static partial class Program
     private const int DefaultImportTraceLimit = 32;
     private const string MitigatedChildFlag = "--sharpemu-mitigated-child";
     private const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
+    private const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
+    private const string SandboxCleanupArgument = "--sandbox-cleanup";
     private const uint INFINITE = 0xFFFFFFFF;
     private const int PROC_THREAD_ATTRIBUTE_MITIGATION_POLICY = 0x00020007;
     private const uint JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
@@ -67,6 +69,11 @@ internal static partial class Program
             finally { SharpEmuLog.Shutdown(); }
         }
 
+        if (args is [SandboxCleanupArgument])
+        {
+            return RunSandboxCleanup();
+        }
+
         // Apply the game's settings file before anything reads the environment (the Vulkan
         // loader setup below, and backend settings cached in static fields). Keep the result
         // for RunEmulator so settings and relative paths are resolved once.
@@ -98,6 +105,20 @@ internal static partial class Program
             DropConsoleFileMirror();
             SharpEmuLog.Shutdown();
         }
+    }
+
+    // --sandbox-cleanup: revokes what SHARPEMU_SANDBOX=1 launches granted to the AppContainer profile and deletes it.
+    private static int RunSandboxCleanup()
+    {
+        EnsureCliConsole();
+        UseUtf8ConsoleOutput();
+        if (!OperatingSystem.IsWindows())
+        {
+            Console.Error.WriteLine("[SANDBOX][ERROR] The sandbox exists on Windows only.");
+            return 1;
+        }
+
+        return WindowsAppContainerSandbox.Cleanup(SharpEmu.Libs.SharpEmuPaths.DataRoot, Console.Out);
     }
 
     private static void ConfigureManagedPluginResolution()
@@ -226,6 +247,14 @@ internal static partial class Program
     private static int RunEmulator(string[] args, bool isMitigatedChild)
     {
         Console.Error.WriteLine($"[DEBUG] SharpEmu starting with {args.Length} args");
+        // The sandboxed launcher hands the child its launch report: the profile, SID and every granted folder go
+        // into this run's log, with proof that this process really runs in the AppContainer.
+        if (isMitigatedChild && OperatingSystem.IsWindows() &&
+            Environment.GetEnvironmentVariable(WindowsAppContainerSandbox.ReportVariable) is { Length: > 0 } sandboxReport)
+        {
+            Console.Error.WriteLine(
+                $"[SANDBOX][INFO] child inside AppContainer={WindowsAppContainerSandbox.IsCurrentProcessAppContainer()}; {sandboxReport}");
+        }
 
         var sessionArgument = args.SingleOrDefault(argument => argument.StartsWith(GnmLoadExecSession.ArgumentPrefix, StringComparison.Ordinal));
         if (!isMitigatedChild && sessionArgument is null && TryRunGnmSupervisor(args, out var supervisedExitCode))
@@ -275,7 +304,8 @@ internal static partial class Program
         };
         Console.Error.WriteLine($"[DEBUG] Full path: {ebootPath}");
 
-        if (!File.Exists(ebootPath))
+        // A game handed down by handle (SHARPEMU_SANDBOX_FILES) exists though the sandbox cannot open its path.
+        if (!InheritedFiles.Exists(ebootPath))
         {
             Log.Error($"EBOOT file was not found: {ebootPath}");
             return 2;
@@ -309,7 +339,18 @@ internal static partial class Program
 
         Console.Error.WriteLine("[DEBUG] Creating runtime...");
 
-        SharpEmu.Core.Diagnostics.WindowsCrashCapture.StartIfEnabled(logFilePath);
+        // The crash helper is a second process, which the sandbox job refuses (and reports as a blocked game action).
+        if (OperatingSystem.IsWindows() && WindowsAppContainerSandbox.IsCurrentProcessAppContainer())
+        {
+            if (Environment.GetEnvironmentVariable("SHARPEMU_CRASH_CAPTURE") == "1")
+            {
+                Console.Error.WriteLine("[CRASH][WARN] Crash capture is not available in the sandbox; launch without SHARPEMU_SANDBOX=1 to capture dumps.");
+            }
+        }
+        else
+        {
+            SharpEmu.Core.Diagnostics.WindowsCrashCapture.StartIfEnabled(logFilePath);
+        }
 
         try
         {
@@ -532,19 +573,42 @@ internal static partial class Program
     private static bool TryRunMitigatedChild(string[] args, out int childExitCode)
     {
         childExitCode = 0;
+        var sandboxRequested = string.Equals(
+            Environment.GetEnvironmentVariable("SHARPEMU_SANDBOX"), "1", StringComparison.Ordinal);
         if (!OperatingSystem.IsWindows())
         {
+            if (sandboxRequested)
+            {
+                childExitCode = 5;
+                Console.Error.WriteLine("[ERROR] SHARPEMU_SANDBOX=1 needs Windows; refusing to run without the sandbox.");
+                return true;
+            }
+
             return false;
         }
 
         if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_DISABLE_MITIGATION_RELAUNCH"), "1", StringComparison.Ordinal))
         {
+            if (sandboxRequested)
+            {
+                childExitCode = 5;
+                Console.Error.WriteLine("[ERROR] SHARPEMU_SANDBOX=1 cannot be combined with SHARPEMU_DISABLE_MITIGATION_RELAUNCH=1.");
+                return true;
+            }
+
             return false;
         }
 
         var processPath = Environment.ProcessPath;
         if (string.IsNullOrWhiteSpace(processPath))
         {
+            if (sandboxRequested)
+            {
+                childExitCode = 5;
+                Console.Error.WriteLine("[ERROR] SHARPEMU_SANDBOX=1 needs the emulator executable path.");
+                return true;
+            }
+
             return false;
         }
 
@@ -556,20 +620,65 @@ internal static partial class Program
                 ? [entryAssemblyPath, MitigatedChildFlag, .. args]
                 : [MitigatedChildFlag, .. args];
 
+        // SHARPEMU_SANDBOX=1: the child runs in an AppContainer limited to the folders of this launch, with its output
+        // read through a pipe (a console handle of the launcher is not given to it). Failing to set that up fails the
+        // launch; it never falls back to an unconfined child.
+        WindowsAppContainerSandbox? sandbox = null;
+        SharpEmu.Libs.Pad.GamepadBridgeHost? gamepadBridge = null;
+        nint outputRead = 0;
+        nint outputWrite = 0;
+        if (sandboxRequested)
+        {
+            try
+            {
+                sandbox = WindowsAppContainerSandbox.Create(new SandboxInputs(
+                    AppContext.BaseDirectory,
+                    SharpEmu.Libs.SharpEmuPaths.DataRoot,
+                    _preparedLaunch?.Path,
+                    _preparedLaunch?.LogFile,
+                    args,
+                    Environment.GetEnvironmentVariable));
+            }
+            catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidOperationException)
+            {
+                childExitCode = 5;
+                Console.Error.WriteLine($"[ERROR] Could not set up the sandbox: {exception.Message}");
+                return true;
+            }
+
+            if (!WindowsAppContainerSandbox.TryCreateOutputPipe(out outputRead, out outputWrite))
+            {
+                sandbox.Dispose();
+                childExitCode = 5;
+                Console.Error.WriteLine($"[ERROR] Could not create the sandbox output pipe: {Marshal.GetLastWin32Error()}");
+                return true;
+            }
+        }
+
         var commandLine = BuildCommandLine(processPath, childArguments);
         var startupInfoEx = new STARTUPINFOEX();
         startupInfoEx.StartupInfo.cb = Marshal.SizeOf<STARTUPINFOEX>();
-        ConfigureInheritedStdHandles(ref startupInfoEx.StartupInfo);
+        if (sandbox is null)
+        {
+            ConfigureInheritedStdHandles(ref startupInfoEx.StartupInfo);
+        }
+        else
+        {
+            startupInfoEx.StartupInfo.hStdOutput = outputWrite;
+            startupInfoEx.StartupInfo.hStdError = outputWrite;
+            startupInfoEx.StartupInfo.dwFlags |= STARTF_USESTDHANDLES;
+        }
 
         nint attributeList = 0;
         nint mitigationPolicies = 0;
         var previousChildEnvironment = Environment.GetEnvironmentVariable(MitigatedChildEnvironment);
         try
         {
+            var attributeCount = sandbox is null ? 1 : WindowsAppContainerSandbox.AttributeCount;
             nuint attributeListSize = 0;
-            _ = InitializeProcThreadAttributeList(0, 1, 0, ref attributeListSize);
+            _ = InitializeProcThreadAttributeList(0, attributeCount, 0, ref attributeListSize);
             attributeList = Marshal.AllocHGlobal((nint)attributeListSize);
-            if (!InitializeProcThreadAttributeList(attributeList, 1, 0, ref attributeListSize))
+            if (!InitializeProcThreadAttributeList(attributeList, attributeCount, 0, ref attributeListSize))
             {
                 childExitCode = 5;
                 Console.Error.WriteLine($"[ERROR] Failed to initialize mitigation attributes: {Marshal.GetLastWin32Error()}");
@@ -596,8 +705,33 @@ internal static partial class Program
                 return true;
             }
 
+            if (sandbox is not null)
+            {
+                try
+                {
+                    sandbox.AddSecurityCapabilities(attributeList);
+                    // The AppContainer child sees no controller: this process reads it and shares it (see GamepadBridgeHost).
+                    gamepadBridge = SharpEmu.Libs.Pad.GamepadBridgeHost.TryStart();
+                    if (gamepadBridge is null)
+                    {
+                        sandbox.AddHandleList(attributeList, outputWrite);
+                    }
+                    else
+                    {
+                        sandbox.AddHandleList(attributeList, outputWrite, gamepadBridge.Handle);
+                    }
+                }
+                catch (InvalidOperationException exception)
+                {
+                    childExitCode = 5;
+                    Console.Error.WriteLine($"[ERROR] {exception.Message}");
+                    return true;
+                }
+            }
+
             var cmdLineBuilder = new StringBuilder(commandLine);
             nint jobHandle = 0;
+            SandboxJobMonitor? jobMonitor = null;
             Environment.SetEnvironmentVariable(MitigatedChildEnvironment, "1");
             var created = CreateProcessW(
                 null,
@@ -605,9 +739,10 @@ internal static partial class Program
                 0,
                 0,
                 true,
-                EXTENDED_STARTUPINFO_PRESENT | WindowsGuestAddressReservation.CreateSuspended,
-                0,
-                Environment.CurrentDirectory,
+                EXTENDED_STARTUPINFO_PRESENT | WindowsGuestAddressReservation.CreateSuspended |
+                    (sandbox is null ? 0 : CREATE_UNICODE_ENVIRONMENT),
+                sandbox?.CreateEnvironmentBlock(gamepadBridge is null ? null : [gamepadBridge.ChildEnvironment]) ?? 0,
+                sandbox is null ? Environment.CurrentDirectory : AppContext.BaseDirectory,
                 ref startupInfoEx,
                 out var processInfo);
             Environment.SetEnvironmentVariable(MitigatedChildEnvironment, previousChildEnvironment);
@@ -618,15 +753,47 @@ internal static partial class Program
                 return true;
             }
 
+            Thread? outputPump = null;
             try
             {
-                jobHandle = CreateJobObjectW(0, null);
-                if (jobHandle != 0 &&
-                    TryEnableKillOnJobClose(jobHandle) &&
-                    !AssignProcessToJobObject(jobHandle, processInfo.hProcess))
+                if (sandbox is not null)
                 {
-                    CloseHandle(jobHandle);
-                    jobHandle = 0;
+                    CloseHandle(outputWrite);
+                    outputWrite = 0;
+                    outputPump = WindowsAppContainerSandbox.PumpOutput(outputRead, line => Console.Out.WriteLine(line));
+                    outputRead = 0;
+                    // One process only, and in the job before the guest can run.
+                    jobHandle = sandbox.CreateConfinedJob(processInfo.hProcess, out jobMonitor);
+                    if (jobMonitor is not null)
+                    {
+                        jobMonitor.ProcessLaunchBlocked += count =>
+                        {
+                            if (count == 1)
+                            {
+                                Console.Error.WriteLine(
+                                    "[SANDBOX][WARN] The game tried to start another program and the sandbox blocked it. " +
+                                    "The dump may have been modified; only run dumps you made from your own console.");
+                                if (OperatingSystem.IsWindows())
+                                {
+                                    WindowsBalloonNotification.TryShow(
+                                        "SharpEmu sandbox",
+                                        "This game tried to start another program and the sandbox blocked it. " +
+                                        "The dump may have been modified; only run dumps you made from your own console.");
+                                }
+                            }
+                        };
+                    }
+                }
+                else
+                {
+                    jobHandle = CreateJobObjectW(0, null);
+                    if (jobHandle != 0 &&
+                        TryEnableKillOnJobClose(jobHandle) &&
+                        !AssignProcessToJobObject(jobHandle, processInfo.hProcess))
+                    {
+                        CloseHandle(jobHandle);
+                        jobHandle = 0;
+                    }
                 }
 
                 WindowsGuestAddressReservation.PrepareAndResume(processInfo.hProcess, processInfo.hThread);
@@ -654,10 +821,17 @@ internal static partial class Program
                 }
 
                 childExitCode = unchecked((int)exitCode);
+                outputPump?.Join(2000);
+                if (jobMonitor is { BlockedCount: > 0 })
+                {
+                    Console.Error.WriteLine(
+                        $"[SANDBOX][WARN] The sandbox blocked {jobMonitor.BlockedCount} attempt(s) by the game to start another program.");
+                }
+
                 Console.Error.WriteLine("[DEBUG] Running in mitigated child process (CET/CFG disabled).");
                 return true;
             }
-            catch (System.ComponentModel.Win32Exception exception)
+            catch (Exception exception) when (exception is System.ComponentModel.Win32Exception or InvalidOperationException)
             {
                 childExitCode = 5;
                 Console.Error.WriteLine($"[ERROR] Guest process preparation failed: {exception.Message}");
@@ -665,6 +839,7 @@ internal static partial class Program
             }
             finally
             {
+                jobMonitor?.Dispose();
                 if (jobHandle != 0)
                 {
                     CloseHandle(jobHandle);
@@ -677,6 +852,17 @@ internal static partial class Program
         finally
         {
             Environment.SetEnvironmentVariable(MitigatedChildEnvironment, previousChildEnvironment);
+            gamepadBridge?.Dispose();
+            sandbox?.Dispose();
+            if (outputRead != 0)
+            {
+                CloseHandle(outputRead);
+            }
+
+            if (outputWrite != 0)
+            {
+                CloseHandle(outputWrite);
+            }
 
             if (attributeList != 0)
             {

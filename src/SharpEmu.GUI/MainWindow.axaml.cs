@@ -22,6 +22,7 @@ using SharpEmu.GnmMode;
 using SharpEmu.GnmMode.Libraries.Np;
 using SharpEmu.HLE.FileSystem;
 using SharpEmu.HLE.Host;
+using SharpEmu.HLE.Host.Windows;
 using SharpEmu.Libs.Pad;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.Logging;
@@ -3226,6 +3227,7 @@ public partial class MainWindow : Window
         var process = new EmulatorProcess();
         process.OutputReceived += OnEmulatorOutput;
         process.Exited += code => Dispatcher.UIThread.Post(() => OnEmulatorExited(code));
+        process.SandboxActionBlocked += () => Dispatcher.UIThread.Post(ShowSandboxBlockedWarning);
 
         try
         {
@@ -3262,6 +3264,24 @@ public partial class MainWindow : Window
     private List<string> BuildEmulatorArguments(PendingLaunch launch) =>
         new LaunchConfiguration(launch.Settings, []).BuildArguments(
             launch.EbootPath, launch.ConsoleLanguage);
+
+    // The sandbox refused the game its first attempt to start another program: say so in the console and in a sheet.
+    private async void ShowSandboxBlockedWarning()
+    {
+        AppendConsoleLine(Localization.Instance.Get("Sandbox.BlockedMessage"), ErrorLineBrush);
+        // The game window is in front of the launcher, so the sheet alone would go unseen.
+        if (OperatingSystem.IsWindows())
+        {
+            WindowsBalloonNotification.TryShow(
+                Localization.Instance.Get("Sandbox.BlockedTitle"), Localization.Instance.Get("Sandbox.BlockedMessage"));
+            if (TryGetPlatformHandle() is { } handle)
+            {
+                WindowsBalloonNotification.FlashTaskbarButton(handle.Handle);
+            }
+        }
+
+        await Sheets.ShowAsync(new SandboxWarningDialog());
+    }
 
     private void OnEmulatorOutput(string line, bool isError)
     {

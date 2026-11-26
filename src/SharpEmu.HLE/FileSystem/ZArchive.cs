@@ -3,6 +3,7 @@
 
 using System.Buffers.Binary;
 using System.Text;
+using Microsoft.Win32.SafeHandles;
 using ZstdSharp;
 
 namespace SharpEmu.HLE.FileSystem;
@@ -31,7 +32,9 @@ public sealed class ZArchive : IDisposable
 
     public const int InvalidNode = -1;
 
-    private readonly FileStream _stream;
+    // Read only at explicit offsets, so one handle serves every thread. For an inherited file (see InheritedFiles)
+    // it is a non-owning view of the launcher's handle, and disposing it closes nothing.
+    private readonly SafeFileHandle _stream;
     private readonly OffsetRecord[] _offsetRecords;
     private readonly byte[] _names;
     private readonly Node[] _nodes;
@@ -65,7 +68,7 @@ public sealed class ZArchive : IDisposable
 
     public string Path { get; }
 
-    private ZArchive(string path, FileStream stream, OffsetRecord[] offsetRecords, byte[] names, Node[] nodes, ulong dataOffset, ulong dataSize)
+    private ZArchive(string path, SafeFileHandle stream, OffsetRecord[] offsetRecords, byte[] names, Node[] nodes, ulong dataOffset, ulong dataSize)
     {
         Path = path;
         _stream = stream;
@@ -77,12 +80,14 @@ public sealed class ZArchive : IDisposable
     }
 
     public static bool IsArchivePath(string? path) =>
-        path is not null && path.EndsWith(".zar", StringComparison.OrdinalIgnoreCase) && File.Exists(path);
+        path is not null && path.EndsWith(".zar", StringComparison.OrdinalIgnoreCase) && InheritedFiles.Exists(path);
 
     // Null when the file is not a well-formed version-1 archive.
     public static ZArchive? Open(string path)
     {
-        var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1, FileOptions.RandomAccess);
+        var stream = InheritedFiles.TryGet(path, out var inherited)
+            ? InheritedFiles.OpenRead(inherited)
+            : File.OpenHandle(path, FileMode.Open, FileAccess.Read, FileShare.Read, FileOptions.RandomAccess);
         try
         {
             if (TryOpen(path, stream) is { } archive)
@@ -98,9 +103,9 @@ public sealed class ZArchive : IDisposable
         return null;
     }
 
-    private static ZArchive? TryOpen(string path, FileStream stream)
+    private static ZArchive? TryOpen(string path, SafeFileHandle stream)
     {
-        var length = (ulong)stream.Length;
+        var length = (ulong)RandomAccess.GetLength(stream);
         if (length <= FooterBytes)
         {
             return null;
@@ -374,9 +379,9 @@ public sealed class ZArchive : IDisposable
         return position + length > names.Length ? string.Empty : Encoding.UTF8.GetString(names, position, length);
     }
 
-    private static void ReadExactly(FileStream stream, ulong offset, Span<byte> destination)
+    private static void ReadExactly(SafeFileHandle stream, ulong offset, Span<byte> destination)
     {
-        if (RandomAccess.Read(stream.SafeFileHandle, destination, (long)offset) != destination.Length)
+        if (RandomAccess.Read(stream, destination, (long)offset) != destination.Length)
         {
             throw new IOException("The archive ended before a section it lists.");
         }

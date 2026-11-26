@@ -1606,6 +1606,11 @@ public static partial class KernelMemoryCompatExports
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
+            if (ex is UnauthorizedAccessException)
+            {
+                SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(hostPath);
+            }
+
             LogOpenTrace($"_open fail path='{guestPath}' host='{hostPath}' flags=0x{flags:X8} ex={ex.GetType().Name}: {ex.Message}");
             return ex is UnauthorizedAccessException
                 ? (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT
@@ -2155,6 +2160,7 @@ public static partial class KernelMemoryCompatExports
         }
         catch (UnauthorizedAccessException)
         {
+            SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(hostPath);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
         }
         catch (IOException)
@@ -2226,6 +2232,7 @@ public static partial class KernelMemoryCompatExports
         }
         catch (UnauthorizedAccessException)
         {
+            SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(hostPath);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
         }
         catch (IOException)
@@ -2276,6 +2283,7 @@ public static partial class KernelMemoryCompatExports
         }
         catch (UnauthorizedAccessException)
         {
+            SharpEmu.HLE.Host.Windows.SandboxAccessLog.ReportBlocked(hostPath);
             return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_PERMISSION_DENIED;
         }
         catch (IOException)
@@ -7154,7 +7162,7 @@ public static partial class KernelMemoryCompatExports
         }
 
         var size = isDirectory ? 65536L : (long)archive.GetFileSize(node);
-        var archiveTime = File.GetLastWriteTimeUtc(archive.Path);
+        var archiveTime = InheritedFiles.GetStamp(archive.Path).LastWriteTimeUtc;
         return TryWriteKernelStat(ctx, statAddress, isDirectory, size, archiveTime, archiveTime, archiveTime, hostPath);
     }
 

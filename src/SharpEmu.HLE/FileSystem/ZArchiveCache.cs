@@ -38,10 +38,10 @@ public static class ZArchiveCache
     public static string Prepare(string archivePath, string cacheParent)
     {
         archivePath = Path.GetFullPath(archivePath);
-        var info = new FileInfo(archivePath);
+        var (length, lastWriteTimeUtc) = InheritedFiles.GetStamp(archivePath);
         var cacheRoot = GetCacheRoot(archivePath, cacheParent);
         var stampPath = Path.Combine(cacheRoot, StampName);
-        var stamp = $"{archivePath}|{info.Length}|{info.LastWriteTimeUtc.Ticks}";
+        var stamp = $"{archivePath}|{length}|{lastWriteTimeUtc.Ticks}";
         if (!File.Exists(stampPath) || File.ReadAllText(stampPath) != stamp)
         {
             if (Directory.Exists(cacheRoot))

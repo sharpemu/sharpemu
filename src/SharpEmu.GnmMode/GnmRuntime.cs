@@ -55,7 +55,7 @@ public static partial class GnmRuntime
 
     private static bool UsesGnmMode(string path)
     {
-        if (!File.Exists(path))
+        if (!InheritedFiles.Exists(path))
             return false;
         if (ZArchive.IsArchivePath(path))
         {
