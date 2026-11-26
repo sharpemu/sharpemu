@@ -90,6 +90,7 @@ internal static unsafe partial class VulkanVideoPresenter
         public ulong ProvenGeneration = ulong.MaxValue;
         public ulong ProvenCollection;
         public ulong ProvenTick;
+        public bool SharedSamplers, SharedSources;
         public Sampler[] SamplerHandles = [];
         public (BufferDescriptorWords Descriptor, ResourceSlotIdentifier Buffer, ulong MappedSize)[] Sources = [];
         public bool Valid;
@@ -152,6 +153,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 _stage = stage;
                 _program = program;
+                SharesMemoInputs = SharedSources = false;
                 Memoized = false;
                 TexturesKept = false;
                 Memo = null;
@@ -183,6 +185,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             public TextureResource[] Textures => Descriptors.Images;
 
+            public bool SharesMemoInputs, SharedSources;
             public bool Memoized { get; set; }
 
             public bool TexturesKept { get; set; }
@@ -499,10 +502,12 @@ internal static unsafe partial class VulkanVideoPresenter
             prepared.Memo = memo;
             preparation.Stages.Add(prepared);
             var descriptors = prepared.Descriptors;
+            // BindImages can replace stale texture slots independently for each prepared stage.
             descriptors.Images = Scratch.Images.Rent(memo.Textures.Length);
             memo.Textures.CopyTo(descriptors.Images, 0);
-            descriptors.Samplers = Scratch.Samplers.Rent(memo.SamplerHandles.Length);
-            memo.SamplerHandles.CopyTo(descriptors.Samplers, 0);
+            prepared.SharesMemoInputs = true;
+            descriptors.Samplers = memo.SamplerHandles;
+            memo.SharedSamplers = true;
             foreach (var texture in memo.Textures)
             {
                 CompleteOverlappingPublications(texture.Request.Description.Data.Address,
@@ -539,6 +544,11 @@ internal static unsafe partial class VulkanVideoPresenter
             if (!sameBuffers || memo.RegistrationSerial != _bufferCache.RegistrationSerial)
             {
                 FindBuffers(prepared);
+                if (memo.SharedSources)
+                {
+                    memo.Sources = new (BufferDescriptorWords, ResourceSlotIdentifier, ulong)[prepared.BufferSources.Length];
+                    memo.SharedSources = false;
+                }
                 prepared.BufferSources.CopyTo(memo.Sources, 0);
                 memo.Buffers = stage.Resources.Buffers;
                 memo.RegistrationSerial = _bufferCache.RegistrationSerial;
@@ -546,8 +556,8 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             else
             {
-                prepared.BufferSources = Scratch.Sources.Rent(memo.Sources.Length);
-                memo.Sources.CopyTo(prepared.BufferSources, 0);
+                prepared.BufferSources = memo.Sources;
+                memo.SharedSources = prepared.SharedSources = true;
             }
 
             return prepared;
@@ -603,18 +613,20 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var samplers = prepared.Descriptors.Samplers;
-            if (memo.SamplerHandles.Length != samplers.Length)
+            if (memo.SharedSamplers || memo.SamplerHandles.Length != samplers.Length)
             {
                 memo.SamplerHandles = new Sampler[samplers.Length];
+                memo.SharedSamplers = false;
             }
 
             memo.LookupGeneration = _imageCache.LookupGeneration;
 
             samplers.CopyTo(memo.SamplerHandles, 0);
             var sources = prepared.BufferSources;
-            if (memo.Sources.Length != sources.Length)
+            if (memo.SharedSources || memo.Sources.Length != sources.Length)
             {
                 memo.Sources = new (BufferDescriptorWords, ResourceSlotIdentifier, ulong)[sources.Length];
+                memo.SharedSources = false;
             }
 
             sources.CopyTo(memo.Sources, 0);
@@ -1297,7 +1309,8 @@ internal static unsafe partial class VulkanVideoPresenter
             var program = prepared.Program;
             var snapshot = prepared.Stage.Resources;
             var count = prepared.Resources.Info.Buffers.Count;
-            var sources = prepared.BufferSources.Length == count && count != 0 ? prepared.BufferSources : Scratch.Sources.Rent(count);
+            var sources = !prepared.SharedSources && prepared.BufferSources.Length == count && count != 0 ? prepared.BufferSources : Scratch.Sources.Rent(count);
+            prepared.SharedSources = false;
             prepared.BufferSources = sources;
             var memos = BufferSourceMemosOf(program, sources.Length);
             var spans = GuestGpuMemoryHook.Current?.SpanVersion ?? 0;
@@ -2132,9 +2145,11 @@ internal static unsafe partial class VulkanVideoPresenter
             // CommitBindings copies texture references into submission-owned
             // storage. These CPU descriptions are no longer referenced by GPU work.
             Scratch.Images.Return(stage.Descriptors.Images);
-            Scratch.Samplers.Return(stage.Descriptors.Samplers);
+            if (!stage.SharesMemoInputs)
+                Scratch.Samplers.Return(stage.Descriptors.Samplers);
             Scratch.Buffers.Return(stage.Descriptors.Buffers);
-            Scratch.Sources.Return(stage.BufferSources);
+            if (!stage.SharedSources)
+                Scratch.Sources.Return(stage.BufferSources);
             Scratch.ShaderData.Return(stage.ShaderData);
             stage.Descriptors.Images = [];
             stage.Descriptors.Samplers = [];
