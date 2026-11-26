@@ -532,7 +532,7 @@
   "Overlay.Ime.Cursor": "Curseur",
   "Overlay.Ime.Select": "Sélectionner",
   "Overlay.Ime.Type": "Tapez avec votre clavier",
-  "Sandbox.BlockedTitle": "Le bac à sable a bloqué une action",
-  "Sandbox.BlockedMessage": "Ce jeu a tenté une action bloquée par le bac à sable (lancer un autre programme). Le dump a peut-être été modifié. N’exécutez que des dumps faits depuis votre propre console.",
+  "Sandbox.BlockedTitle": "Le bac à sable a arrêté le jeu",
+  "Sandbox.BlockedMessage": "Ce jeu a tenté de lancer un autre programme. Le bac à sable l’a bloqué et a arrêté le jeu. Le dump a probablement été modifié. N’exécutez que des dumps faits depuis votre propre console.",
   "Sandbox.BlockedOk": "OK"
 }

@@ -352,6 +352,8 @@ internal sealed class EmulatorProcess : IDisposable
                     {
                         if (count == 1)
                         {
+                            // A PS5 game cannot start a Windows program: the attempt means a modified dump. Stop it.
+                            Stop();
                             SandboxActionBlocked?.Invoke();
                         }
                     };

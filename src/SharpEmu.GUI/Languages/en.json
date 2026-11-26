@@ -535,7 +535,7 @@
   "Overlay.Ime.Cursor": "Cursor",
   "Overlay.Ime.Select": "Select",
   "Overlay.Ime.Type": "Type with your keyboard",
-  "Sandbox.BlockedTitle": "The sandbox blocked an action",
-  "Sandbox.BlockedMessage": "This game tried an action the sandbox blocked (starting another program). The dump may have been modified. Only run dumps you made from your own console.",
+  "Sandbox.BlockedTitle": "The sandbox stopped the game",
+  "Sandbox.BlockedMessage": "This game tried to start another program. The sandbox blocked it and stopped the game. The dump has probably been modified. Only run dumps you made from your own console.",
   "Sandbox.BlockedOk": "OK"
 }

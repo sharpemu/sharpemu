@@ -26,6 +26,8 @@ internal static partial class Program
     private static ParsedLaunch? _preparedLaunch;
     private const int DefaultImportTraceLimit = 32;
     private const string MitigatedChildFlag = "--sharpemu-mitigated-child";
+    // Exit code of a sandboxed game stopped after it tried to start another program.
+    private const uint SandboxStoppedExitCode = 7;
     private const uint EXTENDED_STARTUPINFO_PRESENT = 0x00080000;
     private const uint CREATE_UNICODE_ENVIRONMENT = 0x00000400;
     private const string SandboxCleanupArgument = "--sandbox-cleanup";
@@ -792,19 +794,23 @@ internal static partial class Program
                     jobHandle = sandbox.CreateConfinedJob(processInfo.hProcess, out jobMonitor);
                     if (jobMonitor is not null)
                     {
+                        // A PS5 game has no way to start a Windows program: an attempt means code written for Windows
+                        // was put in the dump. The attempt is already refused; the game is stopped as well.
+                        var confinedJob = jobHandle;
                         jobMonitor.ProcessLaunchBlocked += count =>
                         {
                             if (count == 1)
                             {
                                 Console.Error.WriteLine(
-                                    "[SANDBOX][WARN] The game tried to start another program and the sandbox blocked it. " +
-                                    "The dump may have been modified; only run dumps you made from your own console.");
+                                    "[SANDBOX][ERROR] The game tried to start another program; the sandbox blocked it and " +
+                                    "stopped the game. The dump has probably been modified; only run dumps you made from your own console.");
+                                _ = TerminateJobObject(confinedJob, SandboxStoppedExitCode);
                                 if (OperatingSystem.IsWindows())
                                 {
                                     WindowsBalloonNotification.TryShow(
-                                        "SharpEmu sandbox",
-                                        "This game tried to start another program and the sandbox blocked it. " +
-                                        "The dump may have been modified; only run dumps you made from your own console.");
+                                        "SharpEmu sandbox: game stopped",
+                                        "This game tried to start another program. The sandbox blocked it and stopped the game. " +
+                                        "The dump has probably been modified; only run dumps you made from your own console.");
                                 }
                             }
                         };
@@ -2096,6 +2102,10 @@ internal static partial class Program
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool TerminateProcess(nint process, uint exitCode);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool TerminateJobObject(nint job, uint exitCode);
 
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
