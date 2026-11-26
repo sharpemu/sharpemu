@@ -1,19 +1,25 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Collections.Concurrent;
+using System.Runtime.ExceptionServices;
 using System.Text.Json;
 
 namespace SharpEmu.HLE.FileSystem.Pkg;
 
 // A fake/debug PS5 package ("\x7FFIH") opened for reading. Retail packages and packages whose outer
-// PFS is encrypted are refused at Open: their files need console keys. Extraction streams every
-// file block by block, so a package of any size needs only a few hundred KiB of memory.
+// PFS is encrypted are refused at Open: their files need console keys. Extraction decodes the files
+// block by block on several threads (a big file is split into ranges too), so a package of any
+// size needs only a few hundred KiB of memory per worker.
 public sealed class Ps5Package : IGamePackage
 {
     private const string ImageFileName = "pfs_image.dat";
     private const string LayoutFileName = "naps_pkg_layout.dat";
     // A layout is a few MiB at most; anything larger is not a NAPS file.
     private const long MaxLayoutSize = 256L << 20;
+    // Logical range of one parallel work item: large enough to keep seeks rare, small enough that a
+    // few huge files still spread over every worker.
+    private const long DefaultChunkBytes = 64L << 20;
 
     private readonly Ps5Source _source;
     private readonly Ps5Fih _fih;
@@ -92,8 +98,27 @@ public sealed class Ps5Package : IGamePackage
         IProgress<PkgExtractProgress>? progress,
         CancellationToken cancellation,
         long progressStepBytes,
-        long? availableBytes)
+        long? availableBytes) =>
+        Extract(
+            destination,
+            progress,
+            cancellation,
+            progressStepBytes,
+            availableBytes,
+            DefaultChunkBytes,
+            Math.Clamp(Environment.ProcessorCount / 2, 1, 8));
+
+    internal void Extract(
+        string destination,
+        IProgress<PkgExtractProgress>? progress,
+        CancellationToken cancellation,
+        long progressStepBytes,
+        long? availableBytes,
+        long chunkBytes,
+        int maxParallelism)
     {
+        ArgumentOutOfRangeException.ThrowIfLessThan(chunkBytes, 1);
+        ArgumentOutOfRangeException.ThrowIfLessThan(maxParallelism, 1);
         var (image, files) = LoadTree();
         var total = _filesSize;
 
@@ -121,31 +146,145 @@ public sealed class Ps5Package : IGamePackage
             File.WriteAllBytes(path, bytes);
         }
 
-        long done = 0;
+        targets = DeduplicateTargets(targets);
+
+        // Create every file at its final size first, so workers only write inside existing files and
+        // never race to create or grow one.
+        var items = new List<WorkItem>();
         foreach (var (path, file) in targets)
         {
             cancellation.ThrowIfCancellationRequested();
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            var relative = Path.GetRelativePath(destination, path);
-            progress?.Report(new PkgExtractProgress(done, total, relative));
-            var sinceReport = 0L;
-            using var output = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.Read, 1 << 20, FileOptions.SequentialScan);
-            image.CopyTo(file.Logical, file.Size, chunk =>
+            using (var created = File.OpenHandle(path, FileMode.Create, FileAccess.Write, FileShare.None))
             {
-                output.Write(chunk);
-                done += chunk.Length;
-                sinceReport += chunk.Length;
-                cancellation.ThrowIfCancellationRequested();
-                if (sinceReport >= progressStepBytes)
+                MarkSparse(created);
+                RandomAccess.SetLength(created, file.Size);
+            }
+
+            var relative = Path.GetRelativePath(destination, path);
+            for (long offset = 0; offset < file.Size; offset += chunkBytes)
+            {
+                items.Add(new WorkItem(path, relative, file.Logical, offset, Math.Min(chunkBytes, file.Size - offset)));
+            }
+        }
+
+        progress?.Report(new PkgExtractProgress(0, total, string.Empty));
+        var tracker = new ProgressTracker(progress, total, progressStepBytes);
+        var options = new ParallelOptions { MaxDegreeOfParallelism = maxParallelism, CancellationToken = cancellation };
+        try
+        {
+            // Load-balanced partitioning hands out one item at a time, so a few big files still keep
+            // every worker busy.
+            Parallel.ForEach(
+                Partitioner.Create(items, loadBalance: true),
+                options,
+                image.CreateReader,
+                (item, _, reader) =>
                 {
-                    sinceReport = 0;
-                    progress?.Report(new PkgExtractProgress(done, total, relative));
-                }
-            });
-            progress?.Report(new PkgExtractProgress(done, total, relative));
+                    WriteRange(reader, item, cancellation, tracker);
+                    return reader;
+                },
+                _ => { });
+        }
+        catch (AggregateException aggregate)
+        {
+            // Callers catch the specific exception types, not AggregateException.
+            cancellation.ThrowIfCancellationRequested();
+            var inner = aggregate.Flatten().InnerExceptions;
+            ExceptionDispatchInfo.Capture(inner.FirstOrDefault(e => e is not OperationCanceledException) ?? inner[0]).Throw();
         }
 
         progress?.Report(new PkgExtractProgress(total, total, string.Empty));
+    }
+
+    private static void WriteRange(Ps5InnerImage.BlockReader reader, WorkItem item, CancellationToken cancellation, ProgressTracker tracker)
+    {
+        cancellation.ThrowIfCancellationRequested();
+        using var output = File.OpenHandle(item.Path, FileMode.Open, FileAccess.Write, FileShare.ReadWrite);
+        var position = item.Offset;
+        reader.CopyTo(item.Logical + item.Offset, item.Length, chunk =>
+        {
+            RandomAccess.Write(output, chunk, position);
+            position += chunk.Length;
+            tracker.Add(chunk.Length, item.Relative);
+            cancellation.ThrowIfCancellationRequested();
+        });
+    }
+
+    // Two inner files can map to one host path (names differing only by case on Windows). The old
+    // sequential loop let the later one overwrite the earlier, so only the last occurrence is kept.
+    private static List<(string Path, Ps5InnerFile File)> DeduplicateTargets(List<(string Path, Ps5InnerFile File)> targets)
+    {
+        var seen = new HashSet<string>(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+        var kept = new List<(string Path, Ps5InnerFile File)>(targets.Count);
+        for (var i = targets.Count - 1; i >= 0; i--)
+        {
+            if (seen.Add(targets[i].Path))
+            {
+                kept.Add(targets[i]);
+            }
+        }
+
+        kept.Reverse();
+        return kept;
+    }
+
+    // Workers write the ranges of one file out of order. NTFS zero-fills everything between the
+    // last written byte and a write past it, so a non-sparse file would get most of its bytes
+    // written twice; a sparse file skips that fill. The file ends fully written, so no hole is
+    // left. Volumes without sparse support (FAT, exFAT) just keep the zero fill.
+    private static void MarkSparse(Microsoft.Win32.SafeHandles.SafeFileHandle handle)
+    {
+        if (OperatingSystem.IsWindows())
+        {
+            _ = DeviceIoControl(handle, FsctlSetSparse, 0, 0, 0, 0, out _, 0);
+        }
+    }
+
+    private const uint FsctlSetSparse = 0x000900C4;
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool DeviceIoControl(
+        Microsoft.Win32.SafeHandles.SafeFileHandle device,
+        uint controlCode,
+        nint inBuffer,
+        uint inBufferSize,
+        nint outBuffer,
+        uint outBufferSize,
+        out uint bytesReturned,
+        nint overlapped);
+
+    private readonly record struct WorkItem(string Path, string Relative, long Logical, long Offset, long Length);
+
+    // Progress from several threads: bytes add up atomically and a report goes out at most every
+    // `step` bytes, under a lock, with a BytesDone that never goes backwards.
+    private sealed class ProgressTracker(IProgress<PkgExtractProgress>? progress, long total, long step)
+    {
+        private readonly object _gate = new();
+        private long _done;
+        private long _reported;
+
+        public void Add(int bytes, string file)
+        {
+            var done = Interlocked.Add(ref _done, bytes);
+            if (progress is null || done - Volatile.Read(ref _reported) < step)
+            {
+                return;
+            }
+
+            lock (_gate)
+            {
+                // Read again under the lock: other workers may have added bytes meanwhile.
+                var current = Interlocked.Read(ref _done);
+                if (current - _reported < step)
+                {
+                    return;
+                }
+
+                _reported = current;
+                progress.Report(new PkgExtractProgress(current, total, file));
+            }
+        }
     }
 
     // Opens the inner image and lists its files once; both GetInstalledSize and Extract need them.
