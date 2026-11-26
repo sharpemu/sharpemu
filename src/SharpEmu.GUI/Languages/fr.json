@@ -544,5 +544,11 @@
   "Sandbox.VolumeConvert": "Convertir en .zar",
   "Sandbox.VolumePlayWithout": "Jouer sans bac à sable",
   "Options.Sandbox.Label": "Exécuter les jeux dans un bac à sable (recommandé)",
-  "Options.Sandbox.Desc": "Empêche un jeu modifié de lire vos fichiers, d’utiliser internet ou de lancer des programmes. Windows uniquement."
+  "Options.Sandbox.Desc": "Empêche un jeu modifié de lire vos fichiers, d’utiliser internet ou de lancer des programmes. Windows uniquement.",
+  "Options.SandboxCleanup.Label": "Retirer les autorisations du bac à sable",
+  "Options.SandboxCleanup.Desc": "Retire les autorisations que le bac à sable a ajoutées sur vos dossiers, par exemple avant de désinstaller. Elles sont remises au prochain lancement avec bac à sable.",
+  "Options.SandboxCleanup.Button": "Retirer",
+  "Options.SandboxCleanup.Running": "Fermez le jeu avant de retirer les autorisations du bac à sable.",
+  "Options.SandboxCleanup.Done": "Autorisations du bac à sable retirées.",
+  "Options.SandboxCleanup.Failed": "Certaines autorisations n’ont pas pu être retirées ; voir les lignes ci-dessus."
 }

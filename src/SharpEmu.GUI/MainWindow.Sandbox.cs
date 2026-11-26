@@ -52,6 +52,43 @@ public partial class MainWindow
         }
     }
 
+    // Removes the folder permissions the sandbox added and its Windows profile (same as --sandbox-cleanup). The next
+    // sandboxed launch grants again what it needs. Not while a game runs: it would lose access to its own folders.
+    private async void OnSandboxCleanupClicked()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return;
+        }
+
+        if (_isRunning)
+        {
+            AppendConsoleLine(Localization.Instance.Get("Options.SandboxCleanup.Running"), WarningLineBrush);
+            return;
+        }
+
+        SandboxCleanupButton.IsEnabled = false;
+        try
+        {
+            var output = new StringWriter();
+            var exitCode = await Task.Run(() => OperatingSystem.IsWindows()
+                ? WindowsAppContainerSandbox.Cleanup(SharpEmu.Libs.SharpEmuPaths.DataRoot, output)
+                : 0);
+            foreach (var line in output.ToString().Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                AppendConsoleLine(line, DimLineBrush);
+            }
+
+            AppendConsoleLine(
+                Localization.Instance.Get(exitCode == 0 ? "Options.SandboxCleanup.Done" : "Options.SandboxCleanup.Failed"),
+                exitCode == 0 ? SuccessLineBrush : WarningLineBrush);
+        }
+        finally
+        {
+            SandboxCleanupButton.IsEnabled = true;
+        }
+    }
+
     private async Task<bool> ConfirmSandboxOffAsync() =>
         await Sheets.ShowAsync(new SandboxOffConfirmDialog()) is true;
 

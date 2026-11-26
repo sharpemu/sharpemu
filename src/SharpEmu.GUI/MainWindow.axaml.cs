@@ -405,6 +405,8 @@ public partial class MainWindow : Window
         };
         SandboxRow.IsVisible = OperatingSystem.IsWindows();
         SandboxToggle.IsCheckedChanged += (_, _) => OnSandboxToggleChanged();
+        SandboxCleanupRow.IsVisible = OperatingSystem.IsWindows();
+        SandboxCleanupButton.Click += (_, _) => OnSandboxCleanupClicked();
         InitializeThemeControls();
         ConsoleLanguageBox.SelectionChanged += (_, _) =>
         {
