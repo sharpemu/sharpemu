@@ -11,6 +11,43 @@ namespace SharpEmu.Libs.Gpu.Pipelines;
 // The native descriptor type and count of every binding kind, shared by layouts and writes.
 public static class DescriptorWriter
 {
+    internal static unsafe ReadOnlySpan<ulong> DescriptorKey(ReadOnlySpan<WriteDescriptorSet> writes, ref ulong[]? scratch)
+    {
+        var length = 0;
+        scratch ??= new ulong[256];
+        foreach (ref readonly var write in writes)
+        {
+            var needed = length + 2 + (int)write.DescriptorCount * 3;
+            if (scratch.Length < needed)
+            {
+                Array.Resize(ref scratch, Math.Max(needed, scratch.Length * 2));
+            }
+
+            var key = scratch;
+            key[length++] = write.DstBinding | ((ulong)write.DescriptorType << 32);
+            key[length++] = write.DescriptorCount | (write.PBufferInfo != null ? 1UL << 32 : 0) | (write.PImageInfo != null ? 1UL << 33 : 0);
+            for (var index = 0; index < write.DescriptorCount; index++)
+            {
+                if (write.PBufferInfo != null)
+                {
+                    var info = write.PBufferInfo[index];
+                    key[length++] = info.Buffer.Handle;
+                    key[length++] = info.Offset;
+                    key[length++] = info.Range;
+                }
+                else if (write.PImageInfo != null)
+                {
+                    var info = write.PImageInfo[index];
+                    key[length++] = info.Sampler.Handle;
+                    key[length++] = info.ImageView.Handle;
+                    key[length++] = (ulong)info.ImageLayout;
+                }
+            }
+        }
+
+        return scratch.AsSpan(0, length);
+    }
+
     public static DescriptorType DescriptorType(DescriptorBindingKind kind)
     {
         var imageClass = ImageDescriptorBinding.ResourceClass(kind);

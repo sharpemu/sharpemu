@@ -592,6 +592,7 @@ public unsafe class GpuBuffer : IDisposable
         }
 
         DeviceFaultReport.Untrack(_deviceAddress);
+        _device.InvalidateDescriptorResources();
         _device.Vk.DestroyBuffer(_device.Device, _handle, null);
         if (_slab is { } slab)
         {

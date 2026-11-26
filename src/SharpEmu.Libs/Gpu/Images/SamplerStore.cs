@@ -222,6 +222,7 @@ public sealed unsafe class SamplerStore : IDisposable
     {
         foreach (var sampler in _samplers.Values)
         {
+            _device.InvalidateDescriptorResources();
             _device.Vk.DestroySampler(_device.Device, sampler, null);
         }
 

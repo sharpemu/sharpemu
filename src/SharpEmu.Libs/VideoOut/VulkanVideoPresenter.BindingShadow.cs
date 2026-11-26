@@ -1,6 +1,7 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Vulkan;
 using SharpEmu.ShaderCompiler.Resources;
@@ -181,13 +182,13 @@ internal static unsafe partial class VulkanVideoPresenter
                 return false;
             }
 
-            var length = DescriptorKey(writes);
+            var key = DescriptorWriter.DescriptorKey(writes, ref _descriptorKeyScratch);
+            _descriptorKeyLength = key.Length;
             var shadow = bindPoint == PipelineBindPoint.Compute
                 ? _computeDescriptorShadow ??= new DescriptorShadow()
                 : setIndex == 0
                     ? _graphicsDescriptorShadow ??= new DescriptorShadow()
                     : _graphicsPixelDescriptorShadow ??= new DescriptorShadow();
-            var key = _descriptorKeyScratch.AsSpan(0, length);
             var reused = shadow.Valid && shadow.Layout.Handle == layout.Handle && key.SequenceEqual(shadow.Key.AsSpan(0, shadow.Length));
             CountNativeState(NativeStateKind.Descriptors, reused);
             if (reused)
@@ -196,13 +197,13 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             DropSetsOfOtherLayouts(bindPoint, layout);
-            if (shadow.Key.Length < length)
+            if (shadow.Key.Length < key.Length)
             {
-                shadow.Key = new ulong[Math.Max(length, shadow.Key.Length * 2)];
+                shadow.Key = new ulong[Math.Max(key.Length, shadow.Key.Length * 2)];
             }
 
             key.CopyTo(shadow.Key);
-            shadow.Length = length;
+            shadow.Length = key.Length;
             shadow.Layout = layout;
             shadow.Valid = true;
             return false;
@@ -238,44 +239,6 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 shadow.Valid = false;
             }
-        }
-
-        private int DescriptorKey(ReadOnlySpan<WriteDescriptorSet> writes)
-        {
-            var length = 0;
-            _descriptorKeyScratch ??= new ulong[256];
-            foreach (ref readonly var write in writes)
-            {
-                var needed = length + 2 + (int)write.DescriptorCount * 3;
-                if (_descriptorKeyScratch.Length < needed)
-                {
-                    Array.Resize(ref _descriptorKeyScratch, Math.Max(needed, _descriptorKeyScratch.Length * 2));
-                }
-
-                var key = _descriptorKeyScratch;
-                key[length++] = write.DstBinding | ((ulong)write.DescriptorType << 32);
-                key[length++] = write.DescriptorCount | (write.PBufferInfo != null ? 1UL << 32 : 0) | (write.PImageInfo != null ? 1UL << 33 : 0);
-                for (var index = 0; index < write.DescriptorCount; index++)
-                {
-                    if (write.PBufferInfo != null)
-                    {
-                        var info = write.PBufferInfo[index];
-                        key[length++] = info.Buffer.Handle;
-                        key[length++] = info.Offset;
-                        key[length++] = info.Range;
-                    }
-                    else if (write.PImageInfo != null)
-                    {
-                        var info = write.PImageInfo[index];
-                        key[length++] = info.Sampler.Handle;
-                        key[length++] = info.ImageView.Handle;
-                        key[length++] = (ulong)info.ImageLayout;
-                    }
-                }
-            }
-
-            _descriptorKeyLength = length;
-            return length;
         }
 
         private bool VertexBuffersAlreadyBound(CommandBuffer command, ReadOnlySpan<BufferBinding> bindings)

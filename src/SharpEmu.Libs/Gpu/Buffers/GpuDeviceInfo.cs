@@ -14,6 +14,11 @@ public sealed unsafe class GpuDeviceInfo : IImageFormatSupport
     // Two threads may query the same missing key once each; the driver answers identically.
     private readonly System.Collections.Concurrent.ConcurrentDictionary<Format, FormatProperties> _formatProperties = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<(Format, ImageType, ImageTiling, ImageUsageFlags, ImageCreateFlags), (Result Result, ImageFormatProperties Properties)> _imageFormatProperties = new();
+    // Vulkan may recycle a handle as soon as its resource is destroyed.
+    private long _descriptorGeneration;
+    internal long DescriptorGeneration => Volatile.Read(ref _descriptorGeneration);
+    internal void InvalidateDescriptorResources() => Interlocked.Increment(ref _descriptorGeneration);
+
     private int _liveAllocations;
     private int _peakAllocations;
 

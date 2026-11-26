@@ -763,6 +763,7 @@ public sealed unsafe partial class CachedImage : IDisposable
         Volatile.Write(ref _viewSnapshot, []);
         foreach (var cached in Views)
         {
+            _device.InvalidateDescriptorResources();
             _device.Vk.DestroyImageView(_device.Device, cached.View, null);
         }
 

@@ -13,6 +13,10 @@ public sealed unsafe class DescriptorPoolStock : IDisposable
     private readonly GpuDeviceInfo _device;
     private readonly ConcurrentBag<DescriptorPool> _free = new();
     private readonly List<DescriptorPool> _all = new();
+    private const int MaxRetainedPools = 64;
+    private readonly ConcurrentBag<RetainedDescriptorPool> _idle = new();
+    private readonly Dictionary<ulong, RetainedDescriptorPool> _retained = new();
+    private int _retainedCount;
     private bool _disposed;
 
     public DescriptorPoolStock(GpuDeviceInfo device)
@@ -36,6 +40,29 @@ public sealed unsafe class DescriptorPoolStock : IDisposable
         return pool;
     }
 
+    internal RetainedDescriptorPool? RentRetained()
+    {
+        if (_idle.TryTake(out var previous)) return previous;
+        lock (_all)
+        {
+            if (_retainedCount == MaxRetainedPools) return null;
+            _retainedCount++;
+        }
+
+        // Pool creation can block in the driver. Keep it outside the submission retirement lock.
+        try
+        {
+            var retained = new RetainedDescriptorPool(Rent());
+            lock (_all) _retained.Add(retained.Pool.Handle, retained);
+            return retained;
+        }
+        catch
+        {
+            lock (_all) _retainedCount--;
+            throw;
+        }
+    }
+
     public void Return(DescriptorPool pool)
     {
         lock (_all)
@@ -43,6 +70,18 @@ public sealed unsafe class DescriptorPoolStock : IDisposable
             if (_disposed)
             {
                 return;
+            }
+
+            if (_retained.TryGetValue(pool.Handle, out var retained))
+            {
+                if (retained.FinishSlice())
+                {
+                    _idle.Add(retained);
+                    return;
+                }
+
+                _retained.Remove(pool.Handle);
+                _retainedCount--;
             }
 
             var reset = _device.Vk.ResetDescriptorPool(_device.Device, pool, 0);
@@ -71,6 +110,8 @@ public sealed unsafe class DescriptorPoolStock : IDisposable
             }
 
             _all.Clear();
+            _retained.Clear();
+            _idle.Clear();
         }
 
         while (_free.TryTake(out _))
@@ -81,11 +122,15 @@ public sealed unsafe class DescriptorPoolStock : IDisposable
 
 public sealed class SliceDescriptorHeap(GpuDeviceInfo device, DescriptorPoolStock stock)
 {
+    private const uint InitialBatch = 4;
+    private RetainedDescriptorPool? _retained;
+    private bool _triedRetained;
+
     private sealed class SetBatchState
     {
         public readonly DescriptorSet[] Sets = new DescriptorSet[DescriptorHeap.SetBatch];
         public uint Size;
-        public uint Allocation = DescriptorHeap.SetBatch;
+        public uint Allocation = InitialBatch;
     }
 
     private readonly Dictionary<ulong, SetBatchState> _sets = new();
@@ -121,7 +166,7 @@ public sealed class SliceDescriptorHeap(GpuDeviceInfo device, DescriptorPoolStoc
         _pools.Add(_currentPool);
         _remaining = DescriptorHeap.PoolCapacity;
         _remainingSets = DescriptorHeap.SetsPerPool;
-        batch.Allocation = DescriptorHeap.SetBatch;
+        batch.Allocation = InitialBatch;
         if (!Allocate(layout, in demand, batch))
         {
             throw SubmissionScheduler.Fatal(
@@ -131,8 +176,32 @@ public sealed class SliceDescriptorHeap(GpuDeviceInfo device, DescriptorPoolStoc
         return batch.Sets[--batch.Size];
     }
 
+    internal DescriptorSet Commit(ulong pipeline, DescriptorSetLayout layout, in DescriptorSetDemand demand,
+        ReadOnlySpan<ulong> key, Span<WriteDescriptorSet> writes)
+    {
+        if (pipeline != 0 && layout.Handle != 0 && key.Length is > 0 and <= RetainedDescriptorPool.MaxKeyWords &&
+            RetainedDescriptorPool.CoversLayout(in demand, writes))
+        {
+            if (!_triedRetained)
+            {
+                _triedRetained = true;
+                _retained = stock.RentRetained();
+                if (_retained is not null) _pools.Add(_retained.Pool);
+            }
+
+            if (_retained is not null && _retained.TryCommit(device, pipeline, layout, in demand, key, writes, out var written))
+                return written;
+        }
+
+        var set = Commit(layout, in demand);
+        DescriptorHeap.WriteSet(device, set, writes);
+        return set;
+    }
+
     public List<DescriptorPool> TakePools()
     {
+        _retained = null;
+        _triedRetained = false;
         if (_pools.Count == 0)
         {
             return [];
@@ -144,7 +213,7 @@ public sealed class SliceDescriptorHeap(GpuDeviceInfo device, DescriptorPoolStoc
         foreach (var batch in _sets.Values)
         {
             batch.Size = 0;
-            batch.Allocation = DescriptorHeap.SetBatch;
+            batch.Allocation = InitialBatch;
         }
 
         return taken;
@@ -158,6 +227,7 @@ public sealed class SliceDescriptorHeap(GpuDeviceInfo device, DescriptorPoolStoc
         }
 
         batch.Size = batch.Allocation;
+        batch.Allocation = Math.Min(DescriptorHeap.SetBatch, batch.Allocation * 2);
         return true;
     }
 }

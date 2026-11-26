@@ -241,6 +241,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             foreach (var (buffer, memory) in submission.RetireBuffers)
             {
+                _deviceInfo.InvalidateDescriptorResources();
                 _vk.DestroyBuffer(_device, buffer, null);
                 _deviceInfo.FreeMemory(memory);
             }

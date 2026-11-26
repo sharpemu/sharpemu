@@ -2188,7 +2188,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         // Pushes one set's descriptors, or writes them to a set from the heap and binds it; nothing when the same layout and
         // descriptors are already bound there.
-        private void CommitDescriptorSet(CommandBuffer command, PipelineBindPoint bindPoint, PipelineLayout layout, uint setIndex,
+        private void CommitDescriptorSet(CommandBuffer command, PipelineBindPoint bindPoint, RenderPipelineEntry entry, uint setIndex,
             DescriptorSetLayout setLayout, in DescriptorSetDemand demand, bool push, Span<WriteDescriptorSet> writes)
         {
             if (writes.Length == 0)
@@ -2196,6 +2196,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
+            var layout = entry.Layout;
             if (DescriptorsAlreadyBound(command, bindPoint, layout, writes, setIndex))
             {
                 Interlocked.Increment(ref _descriptorsShadowed);
@@ -2216,7 +2217,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
 
                 var cache = NativeStateReuse ? _allocatedSets ??= new() : null;
-                var key = _descriptorKeyScratch.AsSpan(0, cache is null ? 0 : _descriptorKeyLength);
+                ReadOnlySpan<ulong> key = _descriptorKeyScratch.AsSpan(0, cache is null ? 0 : _descriptorKeyLength);
                 if (cache is not null && cache.TryGet(setLayout.Handle, key, out var previous))
                 {
                     using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
@@ -2224,13 +2225,18 @@ internal static unsafe partial class VulkanVideoPresenter
                     return;
                 }
 
-                var set = _worker ? _sliceDescriptors!.Commit(setLayout, in demand) : _descriptorHeap.Commit(setLayout, in demand);
-                for (var index = 0; index < writes.Length; index++)
+                DescriptorSet set;
+                if (_worker)
                 {
-                    writes[index].DstSet = set;
+                    if (cache is null) key = DescriptorWriter.DescriptorKey(writes, ref _descriptorKeyScratch);
+                    set = _sliceDescriptors!.Commit(entry.Id, setLayout, in demand, key, writes);
+                }
+                else
+                {
+                    set = _descriptorHeap.Commit(setLayout, in demand);
+                    DescriptorHeap.WriteSet(_deviceInfo, set, writes);
                 }
 
-                _vk.UpdateDescriptorSets(_device, (uint)writes.Length, writePointer, 0, null);
                 cache?.Remember(setLayout.Handle, key, set);
                 using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
                 {
@@ -2566,7 +2572,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 // A pipeline linked from libraries binds set 0 (vertex), the heap (set 1), then set 2 (pixel): binding a set
                 // with another layout disturbs the sets above it.
                 var vertexWrites = entry.LinkedFromLibraries && pixelWriteStart >= 0 ? pixelWriteStart : writeIndex;
-                CommitDescriptorSet(command, bindPoint, entry.Layout, 0, entry.SetLayout, in entry.Demand, entry.UsesPushDescriptors,
+                CommitDescriptorSet(command, bindPoint, entry, 0, entry.SetLayout, in entry.Demand, entry.UsesPushDescriptors,
                     writes[..vertexWrites]);
                 if (entry.UsesBindlessHeap)
                 {
@@ -2581,7 +2587,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
                 if (vertexWrites != writeIndex)
                 {
-                    CommitDescriptorSet(command, bindPoint, entry.Layout, Presenter.PixelDescriptorSet, entry.PixelSetLayout, in entry.PixelDemand,
+                    CommitDescriptorSet(command, bindPoint, entry, Presenter.PixelDescriptorSet, entry.PixelSetLayout, in entry.PixelDemand,
                         push: false, writes[vertexWrites..writeIndex]);
                 }
             }
