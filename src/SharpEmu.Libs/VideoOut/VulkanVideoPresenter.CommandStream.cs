@@ -808,7 +808,9 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 // The translation state belongs to this thread; the queue context to the render thread.
                 _translation.BeginSubmission(queueId, submissionId, geometrySnapshots, _commandStream.GetInterpreter(queueId));
-                _commandThread!.Post(() => BeginSubmissionContext(queueId, submissionId));
+                // Workers use queue-independent recording buffers. The join binds their
+                // submission context and adopts occlusion queries on the render thread.
+                _commandThread!.PostBetweenSegments(() => BeginSubmissionContext(queueId, submissionId));
                 return;
             }
             BeginSubmissionContext(queueId, submissionId);
@@ -842,7 +844,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             if (OnCommandThread)
             {
-                _commandThread!.Post(FlushSlice);
+                _commandThread!.PostBetweenSegments(FlushSlice);
                 return;
             }
 
@@ -1052,7 +1054,14 @@ internal static unsafe partial class VulkanVideoPresenter
             if (OnCommandThread)
             {
                 var queued = write;
-                _commandThread!.Post(() => RecordEndOfPipe(in queued));
+                Action record = () => RecordEndOfPipe(in queued);
+                // These forms annotate the recording. The actual guest store has its own
+                // ordered item. Keep completion actions and soft-wait landing points as cuts.
+                if (write.Landing is null && write.Kind is (EndOfPipeWriteKind.Write32 or EndOfPipeWriteKind.Write64 or
+                    EndOfPipeWriteKind.WriteBack32 or EndOfPipeWriteKind.WriteBack64))
+                    _commandThread!.PostBetweenSegments(record);
+                else
+                    _commandThread!.Post(record);
                 return;
             }
             using var completionScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandEndOfPipe);

@@ -16,7 +16,7 @@ using Xunit;
 namespace SharpEmu.Libs.Tests.VideoOut;
 
 [Collection(SchedulingStateCollection.Name)]
-public sealed class ShortSliceTests(HeadlessVulkanFixture fixture) : IClassFixture<HeadlessVulkanFixture>
+public sealed partial class ShortSliceTests(HeadlessVulkanFixture fixture) : IClassFixture<HeadlessVulkanFixture>
 {
     private sealed record Marker(int Position, bool Dispatch = false) : AgcExports.DeferredWork
     {
@@ -25,7 +25,7 @@ public sealed class ShortSliceTests(HeadlessVulkanFixture fixture) : IClassFixtu
 
     // Use the normal cutter and consumer. Holding the worker queue makes the steal and
     // the set of slices already dispatched at each stream position deterministic.
-    private sealed class Cutter : IDisposable
+    internal sealed class Cutter : IDisposable
     {
         private static readonly Type Owner = typeof(VulkanVideoPresenter);
         private static readonly Type WorkerType = Owner.GetNestedType("RenderWorkerPool", BindingFlags.NonPublic)!;
@@ -60,19 +60,30 @@ public sealed class ShortSliceTests(HeadlessVulkanFixture fixture) : IClassFixtu
         internal void Add(int position, bool dispatch = false) => _enqueue(new Marker(position, dispatch), !dispatch);
         internal void Add(AgcExports.DeferredWork work) => _enqueue(work, work is not AgcExports.GlobalBarrierWork && !work.IsDispatch);
         internal void Call(Action action) => _post(action, "test");
+        internal void BetweenSegments(Action action) => ThreadType.GetMethod("PostBetweenSegments")!.Invoke(_thread, [action, "test"]);
+        internal void BindToPresenter() => _presenter.SetField("_commandThread", _thread);
+        internal void AsProducer(Action emit)
+        {
+            var field = ThreadType.GetField("_thread", Members)!;
+            var previous = field.GetValue(_thread);
+            field.SetValue(_thread, Thread.CurrentThread);
+            try { emit(); }
+            finally { field.SetValue(_thread, previous); }
+        }
         internal void Write(ulong address, byte value) => ThreadType.GetMethod("PostOwnedWrite")!.Invoke(_thread, [address, new[] { value }, false]);
-        internal int Run() => _run(long.MaxValue, int.MaxValue, static () => { });
-        internal List<(int Count, ManualResetEventSlim Done)> Cut()
+        internal int Run(int maxItems = int.MaxValue, Action? betweenItems = null) =>
+            _run(long.MaxValue, maxItems, betweenItems ?? (() => { }));
+        internal List<(int Count, ManualResetEventSlim Done, object Slice)> Cut()
         {
             ThreadType.GetMethod("FillUnits", Members)!.Invoke(_thread, null);
             var units = (IList)ThreadType.GetField("_units", Members)!.GetValue(_thread)!;
-            var result = new List<(int, ManualResetEventSlim)>();
+            var result = new List<(int, ManualResetEventSlim, object)>();
             foreach (var unit in units)
             {
                 if (unit!.GetType().GetField("Slice")!.GetValue(unit) is not { } slice) continue;
                 var type = slice.GetType();
                 result.Add((((IList)type.GetField("Items")!.GetValue(slice)!).Count,
-                    (ManualResetEventSlim)type.GetField("Done")!.GetValue(slice)!));
+                    (ManualResetEventSlim)type.GetField("Done")!.GetValue(slice)!, slice));
             }
             return result;
         }

@@ -8,6 +8,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using SharpEmu.HLE.Diagnostics;
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Pipelines;
@@ -384,7 +385,6 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public bool TryClaim() => Interlocked.CompareExchange(ref _claimed, 1, 0) == 0;
     }
-
 
     private sealed class RenderWorkerPool : IDisposable
     {

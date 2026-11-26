@@ -73,6 +73,7 @@ internal static partial class VulkanVideoPresenter
             public RangeKind Range;
             public long Sequence;
             public bool Sync;
+            public bool CarryableCall;
             public volatile bool Done;
             public Exception? Failure;
         }
@@ -277,6 +278,13 @@ internal static partial class VulkanVideoPresenter
         {
             Presenter.NotePost(caller);
             Enqueue(new Item { Kind = Kind.Call, Action = action });
+        }
+
+        // An asynchronous call eligible for storage beside the preceding slice. It still cuts recording.
+        public void PostBetweenSegments(Action action, [CallerMemberName] string caller = "")
+        {
+            Presenter.NotePost(caller);
+            Enqueue(new Item { Kind = Kind.Call, Action = action, CarryableCall = true });
         }
 
         public void Run(Action action, [CallerMemberName] string caller = "")
@@ -823,14 +831,19 @@ internal static partial class VulkanVideoPresenter
                     continue;
                 }
 
-                var unit = _units[_unitHead++];
+                var unit = _units[_unitHead];
                 if (unit.Slice is { } slice)
                 {
                     _queuedSlices--;
+                    // Leave the trailer at the head. Stolen or refused suffixes insert before
+                    // it, and the ordinary budget still applies between the slice and its trailer.
+                    if (unit.Item is null) _unitHead++;
+                    else unit.Slice = null;
                     ran += JoinSlice(slice, betweenItems);
                 }
                 else
                 {
+                    _unitHead++;
                     var item = unit.Item!;
                     var started = Stopwatch.GetTimestamp();
                     Execute(item);
@@ -891,6 +904,13 @@ internal static partial class VulkanVideoPresenter
                 if (_cutting is not null && FlushCutting(slicesAhead, workers))
                 {
                     slicesAhead++;
+                    // Decide admission from the pure deferred prefix, exactly as for an ordinary
+                    // cut. The observation never reaches a worker or promotes a short run.
+                    if (item.Kind == Kind.Write || item.CarryableCall)
+                    {
+                        _units[^1].Item = item;
+                        continue;
+                    }
                 }
 
                 _units.Add(new Unit { Item = item });
@@ -1025,8 +1045,9 @@ internal static partial class VulkanVideoPresenter
 
             try
             {
-                while (_presenter.NextSegment(slice, betweenItems) is { } segment)
+                while (true)
                 {
+                    if (_presenter.NextSegment(slice, betweenItems) is not { } segment) break;
                     var end = segment.First + segment.Count;
                     var joinStarted = Stopwatch.GetTimestamp();
                     var joined = _presenter.JoinSegment(slice, segment);
