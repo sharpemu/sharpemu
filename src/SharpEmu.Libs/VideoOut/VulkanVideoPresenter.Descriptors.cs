@@ -2025,17 +2025,23 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        // Views for every image after the targets are bound; a stale image is found again first.
-        private void BindImages(PreparedStageBindings prepared)
+        private bool NeedsImageRebind(TextureResource binding) => !binding.IsHostMovie &&
+            (IsStaleImage(binding.ImageIdentifier, out _) || HoldsMovedStencilPlane(binding));
+
+        private bool ImageBindingsAreCurrent(TextureResource[] images)
+        {
+            foreach (var binding in images)
+                if (NeedsImageRebind(binding)) return false;
+            return true;
+        }
+
+        private int RefindStageImages(PreparedStageBindings prepared)
         {
             var program = prepared.Program;
             var info = prepared.Resources.Info;
             var snapshot = prepared.Stage.Resources;
             var images = prepared.Descriptors.Images;
-            var nulled = RefindStaleBindings(
-                images.Length,
-                index => !images[index].IsHostMovie &&
-                    (IsStaleImage(images[index].ImageIdentifier, out _) || HoldsMovedStencilPlane(images[index])),
+            return RefindStaleBindings(images.Length, index => NeedsImageRebind(images[index]),
                 (index, asNull) =>
                 {
                     if (_imageCache.TryGetImage(images[index].ImageIdentifier, out var stale))
@@ -2046,6 +2052,16 @@ internal static unsafe partial class VulkanVideoPresenter
                     images[index] = ResolveImageBinding(info.Images[index], asNull ? NullImageWords : snapshot.Images[index], program, index);
                     prepared.Memo?.Invalidate();
                 });
+        }
+
+        // Views for every image after the targets are bound; a stale image is found again first.
+        private void BindImages(PreparedStageBindings prepared)
+        {
+            var program = prepared.Program;
+            var info = prepared.Resources.Info;
+            var images = prepared.Descriptors.Images;
+            var current = ImageBindingsAreCurrent(images);
+            var nulled = current ? 0 : RefindStageImages(prepared);
             if (nulled != 0 && Interlocked.Increment(ref _nullRebindReports) <= 32)
             {
                 Console.Error.WriteLine($"[GPU][WARN] {nulled} image binding(s) of 0x{program.Hash:X16} kept losing their image to another binding over the same memory; they read as null images");
