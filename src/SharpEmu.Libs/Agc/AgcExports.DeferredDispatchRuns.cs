@@ -48,7 +48,7 @@ public static partial class AgcExports
             Resolved = 0;
             FrontendImageVersion = 0;
             Marks.Clear();
-            Reads.Clear();
+            Reads.ClearForPool();
             Done.Reset();
         }
     }

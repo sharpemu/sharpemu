@@ -9,6 +9,53 @@ namespace SharpEmu.Libs.Tests.Gpu.GpuCommands;
 
 public sealed class ResolveReadLogTests
 {
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void OversizedReadStorageRemainsValidUntilRetirement(bool compact)
+    {
+        var log = new ResolveReadLog(compact);
+        var initial = log.CapacityBytes;
+        log.Add(0x100, new byte[1 << 20], clean: true);
+        for (uint i = 0; i < 16384; i++) log.Add(0x200000UL + 8UL * i, i);
+        var highWater = log.CapacityBytes;
+        Assert.True(highWater > 1L << 20);
+        Assert.Equal(1 << 20, log.Bytes(0, out _).Length);
+        Assert.Equal(16385, log.Count);
+        // Clearing a still-owned log must retain its metadata for the next validation.
+        log.Clear();
+        var beforeReturn = log.CapacityBytes;
+        log.Add(0x100, new byte[1 << 20], clean: true);
+        log.ClearForPool();
+        Assert.Equal(compact ? initial : beforeReturn + (1 << 20) - 2048, log.CapacityBytes);
+        log.Add(7, 0x11223344);
+        Assert.Equal(new byte[] { 0x44, 0x33, 0x22, 0x11 }, log.Bytes(0, out var address).ToArray());
+        Assert.Equal(7UL, address);
+        Assert.Equal(1, log.Count);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void CopiesLiveReadsWithoutPropagatingTheTemplatesHighWaterMark(bool compact)
+    {
+        var template = new ResolveReadLog(false);
+        for (uint i = 0; i < 16384; i++) template.Add(i * 8UL, i);
+        template.Clear();
+        for (uint i = 0; i < 65; i++) template.Add(i * 8UL, i);
+        template.Add(0x1000, new byte[2049], clean: true);
+        var target = new ResolveReadLog(compact);
+        target.CopyFrom(template);
+        Assert.Equal(compact, target.CapacityBytes < template.CapacityBytes);
+        Assert.Equal(template.Count, target.Count);
+        for (var i = 0; i < target.Count; i++)
+        {
+            Assert.True(template.Bytes(i, out var source).SequenceEqual(target.Bytes(i, out var copied)));
+            Assert.Equal(source, copied);
+            Assert.Equal(template.IsClean(i), target.IsClean(i));
+        }
+    }
+
     [Fact]
     public void KeepsEveryReadWithItsAddressAndGrowsPastItsInitialCapacity()
     {

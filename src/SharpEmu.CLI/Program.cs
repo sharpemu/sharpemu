@@ -7,6 +7,7 @@ using SharpEmu.GnmMode;
 using SharpEmu.GUI;
 using SharpEmu.HLE;
 using SharpEmu.HLE.FileSystem;
+using SharpEmu.HLE.Diagnostics;
 using SharpEmu.HLE.Host.Windows;
 using SharpEmu.Libs.VideoOut;
 using SharpEmu.Logging;
@@ -34,10 +35,6 @@ internal static partial class Program
     private const int STARTF_USESTDHANDLES = 0x00000100;
     private const uint HANDLE_FLAG_INHERIT = 0x00000001;
     private const string MitigatedChildEnvironment = "SHARPEMU_MITIGATED_CHILD";
-    private const string YoungGenerationSizeEnvironment = "DOTNET_GCgen0size";
-    private const string YoungGenerationSize = "10000000";
-    private const string SurvivorGenerationBudgetEnvironment = "DOTNET_GCGen1MaxBudget";
-    private const string SurvivorGenerationBudget = "8000000";
     private static readonly (string Name, string Value)[] ServerGarbageCollector =
     [
         ("DOTNET_gcServer", "1"),
@@ -67,6 +64,8 @@ internal static partial class Program
             finally { SharpEmuLog.Shutdown(); }
         }
 
+        var startupGc = OperatingSystem.IsLinux() && args.Length > 0 ? LinuxGcEnvironment() : null;
+
         // Apply the game's settings file before anything reads the environment (the Vulkan
         // loader setup below, and backend settings cached in static fields). Keep the result
         // for RunEmulator so settings and relative paths are resolved once.
@@ -86,6 +85,12 @@ internal static partial class Program
         if (args.Length > 0 && args[0] == SharpEmu.Core.Diagnostics.WindowsCrashCapture.HelperArgument)
             return SharpEmu.Core.Diagnostics.WindowsCrashCapture.RunHelper(args);
 
+        if (startupGc is not null && _preparedLaunch is not null)
+        {
+            ApplyGcDefaults(gameLaunch: true);
+            if (!startupGc.SequenceEqual(LinuxGcEnvironment())) RelaunchWithGcEnvironment();
+        }
+
         RenderDocCapture.ApplyVulkanLoaderEnvironment();
         SharpEmu.Libs.VideoOut.RenderDocCapture.Initialize();
 
@@ -99,6 +104,49 @@ internal static partial class Program
             SharpEmuLog.Shutdown();
         }
     }
+
+    private static string[] LinuxGcEnvironment() => Environment.GetEnvironmentVariables()
+        .Cast<System.Collections.DictionaryEntry>()
+        .Where(entry => entry.Key is string key && (key.StartsWith("DOTNET_GC", StringComparison.OrdinalIgnoreCase) ||
+            key.StartsWith("COMPlus_GC", StringComparison.OrdinalIgnoreCase)))
+        .Select(entry => $"{entry.Key}={entry.Value}").Order(StringComparer.Ordinal).ToArray();
+
+    // exec preserves the supervisor PID, descriptors, signals and original dotnet/apphost arguments.
+    // The replacement CLR inherits game settings and GC defaults before it initializes.
+    private static unsafe void RelaunchWithGcEnvironment()
+    {
+        const string marker = "SHARPEMU_GC_LAUNCH_PID";
+        var pid = Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        if (Environment.GetEnvironmentVariable(marker) == pid) return;
+        Environment.SetEnvironmentVariable(marker, pid);
+        var command = File.ReadAllBytes("/proc/self/cmdline");
+        if (command.Length == 0 || command[^1] != 0) throw new IOException("Missing Linux process arguments.");
+        var argv = new nint[command.Count(value => value == 0) + 1];
+        var environment = Environment.GetEnvironmentVariables();
+        var envp = new nint[environment.Count + 1];
+        try
+        {
+            var index = 0;
+            foreach (System.Collections.DictionaryEntry item in environment)
+                envp[index++] = Marshal.StringToCoTaskMemUTF8($"{item.Key}={item.Value}");
+            fixed (byte* bytes = command)
+            fixed (nint* arguments = argv, variables = envp)
+            {
+                index = 0;
+                for (var i = 0; i < command.Length; i++)
+                    if (i == 0 || bytes[i - 1] == 0) argv[index++] = (nint)(bytes + i);
+                Execve("/proc/self/exe", arguments, variables);
+                throw new System.ComponentModel.Win32Exception(Marshal.GetLastPInvokeError(), "Cannot restart with the Linux GC environment");
+            }
+        }
+        finally
+        {
+            foreach (var value in envp) Marshal.FreeCoTaskMem(value);
+        }
+    }
+
+    [DllImport("libc", EntryPoint = "execve", SetLastError = true)]
+    private static extern unsafe int Execve(string executable, nint* arguments, nint* environment);
 
     private static void ConfigureManagedPluginResolution()
     {
@@ -119,6 +167,24 @@ internal static partial class Program
         };
     }
 
+    private static void ApplyGcDefaults(bool gameLaunch)
+    {
+        if (gameLaunch)
+        {
+            foreach (var (name, value) in GcFootprint.ChildDefaults())
+                Environment.SetEnvironmentVariable(name, value);
+        }
+
+        foreach (var (name, value) in ServerGarbageCollector)
+        {
+            if (Environment.GetEnvironmentVariable(name) is null &&
+                Environment.GetEnvironmentVariable("COMPlus_" + name["DOTNET_".Length..]) is null)
+            {
+                Environment.SetEnvironmentVariable(name, value);
+            }
+        }
+    }
+
     private static int Run(string[] args)
     {
         if (Updater.TryApply(args, out var updateExitCode))
@@ -127,23 +193,8 @@ internal static partial class Program
         }
 
         args = NormalizeInternalArguments(args, out var isMitigatedChild);
-        if (!isMitigatedChild && Environment.GetEnvironmentVariable(YoungGenerationSizeEnvironment) is null)
-        {
-            Environment.SetEnvironmentVariable(YoungGenerationSizeEnvironment, YoungGenerationSize);
-        }
-
-        if (!isMitigatedChild && Environment.GetEnvironmentVariable(SurvivorGenerationBudgetEnvironment) is null)
-        {
-            Environment.SetEnvironmentVariable(SurvivorGenerationBudgetEnvironment, SurvivorGenerationBudget);
-        }
-
-        foreach (var (name, value) in ServerGarbageCollector)
-        {
-            if (!isMitigatedChild && Environment.GetEnvironmentVariable(name) is null)
-            {
-                Environment.SetEnvironmentVariable(name, value);
-            }
-        }
+        if (!isMitigatedChild && !(OperatingSystem.IsLinux() && _preparedLaunch is not null))
+            ApplyGcDefaults(args.Length != 0);
 
         if (args.Length == 0)
         {

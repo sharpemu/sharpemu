@@ -6,6 +6,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
 using SharpEmu.HLE.Host.Windows;
+using SharpEmu.HLE.Diagnostics;
 
 namespace SharpEmu.GUI;
 
@@ -84,10 +85,17 @@ internal sealed class EmulatorProcess : IDisposable
             foreach (System.Collections.DictionaryEntry entry in Environment.GetEnvironmentVariables())
                 previous[(string)entry.Key] = (string?)entry.Value;
             IReadOnlyList<string> loaderVariables = [];
+            var gcDefaults = new List<string>();
             try
             {
                 foreach (var (name, value) in environment ?? new Dictionary<string, string?>())
                     Environment.SetEnvironmentVariable(name, value);
+                foreach (var (name, value) in GcFootprint.ChildDefaults())
+                {
+                    if (environment?.ContainsKey(name) == true) continue;
+                    gcDefaults.Add(name);
+                    Environment.SetEnvironmentVariable(name, value);
+                }
                 // SHARPEMU_VK_DISABLE_IMPLICITS also needs the Vulkan loader configured in the
                 // child's environment; undo those variables along with the game's own.
                 if (SharpEmu.Libs.VideoOut.RenderDocCapture.ApplyVulkanLoaderEnvironment())
@@ -97,7 +105,7 @@ internal sealed class EmulatorProcess : IDisposable
             }
             finally
             {
-                foreach (var name in (environment?.Keys ?? []).Concat(loaderVariables).Distinct(StringComparer.OrdinalIgnoreCase))
+                foreach (var name in (environment?.Keys ?? []).Concat(loaderVariables).Concat(gcDefaults).Distinct(StringComparer.OrdinalIgnoreCase))
                     Environment.SetEnvironmentVariable(name, previous.GetValueOrDefault(name));
             }
         }

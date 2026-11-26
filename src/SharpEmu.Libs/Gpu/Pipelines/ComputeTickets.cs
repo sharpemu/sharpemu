@@ -74,7 +74,7 @@ public sealed class ComputeTickets : IDisposable
             Program = null;
             Source = null;
             Refused = false;
-            Reads.Clear();
+            Reads.ClearForPool();
             State = 0;
         }
     }

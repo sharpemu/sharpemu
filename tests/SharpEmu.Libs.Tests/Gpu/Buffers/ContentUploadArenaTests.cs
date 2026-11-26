@@ -13,7 +13,6 @@ namespace SharpEmu.Libs.Tests.Gpu.Buffers;
 public sealed class ContentUploadArenaTests : IClassFixture<HeadlessVulkanFixture>
 {
     private const int ChunkBytes = 64 * 1024;
-    private const int ChunksPerArena = 32 * 1024 * 1024 / ChunkBytes;
 
     private readonly HeadlessVulkan? _vulkan;
 
@@ -41,8 +40,10 @@ public sealed class ContentUploadArenaTests : IClassFixture<HeadlessVulkanFixtur
         });
     }
 
-    [Fact]
-    public void AFullArenaRecyclesTheOtherOnlyAfterItsWorkCompleted()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AFullArenaRecyclesTheOtherOnlyAfterItsWorkCompleted(bool compact)
     {
         if (_vulkan is null) return;
         using var worker = new CacheWorker(_vulkan);
@@ -50,12 +51,14 @@ public sealed class ContentUploadArenaTests : IClassFixture<HeadlessVulkanFixtur
         {
             var scheduler = worker.Scheduler;
             scheduler.Begin(new SubmissionContext());
-            using var arena = new ContentUploadArena(_vulkan.DeviceInfo, scheduler);
+            using var arena = new ContentUploadArena(_vulkan.DeviceInfo, scheduler, compact);
+            var capacity = (compact ? 8L : 32L) << 20;
+            var chunksPerArena = capacity / ChunkBytes;
             var kept = Pattern(256, 7);
             Assert.True(arena.TryUpload(kept, 16, out var firstArena, out var keptOffset));
 
             var seed = 100;
-            for (var chunk = 1; chunk < ChunksPerArena; chunk++)
+            for (var chunk = 1; chunk < chunksPerArena; chunk++)
             {
                 Assert.True(arena.TryUpload(Pattern(ChunkBytes, seed++), 16, out _, out _));
             }
@@ -66,7 +69,7 @@ public sealed class ContentUploadArenaTests : IClassFixture<HeadlessVulkanFixtur
             Assert.Equal(firstArena.Handle, keptBuffer.Handle);
             Assert.Equal(keptOffset, keptAgain);
 
-            for (var chunk = 1; chunk < ChunksPerArena; chunk++)
+            for (var chunk = 1; chunk < chunksPerArena; chunk++)
             {
                 Assert.True(arena.TryUpload(Pattern(ChunkBytes, seed++), 16, out _, out _));
             }
@@ -80,6 +83,37 @@ public sealed class ContentUploadArenaTests : IClassFixture<HeadlessVulkanFixtur
             Assert.True(arena.TryUpload(kept, 16, out _, out var storedAgain));
             Assert.NotEqual(keptOffset, storedAgain);
             Assert.Equal(0UL, secondOffset);
+        });
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void ForgettingKeysKeepsOutstandingBytesAndLaterUploadsValid(bool compact)
+    {
+        if (_vulkan is null) return;
+        using var worker = new CacheWorker(_vulkan);
+        worker.Run(() =>
+        {
+            using var arena = new ContentUploadArena(_vulkan.DeviceInfo, worker.Scheduler, compact);
+            byte[] bytes = [255, 255, 255, 255];
+            uint[] words = [uint.MaxValue];
+            Assert.True(arena.TryUpload(bytes, 4, out var firstBuffer, out var hashOffset));
+            Assert.True(arena.TryUpload(words, 4, out _, out var identityOffset));
+            var scratch = new byte[4];
+            for (uint i = 0; i < 16384; i++)
+            {
+                BitConverter.TryWriteBytes(scratch, i);
+                Assert.True(arena.TryUpload(scratch, 4, out _, out _));
+                Assert.True(arena.TryUpload(new[] { i }, 4, out _, out _));
+            }
+            Assert.Equal(compact ? 1 : 16385, arena.IdentityKeys);
+            Assert.Equal(compact ? 1 : 16385, arena.HashKeys);
+            Assert.True(arena.TryUpload(bytes, 4, out var again, out var nextHash));
+            Assert.True(arena.TryUpload(words, 4, out _, out var nextIdentity));
+            Assert.Equal(firstBuffer, again);
+            Assert.Equal(!compact, nextHash == hashOffset);
+            Assert.Equal(!compact, nextIdentity == identityOffset);
         });
     }
 
