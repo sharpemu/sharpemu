@@ -3,12 +3,13 @@
 
 using System.Runtime.InteropServices;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Upscaling;
 using SharpEmu.Libs.Kernel;
 
 namespace SharpEmu.Libs.Psml;
 
-public static class PsmlExports
+public static partial class PsmlExports
 {
     private const ulong PhysicalBlockSize = 0x10000;
     private const ulong PhysicalBlockAlignment = 0x10000;
@@ -27,7 +28,8 @@ public static class PsmlExports
     private static int _dispatchesTraced;
     private static CaptureRequest? _capture;
 
-    private sealed record ContextState(uint Id, uint OutputWidth, uint OutputHeight, string Name);
+    private sealed record ContextState(uint Id, uint OutputWidth, uint OutputHeight, string Name,
+        ulong Mfsr2SharedResources = 0, ulong Mfsr2Block = 0, uint InputColorSpace = 0);
 
     private sealed class CaptureRequest(uint? contextId, int frames, string directory)
     {
@@ -173,15 +175,20 @@ public static class PsmlExports
         var handle = ctx[CpuRegister.Rdi];
         lock (Gate)
         {
-            if (Contexts.Remove(handle, out var state) && _capture is { } capture && capture.ContextId == state.Id)
-            {
-                capture.Remaining = 0;
-                FinishCaptureIfIdle(capture);
-            }
+            RemoveContextLocked(handle);
         }
 
         Trace($"release_context handle=0x{handle:X16}");
         return ctx.SetReturn(0);
+    }
+
+    private static void RemoveContextLocked(ulong handle)
+    {
+        if (Contexts.Remove(handle, out var state) && _capture is { } capture && capture.ContextId == state.Id)
+        {
+            capture.Remaining = 0;
+            FinishCaptureIfIdle(capture);
+        }
     }
 
     [SysAbiExport(
@@ -479,6 +486,12 @@ public static class PsmlExports
             ConvertDispatchParameters900(block);
         }
 
+        return WriteDispatchPacket(ctx, packetAddress, state, block, variant, SuperResolutionPacket.Dwords);
+    }
+
+    private static int WriteDispatchPacket(
+        CpuContext ctx, ulong packetAddress, ContextState? state, ReadOnlySpan<byte> block, string variant, int dwords)
+    {
         Span<uint> textures = stackalloc uint[SuperResolutionPacket.TextureCount * SuperResolutionPacket.TextureDwords];
         textures.Clear();
         var mask = 0u;
@@ -498,11 +511,16 @@ public static class PsmlExports
             }
             else
             {
+                if (variant == "MFSR2")
+                {
+                    return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                }
+
                 words.Clear();
             }
         }
 
-        Span<uint> packet = stackalloc uint[SuperResolutionPacket.Dwords];
+        Span<uint> packet = stackalloc uint[dwords];
         SuperResolutionPacket.Write(
             packet,
             state?.Id ?? 0,
@@ -512,6 +530,13 @@ public static class PsmlExports
             motionVectorsJittered: variant == "900",
             textures,
             block[SuperResolutionPacket.ParameterOffset..]);
+        var padding = packet[SuperResolutionPacket.Dwords..];
+        if (!padding.IsEmpty)
+        {
+            padding.Clear();
+            padding[0] = PacketHeader.Make((uint)padding.Length, PacketOpcode.Nop);
+        }
+
         if (!ctx.Memory.TryWrite(packetAddress, MemoryMarshal.AsBytes(packet)))
         {
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
