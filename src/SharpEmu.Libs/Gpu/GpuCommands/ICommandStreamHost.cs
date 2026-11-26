@@ -172,6 +172,12 @@ public interface ICommandStreamHost
     // host that runs the stream ahead of its recording returns only after the frame is recorded.
     void FlushFrame() => Flush();
 
+    // A run-ahead host may acknowledge this boundary from the renderer after an earlier flip
+    // capture. The queue can parse on while Done still enforces its configured frame lead.
+    bool TryDeferFrameBoundary(Action acknowledge) => false;
+
+    void WaitForPendingFlipCapture() { }
+
     void FlushAndWait();
 
     void SynchronizeGpu();

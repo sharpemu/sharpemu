@@ -108,6 +108,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             catch (Exception exception)
             {
+                AbortPendingFlipCaptures(exception);
                 RenderDocCapture.DiscardFrame();
                 // Device loss can strike between any two Vulkan calls in the frame;
                 // keep the window loop pumping instead of tearing the presenter down.

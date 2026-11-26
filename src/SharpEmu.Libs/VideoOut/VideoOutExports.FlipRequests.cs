@@ -46,6 +46,9 @@ public static partial class VideoOutExports
     }
 
     private static readonly Dictionary<ulong, FlipRequest> _flipRequests = new();
+    // Parser admission only. WaitFlipDone must see this buffer until capture accepts the
+    // request under the same lock. Guest video-out status is published by capture.
+    private static readonly Dictionary<ulong, (int Handle, int Index)> _unpublishedGpuFlips = new();
     private static ulong _nextFlipRequestId;
     private static long _discardedFlipCount;
 
@@ -77,6 +80,16 @@ public static partial class VideoOutExports
 
     internal static ICommandStreamFlipTarget HeadlessFlipTarget { get; } = new CommandStreamFlipTarget();
 
+    internal static ulong AllocateGpuFlipId(int handle, int bufferIndex)
+    {
+        lock (_stateGate)
+        {
+            var id = ++_nextFlipRequestId;
+            _unpublishedGpuFlips.Add(id, (handle, bufferIndex));
+            return id;
+        }
+    }
+
     // Validates the flip and takes its counters; returns a video-out error or zero.
     internal static int TryReserveFlipRequest(
         int handle,
@@ -84,7 +97,8 @@ public static partial class VideoOutExports
         int flipMode,
         long flipArg,
         bool gpuQueued,
-        out ulong requestId)
+        out ulong requestId,
+        ulong allocatedId = 0)
     {
         requestId = 0;
         if (bufferIndex < -1 || bufferIndex >= MaxDisplayBuffers)
@@ -95,6 +109,9 @@ public static partial class VideoOutExports
         FlipRequest request;
         lock (_stateGate)
         {
+            if (allocatedId != 0 && !_unpublishedGpuFlips.Remove(allocatedId))
+                throw new InvalidOperationException("The GPU flip was cancelled before capture.");
+
             if (!_ports.TryGetValue(handle, out var port))
             {
                 return OrbisVideoOutErrorInvalidHandle;
@@ -122,7 +139,7 @@ public static partial class VideoOutExports
             port.SubmitProcessTimeCounter = KernelRuntimeCompatExports.ReadProcessTimeCounter();
             request = new FlipRequest
             {
-                RequestId = ++_nextFlipRequestId,
+                RequestId = allocatedId != 0 ? allocatedId : ++_nextFlipRequestId,
                 Handle = handle,
                 BufferIndex = bufferIndex,
                 FlipMode = flipMode,
@@ -304,6 +321,7 @@ public static partial class VideoOutExports
     {
         lock (_stateGate)
         {
+            if (_unpublishedGpuFlips.ContainsValue((handle, bufferIndex))) return false;
             foreach (var request in _flipRequests.Values)
             {
                 if (request.Handle == handle && request.BufferIndex == bufferIndex && request.Outcome == FlipOutcome.Pending)
@@ -321,6 +339,7 @@ public static partial class VideoOutExports
     {
         lock (_stateGate)
         {
+            _unpublishedGpuFlips.Clear();
             foreach (var request in _flipRequests.Values.ToArray())
             {
                 CancelFlipLocked(request);
@@ -334,6 +353,7 @@ public static partial class VideoOutExports
     {
         lock (_stateGate)
         {
+            _unpublishedGpuFlips.Remove(requestId);
             if (_flipRequests.TryGetValue(requestId, out var request))
             {
                 CancelFlipLocked(request);
@@ -378,7 +398,7 @@ public static partial class VideoOutExports
         {
             lock (_stateGate)
             {
-                return _flipRequests.Count;
+                return _unpublishedGpuFlips.Count + _flipRequests.Count;
             }
         }
     }

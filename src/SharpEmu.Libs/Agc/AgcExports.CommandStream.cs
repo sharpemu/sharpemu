@@ -678,16 +678,31 @@ public static partial class AgcExports
         {
             var state = _gpuState.Graphics;
             TraceFramePacketSummary(state);
-            SyncCpuWrittenGuestImages(_context);
+            SyncFlipImages();
             if (_executor is { } executor)
             {
                 ReplayRetainedTargetlessDraw(executor, state, handle, displayBufferIndex);
             }
+            ResetFlipDrawState(state);
+        }
 
+        // The executor can replay a retained draw using the frame's target bindings. In that
+        // case the producer must stay parked until replay and capture have run together.
+        internal bool TryEndFrameBeforeCapture()
+        {
+            var state = _gpuState.Graphics;
+            if (_executor is not null && state.RetainedTargetlessDraw is not null) return false;
+            TraceFramePacketSummary(state);
+            ResetFlipDrawState(state);
+            return true;
+        }
 
+        internal void SyncFlipImages() => SyncCpuWrittenGuestImages(_context);
+
+        private static void ResetFlipDrawState(SubmittedDcbState state)
+        {
             state.SawIndexedDraw = false;
             state.GuestDrawKind = GuestDrawKind.None;
-
         }
     }
 

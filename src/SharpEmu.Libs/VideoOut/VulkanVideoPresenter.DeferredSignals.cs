@@ -323,6 +323,15 @@ internal static unsafe partial class VulkanVideoPresenter
         private void FailGuestPublications(Exception exception)
         {
             _guestPublications.Fail(exception);
+            HashSet<ulong>? uncaptured;
+            lock (_gate)
+            {
+                _flipCaptureFailure ??= exception;
+                uncaptured = _uncapturedGpuFlips;
+                _uncapturedGpuFlips = null;
+            }
+            if (uncaptured is not null)
+                foreach (var request in uncaptured) VideoOutExports.CancelFlip(request);
             if (_flipPublications is { } flips)
                 foreach (var request in flips.Keys)
                     if (flips.TryRemove(request, out _)) VideoOutExports.CancelFlip(request);

@@ -1215,6 +1215,8 @@ internal static partial class VulkanVideoPresenter
             }
         }
 
+        public void ReportFailure(Exception exception) => Interlocked.CompareExchange(ref _failure, exception, null);
+
         public void ThrowIfFailed()
         {
             if (_failure is { } failure)
