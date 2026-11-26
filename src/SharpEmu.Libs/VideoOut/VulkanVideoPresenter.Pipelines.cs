@@ -2183,7 +2183,8 @@ internal static unsafe partial class VulkanVideoPresenter
             PipelineCache cache,
             ShaderModule module,
             PipelineLayout layout,
-            uint requiredSubgroupSize)
+            uint requiredSubgroupSize,
+            bool prewarm = false)
         {
             var entryPoint = (byte*)SilkMarshal.StringToPtr("main");
             try
@@ -2208,7 +2209,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     Layout = layout,
                 };
                 var result = CreatePipelineWithBinaries(&pipelineInfo, &pipelineInfo.PNext, cache,
-                    &CreateComputePipelineCall, out var pipeline, out _);
+                    &CreateComputePipelineCall, out var pipeline, out _, prewarmCompute: prewarm);
                 if (result != Result.Success)
                 {
                     throw SubmissionScheduler.Fatal($"vkCreateComputePipelines(async) failed: {result}.");

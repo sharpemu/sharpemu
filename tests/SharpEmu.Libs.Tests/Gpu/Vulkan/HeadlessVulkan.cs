@@ -151,11 +151,11 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         }
     }
 
-    public static HeadlessVulkan? TryCreate()
+    public static HeadlessVulkan? TryCreate(bool pipelineBinaries = false)
     {
         try
         {
-            return Create();
+            return Create(pipelineBinaries);
         }
         catch (Exception)
         {
@@ -233,7 +233,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         }
     }
 
-    private static HeadlessVulkan? Create()
+    private static HeadlessVulkan? Create(bool pipelineBinaries)
     {
         var vk = Vk.GetApi();
         uint instanceVersion = Vk.Version10;
@@ -561,6 +561,25 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             vulkan13Features.PNext = &memoryPriority;
             extensionNames.Add(GpuResidency.PriorityExtension);
             extensionNames.Add(GpuResidency.PageableExtension);
+        }
+        var binary = new PhysicalDevicePipelineBinaryFeaturesKHR { SType = StructureType.PhysicalDevicePipelineBinaryFeaturesKhr };
+        var maintenance = new PhysicalDeviceMaintenance5FeaturesKHR { SType = StructureType.PhysicalDeviceMaintenance5FeaturesKhr, PNext = &binary };
+        if (pipelineBinaries)
+        {
+            string[] names = ["VK_KHR_pipeline_binary", "VK_KHR_maintenance5"];
+            if (HasDeviceExtensions(vk, physical, names))
+            {
+                var query = new PhysicalDeviceFeatures2 { SType = StructureType.PhysicalDeviceFeatures2, PNext = &maintenance };
+                vk.GetPhysicalDeviceFeatures2(physical, &query);
+            }
+            if (!binary.PipelineBinaries || !maintenance.Maintenance5)
+            {
+                vk.DestroyInstance(instance, null);
+                return null;
+            }
+            binary.PNext = vulkan13Features.PNext;
+            vulkan13Features.PNext = &maintenance;
+            extensionNames.AddRange(names);
         }
         var deviceExtensions = extensionNames.Count > 0 ? SilkMarshal.StringArrayToPtr(extensionNames.ToArray()) : 0;
         var deviceInfo = new DeviceCreateInfo

@@ -520,7 +520,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 var cache = ResolveGuestPipelineCache(linkedCache?.Cache);
                 var identity = VulkanPipelineCacheStorage.CompiledShaderIdentity(payload);
                 var requiredSubgroupSize = ComputeRequiredSubgroupSize(record.Info);
-                pipeline = CompileComputePipeline(_vk, _device, cache, module, pipelineLayout, requiredSubgroupSize);
+                pipeline = CompileComputePipeline(_vk, _device, cache, module, pipelineLayout, requiredSubgroupSize, prewarm: !linked);
                 created = true;
                 // A plain record's pipeline waits, with the layouts it was compiled with, for the session's request (a
                 // linked one goes: the session links the callees its own program kept). The handover owns what it took;
