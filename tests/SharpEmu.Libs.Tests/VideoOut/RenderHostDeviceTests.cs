@@ -847,6 +847,22 @@ public sealed unsafe partial class RenderHostDeviceTests : IClassFixture<Headles
         _vulkan.Vk.DestroyDescriptorSetLayout(_vulkan.Device, heap, null);
     }
 
+    [Fact]
+    public void RecordingDescriptorSetsRequireExactContentsLayoutAndRecording()
+    {
+        var cache = new SharpEmu.Libs.VideoOut.VulkanVideoPresenter.RecordingDescriptorSets();
+        ulong[] values = [7, 8, 9];
+        cache.Remember(1, values, new DescriptorSet(42));
+        values[1] = 12;
+        cache.Remember(1, values, new DescriptorSet(43));
+        Assert.True(cache.TryGet(1, [7, 8, 9], out var set));
+        Assert.Equal(42UL, set.Handle);
+        Assert.False(cache.TryGet(2, values, out _));
+        Assert.False(cache.TryGet(1, [7, 8, 10], out _));
+        cache.Clear();
+        Assert.False(cache.TryGet(1, values, out _));
+    }
+
     private delegate bool DescriptorsAlreadyBoundCall(CommandBuffer command, PipelineBindPoint bindPoint, PipelineLayout layout,
         ReadOnlySpan<WriteDescriptorSet> writes, uint setIndex);
 

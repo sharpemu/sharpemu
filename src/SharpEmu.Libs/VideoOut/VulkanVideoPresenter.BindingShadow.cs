@@ -14,6 +14,44 @@ internal static unsafe partial class VulkanVideoPresenter
     private static readonly bool NativeStateReuse =
         Environment.GetEnvironmentVariable("SHARPEMU_NATIVE_STATE_REUSE") != "0";
 
+    // Immutable allocated sets are eligible only while this command buffer recording owns them.
+    internal sealed class RecordingDescriptorSets
+    {
+        private readonly (ulong Layout, ulong[]? Key, int Length, DescriptorSet Set)[] _entries = new (ulong, ulong[]?, int, DescriptorSet)[8];
+        private int _count, _next;
+
+        internal void Clear() => _count = _next = 0;
+
+        internal bool TryGet(ulong layout, ReadOnlySpan<ulong> key, out DescriptorSet set)
+        {
+            for (var i = 0; i < _count; i++)
+            {
+                ref var entry = ref _entries[i];
+                if (layout == entry.Layout && entry.Length == key.Length && key.SequenceEqual(entry.Key.AsSpan(0, entry.Length)))
+                {
+                    set = entry.Set;
+                    return true;
+                }
+            }
+            set = default;
+            return false;
+        }
+
+        internal void Remember(ulong layout, ReadOnlySpan<ulong> key, DescriptorSet set)
+        {
+            if (key.Length > 512) return;
+            ref var entry = ref _entries[_next];
+            if (entry.Key is null || entry.Key.Length < key.Length)
+                entry.Key = new ulong[key.Length];
+            key.CopyTo(entry.Key);
+            entry.Layout = layout;
+            entry.Length = key.Length;
+            entry.Set = set;
+            _count = Math.Min(_entries.Length, _count + 1);
+            _next = (_next + 1) % _entries.Length;
+        }
+    }
+
     private sealed partial class RecordingHost
     {
         private const int ShadowVertexBufferCapacity = 32;
@@ -36,6 +74,8 @@ internal static unsafe partial class VulkanVideoPresenter
         private IndexType _shadowIndexType;
         private bool _shadowIndexValid;
         private ulong[]? _descriptorKeyScratch;
+        private int _descriptorKeyLength;
+        private RecordingDescriptorSets? _allocatedSets;
 
         private sealed class DescriptorShadow
         {
@@ -59,6 +99,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 return true;
             }
 
+            _allocatedSets?.Clear();
             _shadowCommand = command.Handle;
             _shadowTick = tick;
             _shadowEpoch = epoch;
@@ -233,6 +274,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
             }
 
+            _descriptorKeyLength = length;
             return length;
         }
 

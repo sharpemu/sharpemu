@@ -2177,6 +2177,15 @@ internal static unsafe partial class VulkanVideoPresenter
                     return;
                 }
 
+                var cache = NativeStateReuse ? _allocatedSets ??= new() : null;
+                var key = _descriptorKeyScratch.AsSpan(0, cache is null ? 0 : _descriptorKeyLength);
+                if (cache is not null && cache.TryGet(setLayout.Handle, key, out var previous))
+                {
+                    using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
+                        _vk.CmdBindDescriptorSets(command, bindPoint, layout, setIndex, 1, &previous, 0, null);
+                    return;
+                }
+
                 var set = _worker ? _sliceDescriptors!.Commit(setLayout, in demand) : _descriptorHeap.Commit(setLayout, in demand);
                 for (var index = 0; index < writes.Length; index++)
                 {
@@ -2184,6 +2193,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
 
                 _vk.UpdateDescriptorSets(_device, (uint)writes.Length, writePointer, 0, null);
+                cache?.Remember(setLayout.Handle, key, set);
                 using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.VulkanCommands))
                 {
                     _vk.CmdBindDescriptorSets(command, bindPoint, layout, setIndex, 1, &set, 0, null);
