@@ -377,6 +377,8 @@ internal static unsafe partial class VulkanVideoPresenter
         public List<SliceArenaChunk> Chunks = [];
         public List<DescriptorPool> DescriptorPools = [];
         public bool Submitted;
+        public bool WatchHead;
+        public long HeadWaitTicks;
         public bool Dispatched;
         public long DispatchedAt;
         public int Origin;
@@ -549,7 +551,12 @@ internal static unsafe partial class VulkanVideoPresenter
             Interlocked.Add(ref flip ? ref RoundTripTotals.FlipTicks : ref RoundTripTotals.ReadTicks, ticks);
         }
 
-        internal static void NoteJoin(long started) => _joinTicks.Add(System.Diagnostics.Stopwatch.GetTimestamp() - started);
+        internal static long NoteJoin(long started)
+        {
+            var ticks = System.Diagnostics.Stopwatch.GetTimestamp() - started;
+            _joinTicks.Add(ticks);
+            return ticks;
+        }
 
         internal static void NoteRestChunk(int items)
         {
@@ -617,6 +624,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var waited = System.Diagnostics.Stopwatch.GetTimestamp() - waitStarted - relayTicks;
+            if (slice.WatchHead && (spinner.Count != 0 || relayTicks != 0)) slice.HeadWaitTicks = waited;
             _sliceWaitTicks.Add(waited);
             _waitByOrigin[slice.Origin].Add(waited);
             return segment;

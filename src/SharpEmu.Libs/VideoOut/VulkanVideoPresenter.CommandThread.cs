@@ -111,6 +111,8 @@ internal static partial class VulkanVideoPresenter
         private readonly ICpuMemory _memory;
         private readonly List<Unit> _units = new();
         private int _unitHead;
+        private int _recentHeadMisses, _partnerSize;
+        private long _headJoinCost;
         private RenderSlice? _cutting;
         private readonly Action<AgcExports.DeferredWork> _runDeferred;
         private readonly Func<SliceResult> _runSlice;
@@ -821,6 +823,7 @@ internal static partial class VulkanVideoPresenter
                     _unitHead = 0;
                     if (_cutting is null)
                     {
+                        _partnerSize = 0;
                         ThrowIfFailed();
                         return ran;
                     }
@@ -899,16 +902,33 @@ internal static partial class VulkanVideoPresenter
                     (_cutting ??= new RenderSlice()).Items.Add(item);
                     // Give the first wave to separate workers. Once each lane has a slice, use full
                     // slices again to amortize validation, prologue recording and submission.
-                    var target = slicesAhead < workers ? waveSize : SliceItems;
-                    if (_cutting.Items.Count >= target)
+                    var target = _partnerSize != 0 ? _partnerSize : slicesAhead < workers ? waveSize : SliceItems;
+                    // With no older worker slice, a long run close to the execution cursor can
+                    // occupy one lane while the renderer waits for its entire first segment.
+                    // Observe comparable heads, then give the two halves to independent lanes.
+                    var half = target / 2;
+                    var split = false;
+                    if (_cutting.Items.Count == half && slicesAhead == 0 && workers > 1 &&
+                        _partnerSize == 0 &&
+                        _cutting.Items[0].Sequence - _executed - 1 < half)
+                    {
+                        _cutting.WatchHead = true;
+                        split = _recentHeadMisses != 0;
+                    }
+                    if (split || _cutting.Items.Count >= target)
                     {
                         CloseSlice();
+                        if (split)
+                        {
+                            _partnerSize = target - half;
+                        }
                         slicesAhead++;
                     }
 
                     continue;
                 }
 
+                _partnerSize = 0;
                 if (_cutting is not null && FlushCutting(slicesAhead, workers))
                 {
                     slicesAhead++;
@@ -994,6 +1014,7 @@ internal static partial class VulkanVideoPresenter
 
         private void SplitTail()
         {
+            _partnerSize = 0;
             var tail = _cutting!;
             _cutting = null;
             var chunks = (tail.Items.Count + RestChunkItems - 1) / RestChunkItems;
@@ -1012,6 +1033,7 @@ internal static partial class VulkanVideoPresenter
 
         private void CloseSlice()
         {
+            _partnerSize = 0;
             var slice = _cutting!;
             _cutting = null;
             _units.Add(new Unit { Slice = slice });
@@ -1030,6 +1052,7 @@ internal static partial class VulkanVideoPresenter
 
             if (slice.TryClaim())
             {
+                if (slice.WatchHead && slice.Origin == 0) NoteHeadWait(false);
                 var stolenInline = slice.Items.Count;
                 if (SplitStolenSlices && _presenter.SlicesEnabled && stolenInline >= RestInlineItems + MinimumSliceItems)
                 {
@@ -1057,13 +1080,24 @@ internal static partial class VulkanVideoPresenter
 
             try
             {
+                var watchHead = slice.WatchHead && slice.Origin == 0;
                 while (true)
                 {
-                    if (_presenter.NextSegment(slice, betweenItems) is not { } segment) break;
+                    if (_presenter.NextSegment(slice, betweenItems) is not { } segment)
+                    {
+                        if (watchHead) NoteHeadWait(false);
+                        break;
+                    }
                     var end = segment.First + segment.Count;
                     var joinStarted = Stopwatch.GetTimestamp();
                     var joined = _presenter.JoinSegment(slice, segment);
-                    Presenter.NoteJoin(joinStarted);
+                    var joinTicks = Presenter.NoteJoin(joinStarted);
+                    if (watchHead)
+                    {
+                        NoteHeadWait(joined && slice.HeadWaitTicks > _headJoinCost);
+                        if (joined) _headJoinCost = joinTicks;
+                        slice.WatchHead = watchHead = false;
+                    }
                     if (joined)
                     {
                         for (var position = segment.First; position < end; position++)
@@ -1130,6 +1164,10 @@ internal static partial class VulkanVideoPresenter
         }
 
         private static readonly bool SplitStolenSlices = Environment.GetEnvironmentVariable("SHARPEMU_SPLIT_STOLEN_SLICES") != "0";
+
+        // Two ready heads age out a miss, restoring the normal wave size.
+        private void NoteHeadWait(bool missed) =>
+            _recentHeadMisses = ((_recentHeadMisses << 1) | (missed ? 1 : 0)) & 3;
 
         private void QueueRestChunks(RenderSlice slice, int inline)
         {
