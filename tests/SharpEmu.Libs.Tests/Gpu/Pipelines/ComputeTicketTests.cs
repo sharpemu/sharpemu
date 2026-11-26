@@ -263,6 +263,10 @@ public sealed class ComputeTicketTests
         {
             Assert.Throws<SerialResolveRequiredException>(() => guest.Programs.TryGetProgram(
                 source, PipelineTestGuest.ComputeOptions(32), false, ref cursor, out _, out _, out _));
+            var entry = Assert.IsType<ProgramSourceEntry>(ShaderProgramCache.LastEntry);
+            var options = PipelineTestGuest.ComputeOptions(32);
+            bool TryRebind() => guest.Programs.TryGetProgramForEntry(entry, source, options, false, ref cursor, out _, out _, out _);
+            Assert.False(TryRebind());
         }
         finally
         {

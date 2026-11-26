@@ -461,7 +461,7 @@ public static partial class AgcExports
                 if (work.RepeatOf != 0 && work.RepeatOf == worker.TemplateSequence &&
                     worker.TemplateRegistrations == ShaderHeaderRegistry.Registrations && TryRepeat(worker, work))
                 {
-                    worker.TemplateSequence = work.Sequence;
+                    worker.TemplateSequence = work.SerialReason is null ? work.Sequence : -1;
                     return;
                 }
 
@@ -504,8 +504,12 @@ public static partial class AgcExports
                         return true;
                     }
                 }
-                catch (SerialResolveRequiredException)
+                catch (SerialResolveRequiredException serial)
                 {
+                    // The full worker resolve would read the same CPU arguments again.
+                    // Leave the item for the joiner's ordinary in-order fallback.
+                    work.SerialReason = serial.Message;
+                    return true;
                 }
                 finally
                 {

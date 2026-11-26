@@ -269,12 +269,16 @@ internal static unsafe partial class VulkanVideoPresenter
 
         // A held-back command write or label lands in guest memory only when its publication runs; a resource
         // read behind it in the command stream must see it, as the command processor's own reads do.
-        private void CompletePendingPublicationsForResourceRead(ulong address, ulong size)
+        private bool CompletePendingPublicationsForResourceRead(ulong address, ulong size)
         {
-            if (!HasPendingMemoryPublication(address, size)) return;
+            if (!HasPendingMemoryPublication(address, size)) return true;
             if (OnResolveWorker)
+            {
+                if (ResourceMaterializer.TryRefuseSpeculativeRead()) return false;
                 throw new Gpu.GpuCommands.SerialResolveRequiredException("pending publication read");
+            }
             CompleteOverlappingPublications(address, size);
+            return true;
         }
 
         public string DescribeCleanRead(ulong address) =>
@@ -282,33 +286,42 @@ internal static unsafe partial class VulkanVideoPresenter
             $"gpu_dirty_pages={_bufferCache.HasGpuDirtyPages(address, sizeof(uint))} image_modified={_imageCache.HasGpuModifiedImageBytes(address, sizeof(uint))} " +
             $"pending_publication={HasPendingMemoryPublication(address, sizeof(uint))} buffer={_bufferCache.IsRegionRegistered(address, sizeof(uint))}";
 
+        private bool RefuseResourceRead(string reason)
+        {
+            if (TryRefuseStrictRead()) return false;
+            return RefuseOnTicketWorker(reason);
+        }
+
+        private bool TryRefuseStrictRead() => ResourceMaterializer.SpeculativeReadActive && OnResolveWorker &&
+            (_resolveWorker!.Ticket || _resolveWorker.Strict) && ResourceMaterializer.TryRefuseSpeculativeRead();
+
         // Refused while a GPU buffer or image write may still own the range.
         public bool TryReadCleanGuestWord(ulong address, out uint word)
         {
             using var profile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.CleanGuestRead);
             word = 0;
-            CompletePendingPublicationsForResourceRead(address, sizeof(uint));
+            if (ResourceMaterializer.SpeculativeReadRefused || !CompletePendingPublicationsForResourceRead(address, sizeof(uint))) return false;
             if (!_guestMemory.CanRead(address, sizeof(uint)))
             {
-                return RefuseOnTicketWorker("unreadable");
+                return RefuseResourceRead("unreadable");
             }
 
             if (OnResolveWorker)
             {
                 if (IsGpuOwnedForWorkerCleanRead(address, sizeof(uint)))
                 {
-                    return RefuseOnTicketWorker("gpu owned");
+                    return RefuseResourceRead("gpu owned");
                 }
 
                 if (IsPendingForWorker(address, sizeof(uint)))
                 {
-                    return RefuseOnTicketWorker("pending");
+                    return RefuseResourceRead("pending");
                 }
 
                 Span<byte> cleanBytes = stackalloc byte[sizeof(uint)];
                 if (!_commandThread!.ReadOverlayBefore(address, cleanBytes, _resolveWorker!.Sequence))
                 {
-                    return RefuseOnTicketWorker("overlay");
+                    return RefuseResourceRead("overlay");
                 }
 
                 _resolveWorker.Reads.Add(address, cleanBytes, clean: true);
@@ -350,7 +363,10 @@ internal static unsafe partial class VulkanVideoPresenter
         private bool ReadWordOnResolveWorker(ulong address, out uint word)
         {
             Span<byte> bytes = stackalloc byte[sizeof(uint)];
-            if (!ReadOnResolveWorker(address, bytes))
+            var read = ResourceMaterializer.SpeculativeReadActive && (_resolveWorker!.Ticket || _resolveWorker.Strict)
+                ? !ResourceMaterializer.SpeculativeReadRefused && ReadResidentBytesOnResolveWorker(address, bytes, clean: false, scalar: true)
+                : ReadOnResolveWorker(address, bytes);
+            if (!read)
             {
                 word = 0;
                 return false;
@@ -362,11 +378,12 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private static readonly bool DirectPageReads = Environment.GetEnvironmentVariable("SHARPEMU_DIRECT_PAGE_READS") != "0";
 
-        private bool ReadResidentBytesOnResolveWorker(ulong address, Span<byte> destination, bool clean)
+        private bool ReadResidentBytesOnResolveWorker(ulong address, Span<byte> destination, bool clean, bool scalar = false)
         {
+            if (ResourceMaterializer.SpeculativeReadRefused) return false;
             var size = (ulong)destination.Length;
             var worker = _resolveWorker!;
-            if (!clean && DirectPageReads && TryGetCleanReadPage(address, size, out var directPage, out _) && directPage == worker.DirectPage &&
+            if (!scalar && !clean && DirectPageReads && TryGetCleanReadPage(address, size, out var directPage, out _) && directPage == worker.DirectPage &&
                 ReferenceEquals(_guestBacking.BackingAliasSnapshot, worker.DirectSnapshot) && _guestBacking.TryEnterBackingAliasAccess())
             {
                 try
@@ -382,17 +399,17 @@ internal static unsafe partial class VulkanVideoPresenter
                 return true;
             }
 
-            CompletePendingPublicationsForResourceRead(address, size);
+            if (!CompletePendingPublicationsForResourceRead(address, size)) return false;
             if (!clean && IsCleanReadPage(address, size) && TryReadAliasBytes(address, destination))
             {
                 worker.Reads.Add(address, destination);
-                RememberDirectPage(worker, address, size);
+                if (!scalar) RememberDirectPage(worker, address, size);
                 return true;
             }
 
             if (!_guestMemory.CanRead(address, size))
             {
-                return RefuseOnTicketWorker("unreadable");
+                return RefuseResourceRead("unreadable");
             }
 
             if (!clean && _commandThread!.TryReadShadowBefore(address, destination, worker.Sequence, out var shadowSequence, out var shadowSource))
@@ -400,9 +417,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 if ((_translation.PendingWrites is { } pending && pending.HasPendingBetween(address, size, shadowSequence, worker.Sequence)) ||
                     _commandThread.HasPendingRangeBetween(address, size, shadowSequence, worker.Sequence))
                 {
-                    return RefuseOnTicketWorker("shadowed pending");
+                    return RefuseResourceRead("shadowed pending");
                 }
 
+                if (TryRefuseStrictRead()) return false;
                 RefuseOnTicketWorker("shadow");
                 SharpEmu.Libs.Agc.AgcExports.NoteWorkerShadowRead((int)shadowSource);
                 return true;
@@ -410,17 +428,17 @@ internal static unsafe partial class VulkanVideoPresenter
 
             if (clean ? IsGpuOwnedForWorkerCleanRead(address, size) : IsGpuOwnedForWorkerRead(address, size))
             {
-                return RefuseOnTicketWorker("gpu owned");
+                return RefuseResourceRead("gpu owned");
             }
 
             if (IsPendingForWorker(address, size))
             {
-                return RefuseOnTicketWorker("pending");
+                return RefuseResourceRead("pending");
             }
 
             if (!_commandThread!.ReadOverlayBefore(address, destination, worker.Sequence))
             {
-                return RefuseOnTicketWorker("overlay");
+                return RefuseResourceRead("overlay");
             }
 
             worker.Reads.Add(address, destination, clean);

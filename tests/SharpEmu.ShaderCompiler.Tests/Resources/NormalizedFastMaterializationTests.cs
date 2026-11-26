@@ -9,6 +9,36 @@ namespace SharpEmu.ShaderCompiler.Tests.Resources;
 
 public sealed class NormalizedFastMaterializationTests
 {
+    [Fact]
+    public void RefusedWorkerReadDiscardsTheEvaluationBeforePublishing()
+    {
+        var plan = Extract(Program(MoveScalar(0, 4, 0x1000), MoveScalar(4, 5, 0),
+            ScalarLoad(8, 4, destination: 6), EndProgram(16)));
+        var nestedInputs = Inputs([], readMemory: (ulong address, out uint word) =>
+        {
+            word = 42;
+            return !ResourceMaterializer.TryRefuseSpeculativeRead();
+        });
+        var inputs = Inputs([], readMemory: (ulong address, out uint word) =>
+        {
+            var nested = new ResourceSnapshot();
+            var nestedSpecialization = new ResourceSpecialization();
+            Assert.True(ResourceMaterializer.MaterializeFast(plan, nestedInputs, ref nested, ref nestedSpecialization, out _));
+            Assert.Equal([42u], nested.FlattenedResourceTable);
+            word = 0x12345678;
+            return address == 0x1000 && !ResourceMaterializer.TryRefuseSpeculativeRead();
+        });
+        var original = new ResourceSnapshot();
+        var snapshot = original;
+        var specialization = new ResourceSpecialization();
+        Assert.False(ResourceMaterializer.MaterializeFast(plan, inputs, ref snapshot, ref specialization, out _, true, out var refused));
+        Assert.True(refused);
+        Assert.Same(original, snapshot);
+        Assert.False(ResourceMaterializer.TryRefuseSpeculativeRead());
+        Assert.True(ResourceMaterializer.MaterializeFast(plan, inputs, ref snapshot, ref specialization, out _));
+        Assert.Equal([0x12345678u], snapshot.FlattenedResourceTable);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

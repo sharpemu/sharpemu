@@ -567,14 +567,22 @@ internal sealed partial class ShaderProgramCache
 
     internal static ProgramSourceEntry? LastEntry => _lastEntry;
 
+    private static ShaderProgram RefuseProgram(out ShaderStageResources stage, out bool refused)
+    {
+        refused = true;
+        stage = default;
+        return default;
+    }
+
     internal bool TryGetProgramForEntry(ProgramSourceEntry entry, ShaderSource source, StageCompileOptions options, bool strictShaders,
         ref uint pushDataCursor, out ShaderProgram program, out ShaderStageResources stage, out string rejection)
     {
         rejection = string.Empty;
         try
         {
-            program = CompleteProgram(entry, sourceWasCached: true, key: null, source, options, ref pushDataCursor, out stage, DeferLinking);
-            return true;
+            program = CompleteProgram(entry, sourceWasCached: true, key: null, source, options, ref pushDataCursor, out stage,
+                DeferLinking, _speculative, out var refused);
+            return !refused;
         }
         catch (ShaderProgramPendingException)
         {
@@ -588,7 +596,8 @@ internal sealed partial class ShaderProgramCache
             {
                 if (_speculative)
                 {
-                    throw new GpuCommands.SerialResolveRequiredException("speculative strict rejection");
+                    program = RefuseProgram(out stage, out _);
+                    return false;
                 }
 
                 throw SubmissionScheduler.Fatal(exception.Message);
@@ -648,7 +657,8 @@ internal sealed partial class ShaderProgramCache
             }
         }
 
-        return CompleteProgram(entry, sourceWasCached, key, source, options, ref pushDataCursor, out stage, deferLinking, runtimeFallback, preparation);
+        return CompleteProgram(entry, sourceWasCached, key, source, options, ref pushDataCursor, out stage, deferLinking,
+            false, out _, runtimeFallback, preparation);
     }
 
     // The entry of this source and static state, or null; a key whose plan was rejected throws its rejection again.
@@ -673,9 +683,10 @@ internal sealed partial class ShaderProgramCache
     }
 
     private ShaderProgram CompleteProgram(ProgramSourceEntry entry, bool sourceWasCached, ProgramKey? key, ShaderSource source, StageCompileOptions options,
-        ref uint pushDataCursor, out ShaderStageResources stage, bool deferLinking, ProgramSourceEntry? runtimeFallback = null,
+        ref uint pushDataCursor, out ShaderStageResources stage, bool deferLinking, bool canRefuse, out bool refused, ProgramSourceEntry? runtimeFallback = null,
         CallDispatchPreparation? preparation = null)
     {
+        refused = false;
         if (runtimeFallback is null)
         {
             _lastEntry = entry;
@@ -700,6 +711,7 @@ internal sealed partial class ShaderProgramCache
         {
             if (_speculative)
             {
+                if (canRefuse) return RefuseProgram(out stage, out refused);
                 throw new GpuCommands.SerialResolveRequiredException("speculative device record fallback");
             }
 
@@ -715,6 +727,7 @@ internal sealed partial class ShaderProgramCache
         var hasShaderCalls = entry.HasShaderCalls;
         if (hasShaderCalls && _speculative)
         {
+            if (canRefuse) return RefuseProgram(out stage, out refused);
             throw new GpuCommands.SerialResolveRequiredException("speculative shader calls");
         }
 
@@ -743,7 +756,9 @@ internal sealed partial class ShaderProgramCache
                 MaterializationTally.Outcome outcome;
                 if (captureIndirectImageFailure is null && ResourceMaterializer.CanMaterializeFast(entry.Plan))
                 {
-                    materialized = ResourceMaterializer.MaterializeFast(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure);
+                    materialized = ResourceMaterializer.MaterializeFast(entry.Plan, inputs, ref snapshot, ref specialization, out materializationFailure,
+                        canRefuse, out var readRefused);
+                    if (readRefused) return RefuseProgram(out stage, out refused);
                     outcome = ResourceMaterializer.LastFastOutcome;
                 }
                 else if (Materializations is { } materializations && captureIndirectImageFailure is null)
@@ -790,6 +805,7 @@ internal sealed partial class ShaderProgramCache
                 {
                     if (_speculative)
                     {
+                        if (canRefuse) return RefuseProgram(out stage, out refused);
                         throw new GpuCommands.SerialResolveRequiredException("speculative materialization failure");
                     }
 
@@ -1007,7 +1023,10 @@ internal sealed partial class ShaderProgramCache
             if (runtimeFallback is not null)
                 throw new ShaderProgramPendingException();
             if (_speculative)
+            {
+                if (canRefuse) return RefuseProgram(out stage, out refused);
                 throw new GpuCommands.SerialResolveRequiredException("speculative permutation compile");
+            }
             try
             {
                 permutation = MakePermutation(source, options, entry, specialization, pushDataCursor, key, sourceWasCached, snapshot,
