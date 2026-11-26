@@ -68,6 +68,14 @@ public sealed unsafe partial class CachedImage
         var partial = range is { } window &&
                       (window.BaseLevel != 0 || window.LevelCount != levels || window.BaseLayer != 0 || window.LayerCount != layers);
         var states = Backing.SubresourceStates;
+        // A valid slice of an already uniform sampled image has the same state before and after the read.
+        if (partial && states is null && range is { } read &&
+            read.LevelCount != 0 && read.BaseLevel < levels && read.LevelCount <= levels - read.BaseLevel &&
+            read.LayerCount != 0 && read.BaseLayer < layers && read.LayerCount <= layers - read.BaseLayer &&
+            access == AccessFlags.ShaderReadBit && Backing.State == new ImageAccessState(stage, access, ReadyLayout, guest))
+        {
+            return (NoBarriers, sourceStages);
+        }
         if (partial || states != null)
         {
             if (states == null)

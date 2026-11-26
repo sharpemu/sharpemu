@@ -18,6 +18,23 @@ public sealed unsafe class CachedImageTests : IClassFixture<HeadlessVulkanFixtur
 
     public CachedImageTests(HeadlessVulkanFixture fixture) => _vulkan = fixture.Vulkan;
 
+    [Fact]
+    public void UniformPartialReadPreservesTheOtherMipsAndOrdersTheNextWrite()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        using var image = new CachedImage(harness.Device, harness.Scheduler, harness.Guest, Color2D(16, 16, levels: 3));
+        var stage = PipelineStageFlags.ComputeShaderBit;
+        var read = AccessFlags.ShaderReadBit;
+        Assert.Single(image.GetBarriers(read, stage, null).Barriers);
+        var one = new SubresourceRange(1, 1, 0, 1);
+        Assert.Empty(image.GetBarriers(read, stage, one).Barriers);
+        Assert.True(image.Backing.SubresourceStates is null);
+        Assert.Single(image.GetBarriers(AccessFlags.TransferWriteBit, PipelineStageFlags.TransferBit, one).Barriers);
+        Assert.Empty(image.GetBarriers(read, stage, new SubresourceRange(0, 1, 0, 1)).Barriers);
+        Assert.Single(image.GetBarriers(read, stage, one).Barriers);
+    }
+
     internal static ImageDescription Color2D(uint width, uint height, uint levels = 1, uint layers = 1, ulong address = ArrayBackedSpace.Base, Format format = Format.R8G8B8A8Unorm)
     {
         var description = ImageDescription.Create();
