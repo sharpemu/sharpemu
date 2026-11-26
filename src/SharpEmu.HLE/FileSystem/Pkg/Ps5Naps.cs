@@ -63,10 +63,6 @@ internal sealed class Ps5Naps
     // File-offset kind of the terminal mount-size entry and of sparse regions.
     public const byte KindMount = 0x40;
 
-    // Largest inner image accepted. Sparse regions cost no stored bytes, so a forged mount size
-    // would otherwise make the reader build one 256 KiB block record per step of a huge image.
-    public const long MaxMountSize = 512L << 30;
-
     private Ps5Naps(NapsCounts counts, NapsFileOffset[] fileOffsets, List<NapsCandidate> candidates)
     {
         Counts = counts;
@@ -102,10 +98,6 @@ internal sealed class Ps5Naps
             }
 
             fileOffsets[i] = new NapsFileOffset(blob[at + 5], offset);
-            if (fileOffsets[i].Kind == KindMount && offset > MaxMountSize)
-            {
-                throw new InvalidDataException($"The NAPS mount size 0x{offset:X} is implausibly large.");
-            }
         }
 
         var fileOffsetsEnd = pos + fileCount * FileOffsetStride;
