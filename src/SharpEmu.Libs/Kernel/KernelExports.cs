@@ -543,6 +543,15 @@ public static class KernelExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    // The hardware query is the same question under another NID; both answer "not Trinity" on the
+    // base console this backend emulates.
+    [SysAbiExport(
+    Nid = "yu17wG8L5FI",
+    ExportName = "sceKernelIsTrinityHardware",
+    Target = Generation.Gen4 | Generation.Gen5,
+    LibraryName = "libKernel")]
+    public static int KernelIsTrinityHardware(CpuContext ctx) => KernelIsTrinityMode(ctx);
+
     [SysAbiExport(
     Nid = "DLORcroUqbc",
     ExportName = "sceKernelGetOpenPsId",

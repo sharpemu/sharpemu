@@ -462,6 +462,24 @@ public static partial class VideoOutExports
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
+    // The global blend space names how the host composites the output; the swapchain keeps its own
+    // composition, so only the handle is validated and the setting is accepted.
+    [SysAbiExport(
+        Nid = "pA8xxaySl7A",
+        ExportName = "sceVideoOutSetGlobalBlendSpace",
+        Target = Generation.Gen5,
+        LibraryName = "libSceVideoOut")]
+    public static int VideoOutSetGlobalBlendSpace(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        if (!TryGetPort(handle, out _))
+        {
+            return OrbisVideoOutErrorInvalidHandle;
+        }
+
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
     [SysAbiExport(
         Nid = "w0hLuNarQxY",
         ExportName = "sceVideoOutConfigureOutput",
