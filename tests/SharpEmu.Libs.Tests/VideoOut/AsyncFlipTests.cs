@@ -130,7 +130,7 @@ public sealed class AsyncFlipTests(HeadlessVulkanFixture fixture) : IClassFixtur
                 stream.Interpreter.SubmitFlip();
             }, waiting =>
             {
-                Assert.Equal(orderedPublication, waiting);
+                Assert.False(waiting);
                 Assert.Equal(before, ReadSubmitTime(0));
                 cpu[CpuRegister.Rdi] = queue;
                 cpu[CpuRegister.Rsi] = (ulong)stream.Handle;
@@ -283,23 +283,159 @@ public sealed class AsyncFlipTests(HeadlessVulkanFixture fixture) : IClassFixtur
         Assert.Equal(baseline, VideoOutExports.PendingFlipRequestCount);
     }
 
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public void PendingPublicationAndRetainedReplayBothRendezvousBeforeParsingOn(bool pending)
+    [Fact]
+    public void RetainedReplayRendezvousBeforeParsingOn()
     {
         if (!GatePrerequisites.Ready(fixture.Vulkan)) return;
         using var stream = new FlipStream(fixture.Vulkan!);
-        var publications = stream.Presenter.GetField<PendingGuestPublications>("_guestPublications");
-        var older = pending ? publications.AddOrdering(0) : null;
-        if (older is not null) publications.Register(older, stream.Presenter.Harness.Scheduler.CurrentTick);
         stream.Run(() =>
         {
-            if (!pending) Assert.True(stream.Translation.TryRetainTargetlessDraw(stream.Interpreter.TypedRegisters, default));
+            Assert.True(stream.Translation.TryRetainTargetlessDraw(stream.Interpreter.TypedRegisters, default));
             stream.Interpreter.SetFlip(new(stream.Handle, -1, 0, 11));
             stream.Interpreter.SubmitFlip();
         }, waiting => Assert.True(waiting));
-        if (older is not null) publications.Publish(older, static () => { });
+        Assert.True(stream.Host.IsFlipDone(stream.Handle, -1));
+    }
+
+    [Theory]
+    [InlineData(0, false, false)]
+    [InlineData(0, true, false)]
+    [InlineData(1, false, false)]
+    [InlineData(1, true, false)]
+    [InlineData(2, false, false)]
+    [InlineData(2, true, false)]
+    [InlineData(2, true, true)]
+    public void FlipChoosesItsPublicationAtCapture(int kind, bool retireBefore, bool requireGpu)
+    {
+        if (!GatePrerequisites.Ready(fixture.Vulkan)) return;
+        using var stream = new FlipStream(fixture.Vulkan!);
+        using var surface = new FlipSurface(stream);
+        var publications = stream.Presenter.GetField<PendingGuestPublications>("_guestPublications");
+        var older = publications.AddOrdering(0); // May still be unregistered when the parser sees the flip.
+        var memory = stream.Presenter.Harness;
+        var label = memory.MapBacked(0x10000, GuestPageProtection.Read | GuestPageProtection.Write);
+        const uint value = 42;
+        var captured = false;
+        var interrupts = 0;
+        stream.Interpreter.CompletionLabelsRequireGpu = requireGpu;
+        var gate = default(PendingGuestPublications.Entry);
+        stream.Presenter.SetField("FlipCaptureStartedForTest", (Action)(() =>
+        {
+            captured = true;
+            gate = stream.Presenter.GetField<PendingGuestPublications.Entry?>("_capturePublication");
+            Assert.Equal(retireBefore, gate is null);
+            Assert.Equal(0u, BitConverter.ToUInt32(memory.Read(label, 4)));
+            if (!retireBefore) publications.Publish(older, static () => { });
+        }));
+        stream.Interrupt = () =>
+        {
+            Assert.True(captured);
+            Assert.Equal(value, BitConverter.ToUInt32(memory.Read(label, 4)));
+            Assert.False(gate?.Completed ?? false);
+            interrupts++;
+        };
+        stream.Run(() =>
+        {
+            stream.Interpreter.SetFlip(new(stream.Handle, 0, 0, 11));
+            if (kind == 0) stream.Interpreter.SubmitFlip();
+            else if (kind == 1) stream.Interpreter.SubmitFlipWithLabel(label, value);
+            else stream.Interpreter.SubmitFlipWithInterrupt(4, 0x38, label, value);
+            stream.Host.DrawIndexed(2, default);
+        }, waiting =>
+        {
+            Assert.False(waiting);
+            Assert.False(captured);
+            Assert.True(stream.SawIndexedDraw);
+            publications.Register(older, memory.Scheduler.CurrentTick);
+            if (retireBefore) publications.Publish(older, static () => { });
+        });
+        Assert.True(captured);
+        Assert.True(stream.SawIndexedDraw);
+        Assert.Equal(0, publications.Count);
+        Assert.Equal(kind == 2 ? 1 : 0, interrupts);
+        Assert.Equal(kind == 0 ? 0u : value, BitConverter.ToUInt32(memory.Read(label, 4)));
+        Assert.Equal(!retireBefore, gate?.Completed ?? false);
+        Assert.Same(gate, surface.PeekPublication());
+        Assert.False(stream.Host.IsFlipDone(stream.Handle, 0));
+        VideoOutExports.MarkFlipPresented(surface.Dequeue());
+        Assert.True(stream.Host.IsFlipDone(stream.Handle, 0));
+        if (kind == 0) return;
+
+        // The guest resets the live dword. A paired wait can still use an immediate
+        // store, while a label published at GPU completion has no own-write hint.
+        Assert.True(memory.Memory.TryWrite(label, new byte[4]));
+        var execution = new PacketCursorStack();
+        var active = typeof(GpuCommandInterpreter).GetField("_execution", PresenterUnderTest.InstanceMembers)!;
+        active.SetValue(stream.Interpreter, execution);
+        try { stream.Presenter.Run(() => stream.Interpreter.WaitOnMemory(3, label, value, uint.MaxValue, 0, false)); }
+        finally { active.SetValue(stream.Interpreter, null); }
+        Assert.Equal(!retireBefore || requireGpu, execution.Suspended);
+    }
+
+    [Fact]
+    public void CaptureFailureDropsTheReservedPublicationAndItsInterrupt()
+    {
+        if (!GatePrerequisites.Ready(fixture.Vulkan)) return;
+        using var stream = new FlipStream(fixture.Vulkan!);
+        var memory = stream.Presenter.Harness;
+        var label = memory.MapBacked(0x10000, GuestPageProtection.Read | GuestPageProtection.Write);
+        var publications = stream.Presenter.GetField<PendingGuestPublications>("_guestPublications");
+        var older = publications.AddOrdering(0);
+        publications.Register(older, memory.Scheduler.CurrentTick);
+        stream.Slot.GetType().GetProperty("GroupIndex")!.SetValue(stream.Slot, 0);
+        var before = VideoOutExports.PendingFlipRequestCount;
+        var interrupts = 0;
+        stream.Interrupt = () => interrupts++;
+        var failure = Record.Exception(() => stream.Run(() =>
+        {
+            stream.Interpreter.SetFlip(new(stream.Handle, 0, 0, 9));
+            stream.Interpreter.SubmitFlipWithInterrupt(4, 0x38, label, 7);
+        }, waiting => Assert.False(waiting)));
+        Assert.Contains("display buffer that is not registered", Assert.IsType<SchedulerFatalException>(failure).Message);
+        Assert.Equal(0, publications.Count);
+        Assert.Equal(0, interrupts);
+        Assert.Equal(0u, BitConverter.ToUInt32(memory.Read(label, 4)));
+        Assert.Equal(before, VideoOutExports.PendingFlipRequestCount);
+        Assert.True(stream.Host.HasFlipSlot());
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void NextLabelAndInterruptObserveTheFlipDecision(bool retireBefore)
+    {
+        if (!GatePrerequisites.Ready(fixture.Vulkan)) return;
+        using var stream = new FlipStream(fixture.Vulkan!);
+        var memory = stream.Presenter.Harness;
+        var label = memory.MapBacked(0x10000, GuestPageProtection.Read | GuestPageProtection.Write);
+        var publications = stream.Presenter.GetField<PendingGuestPublications>("_guestPublications");
+        var older = publications.AddOrdering(0);
+        publications.Register(older, memory.Scheduler.CurrentTick);
+        var passedFlip = false;
+        var signals = new List<uint>();
+        stream.Interrupt = () => signals.Add(BitConverter.ToUInt32(memory.Read(label, 4)));
+        if (!retireBefore)
+            stream.Presenter.SetField("FlipCaptureStartedForTest", (Action)(() => publications.Publish(older, static () => { })));
+        stream.Run(() =>
+        {
+            stream.Interpreter.SetFlip(new(stream.Handle, -1, 0, 8));
+            stream.Interpreter.SubmitFlip();
+            passedFlip = true;
+            var next = new EndOfPipeWrite(EndOfPipeWriteKind.InterruptWriteBack32, 1, label, 17, 3);
+            if (!stream.Host.TryDeferEndOfPipe(0, next))
+            {
+                stream.Interpreter.WriteDword(label, 17);
+                stream.Host.RecordEndOfPipe(next);
+            }
+            stream.Host.Flush();
+        }, waiting =>
+        {
+            Assert.True(waiting);
+            Assert.True(passedFlip);
+            Assert.Empty(signals);
+            if (retireBefore) publications.Publish(older, static () => { });
+        });
+        Assert.Equal(new uint[] { 17 }, signals);
         Assert.Equal(0, publications.Count);
         Assert.True(stream.Host.IsFlipDone(stream.Handle, -1));
     }
@@ -397,6 +533,12 @@ public sealed class AsyncFlipTests(HeadlessVulkanFixture fixture) : IClassFixtur
             _snapshots = (IDictionary)Activator.CreateInstance(versions.FieldType)!;
             stream.Presenter.SetField("_guestImageVersions", _snapshots);
             stream.Presenter.SetField("_flipSnapshotPoolGate", new object());
+        }
+
+        internal PendingGuestPublications.Entry? PeekPublication()
+        {
+            var frame = _queue.GetType().GetMethod("Peek")!.Invoke(_queue, null)!;
+            return (PendingGuestPublications.Entry?)frame.GetType().GetProperty("Publication")!.GetValue(frame);
         }
 
         internal ulong Dequeue()

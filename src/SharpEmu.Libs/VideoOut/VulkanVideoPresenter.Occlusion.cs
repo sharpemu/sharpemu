@@ -18,7 +18,11 @@ internal static unsafe partial class VulkanVideoPresenter
     {
         private readonly PendingGuestPublications _guestPublications = new();
 
-        public bool HasPendingPublications(int queueId) => _guestPublications.HasQueue(queueId);
+        public bool HasPendingPublications(int queueId)
+        {
+            SettleFlipDecision(queueId);
+            return _guestPublications.HasQueue(queueId);
+        }
 
         private static readonly bool OcclusionGpuDumps = !string.Equals(
             Environment.GetEnvironmentVariable("SHARPEMU_OCCLUSION_GPU_DUMPS"), "0", StringComparison.Ordinal);

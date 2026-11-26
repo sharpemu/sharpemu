@@ -48,6 +48,7 @@ public sealed partial class GpuCommandInterpreter
     private ulong _lastWriteValue;
     private int _lastWriteLength;
     private ulong _lastWritePacket;
+    private Func<bool>? _lastWriteIsImmediate;
     // SHARPEMU_END_OF_PIPE_SOFT_WAITS: the packet whose passed wait waits softly for a release, whether the last slice
     // stopped for it, and the address of the packet whose handler runs now.
     private SoftWait? _softWait;
@@ -326,7 +327,7 @@ public sealed partial class GpuCommandInterpreter
     {
         value = 0;
         if (address != _lastWriteAddress || _packetSerial - _lastWritePacket > 2 ||
-            _lastWriteLength < (is64Bit ? sizeof(ulong) : sizeof(uint)))
+            _lastWriteLength < (is64Bit ? sizeof(ulong) : sizeof(uint)) || _lastWriteIsImmediate?.Invoke() == false)
         {
             return false;
         }
@@ -921,6 +922,7 @@ public sealed partial class GpuCommandInterpreter
                 : BinaryPrimitives.ReadUInt64LittleEndian(source);
             _lastWriteLength = source.Length;
             _lastWritePacket = _packetSerial;
+            _lastWriteIsImmediate = null;
         }
         if (ImageClearTrace.Enabled) _host.TraceGuestWrite($"command-write-{caller}", address, (ulong)source.Length);
     }

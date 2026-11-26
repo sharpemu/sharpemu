@@ -1193,7 +1193,7 @@ internal static unsafe partial class VulkanVideoPresenter
             finally { _capturePublication = null; }
         }
 
-        private ulong PostGpuFlip(int handle, int index, int flipMode, long flipArgument)
+        private ulong PostGpuFlip(int handle, int index, int flipMode, long flipArgument, FlipPublicationDecision? decision = null)
         {
             ulong request = 0;
             try
@@ -1206,7 +1206,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         throw new InvalidOperationException("GPU flip capture has failed.", failure);
                     (_uncapturedGpuFlips ??= new()).Add(request);
                 }
-                _commandThread!.Post(() => CaptureReservedFlip(handle, index, flipMode, flipArgument, request));
+                _commandThread!.Post(() => CaptureReservedFlip(handle, index, flipMode, flipArgument, request, decision));
                 _lastAsyncFlipSequence = _commandThread.NextSequence - 1;
                 return request;
             }
@@ -1218,15 +1218,14 @@ internal static unsafe partial class VulkanVideoPresenter
             }
         }
 
-        private void CaptureReservedFlip(int handle, int index, int flipMode, long flipArgument, ulong request)
+        private void CaptureReservedFlip(int handle, int index, int flipMode, long flipArgument, ulong request, FlipPublicationDecision? decision)
         {
             try
             {
-                // At admission this queue had no pending publication. Entries for following
-                // packets can already exist, but register only on this thread after this item.
                 _commandThread!.ThrowIfFailed();
                 EnsureBatchedGuestCommands();
-                PublishAndCaptureGpuFlip(handle, index, request, flipMode, flipArgument);
+                if (decision is not null) CaptureAndPublishFlip(decision, request);
+                else PublishAndCaptureGpuFlip(handle, index, request, flipMode, flipArgument);
                 // No-buffer and lost-device captures do not enqueue a presentation.
                 lock (_gate) _uncapturedGpuFlips?.Remove(request);
             }
