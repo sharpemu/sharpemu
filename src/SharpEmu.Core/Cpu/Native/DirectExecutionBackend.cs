@@ -7355,7 +7355,8 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			return nid is
 				"Op8TBGY5KHg" or // pthread_cond_wait
 				"27bAgiJmOh0" or // pthread_cond_timedwait
-				"fzyMKs9kim0";   // sceKernelWaitEqueue
+				"fzyMKs9kim0" or // sceKernelWaitEqueue
+				"Vo5V8KAwCmk";   // sceSystemServiceHideSplashScreen: held while the shader prewarm runs
 		}
 
 		return false;
