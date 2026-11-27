@@ -1421,6 +1421,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
+            if (entry.OptimizedCompute is { IsCompleted: true })
+            {
+                _presenter.PromoteOptimizedComputePipeline(entry);
+            }
+
             BindPipelineShadowed(command, bindPoint, entry.Pipeline);
             _profileComputePipeline = entry.Id;
         }
