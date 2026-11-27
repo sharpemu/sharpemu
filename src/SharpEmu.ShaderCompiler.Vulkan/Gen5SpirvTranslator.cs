@@ -7102,7 +7102,7 @@ public static partial class Gen5SpirvTranslator
                     goto GatherComplete;
                 }
 
-                if (instruction.Opcode == "ImageGather4L" &&
+                if (instruction.Opcode is "ImageGather4L" or "ImageGather4LO" &&
                     resource.Dimension == SpirvImageDim.Dim2D)
                 {
                     // OpImageGather has no level operand and reads the base level.
@@ -7113,7 +7113,8 @@ public static partial class Gen5SpirvTranslator
                         coordinates,
                         LoadImageFloatAddress(
                             image,
-                            addressCursor + (int)coordinateComponentCount));
+                            addressCursor + (int)coordinateComponentCount),
+                        texelOffset: offset);
                     sampled = UnpackImageGather(resource, image.Dmask, sampled);
                     writeAllComponents = true;
                     goto GatherComplete;
@@ -7378,7 +7379,8 @@ public static partial class Gen5SpirvTranslator
             uint coordinates,
             uint lod,
             uint reference = 0,
-            int emulatedCompare = -1)
+            int emulatedCompare = -1,
+            uint texelOffset = 0)
         {
             var imageValue = _module.AddInstruction(
                 SpirvOp.Image,
@@ -7421,6 +7423,15 @@ public static partial class Gen5SpirvTranslator
                     _vec2Type,
                     _module.AddInstruction(SpirvOp.FMul, _vec2Type, texelPosition, sizeFloat),
                     half));
+            if (texelOffset != 0)
+            {
+                // The signed texel offset applies at the sampled level.
+                corner = _module.AddInstruction(
+                    SpirvOp.FAdd,
+                    _vec2Type,
+                    corner,
+                    _module.AddInstruction(SpirvOp.ConvertSToF, _vec2Type, texelOffset));
+            }
 
             uint component = 0;
             if (resource.ConversionFormat == GuestImageFormat.Invalid)

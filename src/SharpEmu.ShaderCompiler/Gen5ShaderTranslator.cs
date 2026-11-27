@@ -2030,6 +2030,7 @@ public static partial class Gen5ShaderTranslator
             0x4C => "ImageGather4CL",
             0x4E => "ImageGather4CBCl",
             0x4F => "ImageGather4CLz",
+            0x54 => "ImageGather4LO",
             0x57 => "ImageGather4LzO",
             0x58 => "ImageGather4CO",
             0x5F => "ImageGather4CLzO",

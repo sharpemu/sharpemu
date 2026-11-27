@@ -14,6 +14,7 @@ public sealed class Gen5ImageGatherDecodeTests
     [InlineData(0x48u, "ImageGather4C")]
     [InlineData(0x4Cu, "ImageGather4CL")]
     [InlineData(0x4Fu, "ImageGather4CLz")]
+    [InlineData(0x54u, "ImageGather4LO")]
     public void GatherOpcodesDecodeAsImageOperations(uint opcode, string expected)
     {
         // image_gather4* v[0:3], v[4:7], s[8:15], s[0:3] dmask:0xf

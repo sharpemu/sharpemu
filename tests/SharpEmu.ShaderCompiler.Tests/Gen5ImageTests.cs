@@ -162,6 +162,20 @@ public sealed class Gen5ImageTests
     }
 
     [Fact]
+    public void ImageGatherWithALevelAndAnOffsetShiftsTheFourTexelsOfThatLevel()
+    {
+        var instructions = ReadSpirvInstructions(
+            CompileImageOperation("ImageGather4LO", dimension: 1, unifiedFormat: 22u));
+
+        Assert.DoesNotContain(instructions, item => item.Opcode == SpirvOp.ImageGather);
+        Assert.Single(instructions, item => item.Opcode == SpirvOp.ImageQuerySizeLod);
+        Assert.Equal(4, instructions.Count(item => item.Opcode == SpirvOp.ImageSampleExplicitLod));
+        // The packed signed 6-bit offset is extracted and converted to texels.
+        Assert.Contains(instructions, item => item.Opcode == SpirvOp.BitFieldSExtract);
+        Assert.Contains(instructions, item => item.Opcode == SpirvOp.ConvertSToF && item.Operands[0] != 0);
+    }
+
+    [Fact]
     public void ImageGatherCompareLzUsesNativeDepthGather()
     {
         var instructions = ReadSpirvInstructions(
