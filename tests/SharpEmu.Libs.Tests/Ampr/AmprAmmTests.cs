@@ -735,6 +735,73 @@ public sealed class AmprAmmTests
         Assert.Equal(0xC1UL, amm.Read(source));
     }
 
+    // The AMM range is 256 GiB at 0x80_0000_0000 and the multimap range 32 GiB after it, as on AnyPS5. The
+    // query takes four pointers: AMM start and end, multimap start and end.
+    [Fact]
+    public void GetVirtualAddressRangesWritesFourSeparatePointers()
+    {
+        using var amm = new AmmHarness();
+        var ctx = amm.Context;
+        var start = amm.Scratch + 0x100;
+        var end = amm.Scratch + 0x200;
+        var multimapStart = amm.Scratch + 0x300;
+        var multimapEnd = amm.Scratch + 0x400;
+        foreach (var slot in new[] { start, end, multimapStart, multimapEnd })
+        {
+            amm.Write(slot, 0xDEAD_BEEF_DEAD_BEEFUL);
+            amm.Write(slot + 8, 0xDEAD_BEEF_DEAD_BEEFUL);
+        }
+
+        ctx[CpuRegister.Rdi] = start;
+        ctx[CpuRegister.Rsi] = end;
+        ctx[CpuRegister.Rdx] = multimapStart;
+        ctx[CpuRegister.Rcx] = multimapEnd;
+        Assert.Equal(0, AmprExports.AmmGetVirtualAddressRanges(ctx));
+
+        Assert.Equal(0x80_0000_0000UL, amm.Read(start));
+        Assert.Equal(0xC0_0000_0000UL, amm.Read(end));
+        Assert.Equal(0xC0_0000_0000UL, amm.Read(multimapStart));
+        Assert.Equal(0xC8_0000_0000UL, amm.Read(multimapEnd));
+        // Nothing beyond each output qword is written.
+        foreach (var slot in new[] { start, end, multimapStart, multimapEnd })
+        {
+            Assert.Equal(0xDEAD_BEEF_DEAD_BEEFUL, amm.Read(slot + 8));
+        }
+    }
+
+    [Fact]
+    public void GetVirtualAddressRangesRejectsANullOutputPointer()
+    {
+        using var amm = new AmmHarness();
+        var ctx = amm.Context;
+        var slots = new[] { amm.Scratch + 0x100, amm.Scratch + 0x200, amm.Scratch + 0x300, amm.Scratch + 0x400 };
+        for (var nullIndex = 0; nullIndex < 4; nullIndex++)
+        {
+            var pointers = (ulong[])slots.Clone();
+            pointers[nullIndex] = 0;
+            ctx[CpuRegister.Rdi] = pointers[0];
+            ctx[CpuRegister.Rsi] = pointers[1];
+            ctx[CpuRegister.Rdx] = pointers[2];
+            ctx[CpuRegister.Rcx] = pointers[3];
+            Assert.Equal(Einval, AmprExports.AmmGetVirtualAddressRanges(ctx));
+        }
+    }
+
+    // The failing title reserves 0xF0_0000_0000 and 0xFB_1C3A_0000 with MAP_FIXED | NO_OVERWRITE after AMM set up
+    // its range; both used to fail because the AMM reservation reached 0xFC_0000_0000. Whether the host has those
+    // addresses free depends on what else runs in the process (a GPU driver may hold them), so this checks that the
+    // AMM reservation ends below them rather than reserving them for real.
+    [Fact]
+    public void TheAmmReservationEndsBelowTheTopOfTheUserRange()
+    {
+        using var amm = new AmmHarness();
+        Assert.True(amm.AreaAvailable, "the AMM area could not be reserved");
+        Assert.True(AmprExports.ContainsAmmRange(0xC0_0000_0000UL - Page, Page));
+        Assert.False(AmprExports.ContainsAmmRange(0xC0_0000_0000UL, Page));
+        Assert.False(AmprExports.ContainsAmmRange(0xF0_0000_0000UL, 0xD0_0000UL));
+        Assert.False(AmprExports.ContainsAmmRange(0xFB_1C3A_0000UL, 0xE3C6_0000UL));
+    }
+
     private sealed class AmmHarness : IDisposable
     {
         private const ulong CommandBufferObject = 0x100;
@@ -768,13 +835,16 @@ public sealed class AmprAmmTests
         }
         private bool TryReserveArea()
         {
-            Context[CpuRegister.Rdi] = 0;
+            Context[CpuRegister.Rdi] = Scratch + 0x400;
+            Context[CpuRegister.Rsi] = Scratch + 0x408;
+            Context[CpuRegister.Rdx] = Scratch + 0x410;
+            Context[CpuRegister.Rcx] = Scratch + 0x418;
             Assert.Equal(0, AmprExports.AmmGetVirtualAddressRanges(Context));
             return AmprExports.ContainsAmmRange(AreaStart, Page);
         }
 
 
-        // The AMM area is a fixed 500 GiB range. A process whose other tests or runtime already hold memory
+        // The AMM area is a fixed 256 GiB range with a 32 GiB multimap range after it. A process whose other tests or runtime already hold memory
         // inside it cannot reserve it, and the cases then have nothing to run against.
         public bool AreaAvailable => _areaAvailable ??= TryReserveArea();
 

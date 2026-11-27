@@ -15,7 +15,10 @@ public static partial class AmprExports
     // The AMM area lies inside the guest user range that the GPU trackers cover. A title sizes its own
     // allocator from the range it is given.
     private const ulong AmmAreaStart = 0x80_0000_0000UL;
-    private const ulong AmmAreaEnd = 0xFC_0000_0000UL;
+    private const ulong AmmAreaEnd = 0xC0_0000_0000UL;
+    // The multimap range follows the AMM range, 256 GiB then 32 GiB as on AnyPS5. The top of the user range
+    // stays free for the title, which reserves fixed ranges there (0xF000000000 and up).
+    private const ulong AmmMultimapAreaEnd = 0xC8_0000_0000UL;
     private const ulong AmmPageSize = 0x4000;
     private const ulong AmmGiveGranularity = 0x20_0000;
     private const ulong AmmRecordSize = 0x20;
@@ -81,17 +84,25 @@ public static partial class AmprExports
         LibraryName = "libSceAmpr")]
     public static int AmmGetVirtualAddressRanges(CpuContext ctx)
     {
-        // The multimap range sits at the end of the area and is empty, as it is by default.
-        var ranges = ctx[CpuRegister.Rdi];
-        if (ranges != 0)
+        // Four output pointers: AMM start and end, multimap start and end. The multimap range follows the AMM range.
+        _ = TryReserveAmmArea(ctx);
+        var startPtr = ctx[CpuRegister.Rdi];
+        var endPtr = ctx[CpuRegister.Rsi];
+        var multimapStartPtr = ctx[CpuRegister.Rdx];
+        var multimapEndPtr = ctx[CpuRegister.Rcx];
+        if (startPtr == 0 || endPtr == 0 || multimapStartPtr == 0 || multimapEndPtr == 0)
         {
-            _ = ctx.TryWriteUInt64(ranges, AmmAreaStart) &&
-                ctx.TryWriteUInt64(ranges + 0x08, AmmAreaEnd) &&
-                ctx.TryWriteUInt64(ranges + 0x10, AmmAreaEnd) &&
-                ctx.TryWriteUInt64(ranges + 0x18, AmmAreaEnd);
+            return SetAmmResult(ctx, KernelEinval);
         }
 
-        _ = TryReserveAmmArea(ctx);
+        if (!(ctx.TryWriteUInt64(startPtr, AmmAreaStart) &&
+              ctx.TryWriteUInt64(endPtr, AmmAreaEnd) &&
+              ctx.TryWriteUInt64(multimapStartPtr, AmmAreaEnd) &&
+              ctx.TryWriteUInt64(multimapEndPtr, AmmMultimapAreaEnd)))
+        {
+            return SetAmmResult(ctx, KernelEfault);
+        }
+
         return SetAmmResult(ctx, 0);
     }
 
@@ -1016,12 +1027,12 @@ public static partial class AmprExports
             }
 
             var result = ctx.TryWriteUInt64(_ammAddressSlot, AmmAreaStart)
-                ? KernelMemoryCompatExports.ReserveBackingRange(ctx, _ammAddressSlot, AmmAreaEnd - AmmAreaStart, AmmMapFixed, 0)
+                ? KernelMemoryCompatExports.ReserveBackingRange(ctx, _ammAddressSlot, AmmMultimapAreaEnd - AmmAreaStart, AmmMapFixed, 0)
                 : KernelEfault;
             if (result != 0)
             {
                 Console.Error.WriteLine(
-                    $"[LOADER][ERROR] ampr.amm area reservation failed: 0x{AmmAreaStart:X16}+0x{AmmAreaEnd - AmmAreaStart:X} result=0x{result:X8}");
+                    $"[LOADER][ERROR] ampr.amm area reservation failed: 0x{AmmAreaStart:X16}+0x{AmmMultimapAreaEnd - AmmAreaStart:X} result=0x{result:X8}");
                 return false;
             }
 
