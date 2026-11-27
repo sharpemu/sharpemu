@@ -20,7 +20,12 @@ public static class GuestImageFormat
     // other format is evaluated in the shader.
     public static bool HasDepthEquivalent(uint format) => format is Format16Unorm or Format32Float;
     public const uint Format11x2x10Uint = 34;
+    public const uint Format5x6x5Unorm = 133;
+    public const uint Format5x3x1Unorm = 134;
+    public const uint Format4x4Unorm = 136;
     public const uint MaxFormat = 182;
+
+    public static bool IsPacked16Unorm(uint format) => format is Format5x6x5Unorm or Format5x3x1Unorm or Format4x4Unorm;
 
     public const uint ImageType1D = 8;
     public const uint ImageType2D = 9;

@@ -384,7 +384,9 @@ public sealed unsafe partial class CachedImage : IDisposable
                 16 => Format.R32G32B32A32Uint,
                 _ => Format.Undefined,
             }
-            : ViewFormatRules.SrgbStorageFormat(description.PixelFormat);
+            : ViewFormatRules.SrgbStorageFormat(description.PixelFormat) is var srgb and not Format.Undefined
+                ? srgb
+                : ViewFormatRules.PackedStorageFormat(description.PixelFormat);
         var storageFeatures = storageFormat == Format.Undefined ? features : device.GetFormatProperties(storageFormat).OptimalTilingFeatures;
         if (description.Samples == 1 && (storageFeatures & FormatFeatureFlags.StorageImageBit) != 0)
         {

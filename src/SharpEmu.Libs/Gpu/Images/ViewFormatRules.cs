@@ -272,6 +272,12 @@ public static class ViewFormatRules
         _ => Format.Undefined,
     };
 
+    public static Format PackedStorageFormat(Format imageFormat) => imageFormat switch
+    {
+        Format.B5G6R5UnormPack16 or Format.R5G5B5A1UnormPack16 or Format.R4G4B4A4UnormPack16 => Format.R16Uint,
+        _ => Format.Undefined,
+    };
+
     public static bool IsSupportedSampledColorView(Format imageFormat, Format viewFormat, uint swizzle) =>
         IsValidSwizzle(swizzle) && AreCompatible(imageFormat, viewFormat);
 

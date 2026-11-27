@@ -7557,20 +7557,113 @@ public static partial class Gen5SpirvTranslator
             SpirvImageResource resource,
             out int componentCount,
             out ReadOnlySpan<uint> componentBits,
-            out ReadOnlySpan<uint> componentOffsets)
+            out ReadOnlySpan<uint> componentOffsets) =>
+            TryGetPackedImageConversion(resource, out componentCount, out componentBits, out componentOffsets, out _);
+
+        private static bool TryGetPackedImageConversion(
+            SpirvImageResource resource,
+            out int componentCount,
+            out ReadOnlySpan<uint> componentBits,
+            out ReadOnlySpan<uint> componentOffsets,
+            out bool normalized)
         {
-            if (resource.ConversionFormat == GuestImageFormat.Format11x2x10Uint)
+            normalized = false;
+            switch (resource.ConversionFormat)
             {
-                componentCount = 3;
-                componentBits = [11u, 11u, 10u];
-                componentOffsets = [0u, 11u, 22u];
-                return true;
+                case GuestImageFormat.Format11x2x10Uint:
+                    componentCount = 3;
+                    componentBits = [11u, 11u, 10u];
+                    componentOffsets = [0u, 11u, 22u];
+                    return true;
+                case GuestImageFormat.Format5x6x5Unorm:
+                    normalized = true;
+                    componentCount = 3;
+                    componentBits = [5u, 6u, 5u];
+                    componentOffsets = [0u, 5u, 11u];
+                    return true;
+                case GuestImageFormat.Format5x3x1Unorm:
+                    normalized = true;
+                    componentCount = 4;
+                    componentBits = [5u, 5u, 5u, 1u];
+                    componentOffsets = [11u, 6u, 1u, 0u];
+                    return true;
+                case GuestImageFormat.Format4x4Unorm:
+                    normalized = true;
+                    componentCount = 4;
+                    componentBits = [4u, 4u, 4u, 4u];
+                    componentOffsets = [12u, 8u, 4u, 0u];
+                    return true;
             }
 
             componentCount = 0;
             componentBits = default;
             componentOffsets = default;
             return false;
+        }
+
+        private uint UnpackNormalizedImageTexel(
+            SpirvImageResource resource,
+            uint texel,
+            int componentCount,
+            ReadOnlySpan<uint> componentBits,
+            ReadOnlySpan<uint> componentOffsets)
+        {
+            var packed = _module.AddInstruction(SpirvOp.CompositeExtract, _uintType, texel, 0u);
+            var channels = new uint[4];
+            for (var component = 0; component < channels.Length; component++)
+            {
+                if (component >= componentCount)
+                {
+                    channels[component] = UInt(component == 3 ? BitConverter.SingleToUInt32Bits(1f) : 0u);
+                    continue;
+                }
+
+                var bits = _module.AddInstruction(
+                    SpirvOp.BitFieldUExtract,
+                    _uintType,
+                    packed,
+                    UInt(componentOffsets[component]),
+                    UInt(componentBits[component]));
+                var scaled = _module.AddInstruction(
+                    SpirvOp.FMul,
+                    _floatType,
+                    _module.AddInstruction(SpirvOp.ConvertUToF, _floatType, bits),
+                    Float(1f / ((1u << (int)componentBits[component]) - 1u)));
+                channels[component] = Bitcast(_uintType, scaled);
+            }
+
+            return _module.AddInstruction(SpirvOp.CompositeConstruct, resource.VectorType, channels);
+        }
+
+        private uint PackNormalizedImageTexel(
+            SpirvImageResource resource,
+            uint texel,
+            int componentCount,
+            ReadOnlySpan<uint> componentBits,
+            ReadOnlySpan<uint> componentOffsets)
+        {
+            var packed = UInt(0);
+            for (var component = 0; component < componentCount; component++)
+            {
+                var value = Bitcast(
+                    _floatType,
+                    _module.AddInstruction(SpirvOp.CompositeExtract, _uintType, texel, (uint)component));
+                var maximum = (1u << (int)componentBits[component]) - 1u;
+                var quantized = _module.AddInstruction(
+                    SpirvOp.ConvertFToU,
+                    _uintType,
+                    Ext(1, _floatType, _module.AddInstruction(
+                        SpirvOp.FMul,
+                        _floatType,
+                        Ext(43, _floatType, value, Float(0f), Float(1f)),
+                        Float(maximum))));
+                var shifted = componentOffsets[component] == 0
+                    ? quantized
+                    : ShiftLeftLogical(quantized, UInt(componentOffsets[component]));
+                packed = BitwiseOr(packed, shifted);
+            }
+
+            return _module.AddInstruction(SpirvOp.CompositeConstruct, resource.VectorType, packed, UInt(0), UInt(0), UInt(0));
         }
 
         private uint UnpackImageTexel(
@@ -7600,9 +7693,15 @@ public static partial class Gen5SpirvTranslator
                     resource,
                     out var componentCount,
                     out var componentBits,
-                    out var componentOffsets))
+                    out var componentOffsets,
+                    out var normalized))
             {
                 return texel;
+            }
+
+            if (normalized)
+            {
+                return UnpackNormalizedImageTexel(resource, texel, componentCount, componentBits, componentOffsets);
             }
 
             var packed = _module.AddInstruction(
@@ -7708,9 +7807,15 @@ public static partial class Gen5SpirvTranslator
                     resource,
                     out var componentCount,
                     out var componentBits,
-                    out var componentOffsets))
+                    out var componentOffsets,
+                    out var normalized))
             {
                 return texel;
+            }
+
+            if (normalized)
+            {
+                return PackNormalizedImageTexel(resource, texel, componentCount, componentBits, componentOffsets);
             }
 
             var packed = UInt(0);

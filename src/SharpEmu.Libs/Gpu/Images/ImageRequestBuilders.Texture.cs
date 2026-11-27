@@ -401,6 +401,8 @@ public static partial class ImageRequestBuilders
             : storage && (shape.Atomic || format == GuestPixelFormat.Bits32SInt) ? Format.R32Uint
             : storage && shape.NumericClass == TextureNumericClass.Uint && UnsignedOfSigned(pixelFormat) is var unsigned and not Format.Undefined
                 ? unsigned
+            : storage && shape.NumericClass == TextureNumericClass.Uint && ViewFormatRules.PackedStorageFormat(pixelFormat) is var packed and not Format.Undefined
+                ? packed
                 : ViewFormatRules.SrgbStorageFormat(pixelFormat);
         var viewFormat = storage && storageViewFormat != Format.Undefined ? storageViewFormat : pixelFormat;
         var blockBytes = GuestPixelFormats.BlockCompressedBytes(format);

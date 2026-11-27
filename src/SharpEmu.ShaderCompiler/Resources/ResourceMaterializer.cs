@@ -2076,7 +2076,9 @@ public static partial class ResourceMaterializer
             {
                 MipStatistics = RecordMipStatistics && plan.Stage == ShaderStage.Pixel && !storage && ((descriptor[5] >> 25) & 1) != 0,
             };
-            var conversionFormat = ImageConversionFormat(format);
+            var conversionFormat = storage && !baseImage.Atomic && GuestImageFormat.IsPacked16Unorm(format)
+                ? format
+                : ImageConversionFormat(format);
             // A storage image with no conversion format takes its select from shader data (RuntimeImageSwizzle), so the
             // module keeps the identity select for every select bound.
             var runtimeSwizzle = storage && conversionFormat == GuestImageFormat.Invalid && info.UsesRuntimeImageSwizzles &&
@@ -2096,7 +2098,8 @@ public static partial class ResourceMaterializer
                 }
 
                 // Atomics use the uint view; float min/max compare-exchange its bits.
-                if (rawSintStorage || (baseImage.Atomic && numericClass == ImageNumericClass.Float))
+                if (rawSintStorage || (baseImage.Atomic && numericClass == ImageNumericClass.Float) ||
+                    GuestImageFormat.IsPacked16Unorm(conversionFormat))
                 {
                     numericClass = ImageNumericClass.Uint;
                 }
