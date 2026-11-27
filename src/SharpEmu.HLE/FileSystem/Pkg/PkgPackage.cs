@@ -7,19 +7,25 @@ public readonly record struct PkgExtractProgress(long BytesDone, long BytesTotal
 
 // A fake (fpkg) PS4 package opened for reading. Extraction streams every file block by block,
 // so a package of any size needs only a few hundred KiB of memory.
-public sealed class PkgPackage : IGamePackage
+public sealed class PkgPackage : IGamePackage, IPackageContent
 {
     private const int EntryKeysTableOffset = 32 + 7 * 32; // seed digest + 7 digests, then 7 RSA keys
     private const int EntryKeySize = 256;
     private const long PfsSeedOffset = 0x370;
 
-    private readonly FileStream _file;
+    private readonly PackageSource _source;
+    private readonly Stream _file;
     private readonly byte[] _entryTable;
+    private (byte[]? Data, byte[]? Tweak)? _pfsKeys;
+    // The image the content listing walked; SourceEnd maps file blocks through it.
+    private PkgPfsStream? _contentImage;
+    private PfscImage? _contentPfsc;
     private string? _category;
     private bool _categoryRead;
 
-    private PkgPackage(FileStream file, PkgHeader header, byte[] entryTable, PkgEntry[] entries)
+    private PkgPackage(PackageSource source, Stream file, PkgHeader header, byte[] entryTable, PkgEntry[] entries)
     {
+        _source = source;
         _file = file;
         Header = header;
         _entryTable = entryTable;
@@ -105,9 +111,12 @@ public sealed class PkgPackage : IGamePackage
         }
     }
 
-    public static PkgPackage Open(string path)
+    public static PkgPackage Open(string path) => Open(new PackageSource(path));
+
+    // Takes ownership of `source`.
+    internal static PkgPackage Open(PackageSource source)
     {
-        var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite, 1 << 16, FileOptions.RandomAccess);
+        var file = new PackageSourceStream(source);
         try
         {
             var headerBytes = new byte[PkgHeader.Size];
@@ -132,11 +141,11 @@ public sealed class PkgPackage : IGamePackage
             var table = new byte[checked((int)header.TableEntryCount * PkgEntry.Size_)];
             file.Position = header.TableEntryOffset;
             file.ReadExactly(table);
-            return new PkgPackage(file, header, table, PkgEntry.ParseTable(table, (int)header.TableEntryCount));
+            return new PkgPackage(source, file, header, table, PkgEntry.ParseTable(table, (int)header.TableEntryCount));
         }
         catch
         {
-            file.Dispose();
+            source.Dispose();
             throw;
         }
     }
@@ -277,14 +286,23 @@ public sealed class PkgPackage : IGamePackage
         progress?.Report(new PkgExtractProgress(total, total, string.Empty));
     }
 
-    private PkgPfsStream OpenPfsImageStream()
+    private PkgPfsStream OpenPfsImageStream() => OpenPfsImageStream(_file);
+
+    // The decrypted PFS image over `file` (the package itself, or a per-thread view of it).
+    private PkgPfsStream OpenPfsImageStream(Stream file)
+    {
+        var (dataKey, tweakKey) = _pfsKeys ??= DerivePfsKeys();
+        return new PkgPfsStream(file, (long)Header.PfsImageOffset, (long)Header.PfsImageSize, dataKey, tweakKey);
+    }
+
+    private (byte[]? Data, byte[]? Tweak) DerivePfsKeys()
     {
         var imageKeyEntry = FindEntry(PkgEntry.ImageKeyId, out var imageKeyRow);
         var keysEntry = FindEntry(PkgEntry.EntryKeysId, out _);
         if (imageKeyEntry is null || keysEntry is null)
         {
             // No key material means the PFS image is stored in the clear.
-            return new PkgPfsStream(_file, (long)Header.PfsImageOffset, (long)Header.PfsImageSize, null, null);
+            return (null, null);
         }
 
         var keys = ReadEntry(keysEntry.Value);
@@ -306,8 +324,96 @@ public sealed class PkgPackage : IGamePackage
         var seed = new byte[16];
         _file.Position = (long)Header.PfsImageOffset + PfsSeedOffset;
         _file.ReadExactly(seed);
-        var (dataKey, tweakKey) = PkgCrypto.DerivePfsKeys(ekpfs, seed);
-        return new PkgPfsStream(_file, (long)Header.PfsImageOffset, (long)Header.PfsImageSize, dataKey, tweakKey);
+        return PkgCrypto.DerivePfsKeys(ekpfs, seed);
+    }
+
+    PackageSource IPackageContent.Source => _source;
+
+    IReadOnlyList<PackageContentFile> IPackageContent.ListContentFiles()
+    {
+        var content = new List<PackageContentFile>();
+        foreach (var entry in Entries)
+        {
+            if (entry.Name is { } name)
+            {
+                ResolveSafe(string.Empty, ["sce_sys", .. name.Split('/')]);
+                var bytes = ReadEntry(entry);
+                content.Add(new PackageContentFile("sce_sys/" + name, bytes.Length, bytes, null));
+            }
+        }
+
+        _contentImage?.Dispose();
+        _contentImage = OpenPfsImageStream();
+        _contentPfsc = new PfscImage(_contentImage, PfscImage.FindOffset(_contentImage));
+        var pfs = new PfsImage(_contentPfsc);
+        var files = new List<(string Path, PfsInode Inode)>();
+        long total = 0;
+        CollectTree(pfs, pfs.GetUserRoot(), string.Empty, files, ref total, new HashSet<int>(), 0);
+        foreach (var (path, inode) in files)
+        {
+            if (inode.Size < 0 || inode.Blocks * (long)PfscImage.BlockSize < inode.Size)
+            {
+                throw new InvalidDataException("PFS file claims more data than its blocks hold.");
+            }
+
+            content.Add(new PackageContentFile(string.Join('/', path.Split(Path.DirectorySeparatorChar)), inode.Size, null, inode));
+        }
+
+        return content;
+    }
+
+    long IPackageContent.SourceEnd(PackageContentFile file, long offset, long length)
+    {
+        if (file.Native is not PfsInode inode || length <= 0)
+        {
+            return 0;
+        }
+
+        var pfsc = _contentPfsc ?? throw new InvalidOperationException("List the package content first.");
+        long end = 0;
+        var last = (offset + length - 1) / PfscImage.BlockSize;
+        for (var block = offset / PfscImage.BlockSize; block <= last; block++)
+        {
+            var (start, size) = pfsc.BlockExtent((long)inode.Location + block);
+            if (size > 0)
+            {
+                end = Math.Max(end, _contentImage!.SourceEnd(pfsc.Offset + start, size));
+            }
+        }
+
+        return end;
+    }
+
+    IPackageContentReader IPackageContent.CreateContentReader()
+    {
+        var pfsc = _contentPfsc ?? throw new InvalidOperationException("List the package content first.");
+        var image = OpenPfsImageStream(new PackageSourceStream(_source));
+        return new ContentReader(image, new PfscImage(pfsc, image));
+    }
+
+    // Reads file ranges block by block, as PfsImage.CopyFile does, through its own image view.
+    private sealed class ContentReader(PkgPfsStream image, PfscImage pfsc) : IPackageContentReader
+    {
+        private readonly byte[] _block = new byte[PfscImage.BlockSize];
+
+        public void Read(PackageContentFile file, long offset, Memory<byte> destination)
+        {
+            var inode = (PfsInode)file.Native!;
+            var span = destination.Span;
+            var done = 0;
+            while (done < span.Length)
+            {
+                var position = offset + done;
+                var block = position / PfscImage.BlockSize;
+                var within = (int)(position % PfscImage.BlockSize);
+                pfsc.ReadBlock((long)inode.Location + block, _block);
+                var count = Math.Min(span.Length - done, PfscImage.BlockSize - within);
+                _block.AsSpan(within, count).CopyTo(span[done..]);
+                done += count;
+            }
+        }
+
+        public void Dispose() => image.Dispose();
     }
 
     private PkgEntry? FindEntry(uint id, out byte[] row)
@@ -384,5 +490,10 @@ public sealed class PkgPackage : IGamePackage
         return path;
     }
 
-    public void Dispose() => _file.Dispose();
+    public void Dispose()
+    {
+        _contentImage?.Dispose();
+        _file.Dispose();
+        _source.Dispose();
+    }
 }

@@ -44,6 +44,20 @@ public sealed class PkgPfsStream : Stream
         set => _position = value < 0 ? throw new ArgumentOutOfRangeException(nameof(value)) : value;
     }
 
+    // Package offset just past the last byte a read of [position, position+count) of the image
+    // touches: reads cover whole sectors, clipped to the image and to the package file.
+    internal long SourceEnd(long position, long count)
+    {
+        if (count <= 0 || position >= _length)
+        {
+            return 0;
+        }
+
+        var end = position + Math.Min(count, _length - position);
+        var alignedEnd = (end + PkgCrypto.SectorSize - 1) & ~(long)(PkgCrypto.SectorSize - 1);
+        return Math.Min(_start + alignedEnd, _inner.Length);
+    }
+
     public override int Read(byte[] buffer, int offset, int count) => Read(buffer.AsSpan(offset, count));
 
     public override int Read(Span<byte> destination)

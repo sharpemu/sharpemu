@@ -11,7 +11,7 @@ namespace SharpEmu.HLE.FileSystem.Pkg;
 // PFS is encrypted are refused at Open: their files need console keys. Extraction decodes the files
 // block by block on several threads (a big file is split into ranges too), so a package of any
 // size needs only a few hundred KiB of memory per worker.
-public sealed class Ps5Package : IGamePackage
+public sealed class Ps5Package : IGamePackage, IPackageContent
 {
     private const string ImageFileName = "pfs_image.dat";
     private const string LayoutFileName = "naps_pkg_layout.dat";
@@ -21,7 +21,7 @@ public sealed class Ps5Package : IGamePackage
     // few huge files still spread over every worker.
     private const long DefaultChunkBytes = 64L << 20;
 
-    private readonly Ps5Source _source;
+    private readonly PackageSource _source;
     private readonly Ps5Fih _fih;
     private readonly Ps5Cnt _cnt;
     private readonly Ps5OuterPfs _outer;
@@ -32,7 +32,7 @@ public sealed class Ps5Package : IGamePackage
     private List<Ps5InnerFile>? _files;
     private long _filesSize;
 
-    private Ps5Package(Ps5Source source, Ps5Fih fih, Ps5Cnt cnt, Ps5OuterPfs outer)
+    private Ps5Package(PackageSource source, Ps5Fih fih, Ps5Cnt cnt, Ps5OuterPfs outer)
     {
         _source = source;
         _fih = fih;
@@ -68,9 +68,11 @@ public sealed class Ps5Package : IGamePackage
     public string GetFolderName(string fallback) =>
         PkgPackage.ToFolderName(Title) ?? PkgPackage.ToFolderName(TitleId) ?? fallback;
 
-    public static Ps5Package Open(string path)
+    public static Ps5Package Open(string path) => Open(new PackageSource(path));
+
+    // Takes ownership of `source`.
+    internal static Ps5Package Open(PackageSource source)
     {
-        var source = new Ps5Source(path);
         try
         {
             var fih = Ps5Fih.Read(source);
@@ -287,6 +289,54 @@ public sealed class Ps5Package : IGamePackage
                 _reported = current;
                 progress.Report(new PkgExtractProgress(current, total, file));
             }
+        }
+    }
+
+    PackageSource IPackageContent.Source => _source;
+
+    IReadOnlyList<PackageContentFile> IPackageContent.ListContentFiles()
+    {
+        var (_, files) = LoadTree();
+        var content = new List<PackageContentFile>(_cnt.Files.Count + files.Count);
+        foreach (var file in _cnt.Files)
+        {
+            PkgPackage.ResolveSafe(string.Empty, ["sce_sys", .. file.Name.Split('/')]);
+            content.Add(new PackageContentFile("sce_sys/" + file.Name, file.Bytes.Length, file.Bytes, null));
+        }
+
+        foreach (var file in files)
+        {
+            PkgPackage.ResolveSafe(string.Empty, file.Components);
+            content.Add(new PackageContentFile(string.Join('/', file.Components), file.Size, null, file));
+        }
+
+        return content;
+    }
+
+    long IPackageContent.SourceEnd(PackageContentFile file, long offset, long length) =>
+        file.Native is Ps5InnerFile inner ? LoadTree().Image.SourceEnd(inner.Logical + offset, length) : 0;
+
+    IPackageContentReader IPackageContent.CreateContentReader() => new ContentReader(LoadTree().Image.CreateReader());
+
+    private sealed class ContentReader(Ps5InnerImage.BlockReader reader) : IPackageContentReader
+    {
+        public void Read(PackageContentFile file, long offset, Memory<byte> destination)
+        {
+            var inner = (Ps5InnerFile)file.Native!;
+            var done = 0;
+            reader.CopyTo(inner.Logical + offset, destination.Length, chunk =>
+            {
+                chunk.CopyTo(destination.Span[done..]);
+                done += chunk.Length;
+            });
+            if (done != destination.Length)
+            {
+                throw new InvalidDataException("The inner image returned fewer bytes than asked for.");
+            }
+        }
+
+        public void Dispose()
+        {
         }
     }
 

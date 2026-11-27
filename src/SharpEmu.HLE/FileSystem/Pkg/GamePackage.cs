@@ -34,6 +34,37 @@ public static class GamePackage
         throw new InvalidDataException("Not a PS4 or PS5 package (unknown magic).");
     }
 
+    // Opens the package through `source`, which it then owns. Every read, the magic included, goes
+    // through the source, so a recorded snapshot replays this exact open.
+    internal static IGamePackage Open(PackageSource source)
+    {
+        try
+        {
+            Span<byte> magic = stackalloc byte[4];
+            if (source.ReadAt(magic, 0) != 4)
+            {
+                throw new InvalidDataException("This file is too short to be a PKG package.");
+            }
+
+            if (magic.SequenceEqual(CntMagic))
+            {
+                return PkgPackage.Open(source);
+            }
+
+            if (magic.SequenceEqual(FihMagic))
+            {
+                return Ps5Package.Open(source);
+            }
+
+            throw new InvalidDataException("Not a PS4 or PS5 package (unknown magic).");
+        }
+        catch
+        {
+            source.Dispose();
+            throw;
+        }
+    }
+
     // True for a readable .pkg file with either known magic.
     public static bool IsPackagePath(string path)
     {

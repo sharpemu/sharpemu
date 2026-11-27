@@ -146,9 +146,41 @@ public sealed class PfscImage
         }
     }
 
+    // A view of `shared` that reads through `source` (another view of the same image), sharing the
+    // block table, so each thread can decode with its own stream.
+    internal PfscImage(PfscImage shared, Stream source)
+    {
+        _source = source;
+        _offset = shared._offset;
+        _blockOffsets = shared._blockOffsets;
+        DataLength = shared.DataLength;
+        BlockCount = shared.BlockCount;
+    }
+
     public long DataLength { get; }
 
     public int BlockCount { get; }
+
+    // Where the PFSC starts in the image.
+    internal long Offset => _offset;
+
+    // The stored bytes of block `index`, relative to the PFSC start: what ReadBlock reads.
+    internal (long Start, long Size) BlockExtent(long index)
+    {
+        if (index < 0 || index >= BlockCount)
+        {
+            throw new InvalidDataException($"PFSC block {index} is out of range.");
+        }
+
+        var start = _blockOffsets[index];
+        var size = _blockOffsets[index + 1] - start;
+        if (size < 0 || size > BlockSize)
+        {
+            throw new InvalidDataException($"PFSC block {index} has an invalid size {size}.");
+        }
+
+        return (start, size);
+    }
 
     // Finds the PFSC inside a decrypted PFS image: it starts on a 64 KiB boundary after the
     // image's own header blocks.

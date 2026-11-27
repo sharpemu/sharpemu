@@ -218,6 +218,11 @@ internal static partial class Program
             return InstallPkg(args);
         }
 
+        if (args.Length > 0 && string.Equals(args[0], "--pkg-to-zar", StringComparison.OrdinalIgnoreCase))
+        {
+            return PkgToZar(args);
+        }
+
         if (!CheckHostArchitecture())
         {
             return 5;
@@ -1099,6 +1104,82 @@ internal static partial class Program
         }
     }
 
+    // --pkg-to-zar <file.pkg> [dest.zar] [--consume-source]: converts a fake PS4 or PS5 package
+    // straight into a .zar (by default <pkg folder>/<game title>.zar) without an extracted folder.
+    // --consume-source shrinks the package as its data lands in the archive and deletes it at the
+    // end; an interrupted run resumes when the same command runs again.
+    private static int PkgToZar(string[] args)
+    {
+        const string Usage = "Usage: SharpEmu.CLI --pkg-to-zar <path-to-game.pkg> [destination.zar] [--consume-source]";
+        var consume = args.Skip(1).Any(arg => string.Equals(arg, "--consume-source", StringComparison.OrdinalIgnoreCase));
+        var positional = args.Skip(1).Where(arg => !string.Equals(arg, "--consume-source", StringComparison.OrdinalIgnoreCase)).ToList();
+        if (positional.Count is < 1 or > 2 || positional.Any(arg => arg.StartsWith("--", StringComparison.Ordinal)))
+        {
+            Log.Error(Usage);
+            return 2;
+        }
+
+        var pkgPath = Path.GetFullPath(positional[0]);
+        try
+        {
+            string destination;
+            if (positional.Count == 2)
+            {
+                destination = Path.GetFullPath(positional[1]);
+            }
+            else if (SharpEmu.HLE.FileSystem.Pkg.PkgZarConverter.FindPendingDestination(pkgPath) is { } pending)
+            {
+                // The package may already be cut short; the journal knows where it was going.
+                destination = pending;
+            }
+            else
+            {
+                if (!File.Exists(pkgPath))
+                {
+                    Log.Error($"Package not found: {pkgPath}");
+                    return 2;
+                }
+
+                using var package = SharpEmu.HLE.FileSystem.Pkg.GamePackage.Open(pkgPath);
+                if (!package.IsGameApplication)
+                {
+                    Log.Error($"{Path.GetFileName(pkgPath)} is not a base game (category '{package.Category}'). Patches and DLC packages are not supported yet.");
+                    return 2;
+                }
+
+                destination = Path.Combine(
+                    Path.GetDirectoryName(pkgPath)!,
+                    package.GetFolderName(Path.GetFileNameWithoutExtension(pkgPath)) + ".zar");
+            }
+
+            var resuming = File.Exists(SharpEmu.HLE.FileSystem.Pkg.PkgZarConverter.JournalPath(destination));
+            Log.Info($"{(resuming ? "Resuming the conversion of" : "Converting")} {Path.GetFileName(pkgPath)} into {destination}{(consume ? " (consuming the package)" : string.Empty)}");
+            var lastPercent = -1;
+            var progress = new SynchronousProgress<SharpEmu.HLE.FileSystem.Pkg.PkgExtractProgress>(report =>
+            {
+                var percent = report.BytesTotal == 0 ? 100 : (int)(report.BytesDone * 100 / report.BytesTotal);
+                if (percent != lastPercent)
+                {
+                    lastPercent = percent;
+                    Log.Info($"{percent,3}%  {report.BytesDone / (1024.0 * 1024 * 1024):0.00} / {report.BytesTotal / (1024.0 * 1024 * 1024):0.00} GB");
+                }
+            });
+            SharpEmu.HLE.FileSystem.Pkg.PkgZarConverter.Convert(pkgPath, destination, consume, progress);
+            Log.Info($"Done. Launch it with: SharpEmu.CLI \"{destination}\"");
+            return 0;
+        }
+        catch (SharpEmu.HLE.FileSystem.Pkg.PkgConversionPausedException exception)
+        {
+            Log.Error(exception.Message);
+            return 3;
+        }
+        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or InvalidDataException or OperationCanceledException)
+        {
+            Log.Error($"Converting the package failed: {exception.Message}");
+            return 1;
+        }
+    }
+
     private sealed class SynchronousProgress<T>(Action<T> handler) : IProgress<T>
     {
         public void Report(T value) => handler(value);
@@ -1108,6 +1189,7 @@ internal static partial class Program
     {
         Log.Info("Usage: SharpEmu.CLI [--strict[=on|off]] [--trace-imports[=N]] [--cpu-engine=<native>] [--console=<ps5>] [--console-language=<language>] [--log-level=<level>] [--log-file[=<path>]] [--no-log-file] [--window-mode=<windowed|borderless|exclusive>] [--resolution=<WIDTHxHEIGHT>] [--display=<N>] [--refresh-rate=<HZ>] [--scaling=<fit|cover|stretch|integer>] [--vsync=<on|off>] [--hdr=<auto|on|off>] [--overlay=<on|off>] [--overlay-mode=<full|minimal|titlebar>] [--overlay-corner=<topleft|topright|bottomright|bottomleft>] [--debug-server[=host:port]] <path-to-eboot.bin|path-to-game.zar|path-to-ps5-game.pkg>");
         Log.Info("Install a fake PS4 or PS5 package: SharpEmu.CLI --install-pkg <path-to-game.pkg> [destination-folder]");
+        Log.Info("Convert a fake PS4 or PS5 package to .zar: SharpEmu.CLI --pkg-to-zar <path-to-game.pkg> [destination.zar] [--consume-source]");
         Log.Info(@"Example: SharpEmu.CLI --cpu-engine=native --trace-imports=64 --log-level=debug --log-file ""E:\Games\...\eboot.bin""");
         Log.Info("Debug server: --debug-server starts a live debug listener (default 127.0.0.1:5714); connect with SharpEmu.DebugClient.");
     }

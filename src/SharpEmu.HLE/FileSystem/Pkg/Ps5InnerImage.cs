@@ -231,6 +231,29 @@ internal sealed class Ps5InnerImage
     // Streams logical bytes to `sink` one block at a time.
     public void CopyTo(long logical, long size, SpanAction sink) => _defaultReader.CopyTo(logical, size, sink);
 
+    // Package offset just past the last byte that decoding logical [logical, logical+size) reads:
+    // every block overlapping the range loads its whole stored payload; sparse blocks read nothing.
+    public long SourceEnd(long logical, long size)
+    {
+        if (size <= 0)
+        {
+            return 0;
+        }
+
+        long end = 0;
+        var stop = logical + size;
+        for (var index = FindBlock(logical); index < _blocks.Length && _blocks[index].Logical < stop; index++)
+        {
+            var block = _blocks[index];
+            if (block.Compressed != 0)
+            {
+                end = Math.Max(end, _image.SourceEnd(block.OnDisk, block.Compressed));
+            }
+        }
+
+        return end;
+    }
+
     // A reader with its own decode buffers, for one thread of a parallel extraction.
     internal BlockReader CreateReader() => new(this);
 

@@ -14,7 +14,10 @@ namespace SharpEmu.HLE.FileSystem;
 // through one block at a time, so a large game needs little memory.
 public static class ZArchiveWriter
 {
-    private const int CompressionLevel = 6;
+    internal const int CompressionLevel = 6;
+    internal const int BlocksPerRecord = 16;
+    // Logical bytes behind one offset record: 16 blocks, placed anywhere in the data section.
+    internal const int RecordSpan = ZArchive.BlockSize * BlocksPerRecord;
     private const uint Version = 0x61BF3A01;
     private const uint Magic = 0x169F52D6;
 
@@ -106,37 +109,27 @@ public static class ZArchiveWriter
         IProgress<Progress>? progress,
         CancellationToken cancellationToken)
     {
-        var root = new PathNode(string.Empty, isFile: false);
         var block = new byte[ZArchive.BlockSize];
+        var encoded = new byte[EncodeBufferSize];
         var filled = 0;
         var blockIndex = 0;
         var records = new List<(ulong BaseOffset, ushort[] Sizes)>();
+        var entries = new List<(string[] Parts, ulong Offset, ulong Size)>(files.Count);
         using var compressor = new Compressor(CompressionLevel);
         ulong dataOffset = 0;
         var lastReport = 0L;
 
         void FlushBlock()
         {
-            var compressed = compressor.Wrap(block);
             var offset = (ulong)output.Position;
-            int size;
-            if (compressed.Length >= ZArchive.BlockSize)
+            var size = EncodeBlock(compressor, block, encoded);
+            output.Write(encoded, 0, size);
+            if (blockIndex % BlocksPerRecord == 0)
             {
-                output.Write(block);
-                size = ZArchive.BlockSize;
-            }
-            else
-            {
-                output.Write(compressed);
-                size = compressed.Length;
+                records.Add((offset, new ushort[BlocksPerRecord]));
             }
 
-            if (blockIndex % 16 == 0)
-            {
-                records.Add((offset, new ushort[16]));
-            }
-
-            records[^1].Sizes[blockIndex % 16] = (ushort)(size - 1);
+            records[^1].Sizes[blockIndex % BlocksPerRecord] = (ushort)(size - 1);
             blockIndex++;
             filled = 0;
         }
@@ -144,20 +137,8 @@ public static class ZArchiveWriter
         for (var index = 0; index < files.Count; index++)
         {
             var parts = Path.GetRelativePath(source, files[index].FullName).Split(Path.DirectorySeparatorChar);
-            var directory = root;
-            foreach (var part in parts[..^1])
-            {
-                var next = directory.Children.Find(child => string.Equals(child.Name, part, StringComparison.OrdinalIgnoreCase));
-                if (next is null)
-                {
-                    next = new PathNode(part, isFile: false);
-                    directory.Children.Add(next);
-                }
-
-                directory = next;
-            }
-
-            var file = new PathNode(parts[^1], isFile: true) { FileOffset = dataOffset };
+            var fileOffset = dataOffset;
+            ulong fileSize = 0;
             using (var input = new FileStream(files[index].FullName, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 20))
             {
                 int read;
@@ -165,7 +146,7 @@ public static class ZArchiveWriter
                 {
                     filled += read;
                     dataOffset += (ulong)read;
-                    file.FileSize += (ulong)read;
+                    fileSize += (ulong)read;
                     if (filled == block.Length)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
@@ -179,7 +160,7 @@ public static class ZArchiveWriter
                 }
             }
 
-            directory.Children.Add(file);
+            entries.Add((parts, fileOffset, fileSize));
         }
 
         if (filled > 0)
@@ -188,7 +169,56 @@ public static class ZArchiveWriter
             FlushBlock();
         }
 
-        var dataSize = (ulong)output.Position;
+        WriteTrailer(output, (ulong)output.Position, records, entries);
+        progress?.Report(new Progress(bytesTotal, bytesTotal, files.Count, files.Count));
+    }
+
+    // Room EncodeBlock needs in its destination.
+    internal static int EncodeBufferSize { get; } = Math.Max(Compressor.GetCompressBound(ZArchive.BlockSize), ZArchive.BlockSize);
+
+    // Compresses one 64 KiB block into `destination` (EncodeBufferSize bytes) and returns its stored
+    // size: the zstd frame, or the raw block when the frame does not shrink it.
+    internal static int EncodeBlock(Compressor compressor, ReadOnlySpan<byte> block, Span<byte> destination)
+    {
+        var size = compressor.Wrap(block, destination);
+        if (size >= ZArchive.BlockSize)
+        {
+            block.CopyTo(destination);
+            return ZArchive.BlockSize;
+        }
+
+        return size;
+    }
+
+    // Writes everything after the compressed data: padding to 8 bytes, the offset records, names, the
+    // breadth-first tree (each directory's children sorted without case; directories merge without
+    // case, the first spelling wins) and the footer. `output` sits at `dataSize`, the end of the data
+    // section. Files are (path parts, data offset, size), in the order their nodes are created.
+    internal static void WriteTrailer(
+        Stream output,
+        ulong dataSize,
+        IReadOnlyList<(ulong BaseOffset, ushort[] Sizes)> records,
+        IEnumerable<(string[] Parts, ulong Offset, ulong Size)> files)
+    {
+        var root = new PathNode(string.Empty, isFile: false);
+        foreach (var (parts, offset, size) in files)
+        {
+            var directory = root;
+            foreach (var part in parts[..^1])
+            {
+                var next = directory.Children.Find(child => string.Equals(child.Name, part, StringComparison.OrdinalIgnoreCase));
+                if (next is null)
+                {
+                    next = new PathNode(part, isFile: false);
+                    directory.Children.Add(next);
+                }
+
+                directory = next;
+            }
+
+            directory.Children.Add(new PathNode(parts[^1], isFile: true) { FileOffset = offset, FileSize = size });
+        }
+
         while (output.Position % 8 != 0)
         {
             output.WriteByte(0);
@@ -286,7 +316,6 @@ public static class ZArchiveWriter
         WriteU64(output, (ulong)output.Position + 8 + 4 + 4);
         WriteU32(output, Version);
         WriteU32(output, Magic);
-        progress?.Report(new Progress(bytesTotal, bytesTotal, files.Count, files.Count));
     }
 
     private static void WriteU16(Stream stream, ushort value)
