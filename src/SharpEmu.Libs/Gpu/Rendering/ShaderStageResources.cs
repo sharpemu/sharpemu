@@ -57,6 +57,7 @@ public class ShaderProgramInfo
     public int VertexOffsetScalarRegister { get; init; } = NoScalarRegister;
     public int InstanceOffsetScalarRegister { get; init; } = NoScalarRegister;
     public bool UsesDeviceAddresses { get; init; }
+    public bool WritesDeviceAddresses { get; init; }
     public bool DeviceAddressReadsBounded { get; init; }
 
     // See ShaderResourcePlan.DeviceAddressReadsWindowed.

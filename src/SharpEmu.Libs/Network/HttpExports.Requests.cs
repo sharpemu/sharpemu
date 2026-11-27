@@ -13,6 +13,9 @@ public static partial class HttpExports
     private const int HttpErrorBeforeSend = unchecked((int)0x80431065);
     private const int HttpErrorResolverNoDns = unchecked((int)0x80436002);
 
+    // SCE_HTTP_METHOD_GET .. SCE_HTTP_METHOD_CONNECT.
+    private static readonly string[] MethodNames = ["GET", "POST", "HEAD", "OPTIONS", "PUT", "DELETE", "TRACE", "CONNECT"];
+
     private static readonly ConcurrentDictionary<int, HttpConnection> Connections = new();
     private static readonly ConcurrentDictionary<int, HttpRequest> Requests = new();
 
@@ -49,6 +52,40 @@ public static partial class HttpExports
     }
 
     [SysAbiExport(
+        Nid = "qgxDBjorUxs",
+        ExportName = "sceHttpCreateConnectionWithURL",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceHttp")]
+    public static int HttpCreateConnectionWithUrl(CpuContext ctx)
+    {
+        // tmplId, url, isEnableKeepalive. The URL stands in for the server name.
+        var templateId = unchecked((int)ctx[CpuRegister.Rdi]);
+        var urlAddress = ctx[CpuRegister.Rsi];
+        var keepAlive = unchecked((int)ctx[CpuRegister.Rdx]);
+        if (!Templates.ContainsKey(templateId))
+        {
+            return ctx.SetReturn(HttpErrorInvalidId);
+        }
+
+        if (urlAddress == 0 || keepAlive is < 0 or > 1)
+        {
+            return ctx.SetReturn(HttpErrorInvalidValue);
+        }
+
+        var error = ReadHttpUrl(ctx, urlAddress, out var port);
+        if (error != 0)
+        {
+            return ctx.SetReturn(error);
+        }
+
+        var id = Interlocked.Increment(ref _nextTemplateId);
+        Connections[id] = new HttpConnection(templateId, urlAddress, port);
+        TraceHttp("create_connection_url", id, unchecked((ulong)templateId), urlAddress, port, unchecked((ulong)keepAlive));
+        ctx[CpuRegister.Rax] = unchecked((ulong)id);
+        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    [SysAbiExport(
         Nid = "P6A3ytpsiYc",
         ExportName = "sceHttpDeleteConnection",
         Target = Generation.Gen4 | Generation.Gen5,
@@ -77,26 +114,111 @@ public static partial class HttpExports
         ExportName = "sceHttpCreateRequest",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libSceHttp")]
-    public static int HttpCreateRequest(CpuContext ctx)
+    public static int HttpCreateRequest(CpuContext ctx) => CreateRequest(ctx, methodIsName: false, targetIsUrl: false);
+
+    // connId, method, url, contentLength.
+    [SysAbiExport(
+        Nid = "Aeu5wVKkF9w",
+        ExportName = "sceHttpCreateRequestWithURL",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceHttp")]
+    public static int HttpCreateRequestWithUrl(CpuContext ctx) => CreateRequest(ctx, methodIsName: false, targetIsUrl: true);
+
+    // connId, "METHOD", path, contentLength.
+    [SysAbiExport(
+        Nid = "rGNm+FjIXKk",
+        ExportName = "sceHttpCreateRequest2",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceHttp")]
+    public static int HttpCreateRequest2(CpuContext ctx) => CreateRequest(ctx, methodIsName: true, targetIsUrl: false);
+
+    // connId, "METHOD", url, contentLength.
+    [SysAbiExport(
+        Nid = "Cnp77podkCU",
+        ExportName = "sceHttpCreateRequestWithURL2",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libSceHttp")]
+    public static int HttpCreateRequestWithUrl2(CpuContext ctx) => CreateRequest(ctx, methodIsName: true, targetIsUrl: true);
+
+    private static int CreateRequest(CpuContext ctx, bool methodIsName, bool targetIsUrl)
     {
-        // connId, method, path, contentLength.
         var connectionId = unchecked((int)ctx[CpuRegister.Rdi]);
         if (!Connections.ContainsKey(connectionId))
         {
             return ctx.SetReturn(HttpErrorInvalidId);
         }
 
-        if (ctx[CpuRegister.Rdx] == 0)
+        var targetAddress = ctx[CpuRegister.Rdx];
+        if (targetAddress == 0)
         {
             return ctx.SetReturn(HttpErrorInvalidValue);
         }
 
+        int method;
+        if (methodIsName)
+        {
+            if (ctx[CpuRegister.Rsi] == 0 ||
+                ReadUriSource(ctx.Memory, ctx[CpuRegister.Rsi], out var methodName) != 0 ||
+                methodName.Length == 0)
+            {
+                return ctx.SetReturn(HttpErrorInvalidValue);
+            }
+
+            // A name outside the standard set is a custom method.
+            method = Array.IndexOf(MethodNames, methodName);
+        }
+        else
+        {
+            method = unchecked((int)ctx[CpuRegister.Rsi]);
+            if ((uint)method >= (uint)MethodNames.Length)
+            {
+                return ctx.SetReturn(HttpErrorInvalidValue);
+            }
+        }
+
+        if (targetIsUrl)
+        {
+            var error = ReadHttpUrl(ctx, targetAddress, out _);
+            if (error != 0)
+            {
+                return ctx.SetReturn(error);
+            }
+        }
+
         var id = Interlocked.Increment(ref _nextTemplateId);
-        var method = unchecked((int)ctx[CpuRegister.Rsi]);
         Requests[id] = new HttpRequest(connectionId, method, ctx[CpuRegister.Rcx]);
-        TraceHttp("create_request", id, unchecked((ulong)connectionId), unchecked((ulong)method), ctx[CpuRegister.Rdx], ctx[CpuRegister.Rcx]);
+        TraceHttp("create_request", id, unchecked((ulong)connectionId), unchecked((ulong)method), targetAddress, ctx[CpuRegister.Rcx]);
         ctx[CpuRegister.Rax] = unchecked((ulong)id);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+    }
+
+    // Reads an absolute http or https URL; the port defaults to the scheme's.
+    private static int ReadHttpUrl(CpuContext ctx, ulong address, out ushort port)
+    {
+        port = 0;
+        var error = ReadUriSource(ctx.Memory, address, out var url);
+        if (error != 0)
+        {
+            return error;
+        }
+
+        if (!TrySplitUri(url, out var components, out var isOpaque, out port) || isOpaque || string.IsNullOrEmpty(components[3]))
+        {
+            return HttpErrorInvalidUrl;
+        }
+
+        var secure = string.Equals(components[0], "https", StringComparison.OrdinalIgnoreCase);
+        if (!secure && !string.Equals(components[0], "http", StringComparison.OrdinalIgnoreCase))
+        {
+            return HttpErrorInvalidUrl;
+        }
+
+        if (port == 0)
+        {
+            port = secure ? (ushort)443 : (ushort)80;
+        }
+
+        return 0;
     }
 
     [SysAbiExport(

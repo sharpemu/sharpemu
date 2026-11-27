@@ -125,7 +125,7 @@ public sealed partial class RenderExecutor
 
         if (indirectArgumentsAddress == 0)
         {
-            record.MetadataClear = DecodeMetadataClear(input);
+            record.MetadataClear = DecodeMetadataClear(input, groupsX, groupsY, groupsZ);
             record.MetadataClearHasExclusiveOr = program.HasBitwiseExclusiveOr;
             record.ConstantFill = DecodeConstantFill(input, groupsX, groupsY, groupsZ);
             record.BoundedFill = DecodeBoundedFill(input, groupsX, groupsY, groupsZ, dispatchInitiator);
@@ -251,7 +251,7 @@ public sealed partial class RenderExecutor
             }
         }
 
-        record.MetadataClear = DecodeMetadataClear(input);
+        record.MetadataClear = DecodeMetadataClear(input, groupsX, groupsY, groupsZ);
         record.MetadataClearHasExclusiveOr = program.HasBitwiseExclusiveOr;
         record.ConstantFill = DecodeConstantFill(input, groupsX, groupsY, groupsZ);
         record.BoundedFill = DecodeBoundedFill(input, groupsX, groupsY, groupsZ, dispatchInitiator);
@@ -450,7 +450,11 @@ public sealed partial class RenderExecutor
         return BufferDescriptorWords.From(words);
     }
 
-    private MetadataBufferProbe[] DecodeMetadataClear(ComputeInputInfo input)
+    // A clear of a metadata surface is a spread of workgroups over it; a one-group kernel is a counter reset or an
+    // argument write whose buffer only happens to start where a transient surface's HTILE was registered.
+    private const ulong MetadataClearMinimumGroups = 2;
+
+    private MetadataBufferProbe[]? DecodeMetadataClear(ComputeInputInfo input, uint groupsX, uint groupsY, uint groupsZ)
     {
         var program = input.Stage.Program!;
         var resources = input.Stage.Resources;
@@ -459,11 +463,23 @@ public sealed partial class RenderExecutor
             throw _host.Fatal($"The compute buffer count does not match the program: descriptors={resources.Buffers.Length} program={program.Buffers.Length}.");
         }
 
+        // A metadata clear is buffer stores and nothing else. A dispatch that also reads or stores images, or writes
+        // through device addresses, does real work beside the metadata - UE5's Nanite depth export writes the depth
+        // surface and the HTILE that describes it in one dispatch - and dropping it loses that work and leaves the
+        // surface marked cleared (Black Myth: Wukong's characters failed every depth-equal base pass draw).
+        if ((ulong)groupsX * groupsY * groupsZ < MetadataClearMinimumGroups ||
+            program.Images.Length != 0 || program.SamplerCount != 0 || program.WritesDeviceAddresses)
+        {
+            return null;
+        }
+
         var probes = new MetadataBufferProbe[program.Buffers.Length];
         for (var i = 0; i < program.Buffers.Length; i++)
         {
             var resource = program.Buffers[i];
-            probes[i] = new MetadataBufferProbe(DecodeBufferDescriptor(resources, i).Address, resource.Written, resource.Read);
+            var descriptor = DecodeBufferDescriptor(resources, i);
+            var size = descriptor.Stride == 0 ? descriptor.RecordCount : (ulong)descriptor.RecordCount * descriptor.Stride;
+            probes[i] = new MetadataBufferProbe(descriptor.Address, size, resource.Written, resource.Read);
         }
 
         return probes;

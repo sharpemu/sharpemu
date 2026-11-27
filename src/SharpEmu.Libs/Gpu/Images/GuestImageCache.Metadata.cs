@@ -140,7 +140,7 @@ public sealed partial class GuestImageCache
                 // so it comes first: the clear, which takes the ownership, has the last word.
                 if (request.Role != ImageRole.DisplaySurface)
                 {
-                    _bufferCache.FillBuffer(address, sliceSize, uint.MaxValue, isGds: false);
+                    _bufferCache.FillDccMetadata(address, sliceSize, uint.MaxValue);
                 }
 
                 using (var held = _lock.Hold())

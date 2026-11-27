@@ -321,6 +321,10 @@ public interface IRenderHost
 
     bool IsMetadata(ulong address);
 
+    // Whether a buffer binding of this size at the address spans the whole metadata surface registered there, as a
+    // clear of it does. A small buffer that merely starts where a surface's metadata once lived does not.
+    bool CoversMetadata(ulong address, ulong size) => IsMetadata(address);
+
     bool ClearMetadata(ulong address);
 
     bool TryClearImageFromBuffer(ulong address, ulong size, uint packedClear);

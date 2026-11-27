@@ -184,6 +184,9 @@ public sealed class ShaderResourceInfo
     public bool HasBitwiseExclusiveOr { get; set; }
     public bool UsesDeviceAddresses { get; set; }
 
+    // A store or an atomic goes through the device-address page table: it can land on any mapped guest page.
+    public bool WritesDeviceAddresses { get; set; }
+
     // Some image access reads its image or sampler from a bindless heap through descriptor set 1.
     public bool UsesBindlessHeap { get; set; }
 
@@ -225,6 +228,7 @@ public sealed class ShaderResourceInfo
         InstanceOffsetScalarRegister = InstanceOffsetScalarRegister,
         HasBitwiseExclusiveOr = HasBitwiseExclusiveOr,
         UsesDeviceAddresses = UsesDeviceAddresses,
+        WritesDeviceAddresses = WritesDeviceAddresses,
         UsesBindlessHeap = UsesBindlessHeap,
         HeapViewCount = HeapViewCount,
         UsesCallRecords = UsesCallRecords,

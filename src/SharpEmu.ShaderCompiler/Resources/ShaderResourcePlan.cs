@@ -310,7 +310,11 @@ public sealed partial class ShaderResourcePlan
             .ToList();
         plan.Info.HeapViewCount = (uint)plan.HeapRecordSources.Count;
         if (program.Instructions.Any(instruction => instruction.Control is ShaderCallFaultControl))
+        {
+            // A shader call reaches code the program does not show, so it may store anywhere.
             plan.Info.UsesDeviceAddresses = true;
+            plan.Info.WritesDeviceAddresses = true;
+        }
         // A program with shader calls, or a compute program with many device-address dwords (CompactMemoryAccessPolicy),
         // reads device addresses without branches; an access it does not make reads the host's fallback address.
         if (plan.Info.UsesDeviceAddresses &&

@@ -331,7 +331,7 @@ public sealed class GuestRedZonePatcherTests
     [InlineData(0, 63)]
     public unsafe void ExtractRewriteRunsRelocatedWithoutAFault(int length, int index)
     {
-        if (RuntimeInformation.ProcessArchitecture != Architecture.X64 || !Sse4aExtractRewrite.IsRequired) return;
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64 || !Sse4aRewrite.IsRequired) return;
         var loadDestination = OperatingSystem.IsWindows() ? (byte)0x91 : (byte)0x97;
         var loadControl = OperatingSystem.IsWindows() ? (byte)0xA9 : (byte)0xAF;
         byte[] function =
@@ -349,10 +349,10 @@ public sealed class GuestRedZonePatcherTests
         using var image = PatchedImage.Create(function,
             [(0x2000, unchecked((uint)low)), (0x2004, (uint)(low >> 32)), (0x2008, unchecked((uint)high)), (0x200C, (uint)(high >> 32)),
              (0x2010, control), (0x2028, 0xFFFF_FFFFu)]);
-        if (Sse4aExtractRewrite.IsRequired)
+        if (Sse4aRewrite.IsRequired)
         {
-            Assert.Equal(1, image.Result.ExtractRewrites);
-            Assert.Equal(1, image.Result.ExtractCandidates);
+            Assert.Equal(1, image.Result.Sse4aRewrites);
+            Assert.Equal(1, image.Result.Sse4aCandidates);
             Assert.Equal(0, image.Result.ShaInstructionCount);
             Assert.Equal(0xE9, image.ReadByte(16));
         }
@@ -362,14 +362,48 @@ public sealed class GuestRedZonePatcherTests
         Assert.Equal(0u, image.ReadUInt32(0x2028));
     }
 
+    [Theory]
+    [InlineData(8, 8)]
+    [InlineData(0, 0)]
+    [InlineData(20, 50)]
+    public unsafe void InsertRewriteRunsRelocatedWithoutAFault(int length, int index)
+    {
+        if (RuntimeInformation.ProcessArchitecture != Architecture.X64 || !Sse4aRewrite.IsRequired) return;
+        var loadDestination = OperatingSystem.IsWindows() ? (byte)0x91 : (byte)0x97;
+        var loadSource = OperatingSystem.IsWindows() ? (byte)0xA9 : (byte)0xAF;
+        byte[] function =
+        [
+            0xF3, 0x0F, 0x6F, loadDestination, 0x00, 0x20, 0x00, 0x00,
+            0xF3, 0x0F, 0x6F, loadSource, 0x10, 0x20, 0x00, 0x00,
+            0xF2, 0x0F, 0x78, 0xD5, (byte)length, (byte)index, // insertq xmm2,xmm5,length,index
+            0x66, 0x48, 0x0F, 0x7E, 0xD0,                   // movq rax,xmm2
+            0xF3, 0x0F, 0x7F, loadDestination, 0x20, 0x20, 0x00, 0x00,
+            0xC3,
+        ];
+        const ulong low = 0xA00E_8965_2C7A_6E65;
+        const ulong high = 0xEB14_B4C0_0000_0000;
+        const ulong source = 0x0123_4567_89AB_CDEF;
+        using var image = PatchedImage.Create(function,
+            [(0x2000, unchecked((uint)low)), (0x2004, (uint)(low >> 32)), (0x2008, unchecked((uint)high)), (0x200C, (uint)(high >> 32)),
+             (0x2010, unchecked((uint)source)), (0x2014, (uint)(source >> 32)), (0x2028, 0xFFFF_FFFFu)]);
+        Assert.Equal(1, image.Result.Sse4aRewrites);
+        Assert.Equal(1, image.Result.Sse4aCandidates);
+        Assert.Equal(0, image.Result.ShaInstructionCount);
+        Assert.Equal(0xE9, image.ReadByte(16));
+
+        var expected = Sse4aBitFieldEmulator.InsertBitField(low, source, length, index);
+        Assert.Equal(expected, ((delegate* unmanaged<ulong, ulong>)image.Base)(image.Base));
+        Assert.Equal(0u, image.ReadUInt32(0x2028));
+    }
+
     [Fact]
     public void ExtractCountersIncludeEveryInstructionInAGroupedSpan()
     {
-        if (!Sse4aExtractRewrite.IsRequired) return;
+        if (!Sse4aRewrite.IsRequired) return;
         byte[] function = [0x66, 0x0F, 0x79, 0xD5, 0x66, 0x0F, 0x79, 0xD5, 0xC3];
         using var image = PatchedImage.Create(function, []);
-        Assert.Equal(2, image.Result.ExtractCandidates);
-        Assert.Equal(2, image.Result.ExtractRewrites);
+        Assert.Equal(2, image.Result.Sse4aCandidates);
+        Assert.Equal(2, image.Result.Sse4aRewrites);
         Assert.Equal(0, image.Result.ShaInstructionCount);
         Assert.Equal(1, image.Result.PatchedSites);
     }

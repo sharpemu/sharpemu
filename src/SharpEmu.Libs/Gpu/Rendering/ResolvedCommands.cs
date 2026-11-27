@@ -222,7 +222,7 @@ internal sealed class ResolvedDraw
     }
 }
 
-internal readonly record struct MetadataBufferProbe(ulong Address, bool Written, bool Read);
+internal readonly record struct MetadataBufferProbe(ulong Address, ulong Size, bool Written, bool Read);
 
 internal readonly record struct ConstantFillCandidate(ulong Address, ulong Size, uint Value);
 
