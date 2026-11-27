@@ -3699,7 +3699,40 @@ public static partial class Gen5SpirvTranslator
             return original;
         }
 
+        // V_INTERP_P2_F16 writes one half of its destination (OPSEL[3]) and keeps the other. Every
+        // interpolation path below produces an f32 in the destination; narrow it afterwards.
         private bool TryEmitInterpolation(
+            Gen5ShaderInstruction instruction,
+            Gen5InterpolationControl interpolation,
+            out string error)
+        {
+            if (interpolation.HighAttribute)
+            {
+                // Pixel inputs are declared as f32 components; the high f16 of a packed attribute
+                // has no input to read from yet.
+                error = $"{instruction.Opcode} reads the high half of attribute {interpolation.Attribute}";
+                return false;
+            }
+
+            if (instruction.Opcode != "VInterpP2F16" || !TryGetVectorDestination(instruction, out var halfDestination))
+            {
+                return TryEmitInterpolationCore(instruction, interpolation, out error);
+            }
+
+            var original = LoadV(halfDestination);
+            if (!TryEmitInterpolationCore(instruction, interpolation, out error))
+            {
+                return false;
+            }
+
+            var half = BitwiseAnd(EmitFloatToHalf(LoadV(halfDestination)), UInt(0xFFFF));
+            StoreV(halfDestination, interpolation.HighDestination
+                ? BitwiseOr(BitwiseAnd(original, UInt(0xFFFF)), ShiftLeftLogical(half, UInt(16)))
+                : BitwiseOr(BitwiseAnd(original, UInt(0xFFFF_0000)), half));
+            return true;
+        }
+
+        private bool TryEmitInterpolationCore(
             Gen5ShaderInstruction instruction,
             Gen5InterpolationControl interpolation,
             out string error)

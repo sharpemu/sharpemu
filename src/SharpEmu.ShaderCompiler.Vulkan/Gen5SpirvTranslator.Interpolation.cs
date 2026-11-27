@@ -286,6 +286,29 @@ public static partial class Gen5SpirvTranslator
                 result = _module.AddInstruction(SpirvOp.FAdd, _floatType, product,
                     firstPhase ? LoadParameter(2) : Bitcast(_floatType, LoadV(destination)));
             }
+            else if (instruction.Opcode is "VInterpP1llF16" or "VInterpP1lvF16" or "VInterpP2F16")
+            {
+                // Same weights as the f32 pair. P1LV takes P0 from the low half of SRC2 and P2 adds
+                // the P1 result held in SRC2 (an f32); P2's value is narrowed by the caller.
+                var source = Bitcast(_floatType, GetRawSource(instruction, 0));
+                uint addend;
+                if (instruction.Opcode == "VInterpP1llF16")
+                {
+                    addend = LoadParameter(2);
+                }
+                else if (instruction.Opcode == "VInterpP1lvF16")
+                {
+                    addend = Bitcast(_floatType, EmitHalfToFloat(GetRawSource(instruction, 1)));
+                }
+                else
+                {
+                    addend = Bitcast(_floatType, GetRawSource(instruction, 1));
+                }
+
+                var product = _module.AddInstruction(SpirvOp.FMul, _floatType,
+                    LoadParameter(instruction.Opcode == "VInterpP2F16" ? 1u : 0u), source);
+                result = _module.AddInstruction(SpirvOp.FAdd, _floatType, product, addend);
+            }
             else
             {
                 error = $"unsupported interpolation opcode {instruction.Opcode}";
