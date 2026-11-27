@@ -8,7 +8,7 @@ using System.Collections.Concurrent;
 namespace SharpEmu.Libs.Ampr;
 
 // The rest of the AMM exports: the remap, protect and PRT commands, the GpuMaskId and measure forms, and the
-// submit variants. Each command records a fixed AmmRecordSize record into the buffer and runs when it is
+// submit variants. Each command records one record into the buffer and runs when it is
 // submitted. The GpuMaskId forms take one more argument that the commands do not use.
 public static partial class AmprExports
 {
@@ -167,16 +167,17 @@ public static partial class AmprExports
             });
 
     // The measure calls return the bytes the command takes in the buffer, or EINVAL for arguments the command
-    // would reject. Every AMM command is one AmmRecordSize record.
-    private static int MeasureAmm(CpuContext ctx, bool valid)
+    // would reject.
+    private static int MeasureAmm(CpuContext ctx, bool valid, AmmCommandKind kind = AmmCommandKind.Map)
     {
         if (!valid)
         {
             return SetAmmResult(ctx, KernelEinval);
         }
 
-        ctx[CpuRegister.Rax] = AmmRecordSize;
-        return (int)AmmRecordSize;
+        var recordSize = AmmCommandRecordSize(kind);
+        ctx[CpuRegister.Rax] = recordSize;
+        return (int)recordSize;
     }
 
     private static bool IsValidAmmMapRange(ulong address, ulong size) =>
@@ -235,7 +236,7 @@ public static partial class AmprExports
         Target = Generation.Gen5,
         LibraryName = "libSceAmpr")]
     public static int AmmMeasureCommandSizeMapAsPrt(CpuContext ctx) =>
-        MeasureAmm(ctx, IsValidAmmMapRange(ctx[CpuRegister.Rdi], ctx[CpuRegister.Rsi]));
+        MeasureAmm(ctx, IsValidAmmMapRange(ctx[CpuRegister.Rdi], ctx[CpuRegister.Rsi]), AmmCommandKind.MapAsPrt);
 
     // MeasureAllocatePaForPrt(va, size, memory type, protection)
     [SysAbiExport(
@@ -245,7 +246,7 @@ public static partial class AmprExports
         LibraryName = "libSceAmpr")]
     public static int AmmMeasureCommandSizeAllocatePaForPrt(CpuContext ctx) =>
         MeasureAmm(ctx, IsValidAmmMapRange(ctx[CpuRegister.Rdi], ctx[CpuRegister.Rsi]) &&
-            IsValidAmmProtection(unchecked((int)ctx[CpuRegister.Rcx])));
+            IsValidAmmProtection(unchecked((int)ctx[CpuRegister.Rcx])), AmmCommandKind.AllocatePaForPrt);
 
     // MeasureRemap and MeasureMultiMap take (va, source va, size, protection).
     [SysAbiExport(

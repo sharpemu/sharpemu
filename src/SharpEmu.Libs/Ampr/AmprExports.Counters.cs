@@ -7,12 +7,11 @@ using System.Buffers.Binary;
 namespace SharpEmu.Libs.Ampr;
 
 // The APR counters: 256 32-bit slots a command buffer writes and waits on. A write stores into or updates a
-// field of a slot (8, 4, 2 or 1 bytes), and a wait compares a field with a reference under a mask. The records
-// follow the AnyPS5 layout: a header of opcode and byte size, then the fields.
+// field of a slot (8, 4, 2 or 1 bytes), and a wait compares a field with a reference under a mask.
 public static partial class AmprExports
 {
-    private const ulong WriteCounterRecordSize = 0x18;
-    private const ulong WaitCounterRecordSize = 0x28;
+    private const ulong CounterRecordHeaderSize = 4;
+    private const uint CounterAccessSize8 = 0;
     private const uint WriteCounterRecordType = 3;
     private const uint WaitCounterRecordType = 5;
     private const int CounterSlots = 256;
@@ -29,7 +28,15 @@ public static partial class AmprExports
         public uint Operation;
         public ulong Value;
         public ulong Mask;
+        public bool Masked;
     }
+
+    private static ulong CounterValueBytes(uint access) => access == CounterAccessSize8 ? sizeof(ulong) : (ulong)sizeof(uint);
+
+    private static ulong WriteCounterRecordSize(uint access) => CounterRecordHeaderSize + CounterValueBytes(access);
+
+    private static ulong WaitCounterRecordSize(uint access, bool masked) =>
+        CounterRecordHeaderSize + (masked ? 2UL : 1UL) * CounterValueBytes(access);
 
     [SysAbiExport(
         Nid = "jK+yuYCI7MA",
@@ -101,6 +108,7 @@ public static partial class AmprExports
             Operation = compare,
             Value = reference,
             Mask = maskOperation != 0 ? mask : ulong.MaxValue,
+            Masked = maskOperation != 0,
         };
         if (!AppendCounterRecord(ctx, commandBuffer, command))
         {
@@ -127,7 +135,7 @@ public static partial class AmprExports
             return SetAmprResult(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        ctx[CpuRegister.Rax] = WriteCounterRecordSize;
+        ctx[CpuRegister.Rax] = WriteCounterRecordSize(access);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -149,7 +157,7 @@ public static partial class AmprExports
             return SetAmprResult(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        ctx[CpuRegister.Rax] = WaitCounterRecordSize;
+        ctx[CpuRegister.Rax] = WaitCounterRecordSize(access, maskOperation != 0);
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }
 
@@ -243,25 +251,18 @@ public static partial class AmprExports
 
     private static bool AppendCounterRecord(CpuContext ctx, ulong commandBuffer, CounterCommand command)
     {
-        var recordSize = command.IsWait ? WaitCounterRecordSize : WriteCounterRecordSize;
+        var recordSize = command.IsWait ? WaitCounterRecordSize(command.Access, command.Masked) : WriteCounterRecordSize(command.Access);
+        var valueBytes = (int)CounterValueBytes(command.Access);
         Span<byte> record = stackalloc byte[(int)recordSize];
         record.Clear();
-        BinaryPrimitives.WriteUInt32LittleEndian(record, command.IsWait ? WaitCounterRecordType : WriteCounterRecordType);
-        BinaryPrimitives.WriteUInt32LittleEndian(record[4..], (uint)recordSize);
-        if (command.IsWait)
+        record[0] = (byte)(command.IsWait ? WaitCounterRecordType : WriteCounterRecordType);
+        record[1] = (byte)command.Counter;
+        record[2] = (byte)command.Access;
+        record[3] = (byte)command.Operation;
+        WriteCounterField(record.Slice((int)CounterRecordHeaderSize, valueBytes), command.Value);
+        if (command.IsWait && command.Masked)
         {
-            BinaryPrimitives.WriteUInt64LittleEndian(record[0x10..], command.Value);
-            BinaryPrimitives.WriteUInt64LittleEndian(record[0x18..], command.Mask);
-            BinaryPrimitives.WriteUInt32LittleEndian(record[0x20..], command.Counter);
-            record[0x24] = (byte)command.Operation;
-            record[0x25] = (byte)command.Access;
-        }
-        else
-        {
-            BinaryPrimitives.WriteUInt32LittleEndian(record[0x08..], command.Counter);
-            record[0x0C] = (byte)command.Access;
-            record[0x0D] = (byte)command.Operation;
-            BinaryPrimitives.WriteUInt64LittleEndian(record[0x10..], command.Value);
+            WriteCounterField(record.Slice((int)CounterRecordHeaderSize + valueBytes, valueBytes), command.Mask);
         }
 
         if (!TryGetCommandBufferState(ctx, commandBuffer, out _, out _, out var state) || state is null)
@@ -285,5 +286,17 @@ public static partial class AmprExports
         }
 
         return true;
+    }
+
+    private static void WriteCounterField(Span<byte> field, ulong value)
+    {
+        if (field.Length == sizeof(ulong))
+        {
+            BinaryPrimitives.WriteUInt64LittleEndian(field, value);
+        }
+        else
+        {
+            BinaryPrimitives.WriteUInt32LittleEndian(field, unchecked((uint)value));
+        }
     }
 }

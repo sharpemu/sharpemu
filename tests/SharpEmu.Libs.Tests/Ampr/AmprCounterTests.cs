@@ -92,7 +92,7 @@ public sealed class AmprCounterTests
         Assert.Equal(0UL, AmprExports.ReadCounter(9, 1));
         Assert.True(f.Context.TryReadUInt32(DefaultCommandBuffer + 4, out var offset));
         Assert.True(f.Context.TryReadUInt32(DefaultCommandBuffer + 8, out var count));
-        Assert.Equal(0x18U, offset);
+        Assert.Equal(0x8U, offset);
         Assert.Equal(1U, count);
 
         Assert.Equal(0, f.Complete());
@@ -194,7 +194,10 @@ public sealed class AmprCounterTests
         ctx[CpuRegister.Rdx] = 0;
         ctx[CpuRegister.Rcx] = 0;
         Assert.Equal(0, AmprExports.MeasureCommandSizeWriteCounter0400(ctx));
-        Assert.Equal(0x18UL, ctx[CpuRegister.Rax]);
+        Assert.Equal(0x8UL, ctx[CpuRegister.Rax]);
+        ctx[CpuRegister.Rsi] = 0;
+        Assert.Equal(0, AmprExports.MeasureCommandSizeWriteCounter0400(ctx));
+        Assert.Equal(0xCUL, ctx[CpuRegister.Rax]);
 
         ctx[CpuRegister.Rdi] = 1;
         ctx[CpuRegister.Rsi] = 1;
@@ -205,7 +208,13 @@ public sealed class AmprCounterTests
         ctx[CpuRegister.Rsp] = Stack;
         Assert.True(ctx.TryWriteUInt64(Stack + 8, 0));
         Assert.Equal(0, AmprExports.MeasureCommandSizeWaitOnCounter0400(ctx));
-        Assert.Equal(0x28UL, ctx[CpuRegister.Rax]);
+        Assert.Equal(0x8UL, ctx[CpuRegister.Rax]);
+        ctx[CpuRegister.Rsi] = 0;
+        ctx[CpuRegister.R8] = 1;
+        Assert.Equal(0, AmprExports.MeasureCommandSizeWaitOnCounter0400(ctx));
+        Assert.Equal(0x14UL, ctx[CpuRegister.Rax]);
+        ctx[CpuRegister.Rsi] = 1;
+        ctx[CpuRegister.R8] = 0;
 
         ctx[CpuRegister.Rcx] = 7;
         Assert.Equal(Einval, AmprExports.MeasureCommandSizeWaitOnCounter0400(ctx));

@@ -22,6 +22,7 @@ public static partial class AmprExports
     private const ulong AmmPageSize = 0x4000;
     private const ulong AmmGiveGranularity = 0x20_0000;
     private const ulong AmmRecordSize = 0x20;
+    private const ulong AmmPrtRecordSize = 0x10;
     private const int AmmUsageDirect = 0;
     private const int AmmUsageAuto = 1;
     private const ulong AmmMapFixed = 0x10;
@@ -353,20 +354,28 @@ public static partial class AmprExports
 
         // The record carries the kind, protection, range and the source range or direct offset. A protect
         // command puts its mask and memory type in the last eight bytes instead.
-        Span<byte> record = stackalloc byte[(int)AmmRecordSize];
+        Span<byte> record = stackalloc byte[(int)AmmCommandRecordSize(command.Kind)];
         record.Clear();
-        BinaryPrimitives.WriteUInt32LittleEndian(record, (uint)command.Kind);
-        BinaryPrimitives.WriteUInt32LittleEndian(record[0x04..], unchecked((uint)command.Protection));
-        BinaryPrimitives.WriteUInt64LittleEndian(record[0x08..], command.Address);
-        BinaryPrimitives.WriteUInt64LittleEndian(record[0x10..], command.Size);
-        if (hasMask)
+        if (record.Length == (int)AmmPrtRecordSize)
         {
-            BinaryPrimitives.WriteUInt32LittleEndian(record[0x18..], unchecked((uint)command.Mask));
-            BinaryPrimitives.WriteUInt32LittleEndian(record[0x1C..], unchecked((uint)command.Type));
+            BinaryPrimitives.WriteUInt64LittleEndian(record, command.Address | (ulong)command.Kind | ((ulong)(uint)command.Type << 5));
+            BinaryPrimitives.WriteUInt64LittleEndian(record[0x08..], command.Size | ((ulong)(uint)command.Protection & (AmmPageSize - 1)));
         }
         else
         {
-            BinaryPrimitives.WriteUInt64LittleEndian(record[0x18..], command.DirectOffset ?? command.Source);
+            BinaryPrimitives.WriteUInt32LittleEndian(record, (uint)command.Kind);
+            BinaryPrimitives.WriteUInt32LittleEndian(record[0x04..], unchecked((uint)command.Protection));
+            BinaryPrimitives.WriteUInt64LittleEndian(record[0x08..], command.Address);
+            BinaryPrimitives.WriteUInt64LittleEndian(record[0x10..], command.Size);
+            if (hasMask)
+            {
+                BinaryPrimitives.WriteUInt32LittleEndian(record[0x18..], unchecked((uint)command.Mask));
+                BinaryPrimitives.WriteUInt32LittleEndian(record[0x1C..], unchecked((uint)command.Type));
+            }
+            else
+            {
+                BinaryPrimitives.WriteUInt64LittleEndian(record[0x18..], command.DirectOffset ?? command.Source);
+            }
         }
 
         lock (state)
@@ -387,6 +396,11 @@ public static partial class AmprExports
         TraceAmpr(ctx, "amm_" + command.Kind, commandBuffer, command.Address, command.Size);
         return SetAmmResult(ctx, 0);
     }
+
+    private static ulong AmmCommandRecordSize(AmmCommandKind kind) =>
+        kind is AmmCommandKind.MapAsPrt or AmmCommandKind.UnmapToPrt or AmmCommandKind.AllocatePaForPrt
+            ? AmmPrtRecordSize
+            : AmmRecordSize;
 
     private static bool IsAmmRange(ulong address, ulong size) =>
         size != 0 && address % AmmPageSize == 0 && size % AmmPageSize == 0 &&

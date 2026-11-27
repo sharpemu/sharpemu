@@ -27,6 +27,7 @@ public sealed class AmprAmmTests
     private const int Efault = unchecked((int)0x8002000E);
     private const int Esrch = unchecked((int)0x80020003);
     private const ulong AmmRecordSize = 0x20;
+    private const ulong AmmPrtRecordSize = 0x10;
 
     [Fact]
     public void AllocatePaForPrtBacksTheRangeSoItCanBeWrittenAndRead()
@@ -496,32 +497,32 @@ public sealed class AmprAmmTests
         amm.Give(0x20_0000, auto: true);
         var a = AreaStart + 0x1300_0000;
         var b = AreaStart + 0x1310_0000;
-        var recorders = new Action<AmmHarness.Commands>[]
+        var recorders = new (Action<AmmHarness.Commands> Record, ulong Size)[]
         {
-            c => c.Map(a, Page, 0, CpuReadWrite),
-            c => c.MapWithGpuMaskId(a, Page, 0, CpuReadWrite, 1),
-            c => c.MapDirect(a, 0, Page, 0, CpuReadWrite),
-            c => c.MapDirectWithGpuMaskId(a, 0, Page, 0, CpuReadWrite),
-            c => c.Unmap(a, Page),
-            c => c.Remap(b, a, Page, CpuReadWrite),
-            c => c.RemapWithGpuMaskId(b, a, Page, CpuReadWrite, 1),
-            c => c.MultiMap(b, a, Page, CpuReadWrite),
-            c => c.MultiMapWithGpuMaskId(b, a, Page, CpuReadWrite, 1),
-            c => c.ModifyProtect(a, Page, CpuRead, 3),
-            c => c.ModifyProtectWithGpuMaskId(a, Page, CpuRead, 3, 1),
-            c => c.ModifyMtypeProtect(a, Page, 1, CpuRead, 3),
-            c => c.ModifyMtypeProtectWithGpuMaskId(a, Page, 1, CpuRead, 3, 1),
-            c => c.MapAsPrt(a, Page),
-            c => c.AllocatePaForPrt(a, Page, 0, CpuReadWrite),
-            c => c.RemapIntoPrt(b, a, Page, CpuReadWrite),
-            c => c.UnmapToPrt(a, Page),
+            (c => c.Map(a, Page, 0, CpuReadWrite), AmmRecordSize),
+            (c => c.MapWithGpuMaskId(a, Page, 0, CpuReadWrite, 1), AmmRecordSize),
+            (c => c.MapDirect(a, 0, Page, 0, CpuReadWrite), AmmRecordSize),
+            (c => c.MapDirectWithGpuMaskId(a, 0, Page, 0, CpuReadWrite), AmmRecordSize),
+            (c => c.Unmap(a, Page), AmmRecordSize),
+            (c => c.Remap(b, a, Page, CpuReadWrite), AmmRecordSize),
+            (c => c.RemapWithGpuMaskId(b, a, Page, CpuReadWrite, 1), AmmRecordSize),
+            (c => c.MultiMap(b, a, Page, CpuReadWrite), AmmRecordSize),
+            (c => c.MultiMapWithGpuMaskId(b, a, Page, CpuReadWrite, 1), AmmRecordSize),
+            (c => c.ModifyProtect(a, Page, CpuRead, 3), AmmRecordSize),
+            (c => c.ModifyProtectWithGpuMaskId(a, Page, CpuRead, 3, 1), AmmRecordSize),
+            (c => c.ModifyMtypeProtect(a, Page, 1, CpuRead, 3), AmmRecordSize),
+            (c => c.ModifyMtypeProtectWithGpuMaskId(a, Page, 1, CpuRead, 3, 1), AmmRecordSize),
+            (c => c.MapAsPrt(a, Page), AmmPrtRecordSize),
+            (c => c.AllocatePaForPrt(a, Page, 0, CpuReadWrite), AmmPrtRecordSize),
+            (c => c.RemapIntoPrt(b, a, Page, CpuReadWrite), AmmRecordSize),
+            (c => c.UnmapToPrt(a, Page), AmmPrtRecordSize),
         };
-        foreach (var record in recorders)
+        foreach (var (record, size) in recorders)
         {
             var before = amm.Offset;
             var commands = amm.Count;
             amm.Record(record);
-            Assert.Equal(AmmRecordSize, amm.Offset - before);
+            Assert.Equal(size, amm.Offset - before);
             Assert.Equal(commands + 1, amm.Count);
         }
 
@@ -538,8 +539,8 @@ public sealed class AmprAmmTests
         Assert.Equal((int)AmmRecordSize, amm.Measure(AmprExports.AmmMeasureCommandSizeModifyProtectWithGpuMaskId, a, Page, CpuRead, 3, 1));
         Assert.Equal((int)AmmRecordSize, amm.Measure(AmprExports.AmmMeasureCommandSizeModifyMtypeProtect, a, Page, 1, CpuRead, 3));
         Assert.Equal((int)AmmRecordSize, amm.Measure(AmprExports.AmmMeasureCommandSizeModifyMtypeProtectWithGpuMaskId, a, Page, 1, CpuRead, 3, 1));
-        Assert.Equal((int)AmmRecordSize, amm.Measure(AmprExports.AmmMeasureCommandSizeMapAsPrt, a, Page));
-        Assert.Equal((int)AmmRecordSize, amm.Measure(AmprExports.AmmMeasureCommandSizeAllocatePaForPrt, a, Page, 0, CpuReadWrite));
+        Assert.Equal((int)AmmPrtRecordSize, amm.Measure(AmprExports.AmmMeasureCommandSizeMapAsPrt, a, Page));
+        Assert.Equal((int)AmmPrtRecordSize, amm.Measure(AmprExports.AmmMeasureCommandSizeAllocatePaForPrt, a, Page, 0, CpuReadWrite));
     }
 
     [Fact]
