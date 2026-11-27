@@ -403,6 +403,35 @@ public sealed partial class GuestImageCacheTests
         harness.Shutdown();
     }
 
+    // A sampled texture in the depth tiling that the GPU wrote reads back through the tiling it was uploaded with.
+    [Fact]
+    public void TiledTextureReadback_TakesTheDepthTiling()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        const uint width = 3, height = 2, pitch = 4;
+        const ulong size = 0x10000;
+        const uint clear = 0x12345678u;
+        const uint stale = 0xdeadbeefu;
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        harness.Write(address, Bytes(Enumerable.Repeat(stale, (int)(size / 4)).ToArray()));
+        var request = LinearRequest(address, size, Format.R32Uint, GuestPixelFormat.Bits32UInt, GuestImageType.Color2D, new Extent3D(width, height, 1), 1, 4, 1);
+        request.Description.Pitch = pitch;
+        request.Description.TileMode = GuestTileMode.Depth;
+        request.Description.MipLayout[0] = new MipLevelLayout { Offset = 0, Size = size, Pitch = pitch, Height = height };
+        var imageIdentifier = harness.Find(ref request);
+        Assert.Equal(ImageRole.Texture, request.Role);
+        Assert.True(harness.Worker.Run(() => harness.Images.TryClearImageFromBuffer(address, size, clear)));
+        harness.MarkGpuWritten(imageIdentifier);
+        Assert.True(harness.Worker.Run(() => harness.Images.TryDownloadForTest(imageIdentifier)));
+        harness.Finish();
+
+        var after = harness.Read(address, (int)size).Chunk(4).Select(chunk => BitConverter.ToUInt32(chunk)).ToArray();
+        Assert.Equal((int)(width * height), after.Count(value => value == clear));
+        Assert.Equal(after.Length - (int)(width * height), after.Count(value => value == stale));
+        harness.Shutdown();
+    }
+
     [Fact]
     public void TiledD16Readback_ConvertsAndPreservesStencil()
     {
