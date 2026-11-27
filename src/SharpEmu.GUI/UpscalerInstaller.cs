@@ -15,6 +15,11 @@ internal static class UpscalerInstaller
         DlssRuntimeFiles.StreamlineVersion + "/" + StreamlineArchive;
     private const long StreamlineBytes = 276_016_170;
     private const string StreamlineSha256 = "32041E51DB0CAB709A271B72A352281B690C2ABBD669A827809401A5DD23956B";
+    private const string XessArchive = "XeSS_SDK_" + XessRuntimeFiles.SdkVersion + ".zip";
+    private const string XessDownloadUrl = "https://github.com/intel/xess/releases/download/v" +
+        XessRuntimeFiles.SdkVersion + "/" + XessArchive;
+    private const long XessBytes = 76_839_749;
+    private const string XessSha256 = "88B8A373F30E33F3558A77A93E634F11B8132FC3047EA1A8EDEEAD32B8471990";
 
     // The signed Vulkan binaries in the AMD FSR SDK v2.4.0 release commit.
     private const string FsrDownloadRoot = "https://raw.githubusercontent.com/GPUOpen-LibrariesAndSDKs/FidelityFX-SDK/" +
@@ -31,13 +36,13 @@ internal static class UpscalerInstaller
     public static async Task InstallAsync(SuperResolutionBackend backend, string destination, IProgress<int>? progress,
         CancellationToken cancellationToken, HttpClient? client = null)
     {
-        if (backend is not (SuperResolutionBackend.Dlss or SuperResolutionBackend.Fsr))
+        var files = backend switch
         {
-            throw new ArgumentOutOfRangeException(nameof(backend));
-        }
-
-        var dlss = backend == SuperResolutionBackend.Dlss;
-        var files = dlss ? DlssRuntimeFiles.Required.Select(file => file.Name).ToArray() : FsrRuntimeFiles.Required;
+            SuperResolutionBackend.Dlss => DlssRuntimeFiles.Required.Select(file => file.Name).ToArray(),
+            SuperResolutionBackend.Fsr => FsrRuntimeFiles.Required,
+            SuperResolutionBackend.Xess => XessRuntimeFiles.Required,
+            _ => throw new ArgumentOutOfRangeException(nameof(backend)),
+        };
         if (HasAllFiles(destination, files))
         {
             return;
@@ -60,7 +65,7 @@ internal static class UpscalerInstaller
         {
             Directory.CreateDirectory(payload);
             client ??= Http;
-            if (dlss)
+            if (backend == SuperResolutionBackend.Dlss)
             {
                 var archivePath = Path.Combine(staging, StreamlineArchive);
                 await DownloadAsync(client, StreamlineDownloadUrl, archivePath, StreamlineBytes, StreamlineSha256,
@@ -70,11 +75,19 @@ internal static class UpscalerInstaller
                 files = [.. files, "NvLowLatencyVk.dll"];
                 foreach (var name in files)
                 {
-                    var entry = archive.GetEntry("bin/x64/" + name)
-                        ?? throw new InvalidDataException($"The Streamline archive is missing bin/x64/{name}.");
-                    await using var source = entry.Open();
-                    await using var output = File.Create(Path.Combine(payload, name));
-                    await source.CopyToAsync(output, cancellationToken);
+                    await ExtractAsync(archive, "bin/x64/" + name, Path.Combine(payload, name), cancellationToken);
+                }
+            }
+            else if (backend == SuperResolutionBackend.Xess)
+            {
+                var archivePath = Path.Combine(staging, XessArchive);
+                await DownloadAsync(client, XessDownloadUrl, archivePath, XessBytes, XessSha256, progress, 0, XessBytes, cancellationToken);
+                using var archive = ZipFile.OpenRead(archivePath);
+                files = [XessRuntimeFiles.Library, "LICENSE.txt", "third-party-programs.txt"];
+                foreach (var name in files)
+                {
+                    var entry = name == XessRuntimeFiles.Library ? "bin/" + name : name;
+                    await ExtractAsync(archive, entry, Path.Combine(payload, name), cancellationToken);
                 }
             }
             else
@@ -103,6 +116,14 @@ internal static class UpscalerInstaller
                 }
             }
         }
+    }
+
+    private static async Task ExtractAsync(ZipArchive archive, string entryName, string destination, CancellationToken cancellationToken)
+    {
+        var entry = archive.GetEntry(entryName) ?? throw new InvalidDataException($"The SDK archive is missing {entryName}.");
+        await using var source = entry.Open();
+        await using var output = File.Create(destination);
+        await source.CopyToAsync(output, cancellationToken);
     }
 
     private static bool HasAllFiles(string directory, IReadOnlyList<string> files) =>

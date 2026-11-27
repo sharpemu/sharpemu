@@ -1690,13 +1690,30 @@ SPDX-License-Identifier: GPL-2.0-or-later
                   </Border>
 
                   <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Pssr.Group.Xess], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
-                  <Border Classes="optionsGroup">
+                  <Border x:Name="PssrXessGroup" Classes="optionsGroup">
                     <StackPanel>
-                      <local:SettingRow x:Name="PssrXessRow"
-                                        Classes="optionRow"
-                                        IsEnabled="False"
+                      <local:SettingRow Classes="optionRow"
                                         Label="{Binding [Options.Pssr.Xess.Label], Source={x:Static local:Localization.Instance}}"
-                                        Description="{Binding [Options.Pssr.ComingSoon], Source={x:Static local:Localization.Instance}}" />
+                                        Description="{Binding [Options.Pssr.XessFiles.Hint], Source={x:Static local:Localization.Instance}}">
+                        <WrapPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                          <Button x:Name="XessInstallButton" Classes="accent" MinWidth="160" Margin="0,0,8,8"
+                                  Content="{Binding [Options.Pssr.Install.Action], Source={x:Static local:Localization.Instance}}" />
+                          <Button x:Name="XessDownloadButton" Classes="optionAction" Margin="0,0,8,8"
+                                  Content="Intel XeSS SDK" />
+                          <Button x:Name="XessFolderButton" Classes="optionAction" Margin="0,0,8,8"
+                                  Content="{Binding [Options.Pssr.DlssFiles.Folder], Source={x:Static local:Localization.Instance}}" />
+                          <Button x:Name="XessRefreshButton" Classes="optionAction" Margin="0,0,0,8"
+                                  Content="{Binding [Options.Pssr.DlssFiles.Refresh], Source={x:Static local:Localization.Instance}}" />
+                        </WrapPanel>
+                      </local:SettingRow>
+                      <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12" Margin="18,4,18,16">
+                        <TextBlock x:Name="XessFilesStatusIcon" Grid.Column="0" Classes="materialSymbol" VerticalAlignment="Top" />
+                        <StackPanel Grid.Column="1" Spacing="4">
+                          <TextBlock x:Name="XessFilesStatusTitle" FontWeight="SemiBold" TextWrapping="Wrap" />
+                          <TextBlock x:Name="XessFilesStatusDetails" Classes="optionsSectionDesc" TextWrapping="Wrap" />
+                          <TextBlock x:Name="XessFilesCheckedText" Classes="optionsSectionDesc" IsVisible="False" TextWrapping="Wrap" />
+                        </StackPanel>
+                      </Grid>
                     </StackPanel>
                   </Border>
                 </StackPanel>

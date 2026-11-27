@@ -9,6 +9,7 @@ public enum SuperResolutionUpscaler
     Dlss,
     Basic,
     Fsr,
+    Xess,
 }
 
 public enum SuperResolutionBackend
@@ -16,6 +17,7 @@ public enum SuperResolutionBackend
     Dlss,
     Fsr,
     Basic,
+    Xess,
 }
 
 public static class SuperResolutionSettings
@@ -28,6 +30,7 @@ public static class SuperResolutionSettings
     {
         "dlss" => SuperResolutionUpscaler.Dlss,
         "fsr" => SuperResolutionUpscaler.Fsr,
+        "xess" => SuperResolutionUpscaler.Xess,
         "basic" or "off" => SuperResolutionUpscaler.Basic,
         _ => SuperResolutionUpscaler.Auto,
     };
@@ -36,6 +39,7 @@ public static class SuperResolutionSettings
     {
         SuperResolutionUpscaler.Dlss => SuperResolutionBackend.Dlss,
         SuperResolutionUpscaler.Fsr => SuperResolutionBackend.Fsr,
+        SuperResolutionUpscaler.Xess => SuperResolutionBackend.Xess,
         SuperResolutionUpscaler.Basic => SuperResolutionBackend.Basic,
         _ => vendor is SharpEmu.Logging.HostGpuVendor.Amd or SharpEmu.Logging.HostGpuVendor.Intel
             ? SuperResolutionBackend.Fsr
@@ -67,6 +71,9 @@ public static class SuperResolutionStartup
                 break;
             case SuperResolutionBackend.Fsr:
                 Console.Error.WriteLine($"[PSSR][INFO] PSSR upscaler: FSR ({SuperResolutionSettings.Requested}, GPU: {gpu}).");
+                break;
+            case SuperResolutionBackend.Xess:
+                Console.Error.WriteLine($"[PSSR][INFO] PSSR upscaler: XeSS ({SuperResolutionSettings.Requested}, GPU: {gpu}).");
                 break;
             default:
                 Console.Error.WriteLine("[PSSR][INFO] PSSR upscaler: basic (set in the PSSR settings).");
@@ -120,6 +127,20 @@ public static class FsrRuntimeFiles
 
     public static string DefaultDirectory => DirectoryFor(AppContext.BaseDirectory);
 
+    public static IReadOnlyList<string> Missing(string directory) =>
+        Required.Where(file => !File.Exists(Path.Combine(directory, file))).ToArray();
+}
+
+public static class XessRuntimeFiles
+{
+    public const string SdkVersion = "3.0.2";
+    public const string SdkReleaseUrl = "https://github.com/intel/xess/releases/tag/v" + SdkVersion;
+    public const string Library = "libxess.dll";
+
+    public static IReadOnlyList<string> Required { get; } = [Library];
+
+    public static string DirectoryFor(string executableDirectory) => UpscalerFolders.For(executableDirectory, "xess");
+    public static string DefaultDirectory => DirectoryFor(AppContext.BaseDirectory);
     public static IReadOnlyList<string> Missing(string directory) =>
         Required.Where(file => !File.Exists(Path.Combine(directory, file))).ToArray();
 }

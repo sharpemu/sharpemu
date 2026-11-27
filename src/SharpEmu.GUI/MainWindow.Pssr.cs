@@ -19,6 +19,7 @@ public partial class MainWindow
         LocalizedChoice.FromKey("Auto", "Options.Pssr.Upscaler.Auto"),
         LocalizedChoice.FromKey("Dlss", "Options.Pssr.Upscaler.Dlss"),
         LocalizedChoice.FromKey("Fsr", "Options.Pssr.Upscaler.Fsr"),
+        LocalizedChoice.FromKey("Xess", "Options.Pssr.Group.Xess"),
         LocalizedChoice.FromKey("Basic", "Options.Pssr.Upscaler.Basic"),
     ];
 
@@ -54,12 +55,21 @@ public partial class MainWindow
             _fsrFilesCheckedAt = DateTime.Now;
             UpdateFsrFilesStatus();
         };
-        DlssInstallButton.IsVisible = FsrInstallButton.IsVisible = UpscalerInstaller.IsSupported;
+        XessInstallButton.Click += async (_, _) => await InstallUpscalerAsync(SuperResolutionBackend.Xess);
+        XessDownloadButton.Click += (_, _) => OpenWebPage(XessRuntimeFiles.SdkReleaseUrl);
+        XessFolderButton.Click += (_, _) => OpenFolder(XessDirectory());
+        XessRefreshButton.Click += (_, _) =>
+        {
+            _xessFilesCheckedAt = DateTime.Now;
+            UpdateXessFilesStatus();
+        };
+        DlssInstallButton.IsVisible = FsrInstallButton.IsVisible = XessInstallButton.IsVisible = UpscalerInstaller.IsSupported;
         UpdateUpscalerInstallButtons();
     }
 
     private DateTime? _dlssFilesCheckedAt;
     private DateTime? _fsrFilesCheckedAt;
+    private DateTime? _xessFilesCheckedAt;
 
     private void ApplyPssrSettingsToControls()
     {
@@ -68,6 +78,7 @@ public partial class MainWindow
         UpdatePssrAvailability();
         UpdateDlssFilesStatus();
         UpdateFsrFilesStatus();
+        UpdateXessFilesStatus();
     }
 
     private void RefreshPssrChoices()
@@ -76,6 +87,7 @@ public partial class MainWindow
         RefreshChoices(_pssrUpscalerChoices);
         UpdateDlssFilesStatus();
         UpdateFsrFilesStatus();
+        UpdateXessFilesStatus();
     }
 
     private void UpdatePssrAutoChoice()
@@ -102,9 +114,11 @@ public partial class MainWindow
         PssrGeneralGroup.IsEnabled = pro;
         PssrDlssGroup.IsEnabled = pro;
         PssrFsrGroup.IsEnabled = pro;
+        PssrXessGroup.IsEnabled = pro;
         PssrGeneralGroup.Opacity = pro ? 1 : 0.5;
         PssrDlssGroup.Opacity = pro ? 1 : 0.5;
         PssrFsrGroup.Opacity = pro ? 1 : 0.5;
+        PssrXessGroup.Opacity = pro ? 1 : 0.5;
     }
 
     private string UpscalerExecutableDirectory() =>
@@ -116,10 +130,13 @@ public partial class MainWindow
 
     private string FsrDirectory() => FsrRuntimeFiles.DirectoryFor(UpscalerExecutableDirectory());
 
+    private string XessDirectory() => XessRuntimeFiles.DirectoryFor(UpscalerExecutableDirectory());
+
     private void UpdateUpscalerInstallButtons()
     {
         DlssInstallButton.IsEnabled = !_isRunning && DlssRuntimeFiles.Missing(DlssDirectory()).Count != 0;
         FsrInstallButton.IsEnabled = !_isRunning && FsrRuntimeFiles.Missing(FsrDirectory()).Count != 0;
+        XessInstallButton.IsEnabled = !_isRunning && XessRuntimeFiles.Missing(XessDirectory()).Count != 0;
     }
 
     private async Task InstallUpscalerAsync(SuperResolutionBackend backend)
@@ -129,23 +146,32 @@ public partial class MainWindow
             return;
         }
 
-        var dlss = backend == SuperResolutionBackend.Dlss;
-        var sdk = dlss ? $"Streamline SDK {DlssRuntimeFiles.StreamlineVersion}" : $"AMD FSR SDK {FsrRuntimeFiles.SdkVersion}";
-        var destination = dlss ? DlssDirectory() : FsrDirectory();
+        var (sdk, destination) = backend switch
+        {
+            SuperResolutionBackend.Dlss => ($"Streamline SDK {DlssRuntimeFiles.StreamlineVersion}", DlssDirectory()),
+            SuperResolutionBackend.Fsr => ($"AMD FSR SDK {FsrRuntimeFiles.SdkVersion}", FsrDirectory()),
+            SuperResolutionBackend.Xess => ($"Intel XeSS SDK {XessRuntimeFiles.SdkVersion}", XessDirectory()),
+            _ => throw new ArgumentOutOfRangeException(nameof(backend)),
+        };
         if (await Sheets.ShowAsync(new UpscalerInstallDialog(sdk, backend, destination)) is not true)
         {
             return;
         }
 
-        if (dlss)
+        switch (backend)
         {
-            _dlssFilesCheckedAt = DateTime.Now;
-            UpdateDlssFilesStatus();
-        }
-        else
-        {
-            _fsrFilesCheckedAt = DateTime.Now;
-            UpdateFsrFilesStatus();
+            case SuperResolutionBackend.Dlss:
+                _dlssFilesCheckedAt = DateTime.Now;
+                UpdateDlssFilesStatus();
+                break;
+            case SuperResolutionBackend.Fsr:
+                _fsrFilesCheckedAt = DateTime.Now;
+                UpdateFsrFilesStatus();
+                break;
+            case SuperResolutionBackend.Xess:
+                _xessFilesCheckedAt = DateTime.Now;
+                UpdateXessFilesStatus();
+                break;
         }
     }
 
@@ -191,6 +217,26 @@ public partial class MainWindow
         if (_fsrFilesCheckedAt is { } checkedAt)
         {
             FsrFilesCheckedText.Text = localization.Format("Options.Pssr.DlssFiles.Checked", checkedAt.ToString("T", System.Globalization.CultureInfo.CurrentCulture));
+        }
+    }
+
+    private void UpdateXessFilesStatus()
+    {
+        var directory = XessDirectory();
+        var missing = XessRuntimeFiles.Missing(directory);
+        var localization = Localization.Instance;
+        var found = missing.Count == 0;
+        XessInstallButton.IsEnabled = !_isRunning && !found;
+        var brush = found ? SuccessLineBrush : ErrorLineBrush;
+        XessFilesStatusIcon.Text = found ? "check_circle" : "error";
+        XessFilesStatusIcon.Foreground = brush;
+        XessFilesStatusTitle.Foreground = brush;
+        XessFilesStatusTitle.Text = localization.Get(found ? "Options.Pssr.XessFiles.FoundTitle" : "Options.Pssr.XessFiles.MissingTitle");
+        XessFilesStatusDetails.Text = Path.Combine(directory, XessRuntimeFiles.Library);
+        XessFilesCheckedText.IsVisible = _xessFilesCheckedAt is not null;
+        if (_xessFilesCheckedAt is { } checkedAt)
+        {
+            XessFilesCheckedText.Text = localization.Format("Options.Pssr.DlssFiles.Checked", checkedAt.ToString("T", System.Globalization.CultureInfo.CurrentCulture));
         }
     }
 

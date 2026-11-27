@@ -186,7 +186,7 @@ public sealed class GuiSettings
             "Indonesian",
             "Ukrainian");
         settings.ConsoleModel = NormalizeChoice(settings.ConsoleModel, "PS5", "PS5Pro");
-        settings.PssrUpscaler = NormalizeChoice(settings.PssrUpscaler, "Auto", "Dlss", "Fsr", "Basic");
+        settings.PssrUpscaler = NormalizeChoice(settings.PssrUpscaler, "Auto", "Dlss", "Fsr", "Xess", "Basic");
         settings.EmbeddedConsoleHeight = NormalizeConsoleSize(settings.EmbeddedConsoleHeight, 240, 120);
         settings.ConsoleWindowWidth = NormalizeConsoleSize(settings.ConsoleWindowWidth, 980, 520);
         settings.ConsoleWindowHeight = NormalizeConsoleSize(settings.ConsoleWindowHeight, 620, 320);

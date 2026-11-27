@@ -11,6 +11,7 @@ using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.VideoOut.Upscaling;
 using SharpEmu.Libs.VideoOut.Upscaling.Fsr;
 using SharpEmu.Libs.VideoOut.Upscaling.Streamline;
+using SharpEmu.Libs.VideoOut.Upscaling.Xess;
 using Silk.NET.Core;
 using Silk.NET.Core.Native;
 using Silk.NET.Vulkan;
@@ -94,6 +95,10 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _streamline = StartStreamline();
+            if (SharpEmu.Libs.Kernel.ConsoleHardware.IsPro && SuperResolutionSettings.Backend == SuperResolutionBackend.Xess)
+            {
+                _xess = XessRuntime.Load(_vk, XessRuntimeFiles.DefaultDirectory, IsInstanceExtensionAvailable);
+            }
             CreateInstance();
             CreateSurface();
             SelectPhysicalDevice();
@@ -101,6 +106,11 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 _streamline.Dispose();
                 _streamline = null;
+            }
+            if (_xess is not null && !_xess.SelectDevice(_instance, _physicalDevice, IsDeviceExtensionAvailable))
+            {
+                _xess.Dispose();
+                _xess = null;
             }
 
             CreateDevice();
@@ -123,7 +133,8 @@ internal static unsafe partial class VulkanVideoPresenter
             var fsr = WantsFsr
                 ? FsrRuntime.Start(_vk, _instance, _physicalDevice, _device, FsrRuntimeFiles.DefaultDirectory)
                 : null;
-            _superResolution = new SuperResolutionService(_vk, _physicalDevice, _device, _pushDescriptorApi, _streamline, fsr);
+            _xess?.Attach(_device);
+            _superResolution = new SuperResolutionService(_vk, _physicalDevice, _device, _pushDescriptorApi, _streamline, fsr, _xess);
             CreateSwapchain();
             CreateCommandResources();
             CreateGuestDrawResources();
@@ -135,6 +146,7 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         private SharpEmu.Libs.VideoOut.Upscaling.Streamline.StreamlineRuntime? _streamline;
+        private XessRuntime? _xess;
         private Task<bool>? _streamlineAttach;
         internal SharpEmu.Libs.VideoOut.Upscaling.SuperResolutionService? _superResolution;
 
@@ -410,10 +422,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 byte* swapchainColorspaceExtension = null;
                 var instanceCreateFlags = InstanceCreateFlags.None;
                 var enabledExtensionCount = (int)extensionCount;
-                var streamlineExtensions = _streamline?.InstanceExtensions ?? [];
-                var enabledExtensions = stackalloc byte*[(int)extensionCount + 3 + streamlineExtensions.Count];
+                var upscalerExtensions = _streamline?.InstanceExtensions ?? _xess?.InstanceExtensions ?? [];
+                var enabledExtensions = stackalloc byte*[(int)extensionCount + 3 + upscalerExtensions.Count];
                 var enabledNames = new HashSet<string>(StringComparer.Ordinal);
-                var streamlineExtensionPointers = new List<nint>();
+                var upscalerExtensionPointers = new List<nint>();
                 for (var index = 0; index < (int)extensionCount; index++)
                 {
                     enabledExtensions[index] = extensions[index];
@@ -449,12 +461,12 @@ internal static unsafe partial class VulkanVideoPresenter
                 enabledNames.Add(DebugUtilsExtensionName);
                 enabledNames.Add(PortabilityEnumerationExtensionName);
                 enabledNames.Add(SwapchainColorspaceExtensionName);
-                foreach (var name in streamlineExtensions)
+                foreach (var name in upscalerExtensions)
                 {
                     if (enabledNames.Add(name) && IsInstanceExtensionAvailable(name))
                     {
                         var pointer = SilkMarshal.StringToPtr(name);
-                        streamlineExtensionPointers.Add(pointer);
+                        upscalerExtensionPointers.Add(pointer);
                         enabledExtensions[enabledExtensionCount++] = (byte*)pointer;
                     }
                 }
@@ -516,7 +528,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         SilkMarshal.Free((nint)swapchainColorspaceExtension);
                     }
 
-                    foreach (var pointer in streamlineExtensionPointers)
+                    foreach (var pointer in upscalerExtensionPointers)
                     {
                         SilkMarshal.Free(pointer);
                     }
@@ -1390,7 +1402,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var dynamicExtensionPointers = new List<nint>();
             try
             {
-                var extensions = stackalloc byte*[26 + FsrDeviceFeatures.ExtensionCount + streamlineDeviceExtensions.Count];
+                var extensions = stackalloc byte*[26 + FsrDeviceFeatures.ExtensionCount + streamlineDeviceExtensions.Count + (_xess?.DeviceExtensions.Count ?? 0)];
                 var extensionCount = 0u;
                 extensions[extensionCount++] = swapchainExtension;
                 if (useMemoryBudget)
@@ -1723,6 +1735,35 @@ internal static unsafe partial class VulkanVideoPresenter
                         {
                             Console.Error.WriteLine($"[DLSS][WARN] The GPU lacks {name}, which DLSS asked for.");
                         }
+                    }
+                }
+                PhysicalDeviceMutableDescriptorTypeFeaturesEXT xessMutableDescriptors;
+                if (_xess is not null)
+                {
+                    if (_xess.EnableDeviceFeatures(ref enabledFeatures, ref vulkan12Features, ref vulkan13Features, &xessMutableDescriptors))
+                    {
+                        var enabledNames = new HashSet<string>(StringComparer.Ordinal);
+                        for (var index = 0; index < extensionCount; index++)
+                        {
+                            if (SilkMarshal.PtrToString((nint)extensions[index]) is { } name)
+                            {
+                                enabledNames.Add(name);
+                            }
+                        }
+                        foreach (var name in _xess.DeviceExtensions)
+                        {
+                            if (enabledNames.Add(name))
+                            {
+                                var pointer = SilkMarshal.StringToPtr(name);
+                                dynamicExtensionPointers.Add(pointer);
+                                extensions[extensionCount++] = (byte*)pointer;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        _xess.Dispose();
+                        _xess = null;
                     }
                 }
                 var features2 = new PhysicalDeviceFeatures2

@@ -15,12 +15,17 @@ public sealed class UpscalerInstallerTests : IDisposable
     [Theory]
     [InlineData(SuperResolutionBackend.Dlss)]
     [InlineData(SuperResolutionBackend.Fsr)]
+    [InlineData(SuperResolutionBackend.Xess)]
     public async Task CompleteInstallationSkipsTheDownload(SuperResolutionBackend backend)
     {
         var destination = _root.CreateSubdirectory("installed").FullName;
-        var files = backend == SuperResolutionBackend.Dlss
-            ? DlssRuntimeFiles.Required.Select(file => file.Name)
-            : FsrRuntimeFiles.Required;
+        var files = backend switch
+        {
+            SuperResolutionBackend.Dlss => DlssRuntimeFiles.Required.Select(file => file.Name),
+            SuperResolutionBackend.Fsr => FsrRuntimeFiles.Required,
+            SuperResolutionBackend.Xess => XessRuntimeFiles.Required,
+            _ => throw new ArgumentOutOfRangeException(nameof(backend)),
+        };
         foreach (var name in files)
         {
             File.WriteAllText(Path.Combine(destination, name), "installed");

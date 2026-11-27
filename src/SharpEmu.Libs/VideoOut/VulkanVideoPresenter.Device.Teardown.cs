@@ -12,6 +12,8 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             if (!_vulkanReady)
             {
+                _xess?.Dispose();
+                _xess = null;
                 return;
             }
 
@@ -70,6 +72,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _superResolution?.Dispose();
             _superResolution = null;
             _streamline = null;
+            _xess = null;
             Console.Error.WriteLine(
                 $"[LOADER][INFO] vk.device_memory live_allocations={_deviceInfo.LiveAllocations} " +
                 $"peak_allocations={_deviceInfo.PeakAllocations} limit={_deviceInfo.MaxMemoryAllocationCount}");

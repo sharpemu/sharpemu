@@ -9,6 +9,7 @@ using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Upscaling;
 using SharpEmu.Libs.VideoOut.Upscaling.Fsr;
 using SharpEmu.Libs.VideoOut.Upscaling.Streamline;
+using SharpEmu.Libs.VideoOut.Upscaling.Xess;
 
 namespace SharpEmu.Libs.VideoOut.Upscaling;
 
@@ -26,6 +27,7 @@ internal readonly record struct SuperResolutionImage(
     bool FsrCompatibleView)
 {
     public bool IsValid => Image != 0 && View != 0;
+    public bool XessCompatibleView { get; init; }
 }
 
 internal sealed class SuperResolutionFrame
@@ -182,7 +184,7 @@ internal sealed unsafe class BlitUpscaler(Vk vk, PhysicalDevice physicalDevice)
 }
 
 internal sealed class SuperResolutionService(Vk vk, PhysicalDevice physicalDevice, Device device,
-    KhrPushDescriptor descriptors, StreamlineRuntime? streamline, FsrRuntime? fsr) : IDisposable
+    KhrPushDescriptor descriptors, StreamlineRuntime? streamline, FsrRuntime? fsr, XessRuntime? xess) : IDisposable
 {
     private const int IdleFramesBeforeRelease = 120;
 
@@ -196,6 +198,7 @@ internal sealed class SuperResolutionService(Vk vk, PhysicalDevice physicalDevic
     public StreamlineRuntime? Streamline => streamline;
 
     public FsrRuntime? Fsr => fsr;
+    public XessRuntime? Xess => xess;
 
     public bool PrefersDlss => streamline is { IsActive: true } &&
         SuperResolutionSettings.Requested is SuperResolutionUpscaler.Auto or SuperResolutionUpscaler.Dlss;
@@ -229,13 +232,24 @@ internal sealed class SuperResolutionService(Vk vk, PhysicalDevice physicalDevic
 
     public bool WentIdle()
     {
-        if (streamline is not { HoldsResources: true } && fsr is not { HoldsResources: true })
+        if (streamline is not { HoldsResources: true } && fsr is not { HoldsResources: true } && xess is not { HoldsResources: true })
         {
             Volatile.Write(ref _idleFrames, 0);
             return false;
         }
 
         return Interlocked.Increment(ref _idleFrames) == IdleFramesBeforeRelease;
+    }
+
+    public bool TryXess(CommandBuffer command, SuperResolutionFrame frame, ulong tick, ulong completedTick, object queueGate)
+    {
+        if (xess is null || !xess.Evaluate(command, frame, tick, completedTick, queueGate))
+        {
+            return false;
+        }
+
+        Volatile.Write(ref _idleFrames, 0);
+        return true;
     }
 
     public void ReleaseResources()
@@ -250,6 +264,12 @@ internal sealed class SuperResolutionService(Vk vk, PhysicalDevice physicalDevic
         {
             fsr.ReleaseResources();
             Console.Error.WriteLine("[FSR][INFO] The game stopped using PSSR; FSR resources are released until it upscales again.");
+        }
+
+        if (xess is { HoldsResources: true })
+        {
+            xess.ReleaseResources();
+            Console.Error.WriteLine("[XESS][INFO] The game stopped using PSSR; XeSS resources are released until it upscales again.");
         }
     }
 
@@ -287,6 +307,7 @@ internal sealed class SuperResolutionService(Vk vk, PhysicalDevice physicalDevic
     public void Dispose()
     {
         _jitterCompensatedBlit.Dispose();
+        xess?.Dispose();
         fsr?.Dispose();
         streamline?.Dispose();
     }
