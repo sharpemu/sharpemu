@@ -17,7 +17,8 @@ public sealed class GameLibraryReconcilerTests
         var scannedRetained = CreateGame(
             "retained",
             name: "New name",
-            version: "02.000");
+            version: "02.000",
+            supportsPs5Pro: true);
         var added = CreateGame("added");
 
         var result = GameLibraryReconciler.Reconcile(
@@ -29,6 +30,7 @@ public sealed class GameLibraryReconcilerTests
         Assert.Same(added, result.Games[1]);
         Assert.Equal("New name", retained.Name);
         Assert.Equal("02.000", retained.Version);
+        Assert.True(retained.SupportsPs5Pro);
         Assert.DoesNotContain(removed, result.Games);
     }
 
@@ -82,7 +84,8 @@ public sealed class GameLibraryReconcilerTests
         string? name = null,
         string? version = null,
         string? coverPath = null,
-        string? backgroundPath = null)
+        string? backgroundPath = null,
+        bool supportsPs5Pro = false)
         => new(
             name ?? id,
             $"PPSA-{id}",
@@ -90,7 +93,8 @@ public sealed class GameLibraryReconcilerTests
             GamePath(id),
             1,
             coverPath,
-            backgroundPath);
+            backgroundPath,
+            supportsPs5Pro: supportsPs5Pro);
 
     private static string GamePath(string id)
         => Path.GetFullPath(Path.Combine("library-tests", id, "eboot.bin"));

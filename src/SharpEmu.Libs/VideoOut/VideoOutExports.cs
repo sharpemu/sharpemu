@@ -128,7 +128,10 @@ public static partial class VideoOutExports
 
     public static bool CompatibilityMode { get; set; }
 
-    public static void ConfigureApplicationInfo(string? title, string? titleId, string? version)
+    public static void ConfigureApplicationInfo(string? title, string? titleId, string? version) =>
+        ConfigureApplicationInfo(title, titleId, version, proMode: false);
+
+    public static void ConfigureApplicationInfo(string? title, string? titleId, string? version, bool proMode)
     {
         var parts = new List<string>();
         if (!string.IsNullOrWhiteSpace(title))
@@ -139,6 +142,11 @@ public static partial class VideoOutExports
         if (!string.IsNullOrWhiteSpace(titleId))
         {
             parts.Add($"[{titleId.Trim()}]");
+        }
+
+        if (proMode)
+        {
+            parts.Add("[Pro mode]");
         }
 
         if (CompatibilityMode)

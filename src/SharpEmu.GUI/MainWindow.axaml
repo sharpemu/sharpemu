@@ -354,6 +354,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                      LineHeight="19.2" />
                         </Border>
                         <Border Classes="pkgBadge"
+                                VerticalAlignment="Top"
+                                IsVisible="{Binding HasProVersion}"
+                                ToolTip.Tip="{Binding [Options.Console.Model.Ps5Pro],
+                                                      Source={x:Static local:Localization.Instance},
+                                                      x:CompileBindings=False}">
+                          <TextBlock Classes="pkgBadgeText" Text="Pro" />
+                        </Border>
+                        <Border Classes="pkgBadge"
                                 IsVisible="{Binding RunsFromPackage}">
                           <TextBlock Classes="pkgBadgeText" Text="PKG" />
                         </Border>

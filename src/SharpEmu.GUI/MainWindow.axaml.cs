@@ -17,6 +17,7 @@ using Avalonia.Rendering.Composition;
 using Avalonia.Threading;
 using Avalonia.VisualTree;
 using SharpEmu.Core.Cpu;
+using SharpEmu.Core.Loader;
 using SharpEmu.Core.Runtime;
 using SharpEmu.GnmMode;
 using SharpEmu.GnmMode.Libraries.Np;
@@ -2221,33 +2222,34 @@ public partial class MainWindow : Window
             }
         }
 
-        var (title, titleId, version) = TryReadParamJson(metadataPath);
+        var (title, titleId, version, supportsPs5Pro) = TryReadParamJson(metadataPath);
         var compatibilityMode = title is null && titleId is null && GnmRuntime.UsesCompatibilityMode(fullPath);
         if (compatibilityMode)
             (title, titleId, version) = GnmRuntime.ReadApplicationInfo(fullPath);
         return new GameEntry(
             title ?? GameNameFor(metadataPath), titleId, version, fullPath, size,
-            FindCoverFor(metadataPath), FindBackgroundFor(metadataPath), compatibilityMode);
+            FindCoverFor(metadataPath), FindBackgroundFor(metadataPath), compatibilityMode,
+            supportsPs5Pro: !compatibilityMode && supportsPs5Pro);
     }
 
     /// <summary>
-    /// Reads the game title, title id and content version from
+    /// Reads the game title, title id, content version and PS5 Pro support from
     /// sce_sys/param.json next to the executable, when present.
     /// </summary>
-    private static (string? Title, string? TitleId, string? Version) TryReadParamJson(string ebootPath)
+    private static (string? Title, string? TitleId, string? Version, bool SupportsPs5Pro) TryReadParamJson(string ebootPath)
     {
         try
         {
             var directory = Path.GetDirectoryName(ebootPath);
             if (directory is null)
             {
-                return (null, null, null);
+                return default;
             }
 
             var paramPath = Path.Combine(directory, "sce_sys", "param.json");
             if (!File.Exists(paramPath))
             {
-                return (null, null, null);
+                return default;
             }
 
             // ReadAllText handles a UTF-8 BOM, which JsonDocument rejects in
@@ -2306,11 +2308,12 @@ public partial class MainWindow : Window
             return (
                 string.IsNullOrWhiteSpace(title) ? null : title,
                 string.IsNullOrWhiteSpace(titleId) ? null : titleId,
-                string.IsNullOrWhiteSpace(version) ? null : version.Trim());
+                string.IsNullOrWhiteSpace(version) ? null : version.Trim(),
+                Ps5ParamJsonReader.SupportsPs5Pro(root));
         }
         catch (Exception)
         {
-            return (null, null, null);
+            return default;
         }
     }
 
@@ -2849,9 +2852,11 @@ public partial class MainWindow : Window
 
         foreach (var versions in GameVersions.Group(_allGames))
         {
+            var hasProVersion = versions.Any(game => game.SupportsPs5Pro);
             foreach (var version in versions)
             {
                 version.SetVersionCount(versions.Count);
+                version.SetHasProVersion(hasProVersion);
             }
 
             if (query.Length == 0 || versions.Any(game =>

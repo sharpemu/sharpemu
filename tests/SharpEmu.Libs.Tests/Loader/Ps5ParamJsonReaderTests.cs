@@ -30,4 +30,18 @@ public sealed class Ps5ParamJsonReaderTests
         Assert.Equal("PPSA00001", info.TitleId);
         Assert.Null(info.ConceptId);
     }
+
+    [Theory]
+    [InlineData("4194304", true)]
+    [InlineData("4456512", true)]
+    [InlineData("262208", false)]
+    [InlineData("0", false)]
+    [InlineData("\"4194304\"", false)]
+    [InlineData("null", false)]
+    public void ReadsPs5ProSupportFromAttribute3(string attribute3, bool expected)
+    {
+        var json = $$"""{ "attribute3": {{attribute3}} }""";
+        Ps5ParamJsonReader.TryReadPs5Param(Encoding.UTF8.GetBytes(json), out var supportsPs5Pro);
+        Assert.Equal(expected, supportsPs5Pro);
+    }
 }

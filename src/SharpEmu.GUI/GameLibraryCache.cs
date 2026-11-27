@@ -39,6 +39,7 @@ internal static class GameLibraryCache
         public string? BackgroundPath { get; set; }
         public bool CompatibilityMode { get; set; }
         public bool NeedsInstall { get; set; }
+        public bool SupportsPs5Pro { get; set; }
     }
 
     internal sealed class CacheDocument
@@ -92,7 +93,8 @@ internal static class GameLibraryCache
                     Existing(cached.CoverPath),
                     Existing(cached.BackgroundPath),
                     cached.CompatibilityMode,
-                    cached.NeedsInstall));
+                    cached.NeedsInstall,
+                    cached.SupportsPs5Pro));
             }
         }
         catch (Exception exception)
@@ -161,6 +163,7 @@ internal static class GameLibraryCache
                     BackgroundPath = game.BackgroundPath,
                     CompatibilityMode = game.CompatibilityMode,
                     NeedsInstall = game.NeedsInstall,
+                    SupportsPs5Pro = game.SupportsPs5Pro,
                 });
             }
 
