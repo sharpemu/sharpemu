@@ -2038,12 +2038,9 @@ public static partial class ResourceMaterializer
             {
                 images[index] = image with
                 {
-                    // A null-bound atomic keeps its declared numeric class
-                    // (Uint or, since float image atomics were added, Float)
-                    // instead of assuming every atomic image is Uint.
                     NumericClass = baseImage.Atomic64
                         ? ImageNumericClass.Uint64
-                        : baseImage.Atomic ? baseImage.NumericClass : ImageNumericClass.Float,
+                        : baseImage.Atomic ? ImageNumericClass.Uint : ImageNumericClass.Float,
                     Dimension = SampledArrayRead(baseImage) ? ImageDimension.Dim2DArray : ImageDimension.Dim2D,
                     Cube = false,
                 };

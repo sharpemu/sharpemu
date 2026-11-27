@@ -714,7 +714,10 @@ public sealed class BindingLayout : IEquatable<BindingLayout>
             var kind = ImageDescriptorBinding.ForImage(image);
             if (kind is null)
             {
-                throw new ResourcePlanException($"shader binding layout failed: image {index} has an invalid binding class");
+                throw new ResourcePlanException(
+                    $"shader binding layout failed: image {index} has an invalid binding class " +
+                    $"(class={image.ResourceClass} numeric={image.NumericClass} dimension={image.Dimension} atomic={image.Atomic} " +
+                    $"cube={image.Cube} depth_compare={image.DepthCompare})");
             }
 
             var group = ImageDescriptorBinding.ArrayIndex(kind.Value);
