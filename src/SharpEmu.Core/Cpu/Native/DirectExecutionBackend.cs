@@ -16,6 +16,7 @@ using SharpEmu.Core.Loader;
 using SharpEmu.Core.Memory;
 using SharpEmu.HLE;
 using SharpEmu.Libs.Diagnostics;
+using SharpEmu.Libs.Kernel;
 
 namespace SharpEmu.Core.Cpu.Native;
 
@@ -782,6 +783,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 
 	private readonly Dictionary<ulong, GuestThreadState> _guestThreads = new Dictionary<ulong, GuestThreadState>();
 	private readonly Queue<(IVirtualMemory Memory, ulong StackBase, ulong StackSize, ulong TlsBase)> _reusableGuestThreadRegions = new();
+
+	// Opt-in diagnostic: register the primary guest entry as a guest thread so
+	// HLE mutex/cond waits use cooperative blocks. Default off keeps the original
+	// host-wait path untouched.
+	private static readonly bool RegisterMainEntryAsGuestThread =
+		string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_MAIN_ENTRY_GUEST_THREAD"), "1", StringComparison.Ordinal);
+	private const ulong MainGuestThreadHandle = 1;
 
 	private readonly Dictionary<ulong, ExternalGuestThreadState> _externalGuestThreads = new Dictionary<ulong, ExternalGuestThreadState>();
 
@@ -6968,6 +6976,10 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		var previousYieldRequested = _activeGuestThreadYieldRequested;
 		var previousYieldReason = _activeGuestThreadYieldReason;
 		nint previousHostRspSlotValue = TlsGetValue(_hostRspSlotTlsIndex);
+		var registerMainEntry = RegisterMainEntryAsGuestThread;
+		var previousMainEntryThread = registerMainEntry
+			? GuestThreadExecution.EnterGuestThread(MainGuestThreadHandle)
+			: 0UL;
 		try
 		{
 			_activeExecutionBackend = this;
@@ -7172,6 +7184,7 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		}
 		finally
 		{
+			if (registerMainEntry) GuestThreadExecution.RestoreGuestThread(previousMainEntryThread);
 			Interlocked.Exchange(ref _mainExecutionThreadHandle, null)?.Dispose();
 			StopReadyThreadDispatcher();
 			StopStallWatchdog();
@@ -7599,6 +7612,11 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 		return false;
 	}
 
+	// Opt-in diagnostic: walk the RBP chain of every blocked guest thread in the
+	// stall snapshot so the libc path behind an unexplained wait is identifiable.
+	private static readonly bool LogStallGuestFrames =
+		string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_STALL_GUEST_FRAMES"), "1", StringComparison.Ordinal);
+
 	private void LogStallWatchdogSnapshot()
 	{
 		try
@@ -7610,6 +7628,13 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 			}
 			ulong rsp = cpuContext[CpuRegister.Rsp];
 			Console.Error.WriteLine($"[LOADER][ERROR] Stall snapshot: rip=0x{cpuContext.Rip:X16} rsp=0x{rsp:X16} rbp=0x{cpuContext[CpuRegister.Rbp]:X16} rax=0x{cpuContext[CpuRegister.Rax]:X16} rbx=0x{cpuContext[CpuRegister.Rbx]:X16} rcx=0x{cpuContext[CpuRegister.Rcx]:X16} rdx=0x{cpuContext[CpuRegister.Rdx]:X16} rsi=0x{cpuContext[CpuRegister.Rsi]:X16} rdi=0x{cpuContext[CpuRegister.Rdi]:X16}");
+			if (LogStallGuestFrames &&
+				KernelPthreadCompatExports.TryDescribeMutex(cpuContext[CpuRegister.Rdi], out var stallOwner, out var stallRecursion, out var stallWaiters))
+			{
+				Console.Error.WriteLine(
+					$"[LOADER][ERROR] Stall mutex: mutex=0x{cpuContext[CpuRegister.Rdi]:X16} " +
+					$"owner=0x{stallOwner:X16} recursion={stallRecursion} waiters={stallWaiters}");
+			}
 			ulong num = cpuContext.Rip & 0xFFFFFFFFFFFFFFF0uL;
 			for (int i = 0; i < _importEntries.Length; i++)
 			{
@@ -7669,6 +7694,40 @@ public sealed unsafe partial class DirectExecutionBackend : INativeCpuBackend, I
 						$"nid={Volatile.Read(ref thread.LastImportNid) ?? "none"} ret=0x{Volatile.Read(ref thread.LastReturnRip):X16} " +
 						$"rdi=0x{Volatile.Read(ref thread.LastImportRdi):X16} rsi=0x{Volatile.Read(ref thread.LastImportRsi):X16} " +
 						$"rdx=0x{Volatile.Read(ref thread.LastImportRdx):X16} block={thread.BlockReason ?? "none"}{hostContextText}");
+					if (LogStallGuestFrames &&
+						Volatile.Read(ref thread.LastImportNid) is "9UK1vLZQft4" or "fFxGkxF2bVo" &&
+						KernelPthreadCompatExports.TryDescribeMutex(
+							Volatile.Read(ref thread.LastImportRdi), out var mutexOwner, out var mutexRecursion, out var mutexWaiters))
+					{
+						Console.Error.WriteLine(
+							$"[LOADER][ERROR] Stall mutex: tid=0x{thread.ThreadHandle:X16} " +
+							$"mutex=0x{Volatile.Read(ref thread.LastImportRdi):X16} owner=0x{mutexOwner:X16} " +
+							$"recursion={mutexRecursion} waiters={mutexWaiters}");
+					}
+					if (LogStallGuestFrames && thread.State == GuestThreadRunState.Blocked)
+					{
+						var blockedContext = thread.Context;
+						var frame = blockedContext[CpuRegister.Rbp];
+						for (var depth = 0; depth < 24 && frame > 4096; depth++)
+						{
+							if (!blockedContext.TryReadUInt64(frame, out var next) ||
+								!blockedContext.TryReadUInt64(frame + sizeof(ulong), out var returnRip))
+							{
+								break;
+							}
+							var symbol = TryFormatNearestRuntimeSymbol(returnRip, out var formatted)
+								? $" [{formatted}]"
+								: string.Empty;
+							Console.Error.WriteLine(
+								$"[LOADER][ERROR] Stall guest-frame: tid=0x{thread.ThreadHandle:X16} depth={depth} " +
+								$"rbp=0x{frame:X16} ret=0x{returnRip:X16}{symbol}");
+							if (next <= frame || next - frame > 0x100000)
+							{
+								break;
+							}
+							frame = next;
+						}
+					}
 					logged++;
 					if (logged >= 48 && threads.Length > logged)
 					{

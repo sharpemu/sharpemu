@@ -57,6 +57,26 @@ public static class KernelPthreadCompatExports
     private static int _pthreadFastPathTraceWritten;
     private static readonly ConcurrentDictionary<ulong, byte> _pthreadFastPathBusyTraced = new();
 
+    /// <summary>
+    /// Diagnostic: describes the tracked owner and waiter count of a mutex.
+    /// Returns false when the address has no tracked state.
+    /// </summary>
+    public static bool TryDescribeMutex(ulong address, out ulong owner, out int recursion, out int waiters)
+    {
+        if (_mutexStates.TryGetValue(address, out var state))
+        {
+            owner = state.OwnerThreadId;
+            recursion = state.RecursionCount;
+            waiters = state.QueuedWaiterCount;
+            return true;
+        }
+
+        owner = 0;
+        recursion = 0;
+        waiters = 0;
+        return false;
+    }
+
     private sealed class PthreadMutexState
     {
         public long ProfileIdentity { get; } = MutexHandoffProfile.CreateIdentity();
@@ -2729,7 +2749,8 @@ public static class KernelPthreadCompatExports
         Console.Error.WriteLine(
             $"[LOADER][TRACE] pthread_{operation}: mutex=0x{mutexAddress:X16} resolved=0x{resolvedAddress:X16} " +
             $"guest[0]=0x{guestWord0:X16} guest[8]=0x{guestWord1:X16} " +
-            $"current=0x{currentThreadId:X16} owner=0x{(state?.OwnerThreadId ?? 0):X16} " +
+            $"current=0x{currentThreadId:X16} managed={Environment.CurrentManagedThreadId} " +
+            $"owner=0x{(state?.OwnerThreadId ?? 0):X16} " +
             $"recursion={(state?.RecursionCount ?? 0)} type={(state?.Type ?? 0)} result=0x{unchecked((uint)result):X8}");
     }
 
