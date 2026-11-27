@@ -194,12 +194,12 @@ public static class KernelPthreadCompatExports
         }
 
         var released = 0;
-        var wakeKeys = new List<string>();
+        var wakeStates = new List<PthreadMutexState>();
         foreach (var pair in _mutexStates)
         {
             var state = pair.Value;
-            string? wakeKey = null;
-            lock (state)
+            var waiterCount = 0;
+            lock (state.SyncRoot)
             {
                 if (state.OwnerThreadId != threadId || state.RecursionCount <= 0)
                 {
@@ -208,26 +208,20 @@ public static class KernelPthreadCompatExports
 
                 state.OwnerThreadId = 0;
                 state.RecursionCount = 0;
-                wakeKey = state.Waiters.First?.Value.Cooperative == true
-                    ? state.Waiters.First.Value.WakeKey
-                    : null;
-                Monitor.PulseAll(state);
+                waiterCount = state.Waiters.Count;
                 released++;
-                Console.Error.WriteLine(
-                    $"[LOADER][WARN] pthread_mutex_abandon mutex=0x{pair.Key:X16} " +
-                    $"owner={KernelPthreadState.DescribeThreadHandle(threadId)} " +
-                    $"reason={reason} waiters={state.Waiters.Count}");
+                wakeStates.Add(state);
             }
 
-            if (wakeKey is not null)
-            {
-                wakeKeys.Add(wakeKey);
-            }
+            Console.Error.WriteLine(
+                $"[LOADER][WARN] pthread_mutex_abandon mutex=0x{pair.Key:X16} " +
+                $"owner={KernelPthreadState.DescribeThreadHandle(threadId)} " +
+                $"reason={reason} waiters={waiterCount}");
         }
 
-        foreach (var wakeKey in wakeKeys)
+        foreach (var state in wakeStates)
         {
-            _ = GuestThreadExecution.Scheduler?.WakeBlockedThreads(wakeKey, 1);
+            WakeFirstMutexWaiter(state);
         }
 
         if (released > 0)
@@ -1155,6 +1149,7 @@ public static class KernelPthreadCompatExports
         }
 
         PthreadMutexWaiter? nextWaiter = null;
+        var wakeNextWaiter = false;
         lock (state.SyncRoot)
         {
             if (state.RecursionCount <= 0)
@@ -1192,7 +1187,19 @@ public static class KernelPthreadCompatExports
                         nextWaiter.HostSignal!.Set();
                     }
                 }
+                else if (state.Waiters.Count != 0)
+                {
+                    // An expired head was dropped by TryGrantMutexWaiterLocked.
+                    // Its own wait loop may not get to drain the new head, so
+                    // wake it here instead of letting it wait for a poll.
+                    wakeNextWaiter = true;
+                }
             }
+        }
+
+        if (wakeNextWaiter)
+        {
+            WakeFirstMutexWaiter(state);
         }
 
         if (nextWaiter is { Cooperative: true })
@@ -2210,9 +2217,27 @@ public static class KernelPthreadCompatExports
                 var next = node.Next;
                 if (node.Value.ThreadId == threadId)
                 {
+                    var stale = node.Value;
                     state.Waiters.Remove(node);
                     state.WaiterRemovedLocked();
-                    node.Value.Node = null;
+                    stale.Node = null;
+
+                    // The removed waiter may already be parked in a host wait or a
+                    // cooperative block. Without a queue node no unlock hand-off
+                    // can ever grant or wake it, so complete it here instead of
+                    // leaving the caller waiting forever for a stale acquisition.
+                    if (Volatile.Read(ref stale.Granted) == 0)
+                    {
+                        stale.TimedOut = true;
+                        if (stale.Cooperative)
+                        {
+                            WakeProfiledMutexWaiter(state, stale);
+                        }
+                        else
+                        {
+                            stale.HostSignal?.Set();
+                        }
+                    }
                 }
 
                 node = next;
@@ -2473,6 +2498,11 @@ public static class KernelPthreadCompatExports
                 waiter.ThreadId,
                 waiter.Cooperative,
                 waiter.WakeKey);
+
+            // A signaled or timed-out wait may find the mutex already free.
+            // Grant it now instead of leaving the reacquisition at the back
+            // of a queue whose head nobody is waiting on any more.
+            _ = TryGrantMutexWaiterLocked(waiter.MutexState, waiter.MutexWaiter);
         }
 
         Monitor.PulseAll(state.SyncRoot);
