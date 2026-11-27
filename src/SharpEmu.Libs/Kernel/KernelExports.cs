@@ -536,6 +536,10 @@ public static class KernelExports
     ExportName = "sceKernelIsTrinityMode",
     Target = Generation.Gen4 | Generation.Gen5,
     LibraryName = "libKernel")]
+    [SysAbiExport(Nid = "yu17wG8L5FI",
+        ExportName = "sceKernelHasTrinityMode",
+        Target = Generation.Gen5,
+        LibraryName = "libKernel")]
     public static int KernelIsTrinityMode(CpuContext ctx)
     {
         ctx[CpuRegister.Rax] = 0;
