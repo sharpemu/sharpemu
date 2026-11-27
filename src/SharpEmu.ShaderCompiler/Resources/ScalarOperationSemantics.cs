@@ -258,10 +258,10 @@ public static class ScalarOperationSemantics
                 result = BitConverter.SingleToUInt32Bits(Float(first) - Float(second));
                 return true;
             case ScalarOperation.FMin:
-                result = BitConverter.SingleToUInt32Bits(MathF.Min(Float(first), Float(second)));
+                result = FloatMinMax(first32, second32, maximum: false);
                 return true;
             case ScalarOperation.FMax:
-                result = BitConverter.SingleToUInt32Bits(MathF.Max(Float(first), Float(second)));
+                result = FloatMinMax(first32, second32, maximum: true);
                 return true;
             case ScalarOperation.FTrunc:
                 result = BitConverter.SingleToUInt32Bits(MathF.Truncate(Float(first)));
@@ -293,6 +293,15 @@ public static class ScalarOperationSemantics
     }
 
     private static float Float(ulong bits) => BitConverter.UInt32BitsToSingle((uint)bits);
+
+    private static uint FloatMinMax(uint first, uint second, bool maximum)
+    {
+        var left = Float(first);
+        var right = Float(second);
+        if (float.IsNaN(left)) return second;
+        if (float.IsNaN(right)) return first;
+        return BitConverter.SingleToUInt32Bits(maximum ? MathF.Max(left, right) : MathF.Min(left, right));
+    }
 
     private static uint ReverseBits(uint value)
     {
