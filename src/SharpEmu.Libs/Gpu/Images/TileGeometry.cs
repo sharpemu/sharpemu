@@ -333,8 +333,8 @@ public static partial class TileGeometry
             return false;
         }
 
-        if (kind is TileBlockKind.Depth64KB or TileBlockKind.RenderTarget64KB or TileBlockKind.RenderTarget64KBGen5 &&
-            GuestPixelFormats.RenderTargetBytesPerElement(format) != element.Bytes)
+        if (kind == TileBlockKind.Depth64KB && GuestPixelFormats.RenderTargetBytesPerElement(format) != element.Bytes ||
+            kind == TileBlockKind.RenderTarget64KBGen5 && (element.TexelWidth != 1 || element.TexelHeight != 1))
         {
             return false;
         }

@@ -221,10 +221,10 @@ public sealed class ShaderPipelineCacheTests : IDisposable
         guest.Host.MeshLimits = limit switch
         {
             "workgroup" => guest.Host.MeshLimits with { MaxWorkGroupSizeX = 31 },
-            "components" => guest.Host.MeshLimits with { MaxOutputComponents = 8 },
-            "output" => guest.Host.MeshLimits with { MaxOutputMemoryBytes = 1535 },
-            "payload-output" => guest.Host.MeshLimits with { MaxPayloadAndOutputMemoryBytes = 1535 },
-            "exact-output" => guest.Host.MeshLimits with { MaxOutputMemoryBytes = 1536, MaxPayloadAndOutputMemoryBytes = 1536 },
+            "components" => guest.Host.MeshLimits with { MaxOutputComponents = 7 },
+            "output" => guest.Host.MeshLimits with { MaxOutputMemoryBytes = 1023 },
+            "payload-output" => guest.Host.MeshLimits with { MaxPayloadAndOutputMemoryBytes = 1023 },
+            "exact-output" => guest.Host.MeshLimits with { MaxOutputMemoryBytes = 1024, MaxPayloadAndOutputMemoryBytes = 1024 },
             _ => guest.Host.MeshLimits,
         };
         var cache = new ShaderPipelineCache(guest.Context, guest.Host, guest.Compiler, guest.Registry);

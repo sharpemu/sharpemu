@@ -49,6 +49,7 @@ internal static unsafe partial class VulkanVideoPresenter
         internal bool _supportsDepthBiasClamp;
         private bool _supportsShaderSignedZeroInfNanPreserveFloat32;
         internal bool _robustBufferAccess2Enabled;
+        internal bool _nullDescriptorEnabled;
         private bool _nativeFloat16Conversions;
         private bool _supportsPipelineBinaries;
         private uint _maxColorAttachments;
@@ -1351,6 +1352,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 _robustBufferAccess2Enabled = supportsRobustness2 && (bool)robustness2Features.RobustBufferAccess2;
                 robustness2Features.RobustImageAccess2 = supportsRobustImageAccess2;
                 robustness2Features.NullDescriptor = supportsNullDescriptor;
+                _nullDescriptorEnabled = supportsNullDescriptor;
+                ShaderCompiler.Resources.ResourceMaterializer.PredictNullBufferFormats = supportsNullDescriptor;
                 robustness2Features.PNext = supportsMaintenance8 ? &maintenance8Features : null;
                 if (!supportsTimelineSemaphore)
                 {

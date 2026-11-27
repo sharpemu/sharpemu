@@ -393,7 +393,9 @@ public sealed class Gen5MeshShaderTests
     [Theory]
     [InlineData(0u)]
     [InlineData((1u << 21) | (1u << 18))]
-    public void MeshAuxiliaryExportsIgnoreDisabledOutputs(uint positionControl)
+    [InlineData((1u << 21) | (1u << 16))]
+    [InlineData((1u << 22) | (1u << 8) | 1u)]
+    public void MeshAuxiliaryExportsFollowPositionControl(uint positionControl)
     {
         var program = ResourceTestProgram.Program(
             new Gen5ShaderInstruction(0, Gen5ShaderEncoding.Exp, "Exp", [0u, 0u],

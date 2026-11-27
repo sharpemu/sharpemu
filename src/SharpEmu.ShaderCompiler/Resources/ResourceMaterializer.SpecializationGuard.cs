@@ -21,6 +21,10 @@ public static partial class ResourceMaterializer
     private static uint BufferGuardFlags(ShaderResourcePlan plan, int index) =>
         0xC0000000u | (plan.Info.Buffers[index].Formatted ? 0x7FFFFu : 0u);
 
+    private static uint BufferGuardKey(ShaderResourcePlan plan, int index, uint[] words) =>
+        (words[3] & BufferGuardFlags(plan, index)) |
+        (plan.Info.Buffers[index].Formatted && PredictsNullBuffer(words) ? 1u << 29 : 0u);
+
     private static SpecializationGuard? CaptureGuard(ShaderResourcePlan plan, MaterializedSnapshot snapshot)
     {
         if (plan.RequiresSpecializationMemory || plan.IndirectImages.Count != 0 || plan.BufferCandidateTables.Count != 0 ||
@@ -33,7 +37,7 @@ public static partial class ResourceMaterializer
         return new SpecializationGuard
         {
             StableImageBindings = plan.StableImageBindings,
-            Buffers = snapshot.Buffers.Select((words, index) => words[3] & BufferGuardFlags(plan, index)).ToArray(),
+            Buffers = snapshot.Buffers.Select((words, index) => BufferGuardKey(plan, index, words)).ToArray(),
             Images = snapshot.Images.Select(words => words.ToArray()).ToArray(),
             Samplers = snapshot.Samplers.Select(words => words.ToArray()).ToArray(),
         };
@@ -48,7 +52,7 @@ public static partial class ResourceMaterializer
         for (var index = 0; index < guard.Buffers.Length; index++)
         {
             var words = snapshot.Buffers[index];
-            if (words.Length != 4 || (words[3] & BufferGuardFlags(plan, index)) != guard.Buffers[index]) return false;
+            if (words.Length != 4 || BufferGuardKey(plan, index, words) != guard.Buffers[index]) return false;
         }
         for (var index = 0; index < guard.Images.Length; index++)
             if (!snapshot.Images[index].AsSpan().SequenceEqual(guard.Images[index])) return false;

@@ -477,11 +477,13 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         if (!TryPreparePairProgram(
             vertexSource,
             mesh is null
-                ? pair.VertexInput.OptionsFor(vertexInfo, (int)attributeCount, tessellation, borrowedVertex)
+                ? pair.VertexInput.OptionsFor(vertexInfo, (int)attributeCount, tessellation, borrowedVertex,
+                    pixelSource is null ? 0u : pair.PixelInput.PackedParameterMask)
                 : new StageCompileOptions
                 {
                     MeshInfo = mesh, RequiredVertexOutputCount = (int)attributeCount,
                     MeshOutputLocationMask = pixelSource is null ? 0u : pixelStage.Program?.InputLocationMask,
+                    PackedParameterMask = pixelSource is null ? 0u : pair.PixelInput.PackedParameterMask,
                 },
             pair.Vertex,
             mesh is null ? vertexInfo : null,
@@ -612,7 +614,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         var ieeeMode = options.VertexInfo?.IeeeMode ?? options.PixelInfo?.IeeeMode ?? false;
         if (kept.Entry is { } entry && staticInputs is not null && ReferenceEquals(kept.StaticInputs, staticInputs) && kept.Hash == source.Hash &&
             kept.UserDataCount == source.UserData.Length && kept.RequiredOutputs == requiredOutputs && kept.StartInstance == startInstance && kept.BaseVertex == baseVertex &&
-            kept.IeeeMode == ieeeMode && kept.Registrations == ShaderHeaderRegistry.Registrations)
+            kept.IeeeMode == ieeeMode && kept.PackedParameterMask == options.PackedParameterMask &&
+            kept.Registrations == ShaderHeaderRegistry.Registrations)
         {
             _pairEntryHits.Increment();
             if (_programs.TryGetProgramForEntry(entry, source, options, _strictShaders, ref pushDataCursor, out program, out stage, out var rejection))
@@ -636,6 +639,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         kept.Hash = source.Hash;
         kept.UserDataCount = source.UserData.Length;
         kept.RequiredOutputs = requiredOutputs;
+        kept.PackedParameterMask = options.PackedParameterMask;
         kept.StartInstance = startInstance;
         kept.BaseVertex = baseVertex;
         kept.IeeeMode = ieeeMode;
@@ -664,7 +668,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         }
 
         var resolved = ResolvePixelInput(banks.Context, source, header, targetExportMapping, depthBound, out outputs, out attributeCount,
-            out dropUnwritten, kept.Outputs);
+            out dropUnwritten, out kept.PackedParameterMask, kept.Outputs);
         kept.Key = key;
         kept.CompileOptions = null;
         kept.Info = resolved;
@@ -676,7 +680,7 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
 
     private PixelInputInfo ResolvePixelInput(ContextRegisters context, ShaderSource source, ShaderHeaderEntry header,
         ReadOnlySpan<ColorComponentMap> targetExportMapping, bool depthBound, out Gen5PixelOutputBinding[] outputs, out uint attributeCount,
-        out bool dropUnwritten, Gen5PixelOutputBinding[] priorOutputs)
+        out bool dropUnwritten, out uint packedParameterMask, Gen5PixelOutputBinding[] priorOutputs)
     {
         var shaderInterface = context.ShaderInterface;
         var pixelProgram = _programs.Decode(source);
@@ -701,6 +705,8 @@ internal sealed partial class ShaderPipelineCache : IShaderPipelineProvider
         outputs = ResolveBoundTargets(context, targetExportMapping, dropUnwritten ? pixelProgram.PixelColorExportMasks : null, outputModes, outputMappings, priorOutputs);
         var info = PixelStageInputResolver.Resolve(_context, source.Registered, shaderInterface, outputModes, outputMappings, inputCount,
             InputSemantics(header));
+        packedParameterMask = Gen5PixelInputMapping.PackedLocations(
+            pixelProgram, info.InterpolatorSettings.AsSpan(0, (int)info.InputCount));
         // SPI_PS_INPUT_CNTL can map an input to any parameter export, beyond the input count;
         // the vertex program must declare every location the pixel program reads.
         attributeCount = Math.Max(attributeCount, ReadVertexOutputCount(attributes, info));
@@ -2072,6 +2078,7 @@ internal sealed class KeptComputeProgram
 
 internal sealed class GraphicsPairStage
 {
+    public uint PackedParameterMask;
     public ProgramSourceEntry? Entry;
     public object? StaticInputs;
     public ulong Hash;
@@ -2107,17 +2114,25 @@ internal sealed class KeptVertexInput
 {
     internal StageCompileOptions? CompileOptions;
 
-    internal StageCompileOptions OptionsFor(VertexInputInfo draw, int outputs, Gen5TessellationInfo? tessellation, bool borrowed = false)
+    internal StageCompileOptions OptionsFor(VertexInputInfo draw, int outputs, Gen5TessellationInfo? tessellation,
+        bool borrowed = false, uint packedParameterMask = 0)
     {
         // A table or clip change invalidates CompileOptions. A borrowed input is read-only
         // and can already carry a stage from a completed draw.
         if (tessellation.HasValue || Info is null || !borrowed)
-            return new StageCompileOptions { VertexInfo = draw, RequiredVertexOutputCount = outputs, Tessellation = tessellation };
+            return new StageCompileOptions
+            {
+                VertexInfo = draw, RequiredVertexOutputCount = outputs, Tessellation = tessellation,
+                PackedParameterMask = packedParameterMask,
+            };
         if (CompileOptions is { VertexInfo: { } previous } options && options.RequiredVertexOutputCount == outputs &&
             previous.StartInstanceUserData == draw.StartInstanceUserData && previous.BaseVertexUserData == draw.BaseVertexUserData &&
-            previous.IeeeMode == draw.IeeeMode)
+            previous.IeeeMode == draw.IeeeMode && options.PackedParameterMask == packedParameterMask)
             return options;
-        return CompileOptions = new StageCompileOptions { VertexInfo = draw.WithoutStage(), RequiredVertexOutputCount = outputs };
+        return CompileOptions = new StageCompileOptions
+        {
+            VertexInfo = draw.WithoutStage(), RequiredVertexOutputCount = outputs, PackedParameterMask = packedParameterMask,
+        };
     }
 
     public ShaderHeaderEntry? Header;
@@ -2129,6 +2144,7 @@ internal sealed class KeptVertexInput
 
 internal sealed class KeptPixelInput
 {
+    public uint PackedParameterMask;
     internal StageCompileOptions? CompileOptions;
 
     internal StageCompileOptions OptionsFor(PixelInputInfo draw, Gen5PixelOutputBinding[] outputs, ShaderInterfaceRegisters registers, bool borrowed = false)

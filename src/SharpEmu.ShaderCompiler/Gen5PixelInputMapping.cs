@@ -5,6 +5,27 @@ namespace SharpEmu.ShaderCompiler;
 
 public static class Gen5PixelInputMapping
 {
+    public static uint PackedLocations(Gen5ShaderProgram program, ReadOnlySpan<uint> controls)
+    {
+        var mask = 0u;
+        foreach (var instruction in program.Instructions)
+        {
+            if (instruction.Control is Gen5InterpolationControl interpolation && IsHalfInterpolation(instruction.Opcode))
+            {
+                var control = interpolation.Attribute < (uint)controls.Length
+                    ? controls[(int)interpolation.Attribute]
+                    : interpolation.Attribute;
+                // SPI_PS_INPUT_CNTL.FP16_INTERP_MODE interprets each exported dword as two halves.
+                if (interpolation.HighAttribute || (control & (1u << 19)) != 0)
+                    mask |= 1u << (int)(control & 0x1Fu);
+            }
+        }
+        return mask;
+    }
+
+    public static bool IsHalfInterpolation(string opcode) =>
+        opcode is "VInterpP1llF16" or "VInterpP1lvF16" or "VInterpP2F16";
+
     public static uint[] ResolveLocations(
         ReadOnlySpan<uint> controls,
         ReadOnlySpan<uint> activeInputs)

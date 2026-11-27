@@ -423,7 +423,7 @@ public sealed class Gen5ScalarLaneTransferTests
             destination.HasValue ? [destination.Value] : [],
             null);
 
-    private static void ValidateWithInstalledSdk(byte[] spirv)
+    internal static void ValidateWithInstalledSdk(byte[] spirv)
     {
         var sdk = Environment.GetEnvironmentVariable("VULKAN_SDK");
         var validator = sdk is null ? null : Path.Combine(sdk, "Bin", "spirv-val.exe");

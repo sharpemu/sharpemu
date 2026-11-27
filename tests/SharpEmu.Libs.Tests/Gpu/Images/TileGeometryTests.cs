@@ -26,12 +26,14 @@ public sealed class TileGeometryTests
         }
     }
 
-    [Fact]
-    public void RenderTargetTextures_SelectGen5AddressEquations()
+    [Theory]
+    [InlineData(GuestPixelFormat.Bits11_11_10Float)]
+    [InlineData(GuestPixelFormat.Bits9_9_9_5Float)]
+    public void RenderTargetTextures_SelectGen5AddressEquations(GuestPixelFormat format)
     {
-        Assert.True(TileGeometry.TryGetTextureBlockLayout(GuestPixelFormat.Bits11_11_10Float,
+        Assert.True(TileGeometry.TryGetTextureBlockLayout(format,
             GuestTileMode.RenderTarget, true, out var volume));
-        Assert.True(TileGeometry.TryGetTextureBlockLayout(GuestPixelFormat.Bits11_11_10Float,
+        Assert.True(TileGeometry.TryGetTextureBlockLayout(format,
             GuestTileMode.RenderTarget, false, out var surface));
         Assert.Equal(TileBlockKind.RenderTarget64KBGen5, volume.Block.Kind);
         Assert.Equal(TileBlockKind.RenderTarget64KBGen5, surface.Block.Kind);

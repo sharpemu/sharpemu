@@ -67,6 +67,8 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
     // As on the presenter's device: a storage buffer access past its descriptor's range reads zero and writes nothing.
     public bool RobustBufferAccess2 { get; private init; }
 
+    public bool SupportsNullDescriptor { get; private init; }
+
     // As on the presenter's device: shaderFloat16 is enabled and the 16-bit float controls of
     // ShaderCompileRequest.NativeFloat16Conversions are available.
     public bool NativeFloat16Conversions { get; private init; }
@@ -506,12 +508,14 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             vulkan13Features.PNext = &float16Features;
         }
         var robustBufferAccess2 = (bool)robustness2Features.RobustBufferAccess2 && baseFeatures.RobustBufferAccess;
-        if (robustBufferAccess2)
+        var nullDescriptor = (bool)robustness2Features.NullDescriptor;
+        if (robustBufferAccess2 || nullDescriptor)
         {
             robustness2Features = new PhysicalDeviceRobustness2FeaturesEXT
             {
                 SType = StructureType.PhysicalDeviceRobustness2FeaturesExt,
-                RobustBufferAccess2 = true,
+                RobustBufferAccess2 = robustBufferAccess2,
+                NullDescriptor = nullDescriptor,
                 PNext = vulkan13Features.PNext,
             };
             vulkan13Features.PNext = &robustness2Features;
@@ -533,7 +537,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             extensionNames.Add(meshExtension);
         }
         if (imageAtomicInt64) extensionNames.Add(imageAtomicInt64Extension);
-        if (robustBufferAccess2) extensionNames.Add(robustness2Extension);
+        if (robustBufferAccess2 || nullDescriptor) extensionNames.Add(robustness2Extension);
         if (graphicsPipelineLibrary)
         {
             graphicsPipelineLibraryFeatures = new PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT
@@ -617,6 +621,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             SupportsBufferInt64Atomics = bufferInt64Atomics,
             SupportsGraphicsPipelineLibrary = graphicsPipelineLibrary,
             RobustBufferAccess2 = robustBufferAccess2,
+            SupportsNullDescriptor = nullDescriptor,
             NativeFloat16Conversions = nativeFloat16,
         };
         if (sparseTable)

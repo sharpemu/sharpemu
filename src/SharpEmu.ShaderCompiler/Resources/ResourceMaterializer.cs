@@ -474,7 +474,8 @@ public static partial class ResourceMaterializer
             foreach (var candidate in memos)
             {
                 if (candidate is SpecializationMemo entry && MatchesOutput(entry, output, bufferCount, imageCount, samplerCount, out statisticsDiffer) &&
-                    (!statisticsDiffer || entry.Specialization.ImageDescriptorGroups.SequenceEqual(OutputImageGroups(output, bufferCount, imageCount))))
+                    (!statisticsDiffer || entry.Specialization.ImageDescriptorGroups.SequenceEqual(
+                        OutputImageGroups(output, bufferCount, imageCount, entry.Specialization.Images))))
                 {
                     memo = entry;
                     break;
@@ -540,7 +541,8 @@ public static partial class ResourceMaterializer
         return SpecializeAndRemember(plan, inputs, materialized, ranges, memos, ref snapshot, ref specialization, out failure);
     }
 
-    private static List<uint> OutputImageGroups(MaterializationProgram.Output output, int bufferCount, int imageCount)
+    private static List<uint> OutputImageGroups(MaterializationProgram.Output output, int bufferCount, int imageCount,
+        IReadOnlyList<ImageSpecialization> views)
     {
         var images = new uint[imageCount][];
         for (var index = 0; index < imageCount; index++)
@@ -548,7 +550,7 @@ public static partial class ResourceMaterializer
             images[index] = output.Source(bufferCount + index).ToArray();
         }
 
-        return DescriptorBindingAliases.Group(images);
+        return DescriptorBindingAliases.Group(images, views);
     }
 
     private static bool MatchesOutput(SpecializationMemo memo, MaterializationProgram.Output output, int bufferCount, int imageCount, int samplerCount,
@@ -563,7 +565,7 @@ public static partial class ResourceMaterializer
         for (var index = 0; index < bufferCount; index++)
         {
             var words = output.Source(index);
-            if (words.Length != 4 || words[1] >> 16 != memo.KeyBuffers[index * 2] || words[3] != memo.KeyBuffers[index * 2 + 1])
+            if (words.Length != 4 || BufferMemoKey(words) != memo.KeyBuffers[index * 2] || words[3] != memo.KeyBuffers[index * 2 + 1])
             {
                 return false;
             }
@@ -634,7 +636,8 @@ public static partial class ResourceMaterializer
             foreach (var candidate in memos)
             {
                 if (candidate is SpecializationMemo entry && MatchesMemo(entry, materialized, out statisticsDiffer) &&
-                    (!statisticsDiffer || entry.Specialization.ImageDescriptorGroups.SequenceEqual(DescriptorBindingAliases.Group(materialized.Images))))
+                    (!statisticsDiffer || entry.Specialization.ImageDescriptorGroups.SequenceEqual(
+                        DescriptorBindingAliases.Group(materialized.Images, entry.Specialization.Images))))
                 {
                     memo = entry;
                     break;
@@ -711,7 +714,7 @@ public static partial class ResourceMaterializer
                 break;
             }
 
-            keyBuffers[index * 2] = words[1] >> 16;
+            keyBuffers[index * 2] = BufferMemoKey(words);
             keyBuffers[index * 2 + 1] = words[3];
         }
 
@@ -762,7 +765,7 @@ public static partial class ResourceMaterializer
         for (var index = 0; index < snapshot.Buffers.Length; index++)
         {
             var words = snapshot.Buffers[index];
-            if (words.Length != 4 || words[1] >> 16 != memo.KeyBuffers[index * 2] || words[3] != memo.KeyBuffers[index * 2 + 1])
+            if (words.Length != 4 || BufferMemoKey(words) != memo.KeyBuffers[index * 2] || words[3] != memo.KeyBuffers[index * 2 + 1])
             {
                 return false;
             }
@@ -1243,6 +1246,20 @@ public static partial class ResourceMaterializer
             if (NulledSampledFormats.Add(format))
             {
                 Console.Error.WriteLine($"[GPU][WARN] A sampled image descriptor uses unsupported format {format}; it is bound as a null texture.");
+            }
+        }
+    }
+
+    private static readonly HashSet<(uint Format, bool Wide)> NulledAtomicFormats = new();
+
+    private static void ReportNulledAtomicFormat(uint format, bool wide)
+    {
+        lock (NulledAtomicFormats)
+        {
+            if (NulledAtomicFormats.Add((format, wide)))
+            {
+                Console.Error.WriteLine(
+                    $"[GPU][WARN] A {(wide ? 64 : 32)}-bit image atomic uses a descriptor of format {format}, which holds no texel of that width; it is bound as a null storage image.");
             }
         }
     }
@@ -1987,6 +2004,11 @@ public static partial class ResourceMaterializer
                 formatted ? words[3] & 0xFFF : DescriptorConstants.IdentityDestinationSelect));
         }
 
+        if (PredictNullBufferFormats && plan.Stage != ShaderStage.Mesh)
+        {
+            PredictNullFormattedBuffers(info, snapshot.Buffers, buffers);
+        }
+
         for (var index = 0; index < images.Count; index++)
         {
             var descriptor = snapshot.Images[index];
@@ -2060,15 +2082,23 @@ public static partial class ResourceMaterializer
             // 32-bit uint UAV. The float image atomics (Fmin/Fmax/Fcmpswap,
             // MIMG op 0x1D-0x1F) are lowered as a compare-and-swap loop on the
             // raw bit pattern (Gen5SpirvTranslator) and legitimately target a
-            // 32-bit float-format UAV instead - reject only formats that are
+            // 32-bit float-format UAV instead - null only formats that are
             // neither. An atomic on two data dwords works on a 64-bit texel,
-            // which the 32_32 UINT format holds.
+            // which the 32_32 formats hold.
             if (baseImage.Atomic64
-                ? format != GuestImageFormat.Format32x2Uint
-                : baseImage.Atomic && format != GuestImageFormat.Format32Uint &&
+                ? !GuestImageFormat.IsAtomic64Format(format)
+                : baseImage.Atomic && format is not (GuestImageFormat.Format32Uint or GuestImageFormat.Format32Sint) &&
                     GuestImageFormat.SampledNumericClass(format) != ImageNumericClass.Float)
             {
-                return Fail($"atomic image descriptor {index} uses unsupported format {format}");
+                ReportNulledAtomicFormat(format, baseImage.Atomic64);
+                Array.Clear(descriptor);
+                images[index] = image with
+                {
+                    NumericClass = baseImage.Atomic64 ? ImageNumericClass.Uint64 : ImageNumericClass.Uint,
+                    Dimension = SampledArrayRead(baseImage) ? ImageDimension.Dim2DArray : ImageDimension.Dim2D,
+                    Cube = false,
+                };
+                continue;
             }
 
             var storage = baseImage.ResourceClass == ImageResourceClass.Storage;
@@ -2092,13 +2122,13 @@ public static partial class ResourceMaterializer
             var rawSintStorage = storage && numericClass == ImageNumericClass.Sint && baseImage.Written && !baseImage.Read && !baseImage.Atomic;
             if (storage)
             {
-                if ((!rawSintStorage && numericClass == ImageNumericClass.Sint) || numericClass == ImageNumericClass.Unsupported)
+                if ((!rawSintStorage && !baseImage.Atomic && numericClass == ImageNumericClass.Sint) || numericClass == ImageNumericClass.Unsupported)
                 {
                     return Fail($"storage image descriptor {index} uses unsupported format {format}");
                 }
 
                 // Atomics use the uint view; float min/max compare-exchange its bits.
-                if (rawSintStorage || (baseImage.Atomic && numericClass == ImageNumericClass.Float) ||
+                if (rawSintStorage || baseImage.Atomic ||
                     GuestImageFormat.IsPacked16Unorm(conversionFormat))
                 {
                     numericClass = ImageNumericClass.Uint;
@@ -2383,6 +2413,75 @@ public static partial class ResourceMaterializer
     // Applies a specialization to the plan's tables: buffer strides and formats, image
     // classes and indirect candidates, point samplers and the sampler each access uses.
     public static bool RecordMipStatistics { get; set; }
+
+    public static bool PredictNullBufferFormats { get; set; }
+
+    private static bool NullBufferDescriptor(ReadOnlySpan<uint> words) =>
+        (words[0] == 0 && (words[1] & 0xFFFF) == 0) || words[2] == 0;
+
+    private static bool PredictsNullBuffer(ReadOnlySpan<uint> words) =>
+        PredictNullBufferFormats && ((words[3] >> 12) & 0x7F) == DescriptorConstants.InvalidFormat && NullBufferDescriptor(words);
+
+    private static uint BufferMemoKey(ReadOnlySpan<uint> words) =>
+        (words[1] >> 16) | (PredictsNullBuffer(words) ? 1u << 16 : 0u);
+
+    private static void PredictNullFormattedBuffers(ShaderResourceInfo info, uint[][] descriptors, List<BufferSpecialization> buffers)
+    {
+        var predicted = default(BufferSpecialization);
+        var predictedCount = 0;
+        for (var index = 0; index < buffers.Count; index++)
+        {
+            var candidate = buffers[index];
+            if (!info.Buffers[index].Formatted || candidate.DescriptorFormat == DescriptorConstants.InvalidFormat ||
+                NullBufferDescriptor(descriptors[index]))
+            {
+                continue;
+            }
+
+            var count = 0;
+            for (var other = index; other < buffers.Count; other++)
+            {
+                if (buffers[other] == candidate && info.Buffers[other].Formatted && !NullBufferDescriptor(descriptors[other]))
+                {
+                    count++;
+                }
+            }
+
+            if (count > predictedCount)
+            {
+                predicted = candidate;
+                predictedCount = count;
+            }
+        }
+
+        if (predictedCount == 0)
+        {
+            return;
+        }
+
+        for (var index = 0; index < buffers.Count; index++)
+        {
+            var buffer = info.Buffers[index];
+            if (buffer.Formatted && buffers[index].DescriptorFormat == DescriptorConstants.InvalidFormat &&
+                NullBufferDescriptor(descriptors[index]) && SelectsOnlyZeroOrXyz(predicted.DescriptorSwizzle, buffer.FormatLoadComponents))
+            {
+                buffers[index] = predicted;
+            }
+        }
+    }
+
+    private static bool SelectsOnlyZeroOrXyz(uint swizzle, uint components)
+    {
+        for (var component = 0; component < components; component++)
+        {
+            if (((swizzle >> (component * 3)) & 7) is not (0 or 4 or 5 or 6))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
 
     public static SpecializedResourceInfo ApplyTo(ShaderResourcePlan plan, ResourceSpecialization specialization)
     {

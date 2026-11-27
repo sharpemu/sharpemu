@@ -272,6 +272,16 @@ public static class ViewFormatRules
         _ => Format.Undefined,
     };
 
+    public static Format UintStorageFormat(Format imageFormat) => BlockBytes(imageFormat) switch
+    {
+        1 => Format.R8Uint,
+        2 => Format.R16Uint,
+        4 => Format.R32Uint,
+        8 => Format.R32G32Uint,
+        16 => Format.R32G32B32A32Uint,
+        _ => Format.Undefined,
+    };
+
     public static Format PackedStorageFormat(Format imageFormat) => imageFormat switch
     {
         Format.B5G6R5UnormPack16 or Format.R5G5B5A1UnormPack16 or Format.R4G4B4A4UnormPack16 => Format.R16Uint,

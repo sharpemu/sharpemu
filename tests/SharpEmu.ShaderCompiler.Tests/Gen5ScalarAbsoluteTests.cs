@@ -37,6 +37,21 @@ public sealed class Gen5ScalarAbsoluteTests
         Assert.Equal(0xC0000123u, result.Dwords[3]);
     }
 
+    [Fact]
+    public void SampleAdjustQuadmaskCanFillTheEntireFourthDword()
+    {
+        var sample = Image(20, "ImageSampleA", 0, 8) with { Words = [0xF0800709u, 0u] };
+        var program = Program(
+            Decode(0x7D840A81),
+            Decode(0xBEEA2D6A) with { Pc = 4 },
+            Decode(0x8F0B8C6A) with { Pc = 8 }, sample, EndProgram(28));
+        var plan = Extract(program, userDataCount: 16);
+        var registers = new uint[16];
+        registers[8] = 6;
+        Assert.True(RuntimeValueEvaluator.EvaluateDescriptorSource(plan, plan.Info.Samplers[0].Source, Inputs(registers), out var result));
+        Assert.Equal(0u, result.Dwords[3]);
+    }
+
     [Theory]
     [InlineData(false)]
     [InlineData(true)]

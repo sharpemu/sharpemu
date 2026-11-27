@@ -384,10 +384,14 @@ public sealed unsafe partial class CachedImage : IDisposable
                 16 => Format.R32G32B32A32Uint,
                 _ => Format.Undefined,
             }
-            : ViewFormatRules.SrgbStorageFormat(description.PixelFormat) is var srgb and not Format.Undefined
-                ? srgb
-                : ViewFormatRules.PackedStorageFormat(description.PixelFormat);
+            : ViewFormatRules.SrgbStorageFormat(description.PixelFormat);
         var storageFeatures = storageFormat == Format.Undefined ? features : device.GetFormatProperties(storageFormat).OptimalTilingFeatures;
+        if ((storageFeatures & FormatFeatureFlags.StorageImageBit) == 0 &&
+            ViewFormatRules.UintStorageFormat(description.PixelFormat) is var uintFormat and not Format.Undefined)
+        {
+            storageFeatures = device.GetFormatProperties(uintFormat).OptimalTilingFeatures;
+        }
+
         if (description.Samples == 1 && (storageFeatures & FormatFeatureFlags.StorageImageBit) != 0)
         {
             usage |= ImageUsageFlags.StorageBit;
@@ -682,7 +686,8 @@ public sealed unsafe partial class CachedImage : IDisposable
         normalized = normalized with { Usage = isStorage ? ImageUsageFlags.StorageBit : 0 };
         normalized = ClampToHostLevels(normalized, image.MipLevels, Description.Resources.Levels);
         var formatCompatible = normalized.Format != Format.Undefined && ViewFormatRules.AreImageViewFormatsCompatible(image.Format, normalized.Format, image.Flags);
-        var usageValid = !isStorage || (image.Usage & ImageUsageFlags.StorageBit) != 0;
+        var usageValid = !isStorage || ((image.Usage & ImageUsageFlags.StorageBit) != 0 &&
+            (_device.GetFormatProperties(normalized.Format).OptimalTilingFeatures & FormatFeatureFlags.StorageImageBit) != 0);
         var sliceView = image.ImageType == ImageType.Type3D && normalized.Type is ImageViewType.Type2D or ImageViewType.Type2DArray;
         var levelsValid = normalized.LevelCount != 0 && normalized.BaseLevel < image.MipLevels && normalized.LevelCount <= image.MipLevels - normalized.BaseLevel;
         var viewLayers = sliceView && levelsValid ? Math.Max(image.Extent.Depth >> (int)normalized.BaseLevel, 1) : image.Layers;

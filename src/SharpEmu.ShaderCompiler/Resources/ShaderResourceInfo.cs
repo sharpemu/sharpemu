@@ -54,6 +54,7 @@ public sealed class BufferResource
     public bool Written { get; set; }
     public bool Atomic { get; set; }
     public bool Formatted { get; set; }
+    public uint FormatLoadComponents { get; set; }
     public bool Scalar { get; set; }
 
     public BufferResource Clone() => (BufferResource)MemberwiseClone();

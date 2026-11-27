@@ -1190,6 +1190,13 @@ internal sealed partial class ShaderPrewarmList : IDisposable
                     if (property.Name == nameof(PixelPrewarmRecord.PreferHeapRecords)) continue;
                 }
 
+                // Packed parameter masks are optional in both pre-rasterization record encodings.
+                if ((type == typeof(VertexPrewarmRecord) || type == typeof(StageCompileOptions)) &&
+                    property.Name == nameof(StageCompileOptions.PackedParameterMask))
+                {
+                    continue;
+                }
+
                 builder.Append(property.PropertyType.ToString()).Append(' ').Append(property.Name).Append(';');
             }
 
@@ -1772,7 +1779,9 @@ internal sealed partial class ShaderPrewarmList : IDisposable
         writer.Write(options.PixelInputAddress);
         writer.Write(options.DeviceRecordCounts);
         WriteSpecialization(writer, record.Specialization);
-        if (record.PreferHeapRecords) writer.Write((byte)1);
+        if (options.PackedParameterMask != 0) writer.Write(options.PackedParameterMask);
+        var extension = (record.PreferHeapRecords ? 1 : 0) | (options.PackedParameterMask != 0 ? 2 : 0);
+        if (extension != 0) writer.Write((byte)extension);
         writer.Flush();
         return stream.ToArray();
     }
@@ -1825,19 +1834,9 @@ internal sealed partial class ShaderPrewarmList : IDisposable
             };
         }
 
-        var options = new StageCompileOptions
-        {
-            VertexInfo = vertexInfo,
-            RequiredVertexOutputCount = requiredVertexOutputCount,
-            PixelInfo = pixelInfo,
-            PixelOutputs = outputs,
-            PixelInputEnable = reader.ReadUInt32(),
-            PixelInputAddress = reader.ReadUInt32(),
-        };
-        if (!reader.ReadBoolean())
-        {
-            options = options.WithoutDeviceRecordCounts();
-        }
+        var pixelInputEnable = reader.ReadUInt32();
+        var pixelInputAddress = reader.ReadUInt32();
+        var deviceRecordCounts = reader.ReadBoolean();
 
         if ((stage == ShaderStage.Vertex && vertexInfo is null) || (stage == ShaderStage.Pixel && pixelInfo is null))
         {
@@ -1845,12 +1844,23 @@ internal sealed partial class ShaderPrewarmList : IDisposable
         }
 
         var specialization = ReadSpecialization(reader, limit);
-        var preferHeapRecords = false;
-        if (reader.BaseStream.Position + 1 == reader.BaseStream.Length)
+        var remaining = reader.BaseStream.Length - reader.BaseStream.Position;
+        var extension = remaining == 0 ? 0 : payload[^1];
+        if (remaining != 0 && (extension is 0 or > 3 || remaining != ((extension & 2) != 0 ? 5 : 1)))
         {
-            if (reader.ReadByte() != 1) throw new ArgumentException("Unknown prewarm stage extension.");
-            preferHeapRecords = true;
+            throw new ArgumentException("Unknown prewarm stage extension.");
         }
+        var options = new StageCompileOptions
+        {
+            VertexInfo = vertexInfo,
+            RequiredVertexOutputCount = requiredVertexOutputCount,
+            PackedParameterMask = (extension & 2) != 0 ? reader.ReadUInt32() : 0u,
+            PixelInfo = pixelInfo,
+            PixelOutputs = outputs,
+            PixelInputEnable = pixelInputEnable,
+            PixelInputAddress = pixelInputAddress,
+        };
+        if (!deviceRecordCounts) options = options.WithoutDeviceRecordCounts();
 
         return new StagePrewarmRecord
         {
@@ -1863,7 +1873,7 @@ internal sealed partial class ShaderPrewarmList : IDisposable
             PushDataCursor = pushDataCursor,
             Options = options,
             Specialization = specialization,
-            PreferHeapRecords = preferHeapRecords,
+            PreferHeapRecords = (extension & 1) != 0,
         };
     }
 

@@ -121,6 +121,17 @@ public sealed class DescriptorBindingAliasTests
     }
 
     [Fact]
+    public void EqualWordsUnderDifferentViewsFormNoGroup()
+    {
+        uint[] words = [1, 2, 3, 4, 5, 6, 7, 8];
+        uint[][] descriptors = [[9, 9, 9, 9, 9, 9, 9, 9], words, [.. words]];
+        var flat = default(ImageSpecialization) with { IndirectRoot = DescriptorConstants.NoIndex, Dimension = ImageDimension.Dim2D };
+        var volume = flat with { Dimension = ImageDimension.Dim3D };
+        Assert.Empty(DescriptorBindingAliases.Group(descriptors, [flat, flat, volume]));
+        Assert.Equal(new uint[] { 0, 1, 1 }, DescriptorBindingAliases.Group(descriptors, [flat, volume, volume]));
+    }
+
+    [Fact]
     public void EqualWordsKeepDifferentViewsAndSamplerModesSeparate()
     {
         var source = new ShaderResourceInfo

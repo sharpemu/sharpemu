@@ -89,15 +89,17 @@ public readonly record struct MeshShaderConfiguration(
                 .Select(location => (uint)location).ToArray()
             : ParameterLocations(request.Program, request.RequiredVertexOutputCount);
 
-    public ulong OutputMemoryBytes(int parameterCount, uint vertexGranularity, uint primitiveGranularity)
+    public ulong OutputMemoryBytes(int parameterCount, uint vertexGranularity, uint primitiveGranularity,
+        int auxiliaryVertexLocations = 0, bool writesLayer = true)
     {
         if (vertexGranularity == 0 || primitiveGranularity == 0)
             throw new ArgumentOutOfRangeException(nameof(vertexGranularity));
         var vertices = ((ulong)OutputVertexCapacity + vertexGranularity - 1) / vertexGranularity * vertexGranularity;
         var primitives = ((ulong)OutputPrimitiveCapacity + primitiveGranularity - 1) / primitiveGranularity * primitiveGranularity;
-        // Position and each parameter use one location. Layer and CullPrimitive use one each.
+        // Position and each parameter use one location. CullPrimitive and an optional Layer use one each.
         // Primitive indices do not count toward output storage.
-        return checked(((ulong)parameterCount + 1) * 16 * vertices + 32 * primitives);
+        return checked(((ulong)parameterCount + (ulong)auxiliaryVertexLocations + 1) * 16 * vertices +
+            (writesLayer ? 32ul : 16ul) * primitives);
     }
 }
 
@@ -367,6 +369,7 @@ public sealed class ShaderCompileRequest
     public IReadOnlyList<uint>? PixelInputCntl { get; init; }
 
     public int RequiredVertexOutputCount { get; init; }
+    public uint PackedParameterMask { get; init; }
     public uint? MeshOutputLocationMask { get; init; }
     public IReadOnlyList<ShaderVertexInput> VertexInputs { get; init; } = [];
     public uint PositionExportControl { get; init; }

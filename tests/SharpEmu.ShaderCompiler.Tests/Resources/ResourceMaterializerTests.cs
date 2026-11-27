@@ -55,13 +55,18 @@ public sealed class ResourceMaterializerTests
 
     [Theory]
     [InlineData(20u, 1u, true)]
+    [InlineData(21u, 1u, true)]
     [InlineData(62u, 3u, true)]
+    [InlineData(63u, 3u, true)]
+    [InlineData(64u, 3u, true)]
     [InlineData(62u, 1u, false)]
     [InlineData(20u, 3u, false)]
-    public void AtomicImageOfAnUnsupportedFormatIsRejected(uint format, uint dmask, bool supported)
+    [InlineData(5u, 1u, false)]
+    [InlineData(5u, 3u, false)]
+    public void AtomicImageOfAFormatWithoutItsTexelWidthIsBoundAsNull(uint format, uint dmask, bool supported)
     {
         // One data dword is an atomic on a 32 bit texel (format 20, R32_UINT); two are an atomic on a 64 bit texel
-        // (format 62, 32_32_UINT). A width and a format that do not match have no lowering.
+        // (formats 62 to 64, 32_32). A width and a format that do not match bind a null storage image of that width.
         var instructions = new List<Gen5ShaderInstruction>();
         uint pc = 0;
         uint[] words = [0x1000, format << 20, 3 | (3 << 14), 0xFAC | (1u << 16) | (ImageType2D << 28), 0, 0, 0, 0];
@@ -87,16 +92,12 @@ public sealed class ResourceMaterializerTests
         var success = ResourceMaterializer.Materialize(
             plan, Inputs([]), ref snapshot, ref specialization, out var failure);
 
-        Assert.Equal(supported, success);
+        Assert.True(success);
+        Assert.Equal(ResourceMaterializationFailure.None, failure);
         Assert.Equal(
-            supported ? ResourceMaterializationFailure.None : ResourceMaterializationFailure.Other,
-            failure);
-        if (supported)
-        {
-            Assert.Equal(
-                dmask == 3 ? ImageNumericClass.Uint64 : ImageNumericClass.Uint,
-                Assert.Single(specialization.Images).NumericClass);
-        }
+            dmask == 3 ? ImageNumericClass.Uint64 : ImageNumericClass.Uint,
+            Assert.Single(specialization.Images).NumericClass);
+        Assert.Equal(!supported, snapshot.Images[0].All(word => word == 0));
     }
 
     [Theory]

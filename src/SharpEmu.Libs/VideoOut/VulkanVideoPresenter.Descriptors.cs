@@ -1730,7 +1730,8 @@ internal static unsafe partial class VulkanVideoPresenter
         // Textures bound for the draw being prepared; cleared when its preparation closes.
         private readonly List<TextureResource[]> _preparedTextures = new();
 
-        private BufferView NullStorageBuffer() => new(NullBufferHandle, 0, NullStorageBufferBytes);
+        private BufferView NullStorageBuffer() =>
+            _presenter._nullDescriptorEnabled ? new(default, 0, Vk.WholeSize) : new(NullBufferHandle, 0, NullStorageBufferBytes);
 
         // A storage buffer view on the cache buffer, aligned down with the adjustment carried in the memory offsets.
         private BufferView BindStorageBuffer(
@@ -2009,7 +2010,10 @@ internal static unsafe partial class VulkanVideoPresenter
                 var shift = ((uint)index % 4) * 8;
                 shaderData[dword] |= memoryOffset << (int)shift;
                 if (layout.UsesBufferLengths)
-                    shaderData[layout.BufferLengthsDword + (uint)index] = checked((uint)(views[index].Range / sizeof(uint)));
+                    shaderData[layout.BufferLengthsDword + (uint)index] =
+                        views[index].Buffer.Handle == NullStorageBuffer().Buffer.Handle
+                            ? 0
+                            : checked((uint)(views[index].Range / sizeof(uint)));
             }
 
             prepared.Descriptors.Buffers = views;
@@ -2510,7 +2514,7 @@ internal static unsafe partial class VulkanVideoPresenter
                                     {
                                         var resource = resources[resourceIndex];
                                         var view = descriptors.Buffers[(int)resource];
-                                        if (view.Buffer.Handle == 0)
+                                        if (view.Buffer.Handle == 0 && (view.Range != Vk.WholeSize || !_presenter._nullDescriptorEnabled))
                                         {
                                             throw SubmissionScheduler.Fatal($"A storage buffer binding has no buffer: buffer={resource} hash=0x{program.Hash:X16}.");
                                         }

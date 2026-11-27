@@ -44,12 +44,14 @@ public sealed class Gen5InterpolationF16Tests
     }
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public void P1llThenP2_TranslatesToAValidModule(bool perVertexSibling)
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public void P1llThenP2_TranslatesToAValidModule(bool perVertexSibling, bool highAttribute)
     {
-        var p1 = Decode(Word0(0x342, 8), Word1(1, 0, 3)) with { Pc = 0 };
-        var p2 = Decode(Word0(0x35A, 9), Word1(1, 0, 4, 0x108u)) with { Pc = 8 };
+        var p1 = Decode(Word0(0x342, 8), Word1(1, 0, 3, high: highAttribute)) with { Pc = 0 };
+        var p2 = Decode(Word0(0x35A, 9), Word1(1, 0, 4, 0x108u, high: highAttribute)) with { Pc = 8 };
         var instructions = new List<Gen5ShaderInstruction> { p1, p2 };
         if (perVertexSibling)
         {
@@ -69,7 +71,7 @@ public sealed class Gen5InterpolationF16Tests
             SupportsPerVertexPixelInputs = true,
         };
         Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
-        Assert.NotEmpty(shader.Spirv);
+        Gen5ScalarLaneTransferTests.ValidateWithInstalledSdk(shader.Spirv);
     }
 
     private static Gen5ShaderInstruction Decode(params uint[] words)

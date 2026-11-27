@@ -7,6 +7,13 @@ namespace SharpEmu.ShaderCompiler.Vulkan;
 
 public static partial class Gen5SpirvTranslator
 {
+    public static (int VertexLocations, bool HasLayer) MeshAuxiliaryOutputs(ShaderCompileRequest request)
+    {
+        var outputs = CompilationContext.DescribeMeshAuxiliaryOutputs(request);
+        return ((outputs.PointSize ? 1 : 0) + (int)((outputs.Clip + 3) / 4) + (int)((outputs.Cull + 3) / 4),
+            outputs.Layer);
+    }
+
     private sealed partial class CompilationContext
     {
         private Dictionary<uint, (uint Output, uint Value)> _meshParameters = [];
@@ -14,6 +21,9 @@ public static partial class Gen5SpirvTranslator
         private uint _meshPositionValue;
         private uint _meshLayerOutput;
         private uint _meshLayerValues;
+        private MeshAuxiliaryOutput _meshPointSize;
+        private MeshAuxiliaryOutput _meshClipDistances;
+        private MeshAuxiliaryOutput _meshCullDistances;
         private uint _meshPrimitiveIndicesOutput;
         private uint _meshCullOutput;
         private uint _meshPrimitiveValue;
@@ -27,6 +37,30 @@ public static partial class Gen5SpirvTranslator
         private uint _meshBlockActive;
         private uint _meshBlockMerge;
         private (uint Header, uint Continue, uint Merge) _meshBarrierLoop;
+
+        private readonly record struct MeshAuxiliaryOutput(uint Type, uint Output, uint FirstHalf, uint SecondHalf);
+
+        public static (bool Layer, bool PointSize, uint Clip, uint Cull) DescribeMeshAuxiliaryOutputs(ShaderCompileRequest request)
+        {
+            var layer = false;
+            var pointSize = false;
+            var clip = 0u;
+            var cull = 0u;
+            foreach (var instruction in request.Program.Instructions)
+            {
+                if (instruction.Control is not Gen5ExportControl { Target: >= 13 and < 16 } export) continue;
+                for (var component = 0u; component < 4; component++)
+                {
+                    if ((export.EnableMask & (1u << (int)component)) == 0) continue;
+                    var output = DecodePositionExportComponent(request.PositionExportControl, export.Target - 12, component);
+                    layer |= output.Layer;
+                    pointSize |= output.PointSize;
+                    if (output.ClipDistance != uint.MaxValue) clip = Math.Max(clip, output.ClipDistance + 1);
+                    if (output.CullDistance != uint.MaxValue) cull = Math.Max(cull, output.CullDistance + 1);
+                }
+            }
+            return (layer, pointSize, clip, cull);
+        }
 
         private void DeclareMeshOutputs()
         {
@@ -55,11 +89,7 @@ public static partial class Gen5SpirvTranslator
             _meshAllocation = _module.AddGlobalVariable(
                 _module.TypePointer(SpirvStorageClass.Workgroup, _module.TypeArrayDistinct(_uintType, 2)),
                 SpirvStorageClass.Workgroup);
-            _meshLayerValues = _module.AddGlobalVariable(
-                _module.TypePointer(SpirvStorageClass.Workgroup, _module.TypeArrayDistinct(_uintType, mesh.OutputVertexCapacity)),
-                SpirvStorageClass.Workgroup);
             _interfaces.Add(_meshAllocation);
-            _interfaces.Add(_meshLayerValues);
             if (!_directMeshBlocks || _meshLoopRegions.Count != 0)
             {
                 _meshBarrierWaiting = DeclarePrivateValue(_boolType);
@@ -77,8 +107,30 @@ public static partial class Gen5SpirvTranslator
 
             _meshPositionOutput = DeclareMeshOutput(_vec4Type, mesh.OutputVertexCapacity,
                 SpirvBuiltIn.Position);
-            _meshLayerOutput = DeclareMeshOutput(_uintType, mesh.OutputPrimitiveCapacity,
-                SpirvBuiltIn.Layer, perPrimitive: true);
+            var auxiliary = DescribeMeshAuxiliaryOutputs(_request);
+            if (auxiliary.Layer)
+            {
+                _meshLayerValues = _module.AddGlobalVariable(
+                    _module.TypePointer(SpirvStorageClass.Workgroup, _module.TypeArrayDistinct(_uintType, mesh.OutputVertexCapacity)),
+                    SpirvStorageClass.Workgroup);
+                _interfaces.Add(_meshLayerValues);
+                _meshLayerOutput = DeclareMeshOutput(_uintType, mesh.OutputPrimitiveCapacity,
+                    SpirvBuiltIn.Layer, perPrimitive: true);
+            }
+            if (auxiliary.PointSize)
+                _meshPointSize = DeclareMeshAuxiliaryOutput(_floatType, mesh.OutputVertexCapacity, SpirvBuiltIn.PointSize);
+            if (auxiliary.Clip != 0)
+            {
+                _module.AddCapability(SpirvCapability.ClipDistance);
+                _meshClipDistances = DeclareMeshAuxiliaryOutput(_module.TypeArray(_floatType, auxiliary.Clip),
+                    mesh.OutputVertexCapacity, SpirvBuiltIn.ClipDistance);
+            }
+            if (auxiliary.Cull != 0)
+            {
+                _module.AddCapability(SpirvCapability.CullDistance);
+                _meshCullDistances = DeclareMeshAuxiliaryOutput(_module.TypeArray(_floatType, auxiliary.Cull),
+                    mesh.OutputVertexCapacity, SpirvBuiltIn.CullDistance);
+            }
             _meshPrimitiveIndicesOutput = DeclareMeshOutput(_uvec3Type, mesh.OutputPrimitiveCapacity,
                 SpirvBuiltIn.PrimitiveTriangleIndicesExt, perPrimitive: true);
             _meshCullOutput = DeclareMeshOutput(_boolType, mesh.OutputPrimitiveCapacity,
@@ -87,15 +139,16 @@ public static partial class Gen5SpirvTranslator
             var locations = MeshShaderConfiguration.ParameterLocations(_request);
             foreach (var location in locations)
             {
+                var type = ParameterType(location);
                 var output = _module.AddGlobalVariable(
                     _module.TypePointer(SpirvStorageClass.Output,
-                        _module.TypeArrayDistinct(_vec4Type, mesh.OutputVertexCapacity)),
+                        _module.TypeArrayDistinct(type, mesh.OutputVertexCapacity)),
                     SpirvStorageClass.Output);
                 _module.AddDecoration(output, SpirvDecoration.Location, location);
                 _interfaces.Add(output);
                 var value = _module.AddGlobalVariable(
-                    _module.TypePointer(SpirvStorageClass.Private, _vec4Type),
-                    SpirvStorageClass.Private, _module.ConstantNull(_vec4Type));
+                    _module.TypePointer(SpirvStorageClass.Private, type),
+                    SpirvStorageClass.Private, _module.ConstantNull(type));
                 _interfaces.Add(value);
                 _meshParameters.Add(location, (output, value));
             }
@@ -131,6 +184,20 @@ public static partial class Gen5SpirvTranslator
             _module.AddExecutionMode(entryPoint, SpirvExecutionMode.OutputVertices, mesh.OutputVertexCapacity);
             _module.AddExecutionMode(entryPoint, SpirvExecutionMode.OutputPrimitivesExt, mesh.OutputPrimitiveCapacity);
             _module.AddExecutionMode(entryPoint, SpirvExecutionMode.OutputTrianglesExt);
+        }
+
+        private MeshAuxiliaryOutput DeclareMeshAuxiliaryOutput(uint type, uint vertices, SpirvBuiltIn builtIn) =>
+            new(type, DeclareMeshOutput(type, vertices, builtIn),
+                DeclarePrivateValue(type), _pairedMeshLanes ? DeclarePrivateValue(type) : 0);
+
+        private uint MeshAuxiliaryValue(MeshAuxiliaryOutput output) =>
+            _logicalHalf == 0 ? output.FirstHalf : output.SecondHalf;
+
+        private void CommitMeshAuxiliaryOutput(MeshAuxiliaryOutput output, uint lane)
+        {
+            if (output.Output != 0)
+                Store(MeshArrayElement(output.Output, output.Type, lane, SpirvStorageClass.Output),
+                    Load(output.Type, MeshAuxiliaryValue(output)));
         }
 
         private bool CanEmitDirectMeshBlocks(IReadOnlyList<ShaderBlock> blocks)
@@ -388,9 +455,9 @@ public static partial class Gen5SpirvTranslator
             InitializeMeshInputs();
             Store(_meshPositionValue, _module.ConstantNull(_vec4Type));
             Store(_meshPrimitiveValue, UInt(0));
-            foreach (var (_, value) in _meshParameters.Values)
+            foreach (var (location, (_, value)) in _meshParameters)
             {
-                Store(value, _module.ConstantNull(_vec4Type));
+                Store(value, _module.ConstantNull(ParameterType(location)));
             }
 
             var lane = MeshInvocationIndex();
@@ -399,9 +466,12 @@ public static partial class Gen5SpirvTranslator
                 Store(MeshArrayElement(_meshAllocation, _uintType, UInt(0), SpirvStorageClass.Workgroup), UInt(0));
                 Store(MeshArrayElement(_meshAllocation, _uintType, UInt(1), SpirvStorageClass.Workgroup), UInt(0));
             });
-            EmitConditional(_module.AddInstruction(SpirvOp.ULessThan, _boolType,
-                lane, UInt(_request.Mesh!.Value.OutputVertexCapacity)), () =>
-                Store(MeshArrayElement(_meshLayerValues, _uintType, lane, SpirvStorageClass.Workgroup), UInt(0)));
+            if (_meshLayerValues != 0)
+            {
+                EmitConditional(_module.AddInstruction(SpirvOp.ULessThan, _boolType,
+                    lane, UInt(_request.Mesh!.Value.OutputVertexCapacity)), () =>
+                    Store(MeshArrayElement(_meshLayerValues, _uintType, lane, SpirvStorageClass.Workgroup), UInt(0)));
+            }
         }
 
         private void InitializeMeshInputs()
@@ -560,19 +630,34 @@ public static partial class Gen5SpirvTranslator
                         continue;
                     }
 
-                    if (output.PointSize || output.Viewport ||
-                        output.ClipDistance != uint.MaxValue || output.CullDistance != uint.MaxValue)
+                    if (output.Viewport)
                     {
                         error = $"The mesh shader has an unsupported auxiliary position export: target={export.Target} component={component}.";
                         return false;
                     }
 
-                    var layer = BitwiseAnd(LoadV(instruction.Sources[(int)component].Value), UInt(0x7ff));
-                    var valid = _module.AddInstruction(SpirvOp.ULessThan, _boolType,
-                        lane, UInt(_request.Mesh!.Value.OutputVertexCapacity));
-                    EmitConditional(LogicalAnd(valid, Load(_boolType, _exec)), () =>
-                        Store(MeshArrayElement(_meshLayerValues, _uintType, lane,
-                            SpirvStorageClass.Workgroup), layer));
+                    if (output.Layer)
+                    {
+                        var layer = BitwiseAnd(LoadV(instruction.Sources[(int)component].Value), UInt(0x7ff));
+                        var valid = _module.AddInstruction(SpirvOp.ULessThan, _boolType,
+                            lane, UInt(_request.Mesh!.Value.OutputVertexCapacity));
+                        EmitConditional(LogicalAnd(valid, Load(_boolType, _exec)), () =>
+                            Store(MeshArrayElement(_meshLayerValues, _uintType, lane,
+                                SpirvStorageClass.Workgroup), layer));
+                    }
+                    else
+                    {
+                        var componentValue = export.Compressed ? LoadCompressedExportComponent(instruction, (int)component)
+                            : Bitcast(_floatType, LoadV(instruction.Sources[(int)component].Value));
+                        if (output.PointSize)
+                            StoreConditional(MeshAuxiliaryValue(_meshPointSize), componentValue, _floatType);
+                        if (output.ClipDistance != uint.MaxValue)
+                            StoreConditional(MeshArrayElement(MeshAuxiliaryValue(_meshClipDistances), _floatType,
+                                UInt(output.ClipDistance), SpirvStorageClass.Private), componentValue, _floatType);
+                        if (output.CullDistance != uint.MaxValue)
+                            StoreConditional(MeshArrayElement(MeshAuxiliaryValue(_meshCullDistances), _floatType,
+                                UInt(output.CullDistance), SpirvStorageClass.Private), componentValue, _floatType);
+                    }
                 }
                 return true;
             }
@@ -596,6 +681,9 @@ public static partial class Gen5SpirvTranslator
                 error = $"The mesh shader has an unsupported export: target={export.Target}.";
                 return false;
             }
+
+            if (export.Target >= 32 && IsPackedParameter(export.Target - 32))
+                return TryEmitPackedParameterExport(instruction, export, destination, out error);
 
             var components = new uint[4];
             for (var component = 0; component < 4; component++)
@@ -649,10 +737,13 @@ public static partial class Gen5SpirvTranslator
             {
                 Store(MeshArrayElement(_meshPositionOutput, _vec4Type, lane, SpirvStorageClass.Output),
                     Load(_vec4Type, _meshPositionValue));
-                foreach (var (output, value) in _meshParameters.Values)
+                CommitMeshAuxiliaryOutput(_meshPointSize, lane);
+                CommitMeshAuxiliaryOutput(_meshClipDistances, lane);
+                CommitMeshAuxiliaryOutput(_meshCullDistances, lane);
+                foreach (var (location, (output, value)) in _meshParameters)
                 {
-                    Store(MeshArrayElement(output, _vec4Type, lane, SpirvStorageClass.Output),
-                        Load(_vec4Type, value));
+                    var type = ParameterType(location);
+                    Store(MeshArrayElement(output, type, lane, SpirvStorageClass.Output), Load(type, value));
                 }
             });
 
@@ -685,12 +776,14 @@ public static partial class Gen5SpirvTranslator
                     SpirvStorageClass.Output), _module.AddInstruction(SpirvOp.LogicalOr,
                         _boolType, isCulled,
                         _module.AddInstruction(SpirvOp.LogicalNot, _boolType, validIndices)));
-                Store(MeshArrayElement(_meshLayerOutput, _uintType, lane,
-                    SpirvStorageClass.Output), UInt(0));
-                EmitConditional(validProvoking, () => Store(
-                    MeshArrayElement(_meshLayerOutput, _uintType, lane, SpirvStorageClass.Output),
-                    Load(_uintType, MeshArrayElement(_meshLayerValues, _uintType, provoking,
-                        SpirvStorageClass.Workgroup))));
+                if (_meshLayerOutput != 0)
+                {
+                    var layerOutput = MeshArrayElement(_meshLayerOutput, _uintType, lane, SpirvStorageClass.Output);
+                    Store(layerOutput, UInt(0));
+                    EmitConditional(validProvoking, () => Store(layerOutput,
+                        Load(_uintType, MeshArrayElement(_meshLayerValues, _uintType, provoking,
+                            SpirvStorageClass.Workgroup))));
+                }
             });
         }
 

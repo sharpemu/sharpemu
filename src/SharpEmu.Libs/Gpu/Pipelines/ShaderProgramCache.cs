@@ -39,6 +39,7 @@ public sealed class StageCompileOptions
 {
     public VertexInputInfo? VertexInfo { get; init; }
     public int RequiredVertexOutputCount { get; init; }
+    public uint PackedParameterMask { get; init; }
     public uint? MeshOutputLocationMask { get; init; }
     public PixelInputInfo? PixelInfo { get; init; }
     public IReadOnlyList<Gen5PixelOutputBinding> PixelOutputs { get; init; } = [];
@@ -1543,6 +1544,7 @@ internal sealed partial class ShaderProgramCache
             case ShaderStage.Vertex:
             case ShaderStage.TessellationEvaluation:
                 StageStaticKey.Build(options.VertexInfo ?? throw new ArgumentException("The vertex lookup has no vertex input info."), options.RequiredVertexOutputCount, state);
+                if (options.PackedParameterMask != 0) state.Add(options.PackedParameterMask);
                 break;
             case ShaderStage.Pixel:
                 StageStaticKey.Build(options.PixelInfo ?? throw new ArgumentException("The pixel lookup has no pixel input info."), state);
@@ -1559,6 +1561,7 @@ internal sealed partial class ShaderProgramCache
                 StageStaticKey.Build(options.MeshInfo ?? throw new ArgumentException("The mesh lookup has no mesh input info."), options.RequiredVertexOutputCount, state);
                 state.Add(options.MeshOutputLocationMask.HasValue ? 1u : 0u);
                 state.Add(options.MeshOutputLocationMask.GetValueOrDefault());
+                if (options.PackedParameterMask != 0) state.Add(options.PackedParameterMask);
                 break;
             default:
                 StageStaticKey.Build(options.ComputeInfo ?? throw new ArgumentException("The compute lookup has no compute input info."), state);
@@ -1970,12 +1973,14 @@ internal sealed partial class ShaderProgramCache
             var limits = _host.MeshLimits;
             var parameterLocations = MeshShaderConfiguration.ParameterLocations(request);
             var parameterCount = parameterLocations.Length;
-            var outputLocations = Math.Max(parameterCount + 3, parameterCount == 0 ? 0 : (int)parameterLocations[^1] + 1);
+            var (auxiliaryVertexLocations, writesLayer) = SharpEmu.ShaderCompiler.Vulkan.Gen5SpirvTranslator.MeshAuxiliaryOutputs(request);
+            var outputLocations = Math.Max(parameterCount + auxiliaryVertexLocations + (writesLayer ? 3 : 2),
+                parameterCount == 0 ? 0 : (int)parameterLocations[^1] + 1);
             if ((ulong)outputLocations * 4 > limits.MaxOutputComponents)
                 throw new ShaderProgramRejectedException($"The mesh output exceeds the device component limit: " +
                     $"components={outputLocations * 4} limit={limits.MaxOutputComponents}.");
             var outputBytes = mesh.OutputMemoryBytes(parameterCount,
-                limits.OutputPerVertexGranularity, limits.OutputPerPrimitiveGranularity);
+                limits.OutputPerVertexGranularity, limits.OutputPerPrimitiveGranularity, auxiliaryVertexLocations, writesLayer);
             // A task-launched program's payload counts in the payload-and-output limit.
             var payloadBytes = mesh.TaskLaunched ? SharpEmu.ShaderCompiler.Vulkan.SpirvMeshTask.PayloadWordCount * 4 : 0u;
             if (outputBytes > limits.MaxOutputMemoryBytes || outputBytes + payloadBytes > limits.MaxPayloadAndOutputMemoryBytes)
@@ -2123,6 +2128,7 @@ internal sealed partial class ShaderProgramCache
                 VertexInfo = options.VertexInfo,
                 MeshInfo = options.MeshInfo,
                 RequiredVertexOutputCount = options.RequiredVertexOutputCount,
+                PackedParameterMask = options.PackedParameterMask,
                 MeshOutputLocationMask = options.MeshOutputLocationMask,
                 Specialization = specialization.Clone(),
                 DeviceRecordCounts = plan.DeviceRecordCounts is not null,
@@ -2207,6 +2213,7 @@ internal sealed partial class ShaderProgramCache
             RobustBufferAccess2 = host.RobustBufferAccess2Enabled,
             NativeFloat16Conversions = host.NativeFloat16Conversions,
             RequiredVertexOutputCount = options.RequiredVertexOutputCount,
+            PackedParameterMask = options.PackedParameterMask,
             Tessellation = options.Tessellation,
             VertexInputs = vertexInputs,
             PositionExportControl = info.PositionExportControl,
@@ -2244,6 +2251,7 @@ internal sealed partial class ShaderProgramCache
             NativeFloat16Conversions = host.NativeFloat16Conversions,
             RequiredVertexOutputCount = options.RequiredVertexOutputCount,
             PositionExportControl = info.Geometry.PositionExportControl,
+            PackedParameterMask = options.PackedParameterMask,
             MeshOutputLocationMask = options.MeshOutputLocationMask,
             ClipSpace = new ShaderClipSpaceTransform(
                 info.Geometry.ClipSpace.Enabled,
@@ -2589,6 +2597,7 @@ internal sealed partial class ShaderProgramCache
                 VertexInfo = record.VertexInfo,
                 MeshInfo = record.MeshInfo,
                 RequiredVertexOutputCount = record.RequiredVertexOutputCount,
+                PackedParameterMask = record.PackedParameterMask,
                 MeshOutputLocationMask = record.MeshOutputLocationMask,
             };
             EmbeddedVertexFetchPlan? fetch = null;

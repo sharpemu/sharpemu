@@ -13,6 +13,7 @@ public static partial class Gen5SpirvTranslator
         private readonly HashSet<uint> _flatParameterAttributes = [];
         // Slots that share a per-vertex input with a V_INTERP_MOV slot; true for a flat slot.
         private readonly Dictionary<uint, bool> _perVertexSourcedAttributes = [];
+        private uint _packedPixelLocations;
         private uint _perspectiveBarycentric;
         private readonly Dictionary<int, uint> _barycentricInputs = [];
         private uint _interpolationSampleId;
@@ -25,10 +26,11 @@ public static partial class Gen5SpirvTranslator
 
         private void DeclareInterpolationParameters()
         {
+            _packedPixelLocations = Gen5PixelInputMapping.PackedLocations(_request.Program, _pixelInputCntl);
             foreach (var instruction in _request.Program.Instructions)
             {
-                if (instruction.Opcode == "VInterpMovF32" &&
-                    instruction.Control is Gen5InterpolationControl interpolation)
+                if (instruction.Control is Gen5InterpolationControl interpolation &&
+                    (instruction.Opcode == "VInterpMovF32" || IsPackedPixelAttribute(interpolation.Attribute)))
                 {
                     _perVertexAttributes.Add(interpolation.Attribute);
                 }
@@ -36,6 +38,9 @@ public static partial class Gen5SpirvTranslator
 
             if (!_request.SupportsPerVertexPixelInputs)
             {
+                if (_packedPixelLocations != 0)
+                    throw new NotSupportedException("Packed FP16 interpolators require per-vertex fragment inputs.");
+
                 // Reading P0 alone is the provoking vertex value, which a flat input gives.
                 // Preserve that exact case. For selectors that need P1/P2, fall back to the
                 // ordinary interpolated input. This is not an exact reconstruction of the
@@ -101,6 +106,40 @@ public static partial class Gen5SpirvTranslator
                 _module.AddDecoration(_interpolationSampleId, SpirvDecoration.Flat);
                 _interfaces.Add(_interpolationSampleId);
             }
+        }
+
+        private uint PixelInterpolatorControl(uint attribute) =>
+            attribute < (uint)_pixelInputCntl.Length ? _pixelInputCntl[attribute] : attribute;
+
+        private bool IsPackedPixelAttribute(uint attribute) =>
+            (_packedPixelLocations & (1u << (int)(PixelInterpolatorControl(attribute) & 0x1Fu))) != 0;
+
+        private bool IsPackedParameter(uint location) =>
+            location < 32 && (_request.PackedParameterMask & (1u << (int)location)) != 0;
+
+        private uint ParameterType(uint location) => IsPackedParameter(location) ? _uvec4Type : _vec4Type;
+
+        private bool TryEmitPackedParameterExport(Gen5ShaderInstruction instruction, Gen5ExportControl export,
+            uint destination, out string error)
+        {
+            if (export.Compressed)
+            {
+                error = "A packed FP16 parameter export needs two halves per component, but EXP supplies only one.";
+                return false;
+            }
+            error = string.Empty;
+            Span<uint> components = stackalloc uint[4];
+            var previous = Load(_uvec4Type, destination);
+            for (var component = 0; component < components.Length; component++)
+            {
+                components[component] = (export.EnableMask & (1u << component)) != 0
+                    ? LoadV(instruction.Sources[component].Value)
+                    : _module.AddInstruction(SpirvOp.CompositeExtract, _uintType, previous, (uint)component);
+            }
+            var value = _module.AddInstruction(SpirvOp.CompositeConstruct, _uvec4Type,
+                components[0], components[1], components[2], components[3]);
+            StoreConditional(destination, value, _uvec4Type);
+            return true;
         }
 
         // FRONT_FACE and ANCILLARY are VGPRs the hardware fills for pixel shaders that enable them.
@@ -249,21 +288,30 @@ public static partial class Gen5SpirvTranslator
             error = string.Empty;
             var custom = interpolation.Attribute < 32 &&
                 (_request.PixelCustomInterpolationMask & (1u << (int)interpolation.Attribute)) != 0;
+            var packed = IsPackedPixelAttribute(interpolation.Attribute);
+            var half = packed && Gen5PixelInputMapping.IsHalfInterpolation(instruction.Opcode);
+            var flat = packed && (PixelInterpolatorControl(interpolation.Attribute) & 0x400u) != 0;
 
             uint LoadVertex(uint vertex)
             {
+                var type = packed ? _uintType : _floatType;
                 var pointer = _module.AddInstruction(SpirvOp.AccessChain,
-                    _module.TypePointer(SpirvStorageClass.Input, _floatType),
+                    _module.TypePointer(SpirvStorageClass.Input, type),
                     input, UInt(vertex), UInt(interpolation.Channel));
-                return Load(_floatType, pointer);
+                var value = Load(type, pointer);
+                if (half) value = EmitHalfToFloat(value, interpolation.HighAttribute);
+                return packed ? Bitcast(_floatType, value) : value;
             }
 
             uint LoadParameter(uint mode)
             {
+                if (flat && mode < 2) return Float(0f);
                 var value = LoadVertex((mode + 1) % 3);
-                return !custom && mode < 2
-                    ? _module.AddInstruction(SpirvOp.FSub, _floatType, value, LoadVertex(0))
-                    : value;
+                if (custom || mode >= 2) return value;
+                var delta = _module.AddInstruction(SpirvOp.FSub, _floatType, value, LoadVertex(0));
+                return half
+                    ? Bitcast(_floatType, EmitHalfToFloat(EmitFloatToHalf(Bitcast(_uintType, delta))))
+                    : delta;
             }
 
             uint result;
@@ -288,7 +336,7 @@ public static partial class Gen5SpirvTranslator
             }
             else if (instruction.Opcode is "VInterpP1llF16" or "VInterpP1lvF16" or "VInterpP2F16")
             {
-                // Same weights as the f32 pair. P1LV takes P0 from the low half of SRC2 and P2 adds
+                // Same weights as the f32 pair. P1LV takes P0 from the selected half of SRC2 and P2 adds
                 // the P1 result held in SRC2 (an f32); P2's value is narrowed by the caller.
                 var source = Bitcast(_floatType, GetRawSource(instruction, 0));
                 uint addend;
@@ -298,7 +346,7 @@ public static partial class Gen5SpirvTranslator
                 }
                 else if (instruction.Opcode == "VInterpP1lvF16")
                 {
-                    addend = Bitcast(_floatType, EmitHalfToFloat(GetRawSource(instruction, 1)));
+                    addend = Bitcast(_floatType, EmitHalfToFloat(GetRawSource(instruction, 1), interpolation.HighAttribute));
                 }
                 else
                 {

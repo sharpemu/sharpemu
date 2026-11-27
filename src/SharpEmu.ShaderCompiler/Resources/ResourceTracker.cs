@@ -445,6 +445,11 @@ public sealed partial class ResourceTracker
                 value = invariant;
             }
 
+            if ((PossibleBits(value) & ~SamplerDword3ReservedMask) == 0)
+            {
+                return _graph.Constant(0u);
+            }
+
             if (value.Kind != ScalarValueKind.Operation || value.Operation != ScalarOperation.Or32)
             {
                 return value;
@@ -1011,8 +1016,19 @@ public sealed partial class ResourceTracker
         resource.Written |= write;
         resource.Atomic |= atomic;
         resource.Formatted |= memory.Formatted;
+        if (memory.Formatted && !memory.Typed && memory.Access == MemoryAccess.Read)
+        {
+            resource.FormatLoadComponents = Math.Max(resource.FormatLoadComponents, FormatComponents(memory.Opcode));
+        }
+
         resource.Scalar |= memory.Kind == MemoryResourceKind.ScalarBuffer;
     }
+
+    private static uint FormatComponents(string opcode) =>
+        opcode.EndsWith("Xyzw", StringComparison.Ordinal) ? 4u
+        : opcode.EndsWith("Xyz", StringComparison.Ordinal) ? 3u
+        : opcode.EndsWith("Xy", StringComparison.Ordinal) ? 2u
+        : 1u;
 
     private uint AddImage(uint source, MemoryAccessInfo memory, uint pc)
     {
@@ -1164,6 +1180,10 @@ public sealed partial class ResourceTracker
 
         if (isBuffer)
         {
+            var deviceFormatStore = memory.Kind == MemoryResourceKind.Buffer &&
+                memory.Opcode.StartsWith("BufferStoreFormat", StringComparison.Ordinal) &&
+                !memory.Opcode.Contains("D16", StringComparison.Ordinal);
+
             // A front GS/HS shader can carry a second code object after
             // S_SETPC_B64. Until AGC supplies its continuation descriptor,
             // linear decoding sees that unreachable tail with undefined SGPRs.
@@ -1196,6 +1216,7 @@ public sealed partial class ResourceTracker
                     {
                         Provenance = BufferDescriptorProvenance.Runtime,
                     };
+                    memory.DeviceDescriptor = deviceFormatStore;
                     _info.UsesDeviceAddresses = true;
                     return;
                 }
@@ -1230,7 +1251,7 @@ public sealed partial class ResourceTracker
 
                 // Without a bounded candidate table, a V# loaded from scalar-buffer
                 // data is read through its descriptor registers on the device.
-                if (memory.Kind == MemoryResourceKind.Buffer && IsDeviceLoadedBufferHandle(access.Handle))
+                if (deviceFormatStore || (memory.Kind == MemoryResourceKind.Buffer && IsDeviceLoadedBufferHandle(access.Handle)))
                 {
                     memory.DeviceDescriptor = true;
                     _info.UsesDeviceAddresses = true;
@@ -1284,11 +1305,11 @@ public sealed partial class ResourceTracker
             {
                 // Past the binding budget the access reads its V# from its SGPRs when it
                 // runs, as the hardware does, and goes through the device-address table.
-                // That path has no typed (tbuffer) or formatted store lowering.
+                // Typed stores and packed D16 stores still need a native binding.
                 if (memory.Opcode.StartsWith("TBuffer", StringComparison.Ordinal) ||
-                    (memory.Formatted && memory.Access != MemoryAccess.Read))
+                    (memory.Formatted && memory.Access != MemoryAccess.Read && !deviceFormatStore))
                 {
-                    throw Failure(memory.Pc, "buffer resource limit exceeded");
+                    throw Failure(memory.Pc, $"buffer resource limit exceeded for {memory.Opcode}");
                 }
 
                 memory.DeviceDescriptor = true;

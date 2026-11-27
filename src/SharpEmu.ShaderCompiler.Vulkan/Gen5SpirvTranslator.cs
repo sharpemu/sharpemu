@@ -1006,7 +1006,7 @@ public static partial class Gen5SpirvTranslator
                 foreach (var parameter in parameters)
                 {
                     var variable = _module.AddGlobalVariable(
-                        outputPointer,
+                        _module.TypePointer(SpirvStorageClass.Output, ParameterType(parameter)),
                         SpirvStorageClass.Output);
                     _module.AddDecoration(variable, SpirvDecoration.Location, parameter);
                     _vertexOutputs.Add(parameter, variable);
@@ -1083,6 +1083,10 @@ public static partial class Gen5SpirvTranslator
                 }
 
                 attributes = attributes.Where(attribute => !shared.ContainsKey(attribute)).ToArray();
+                // Keep packed inputs at their guest export location even if another slot
+                // needs a separate host location for a different interpolation mode.
+                if (_packedPixelLocations != 0)
+                    attributes = attributes.OrderByDescending(IsPackedPixelAttribute).ToArray();
                 var locations = Gen5PixelInputMapping.ResolveLocations(
                     _pixelInputCntl,
                     attributes);
@@ -1093,7 +1097,8 @@ public static partial class Gen5SpirvTranslator
                     // per-vertex array rather than an interpolated value.
                     var variable = _module.AddGlobalVariable(
                         _perVertexAttributes.Contains(attribute)
-                            ? _module.TypePointer(SpirvStorageClass.Input, _module.TypeArray(_vec4Type, 3))
+                            ? _module.TypePointer(SpirvStorageClass.Input,
+                                _module.TypeArray(IsPackedPixelAttribute(attribute) ? _uvec4Type : _vec4Type, 3))
                             : inputVec4Pointer,
                         SpirvStorageClass.Input);
                     // VINTRP ATTR selects the PS input slot. SPI_PS_INPUT_CNTL
@@ -1370,9 +1375,9 @@ public static partial class Gen5SpirvTranslator
                 // extras that only exist to satisfy the fragment interface stay
                 // zero. The explicit store also keeps SPIRV-Cross from pruning
                 // an unexported output (which would re-break the interface).
-                foreach (var output in _vertexOutputs.Values)
+                foreach (var (location, output) in _vertexOutputs)
                 {
-                    Store(output, _module.ConstantNull(_vec4Type));
+                    Store(output, _module.ConstantNull(ParameterType(location)));
                 }
                 if (_pointSizeOutput != 0)
                 {
@@ -3706,14 +3711,6 @@ public static partial class Gen5SpirvTranslator
             Gen5InterpolationControl interpolation,
             out string error)
         {
-            if (interpolation.HighAttribute)
-            {
-                // Pixel inputs are declared as f32 components; the high f16 of a packed attribute
-                // has no input to read from yet.
-                error = $"{instruction.Opcode} reads the high half of attribute {interpolation.Attribute}";
-                return false;
-            }
-
             if (instruction.Opcode != "VInterpP2F16" || !TryGetVectorDestination(instruction, out var halfDestination))
             {
                 return TryEmitInterpolationCore(instruction, interpolation, out error);
@@ -8545,6 +8542,9 @@ public static partial class Gen5SpirvTranslator
             {
                 return true;
             }
+
+            if (export.Target >= 32 && IsPackedParameter(export.Target - 32))
+                return TryEmitPackedParameterExport(instruction, export, outputVariable, out error);
 
             var components = new uint[4];
             for (var component = 0; component < 4; component++)

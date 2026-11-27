@@ -5,15 +5,17 @@ namespace SharpEmu.ShaderCompiler.Resources;
 
 internal static class DescriptorBindingAliases
 {
-    private sealed class WordComparer : IEqualityComparer<uint[]>
+    private sealed class WordComparer : IEqualityComparer<(uint[] Words, ImageSpecialization View)>
     {
-        public bool Equals(uint[]? left, uint[]? right) =>
-            ReferenceEquals(left, right) || left is not null && right is not null && left.AsSpan().SequenceEqual(right);
+        public bool Equals((uint[] Words, ImageSpecialization View) left, (uint[] Words, ImageSpecialization View) right) =>
+            left.View.Equals(right.View) &&
+            (ReferenceEquals(left.Words, right.Words) || left.Words.AsSpan().SequenceEqual(right.Words));
 
-        public int GetHashCode(uint[] words)
+        public int GetHashCode((uint[] Words, ImageSpecialization View) key)
         {
             var hash = new HashCode();
-            foreach (var word in words) hash.Add(word);
+            hash.Add(key.View);
+            foreach (var word in key.Words) hash.Add(word);
             return hash.ToHashCode();
         }
     }
@@ -23,7 +25,7 @@ internal static class DescriptorBindingAliases
     public static List<uint> Group(IReadOnlyList<uint[]> descriptors, IReadOnlyList<ImageSpecialization>? images = null)
     {
         if (descriptors.Count < 2) return [];
-        var groups = new Dictionary<uint[], uint>(new WordComparer());
+        var groups = new Dictionary<(uint[] Words, ImageSpecialization View), uint>(new WordComparer());
         var result = new List<uint>(descriptors.Count);
         var ungrouped = 0;
         for (var index = 0; index < descriptors.Count; index++)
@@ -35,10 +37,11 @@ internal static class DescriptorBindingAliases
                 continue;
             }
 
-            if (!groups.TryGetValue(descriptors[index], out var group))
+            var key = (descriptors[index], images is null ? default : images[index]);
+            if (!groups.TryGetValue(key, out var group))
             {
                 group = (uint)index;
-                groups.Add(descriptors[index], group);
+                groups.Add(key, group);
             }
             result.Add(group);
         }

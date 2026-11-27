@@ -59,6 +59,7 @@ internal sealed class PresenterUnderTest : IDisposable
         SetField("_supportsShaderClipDistance", vulkan.SupportsClipDistance);
         SetField("_supportsTessellation", vulkan.SupportsTessellation);
         SetField("_deviceInfo", vulkan.DeviceInfo);
+        SetField("_nullDescriptorEnabled", vulkan.SupportsNullDescriptor);
         SetField("_scheduler", Harness.Scheduler);
         SetField("_guestPublications", new PendingGuestPublications());
         Harness.Cache.CompleteGuestPublications = (address, size, access) =>

@@ -524,7 +524,7 @@ public static partial class Gen5SpirvTranslator
                 _meshPositionValue, _meshPrimitiveValue, _meshParameters));
             var parameters = new Dictionary<uint, (uint Output, uint Value)>();
             foreach (var (location, parameter) in _meshParameters)
-                parameters.Add(location, (parameter.Output, DeclarePrivateValue(_vec4Type)));
+                parameters.Add(location, (parameter.Output, DeclarePrivateValue(ParameterType(location))));
             _meshLaneRegisters.Add(new(
                 DeclarePrivateValue(_module.TypeArray(_uintType, VectorRegisterCount)),
                 0,

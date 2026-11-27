@@ -25,6 +25,7 @@ internal sealed class VertexPrewarmRecord
     public VertexInputInfo? VertexInfo { get; init; }
     public MeshDrawConfiguration? MeshInfo { get; init; }
     public required int RequiredVertexOutputCount { get; init; }
+    public uint PackedParameterMask { get; init; }
     public uint? MeshOutputLocationMask { get; init; }
     public required ResourceSpecialization Specialization { get; init; }
     public bool DeviceRecordCounts { get; init; }
@@ -288,8 +289,10 @@ internal sealed partial class ShaderPrewarmList
             }
         }
 
-        // Last of all, one byte: the length tells it from the draw registers, which are whole dwords.
-        if (record.PreferHeapRecords) writer.Write((byte)1);
+        if (record.PackedParameterMask != 0) writer.Write(record.PackedParameterMask);
+        // The trailing byte identifies optional state after the draw registers.
+        var extension = (record.PreferHeapRecords ? 1 : 0) | (record.PackedParameterMask != 0 ? 2 : 0);
+        if (extension != 0) writer.Write((byte)extension);
         writer.Flush();
         return stream.ToArray();
     }
@@ -387,8 +390,11 @@ internal sealed partial class ShaderPrewarmList
             var specialization = ReadSpecialization(reader, payload.Length);
             var deviceRecordCounts = reader.ReadBoolean();
             var trailing = reader.BaseStream.Length - reader.BaseStream.Position;
-            var preferHeapRecords = trailing % sizeof(int) == 1;
-            var drawParameters = trailing - (preferHeapRecords ? 1 : 0);
+            var hasExtension = trailing % sizeof(int) == 1;
+            var extension = hasExtension ? payload[^1] : 0;
+            if (hasExtension && extension is 0 or > 3) return null;
+            var hasPackedParameters = (extension & 2) != 0;
+            var drawParameters = trailing - (hasExtension ? 1 : 0) - (hasPackedParameters ? sizeof(uint) : 0);
             if (vertexInfo is not null && drawParameters is sizeof(int) or 2 * sizeof(int))
             {
                 vertexInfo.StartInstanceUserData = reader.ReadInt32();
@@ -398,16 +404,10 @@ internal sealed partial class ShaderPrewarmList
                 }
             }
 
-            if (preferHeapRecords && reader.BaseStream.Position + 1 == reader.BaseStream.Length)
+            var packedParameterMask = hasPackedParameters ? reader.ReadUInt32() : 0u;
+            if (hasExtension)
             {
-                if (reader.ReadByte() != 1)
-                {
-                    return null;
-                }
-            }
-            else
-            {
-                preferHeapRecords = false;
+                reader.ReadByte();
             }
 
             if (reader.BaseStream.Position != reader.BaseStream.Length)
@@ -428,10 +428,11 @@ internal sealed partial class ShaderPrewarmList
                 VertexInfo = vertexInfo,
                 MeshInfo = meshInfo,
                 RequiredVertexOutputCount = requiredOutputCount,
+                PackedParameterMask = packedParameterMask,
                 MeshOutputLocationMask = hasOutputMask ? outputMask : null,
                 Specialization = specialization,
                 DeviceRecordCounts = deviceRecordCounts,
-                PreferHeapRecords = preferHeapRecords,
+                PreferHeapRecords = (extension & 1) != 0,
             };
         }
         catch (Exception exception) when (exception is EndOfStreamException or ArgumentException or IOException)
