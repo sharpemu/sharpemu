@@ -135,10 +135,43 @@ internal static unsafe partial class VulkanVideoPresenter
             var original = *next;
             Pipeline created = default;
             Result result;
-            if (key is not null && TryCreateFromStoredBinaries(createInfo, next, create, key, out var stored, extraFlags, prewarmCompute))
+            if (key is not null && LoadPipelineBinaries(key, out var sharedPart) is { } loaded)
             {
-                pipeline = stored;
-                return Result.Success;
+                fixed (PipelineBinaryKHR* handles = loaded)
+                {
+                    var binaryInfo = new PipelineBinaryInfoKHR
+                    {
+                        SType = StructureType.PipelineBinaryInfoKhr,
+                        PNext = original,
+                        BinaryCount = (uint)loaded.Length,
+                        PPipelineBinaries = handles,
+                    };
+                    *next = &binaryInfo;
+                    if (prewarmCompute && sharedPart && original == null && OperatingSystem.IsWindows() &&
+                        _physicalDeviceVendorId == NvidiaVendorId)
+                    {
+                        result = ImportPrewarmedComputePipeline((ComputePipelineCreateInfo*)createInfo, extraFlags, create, &created);
+                    }
+                    else
+                    {
+                        result = create(_vk, _device, default, createInfo, &created);
+                    }
+                    *next = original;
+                }
+
+                foreach (var handle in loaded)
+                {
+                    _pipelineBinaries!.DestroyPipelineBinary(_device, handle, null);
+                }
+
+                if (result == Result.Success)
+                {
+                    ReportPipelineBinaryCount("loaded", Interlocked.Increment(ref _pipelineBinaryLoads));
+                    pipeline = created;
+                    return result;
+                }
+
+                ReportPipelineBinaryRefusal("create", key, result);
             }
 
             var capture = new PipelineCreateFlags2CreateInfoKHR
@@ -165,81 +198,6 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             pipeline = created;
-            return result;
-        }
-
-        private bool TryCreateFromStoredBinaries(
-            void* createInfo,
-            void** next,
-            delegate*<Vk, Device, PipelineCache, void*, Pipeline*, Result> create,
-            byte[] key,
-            out Pipeline pipeline,
-            PipelineCreateFlags2 extraFlags,
-            bool prewarmCompute)
-        {
-            pipeline = default;
-            if (LoadPipelineBinaries(key, out var sharedPart) is not { } loaded)
-            {
-                return false;
-            }
-
-            var original = *next;
-            Pipeline created = default;
-            Result result;
-            fixed (PipelineBinaryKHR* handles = loaded)
-            {
-                var binaryInfo = new PipelineBinaryInfoKHR
-                {
-                    SType = StructureType.PipelineBinaryInfoKhr,
-                    PNext = original,
-                    BinaryCount = (uint)loaded.Length,
-                    PPipelineBinaries = handles,
-                };
-                *next = &binaryInfo;
-                if (prewarmCompute && sharedPart && original == null && OperatingSystem.IsWindows() &&
-                    _physicalDeviceVendorId == NvidiaVendorId)
-                {
-                    result = ImportPrewarmedComputePipeline((ComputePipelineCreateInfo*)createInfo, extraFlags, create, &created);
-                }
-                else
-                {
-                    result = create(_vk, _device, default, createInfo, &created);
-                }
-                *next = original;
-            }
-
-            foreach (var handle in loaded)
-            {
-                _pipelineBinaries!.DestroyPipelineBinary(_device, handle, null);
-            }
-
-            if (result == Result.Success)
-            {
-                ReportPipelineBinaryCount("loaded", Interlocked.Increment(ref _pipelineBinaryLoads));
-                pipeline = created;
-                return true;
-            }
-
-            ReportPipelineBinaryRefusal("create", key, result);
-            return false;
-        }
-
-        private Result CreateComputePipelineUnoptimizedOnMiss(ComputePipelineCreateInfo* info, out Pipeline pipeline, out bool unoptimized)
-        {
-            if (PipelineBinaryKey(info) is { } key &&
-                TryCreateFromStoredBinaries(info, &info->PNext, &CreateComputePipelineCall, key, out pipeline, 0, prewarmCompute: false))
-            {
-                unoptimized = false;
-                return Result.Success;
-            }
-
-            var flags = info->Flags;
-            info->Flags = flags | PipelineCreateFlags.CreateDisableOptimizationBit;
-            Pipeline created = default;
-            var result = CreateComputePipelineCall(_vk, _device, default, info, &created);
-            info->Flags = flags;
-            pipeline = created;
-            unoptimized = result == Result.Success;
             return result;
         }
 

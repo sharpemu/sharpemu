@@ -41,7 +41,6 @@ internal static unsafe partial class VulkanVideoPresenter
         public ulong ProfileVertexHash;
         public ulong ProfilePixelHash;
         public ulong ProfileComputeHash;
-        public Task<Pipeline>? OptimizedCompute;
 
         // Laid out for pipeline libraries, and linked from them unless built whole: SetLayout is the vertex stage's set 0,
         // PixelSetLayout the pixel stage's set 2.
@@ -1912,7 +1911,6 @@ internal static unsafe partial class VulkanVideoPresenter
             public long StartTimestamp;
             public long CompileMilliseconds;
             public long CompletedTimestamp;
-            public Task<Pipeline>? Optimized;
 
             // A linked program's own pipeline cache (CreateLinkedPipelineCache), written once its pipeline is registered.
             public DriverCacheShard? LinkedCache;
@@ -1930,94 +1928,6 @@ internal static unsafe partial class VulkanVideoPresenter
             _pendingComputePipelines.TryGetValue(program.Id, out var pending) ? pending.Compile : null;
         private static readonly SemaphoreSlim _computeCompileSlots =
             new(Math.Max(2, Environment.ProcessorCount / 2));
-
-        private static readonly SemaphoreSlim _optimizedComputeCompileSlots =
-            new(Math.Max(2, Environment.ProcessorCount / 4));
-
-        private bool _unoptimizedFirstComputePipelines;
-        private volatile bool _optimizedComputeBuildsStopped;
-        private readonly List<Pipeline> _replacedComputePipelines = [];
-
-        private static bool UnoptimizedFirstComputePipelines(uint vendorId, DriverId driverId) =>
-            Environment.GetEnvironmentVariable("SHARPEMU_PIPELINE_FAST_BUILD") switch
-            {
-                "0" => false,
-                "1" => true,
-                _ => vendorId == NvidiaVendorId || driverId == DriverId.MesaRadv,
-            };
-
-        private Task<Pipeline> StartOptimizedComputePipeline(PipelineCache cache, ShaderModule module, PipelineLayout layout,
-            uint requiredSubgroupSize, ulong hash, int spirvBytes) =>
-            Task.Factory.StartNew(
-                () =>
-                {
-                    Thread.CurrentThread.Priority = ThreadPriority.BelowNormal;
-                    _optimizedComputeCompileSlots.Wait();
-                    try
-                    {
-                        if (_optimizedComputeBuildsStopped)
-                        {
-                            return default;
-                        }
-
-                        var started = Stopwatch.GetTimestamp();
-                        var pipeline = CompileComputePipeline(_vk, _device, cache, module, layout, requiredSubgroupSize);
-                        var milliseconds = (long)Stopwatch.GetElapsedTime(started).TotalMilliseconds;
-                        if (milliseconds >= SlowPipelineCreationMilliseconds)
-                        {
-                            Console.Error.WriteLine(
-                                $"[GPU][INFO] Optimized compute pipeline built in the background: cs=0x{hash:X16} spirv_bytes={spirvBytes} ms={milliseconds}");
-                        }
-
-                        return pipeline;
-                    }
-                    finally
-                    {
-                        _optimizedComputeCompileSlots.Release();
-                    }
-                },
-                CancellationToken.None,
-                TaskCreationOptions.LongRunning,
-                TaskScheduler.Default);
-
-        internal void PromoteOptimizedComputePipeline(RenderPipelineEntry entry)
-        {
-            if (Interlocked.Exchange(ref entry.OptimizedCompute, null) is not { } build)
-            {
-                return;
-            }
-
-            var optimized = build.GetAwaiter().GetResult();
-            if (optimized.Handle == 0)
-            {
-                return;
-            }
-
-            SetDebugName(ObjectType.Pipeline, optimized.Handle, $"SharpEmu compute cs=0x{entry.ProfileComputeHash:X16}");
-            lock (_replacedComputePipelines)
-            {
-                _replacedComputePipelines.Add(entry.Pipeline);
-                entry.Pipeline = optimized;
-            }
-        }
-
-        private void DestroyOptimizedComputePipeline(Task<Pipeline>? build)
-        {
-            if (build is null)
-            {
-                return;
-            }
-
-            try
-            {
-                var pipeline = build.GetAwaiter().GetResult();
-                if (pipeline.Handle != 0) _vk.DestroyPipeline(_device, pipeline, null);
-            }
-            catch (Exception exception)
-            {
-                Console.Error.WriteLine($"[LOADER][WARN] Optimized compute pipeline failed during shutdown: {exception.Message}");
-            }
-        }
 
         // A linked compile starts only when LinkedCompileAdmission admits it (free commit for its estimate beside
         // the linked compiles already running, one large one at a time). Until then the fallback that serves a pending
@@ -2121,7 +2031,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 ComputeCompileProfile.Record(ComputeCompileProfile.Part.ConsumeDelay, pending.CompletedTimestamp);
                 ReportPipelineCreation(
                     Interlocked.Read(ref pending.CompileMilliseconds),
-                    pending.Optimized is null ? "compute-async" : "compute-async-unoptimized",
+                    "compute-async",
                     $"cs=0x{pending.Hash:X16} waited_ms={(long)Stopwatch.GetElapsedTime(pending.StartTimestamp).TotalMilliseconds}",
                     pending.SpirvBytes.ToString());
                 MarkPipelineCacheDirty();
@@ -2136,7 +2046,6 @@ internal static unsafe partial class VulkanVideoPresenter
                     UsesPushDescriptors = pending.UsesPushDescriptors,
                     UsesBindlessHeap = pending.UsesBindlessHeap,
                     ProfileComputeHash = pending.Hash,
-                    OptimizedCompute = pending.Optimized,
                 }, () => _pendingComputePipelines.Remove(key));
                 ReleaseLinkedPipelineCache(pending.LinkedCache, pending.Hash, save: true);
 
@@ -2237,23 +2146,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         try { cache = ResolveGuestPipelineCache(cacheSource); }
                         finally { ComputeCompileProfile.Record(ComputeCompileProfile.Part.CacheLoad, cacheStart); }
                         var driverStart = ComputeCompileProfile.Start();
-                        try
-                        {
-                            if (started.Linked || !_unoptimizedFirstComputePipelines)
-                            {
-                                return CompileComputePipeline(vk, device, cache, computeModule, layout, requiredSubgroupSize);
-                            }
-
-                            var first = CompileComputePipeline(vk, device, cache, computeModule, layout, requiredSubgroupSize,
-                                prewarm: false, unoptimizedOnMiss: true, out var unoptimized);
-                            if (unoptimized)
-                            {
-                                started.Optimized = StartOptimizedComputePipeline(cache, computeModule, layout, requiredSubgroupSize,
-                                    started.Hash, started.SpirvBytes);
-                            }
-
-                            return first;
-                        }
+                        try { return CompileComputePipeline(vk, device, cache, computeModule, layout, requiredSubgroupSize); }
                         finally { ComputeCompileProfile.Record(ComputeCompileProfile.Part.DriverCompile, driverStart); }
                     }
                     finally
@@ -2291,19 +2184,7 @@ internal static unsafe partial class VulkanVideoPresenter
             ShaderModule module,
             PipelineLayout layout,
             uint requiredSubgroupSize,
-            bool prewarm = false) =>
-            CompileComputePipeline(vk, device, cache, module, layout, requiredSubgroupSize, prewarm, unoptimizedOnMiss: false, out _);
-
-        private Pipeline CompileComputePipeline(
-            Vk vk,
-            Device device,
-            PipelineCache cache,
-            ShaderModule module,
-            PipelineLayout layout,
-            uint requiredSubgroupSize,
-            bool prewarm,
-            bool unoptimizedOnMiss,
-            out bool unoptimized)
+            bool prewarm = false)
         {
             var entryPoint = (byte*)SilkMarshal.StringToPtr("main");
             try
@@ -2327,19 +2208,8 @@ internal static unsafe partial class VulkanVideoPresenter
                     Stage = stageInfo,
                     Layout = layout,
                 };
-                Pipeline pipeline;
-                Result result;
-                if (unoptimizedOnMiss)
-                {
-                    result = CreateComputePipelineUnoptimizedOnMiss(&pipelineInfo, out pipeline, out unoptimized);
-                }
-                else
-                {
-                    result = CreatePipelineWithBinaries(&pipelineInfo, &pipelineInfo.PNext, cache,
-                        &CreateComputePipelineCall, out pipeline, out _, prewarmCompute: prewarm);
-                    unoptimized = false;
-                }
-
+                var result = CreatePipelineWithBinaries(&pipelineInfo, &pipelineInfo.PNext, cache,
+                    &CreateComputePipelineCall, out var pipeline, out _, prewarmCompute: prewarm);
                 if (result != Result.Success)
                 {
                     throw SubmissionScheduler.Fatal($"vkCreateComputePipelines(async) failed: {result}.");
@@ -2355,7 +2225,6 @@ internal static unsafe partial class VulkanVideoPresenter
 
         private void DrainPendingComputePipelines()
         {
-            _optimizedComputeBuildsStopped = true;
             foreach (var pending in _pendingComputePipelines.Values)
             {
                 try
@@ -2367,17 +2236,12 @@ internal static unsafe partial class VulkanVideoPresenter
                 {
                     Console.Error.WriteLine($"[LOADER][WARN] Pending compute pipeline failed during shutdown: {exception.Message}");
                 }
-                DestroyOptimizedComputePipeline(pending.Optimized);
                 ReleaseLinkedPipelineCache(pending.LinkedCache, pending.Hash, save: false);
                 _vk.DestroyPipelineLayout(_device, pending.Layout, null);
                 _vk.DestroyDescriptorSetLayout(_device, pending.SetLayout, null);
             }
             _pendingComputePipelines.Clear();
             _linkedComputeCompiles.Clear();
-            foreach (var entry in _pipelineEntries.Values)
-            {
-                DestroyOptimizedComputePipeline(Interlocked.Exchange(ref entry.OptimizedCompute, null));
-            }
         }
 
         private void DrainPendingGraphicsPipelines()
@@ -2420,16 +2284,6 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _pipelineEntries.Clear();
-            lock (_replacedComputePipelines)
-            {
-                foreach (var pipeline in _replacedComputePipelines)
-                {
-                    _vk.DestroyPipeline(_device, pipeline, null);
-                }
-
-                _replacedComputePipelines.Clear();
-            }
-
             DestroyGraphicsLibraries();
             foreach (var module in _shaderModules.Values)
             {
