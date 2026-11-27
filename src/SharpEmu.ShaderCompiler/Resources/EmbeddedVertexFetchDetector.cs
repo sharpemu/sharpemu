@@ -305,7 +305,7 @@ public static class EmbeddedVertexFetchDetector
                                         {
                                             "SAndB32" => left & right,
                                             "SLshlB32" => left << (int)(right & 31),
-                                            "SBfeU32" => left >> (int)(right & 31),
+                                            "SBfeU32" => ExtractUnsignedBitfield(left, right),
                                             _ => unchecked(left + right),
                                         },
                                     };
@@ -460,6 +460,14 @@ public static class EmbeddedVertexFetchDetector
         {
             ClearScalars(scalars, destination.Value, count);
         }
+    }
+
+    private static uint ExtractUnsignedBitfield(uint value, uint control)
+    {
+        var offset = (int)(control & 31);
+        var width = Math.Min((int)((control >> 16) & 0x7F), 32 - offset);
+        var mask = width == 32 ? uint.MaxValue : (1u << width) - 1;
+        return (value >> offset) & mask;
     }
 
     private static bool IsFetchBufferLoad(string opcode) =>
