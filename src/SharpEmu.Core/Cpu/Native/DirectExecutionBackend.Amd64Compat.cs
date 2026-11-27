@@ -23,10 +23,16 @@ public sealed partial class DirectExecutionBackend
     private static long _sse4aInstructionsEmulated;
     private static int _monitorxSoftwareFallbackAnnounced;
     private static long _monitorxInstructionsEmulated;
+    private static int _clzeroSoftwareFallbackAnnounced;
 
     private unsafe bool TryRecoverAmdCompatInstruction(void* contextRecord, ulong rip)
     {
         if (TryRecoverMonitorxMwaitx(contextRecord, rip))
+        {
+            return true;
+        }
+
+        if (TryRecoverClzero(contextRecord, rip))
         {
             return true;
         }
@@ -68,6 +74,37 @@ public sealed partial class DirectExecutionBackend
             Console.Error.WriteLine(
                 "[LOADER][INFO] Host lacks AMD MONITORX/MWAITX used by the guest; " +
                 "emulating those instructions in software.");
+        }
+
+        return true;
+    }
+
+    private unsafe bool TryRecoverClzero(void* contextRecord, ulong rip)
+    {
+        // Read 4 bytes so the optional 0x67 prefix form is seen; the instruction may end the
+        // mapping, so fall back to the 3-byte form if the longer read fails.
+        var bytes = new byte[4];
+        if (!TryReadExecutableBytes(rip, bytes))
+        {
+            bytes = new byte[3];
+            if (!TryReadExecutableBytes(rip, bytes))
+            {
+                return false;
+            }
+        }
+
+        if (!ClzeroInstructionEmulator.TryDecode(bytes, out var length, out var addressSize32))
+        {
+            return false;
+        }
+
+        // Guest and host share one address space, so the line is cleared in place.
+        ClzeroInstructionEmulator.ZeroCacheLine(ReadCtxU64(contextRecord, CTX_RAX), addressSize32);
+        WriteCtxU64(contextRecord, CTX_RIP, rip + (ulong)length);
+
+        if (Interlocked.Exchange(ref _clzeroSoftwareFallbackAnnounced, 1) == 0)
+        {
+            Console.Error.WriteLine("[LOADER][INFO] Host lacks AMD CLZERO used by the guest; emulating it in software.");
         }
 
         return true;
