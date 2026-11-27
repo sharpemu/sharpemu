@@ -4315,6 +4315,9 @@ public static partial class Gen5SpirvTranslator
             return _module.AddInstruction(SpirvOp.Select, _uintType, inRange, mapped, UInt(0));
         }
 
+        // DST_SEL_X..W = SQ_SEL_X (4), SQ_SEL_Y (5), SQ_SEL_Z (6), SQ_SEL_W (7).
+        private const uint TypedIdentitySwizzle = 4u | (5u << 3) | (6u << 6) | (7u << 9);
+
         private bool TryEmitDeviceDescriptorBufferMemory(
             Gen5ShaderInstruction instruction,
             Gen5BufferMemoryControl control,
@@ -4323,7 +4326,10 @@ public static partial class Gen5SpirvTranslator
             error = string.Empty;
             // Addresses come from VGPRs, as on the physical storage buffer path: inactive lanes must hold their own values.
             FlushDeferredGuards();
-            if (control.Typed || instruction.Opcode.StartsWith("TBuffer", StringComparison.Ordinal))
+            var typed = control.Typed || instruction.Opcode.StartsWith("TBuffer", StringComparison.Ordinal);
+            if (typed && (!control.Typed || !IsFormatBufferLoad(instruction.Opcode) ||
+                FormatD16Components(instruction.Opcode) != 0 ||
+                !Gfx10UnifiedFormat.TryDecode(control.TypedFormat, out _, out _)))
             {
                 error = $"device buffer descriptor operation {instruction.Opcode} is not supported";
                 return false;
@@ -4331,6 +4337,14 @@ public static partial class Gen5SpirvTranslator
 
             _deviceAddressInstructionPc = instruction.Pc;
             var (baseAddress, size, stride, descriptorWord3) = LoadDeviceBufferDescriptor(control.ScalarResource);
+            if (typed)
+            {
+                // A typed load converts with the instruction format instead of the descriptor's, and component i
+                // comes from memory component i: swap the format into word 3 and select X, Y, Z, W in order.
+                descriptorWord3 = BitwiseOr(
+                    BitwiseAnd(descriptorWord3, UInt(~((0x7Fu << 12) | 0xFFFu))),
+                    UInt((control.TypedFormat << 12) | TypedIdentitySwizzle));
+            }
             var scalarOffset = instruction.Sources.Count > 2
                 ? GetRawSource(instruction, 2)
                 : UInt(0);
@@ -4369,7 +4383,7 @@ public static partial class Gen5SpirvTranslator
                     descriptorWord3,
                     control.VectorData,
                     control.DwordCount,
-                    control.SplitDescriptorFormat);
+                    !typed && control.SplitDescriptorFormat);
                 return true;
             }
 

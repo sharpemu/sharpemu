@@ -30,4 +30,30 @@ public sealed class Gen5DeviceBufferFormatStoreTests
         Assert.Contains((ushort)SpirvOp.AtomicCompareExchange, module.Opcodes);
         Gen5MipStatisticsTests.ValidateWhenAvailable(shader.Spirv);
     }
+
+    // A typed load through a runtime descriptor converts with the instruction format, not the descriptor's.
+    [Theory]
+    [InlineData(1u)]
+    [InlineData(4u)]
+    public void ATypedLoadThroughARuntimeDescriptorCompiles(uint components)
+    {
+        const uint Format32Float = 22;
+        var load = BufferLoad(16, 16, dwords: components, formatted: true);
+        load = load with
+        {
+            Opcode = "T" + load.Opcode,
+            Control = ((Gen5BufferMemoryControl)load.Control!) with { Typed = true, TypedFormat = Format32Float },
+        };
+        var program = Program(
+            ReadFirstLane(0, 12, 0),
+            MoveScalar(4, 13, 0),
+            ScalarLoad(8, 12, 16, count: 4),
+            load,
+            EndProgram(24));
+        Assert.True(Extract(program).Memory.Find(16)!.DeviceDescriptor);
+        var request = Request(program);
+
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+        Gen5MipStatisticsTests.ValidateWhenAvailable(shader.Spirv);
+    }
 }
