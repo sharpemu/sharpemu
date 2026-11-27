@@ -96,7 +96,7 @@ internal sealed unsafe partial class WindowsFaultHandling : IHostFaultHandling
             EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x51); // push r9
             EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x52); // push r10
             EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83);
-            EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x40); // sub rsp, 0x40
+            EmitByte(code, ref offset, 0xEC); EmitByte(code, ref offset, 0x48); // sub rsp, 0x48: entry RSP ≡ 8 (VEH call) + 6 pushes (48, ≡ 0) ⇒ 0x48 (72, ≡ 8) lands calls at ≡ 0
             EmitByte(code, ref offset, 0xB9); EmitUInt32(code, ref offset, unchecked((uint)-12));
             EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
             *(nint*)(code + offset) = getStdHandle;
@@ -129,7 +129,7 @@ internal sealed unsafe partial class WindowsFaultHandling : IHostFaultHandling
 
             EmitByte(code, ref offset, 0x4C); EmitByte(code, ref offset, 0x8B);
             EmitByte(code, ref offset, 0x54); EmitByte(code, ref offset, 0x24);
-            EmitByte(code, ref offset, 0x40); // mov r10, [rsp+0x40]
+            EmitByte(code, ref offset, 0x48); // mov r10, [rsp+0x48]
             EmitByte(code, ref offset, 0x49); EmitByte(code, ref offset, 0xB8);
             var hexDigitsAbsSlot = offset;
             *(nint*)(code + offset) = 0;
@@ -168,16 +168,13 @@ internal sealed unsafe partial class WindowsFaultHandling : IHostFaultHandling
             EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xC7);
             EmitByte(code, ref offset, 0x44); EmitByte(code, ref offset, 0x24);
             EmitByte(code, ref offset, 0x20); EmitUInt32(code, ref offset, 0);
-            EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xC7);
-            EmitByte(code, ref offset, 0x44); EmitByte(code, ref offset, 0x24);
-            EmitByte(code, ref offset, 0x38); EmitUInt32(code, ref offset, 0);
             EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0xB8);
             *(nint*)(code + offset) = writeFile;
             offset += sizeof(nint);
             EmitByte(code, ref offset, 0xFF); EmitByte(code, ref offset, 0xD0);
 
             EmitByte(code, ref offset, 0x48); EmitByte(code, ref offset, 0x83);
-            EmitByte(code, ref offset, 0xC4); EmitByte(code, ref offset, 0x40);
+            EmitByte(code, ref offset, 0xC4); EmitByte(code, ref offset, 0x48); // add rsp, 0x48 (match sub)
             EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x5A);
             EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x59);
             EmitByte(code, ref offset, 0x41); EmitByte(code, ref offset, 0x58);
