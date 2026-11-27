@@ -39,6 +39,16 @@ public static class PsmlExports
         return ctx.SetReturn(0);
     }
 
+    // Mfsr2 runs on a Trinity console only; any other console reports it as unsupported.
+    private const int Mfsr2ErrorUnsupportedConsole = unchecked((int)0x8A8A0012);
+
+    [SysAbiExport(
+        Nid = "o+NM86gEwFE",
+        ExportName = "scePsmlMfsr2Init",
+        Target = Generation.Gen5,
+        LibraryName = "libScePsml")]
+    public static int PsmlMfsr2Init(CpuContext ctx) => ctx.SetReturn(Mfsr2ErrorUnsupportedConsole);
+
     [SysAbiExport(
         Nid = "+2KpvixvL6E",
         ExportName = "scePsmlMfsrGetSharedResourcesInitRequirement",

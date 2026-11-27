@@ -290,7 +290,9 @@ public sealed record Gen5ExportControl(
 
 public sealed record Gen5InterpolationControl(
     uint Attribute,
-    uint Channel) : Gen5InstructionControl;
+    uint Channel,
+    bool HighAttribute = false,
+    bool HighDestination = false) : Gen5InstructionControl;
 
 public sealed record Gen5Vop3Control(
     uint AbsoluteMask,

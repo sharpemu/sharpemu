@@ -1288,6 +1288,22 @@ public static partial class VideoOutExports
     }
 
     [SysAbiExport(
+        Nid = "pA8xxaySl7A",
+        ExportName = "sceVideoOutSetGlobalBlendSpace",
+        Target = Generation.Gen5,
+        LibraryName = "libSceVideoOut")]
+    public static int VideoOutSetGlobalBlendSpace(CpuContext ctx)
+    {
+        var handle = unchecked((int)ctx[CpuRegister.Rdi]);
+        lock (_stateGate)
+        {
+            if (!_ports.ContainsKey(handle)) return OrbisVideoOutErrorInvalidHandle;
+        }
+
+        return 0;
+    }
+
+    [SysAbiExport(
         Nid = "N5KDtkIjjJ4",
         ExportName = "sceVideoOutUnregisterBuffers",
         Target = Generation.Gen4 | Generation.Gen5,

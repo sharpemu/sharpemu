@@ -62,6 +62,7 @@ public static partial class AmprExports
         public readonly List<KernelEventCommand> KernelEventCommands = [];
         public readonly List<WriteAddressCommand> WriteAddressCommands = [];
         public readonly List<WaitAddressCommand> WaitAddressCommands = [];
+        public readonly List<CounterCommand> CounterCommands = [];
         public readonly List<AmmCommand> AmmCommands = [];
         public bool GatherScatterValid;
         public uint GatherScatterFileId;
@@ -970,6 +971,7 @@ public static partial class AmprExports
         public required KernelEventCommand[] KernelEventCommands { get; init; }
         public required WriteAddressCommand[] WriteAddressCommands { get; init; }
         public required WaitAddressCommand[] WaitAddressCommands { get; init; }
+        public required CounterCommand[] CounterCommands { get; init; }
         public required AmmCommand[] AmmCommands { get; init; }
         public required (ulong Offset, int Kind, int Index)[] Order { get; init; }
     }
@@ -992,6 +994,7 @@ public static partial class AmprExports
         KernelEventCommand[] kernelEventCommands;
         WriteAddressCommand[] writeAddressCommands;
         WaitAddressCommand[] waitAddressCommands;
+        CounterCommand[] counterCommands;
         AmmCommand[] ammCommands;
         lock (state)
         {
@@ -1000,12 +1003,13 @@ public static partial class AmprExports
             kernelEventCommands = state.KernelEventCommands.ToArray();
             writeAddressCommands = state.WriteAddressCommands.ToArray();
             waitAddressCommands = state.WaitAddressCommands.ToArray();
+            counterCommands = state.CounterCommands.ToArray();
             ammCommands = state.AmmCommands.ToArray();
         }
 
         var commands = new List<(ulong Offset, int Kind, int Index)>(
             readCommands.Length + kernelEventCommands.Length + writeAddressCommands.Length + waitAddressCommands.Length +
-            ammCommands.Length);
+            ammCommands.Length + counterCommands.Length);
         for (var i = 0; i < readCommands.Length; i++)
         {
             commands.Add((readCommands[i].RecordOffset, 0, i));
@@ -1026,6 +1030,10 @@ public static partial class AmprExports
         {
             commands.Add((ammCommands[i].RecordOffset, 4, i));
         }
+        for (var i = 0; i < counterCommands.Length; i++)
+        {
+            commands.Add((counterCommands[i].RecordOffset, 5, i));
+        }
         commands.Sort(static (left, right) => left.Offset.CompareTo(right.Offset));
         captured = new CapturedCommands
         {
@@ -1036,6 +1044,7 @@ public static partial class AmprExports
             KernelEventCommands = kernelEventCommands,
             WriteAddressCommands = writeAddressCommands,
             WaitAddressCommands = waitAddressCommands,
+            CounterCommands = counterCommands,
             AmmCommands = ammCommands,
             Order = commands.ToArray(),
         };
@@ -1109,6 +1118,23 @@ public static partial class AmprExports
                         executionResult = waitResult;
                         errorOffset = checked((uint)commandEntry.Offset);
                         return true;
+                    }
+                    break;
+
+                case 5:
+                    var counterCommand = captured.CounterCommands[commandEntry.Index];
+                    if (counterCommand.IsWait)
+                    {
+                        if (stopAtUnmetWait && !IsCounterWaitMet(counterCommand))
+                        {
+                            return false;
+                        }
+
+                        WaitForCounter(counterCommand);
+                    }
+                    else
+                    {
+                        ExecuteWriteCounter(counterCommand);
                     }
                     break;
 
@@ -1240,6 +1266,7 @@ public static partial class AmprExports
             state.KernelEventCommands.Clear();
             state.WriteAddressCommands.Clear();
             state.WaitAddressCommands.Clear();
+            state.CounterCommands.Clear();
             state.AmmCommands.Clear();
             state.GatherScatterValid = false;
             state.GatherScatterFileId = 0;
@@ -1308,6 +1335,7 @@ public static partial class AmprExports
                 state.KernelEventCommands.Clear();
                 state.WriteAddressCommands.Clear();
                 state.WaitAddressCommands.Clear();
+                state.CounterCommands.Clear();
                 state.AmmCommands.Clear();
                 state.GatherScatterValid = false;
                 state.GatherScatterFileId = 0;
@@ -1332,6 +1360,7 @@ public static partial class AmprExports
                    state.KernelEventCommands.Count != 0 ||
                    state.WriteAddressCommands.Count != 0 ||
                    state.WaitAddressCommands.Count != 0 ||
+                   state.CounterCommands.Count != 0 ||
                    state.AmmCommands.Count != 0;
         }
     }

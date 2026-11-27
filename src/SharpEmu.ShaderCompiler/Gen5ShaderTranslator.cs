@@ -1486,6 +1486,10 @@ public static partial class Gen5ShaderTranslator
             0x305 => "VMulLoU16",
             0x311 => "VPackB32F16",
             0x340 => "VMadU16",
+            // VOP3-encoded half-precision parameter interpolation (gfx10.3).
+            0x342 => "VInterpP1llF16",
+            0x343 => "VInterpP1lvF16",
+            0x35A => "VInterpP2F16",
             0x35E => "VMadI16",
             0x375 => "VMadI32I16",
             // VOP3-encoded 64-bit VOPC (opcode < 0x100): V_CMP_*_U64 / V_CMPX_*_U64.
@@ -2030,6 +2034,7 @@ public static partial class Gen5ShaderTranslator
             0x4C => "ImageGather4CL",
             0x4E => "ImageGather4CBCl",
             0x4F => "ImageGather4CLz",
+            0x54 => "ImageGather4LO",
             0x57 => "ImageGather4LzO",
             0x58 => "ImageGather4CO",
             0x5F => "ImageGather4CLzO",
@@ -2675,6 +2680,20 @@ public static partial class Gen5ShaderTranslator
                         false,
                         0,
                         isExecCompare ? null : word & 0xFF);
+                    break;
+                }
+
+                if (opcode is "VInterpP1llF16" or "VInterpP1lvF16" or "VInterpP2F16")
+                {
+                    // VOP3 interpolation: the SRC0 field holds ATTR [5:0], ATTRCHAN [7:6] and
+                    // HIGH [8] (the high f16 of the attribute); SRC1 is the I/J VGPR and SRC2 the
+                    // P0 (P1LV) or the P1 result (P2). OPSEL[3] writes the high destination half.
+                    sources = opcode == "VInterpP1llF16" ? [sources[1]] : [sources[1], sources[2]];
+                    control = new Gen5InterpolationControl(
+                        extra & 0x3F,
+                        (extra >> 6) & 0x3,
+                        ((extra >> 8) & 1) != 0,
+                        ((word >> 14) & 1) != 0);
                     break;
                 }
 

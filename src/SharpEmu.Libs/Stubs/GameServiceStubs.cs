@@ -191,6 +191,10 @@ public static class GameServiceStubs
         Target = Generation.Gen5, LibraryName = "libSceVoice")]
     public static int VoiceInit(CpuContext ctx) => Ok(ctx);
 
+    [SysAbiExport(Nid = "54phPH2LZls", ExportName = "sceVoiceStart",
+        Target = Generation.Gen5, LibraryName = "libSceVoice")]
+    public static int VoiceStart(CpuContext ctx) => Ok(ctx);
+
     [SysAbiExport(Nid = "clyKUyi3RYU", ExportName = "sceVoiceSetThreadsParams",
         Target = Generation.Gen5, LibraryName = "libSceVoice")]
     public static int VoiceSetThreadsParams(CpuContext ctx) => Ok(ctx);

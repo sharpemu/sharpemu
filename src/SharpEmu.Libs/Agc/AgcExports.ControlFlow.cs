@@ -22,6 +22,66 @@ public static partial class AgcExports
         return (int)ctx[CpuRegister.Rax];
     }
 
+    // Matches the 5-dword packet sceAgcDcbCondExec writes.
+    [SysAbiExport(
+        Nid = "ou16V5hh5sg",
+        ExportName = "sceAgcDcbCondExecGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbCondExecGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 5u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
+    // The compute COND_EXEC packet has the graphics layout: 5 dwords.
+    [SysAbiExport(
+        Nid = "ozKzBP4aki4",
+        ExportName = "sceAgcAcbCondExecGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int AcbCondExecGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 5u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
+    // The ATOMIC_MEM packet is 9 dwords (36 bytes), as on AnyPS5. No writer exists here yet.
+    [SysAbiExport(
+        Nid = "oz6zQq1JwCE",
+        ExportName = "sceAgcDcbAtomicMemGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int DcbAtomicMemGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 9u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
+    // The ATOMIC_MEM packet is 9 dwords (36 bytes), as on AnyPS5. No writer exists here yet.
+    [SysAbiExport(
+        Nid = "da1Sm8-QDoU",
+        ExportName = "sceAgcAcbAtomicMemGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int AcbAtomicMemGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 9u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
+    // Matches the 2-dword packet sceAgcAcbRewind writes.
+    [SysAbiExport(
+        Nid = "0ZOG0jc9nRg",
+        ExportName = "sceAgcAcbRewindGetSize",
+        Target = Generation.Gen5,
+        LibraryName = "libSceAgc")]
+    public static int AcbRewindGetSize(CpuContext ctx)
+    {
+        ctx[CpuRegister.Rax] = 2u * sizeof(uint);
+        return (int)ctx[CpuRegister.Rax];
+    }
+
     // Writes IT_REWIND. When valid=0 the submit parser suspends until
     // sceAgcRewindPatchSetRewindState sets bit 31 on the body dword.
     [SysAbiExport(
