@@ -850,10 +850,8 @@ public static class KernelEventQueueCompatExports
         }
 
         var waiterId = Interlocked.Increment(ref _nextEventQueueWaiterId);
-        var blockDeadlineTimestamp = timeoutAddress == 0
-            ? 0
-            : GuestThreadExecution.ComputeDeadlineTimestamp(
-                TimeSpan.FromMicroseconds(timeoutUsec));
+        var blockDeadlineTimestamp = ComputeWaitEqueueDeadline(
+            MaxInfiniteEqueueWaitMs, timeoutAddress != 0, timeoutUsec);
         var requestedBlock = GuestThreadExecution.RequestCurrentThreadBlock(
             ctx,
             "sceKernelWaitEqueue",
@@ -2029,6 +2027,28 @@ public static class KernelEventQueueCompatExports
 
     private static readonly bool _logEqueue =
         string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_EQUEUE"), "1", StringComparison.Ordinal);
+
+    // Opt-in diagnostic: bound an otherwise infinite sceKernelWaitEqueue so a
+    // worker stuck in an untriggered wait can return to the guest and release
+    // resources held across the wait. Zero keeps the infinite wait unchanged.
+    private static readonly int MaxInfiniteEqueueWaitMs =
+        int.TryParse(Environment.GetEnvironmentVariable("SHARPEMU_EQUEUE_MAX_WAIT_MS"), out var maxEqueueWaitMs) &&
+        maxEqueueWaitMs > 0
+            ? maxEqueueWaitMs
+            : 0;
+
+    // Testable seam for the deadline: zero means an infinite wait.
+    internal static long ComputeWaitEqueueDeadline(int maxInfiniteWaitMs, bool hasTimeout, uint timeoutUsec)
+    {
+        if (hasTimeout)
+        {
+            return GuestThreadExecution.ComputeDeadlineTimestamp(TimeSpan.FromMicroseconds(timeoutUsec));
+        }
+
+        return maxInfiniteWaitMs > 0
+            ? GuestThreadExecution.ComputeDeadlineTimestamp(TimeSpan.FromMilliseconds(maxInfiniteWaitMs))
+            : 0;
+    }
 
     private static void TraceEventQueue(
         CpuContext ctx,

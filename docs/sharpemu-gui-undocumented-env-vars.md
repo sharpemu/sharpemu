@@ -600,6 +600,7 @@ The emulator sets these variables for its own processes. Do not set them manuall
 | Variable | Value | Function | Code that reads it |
 | --- | --- | --- | --- |
 | `SHARPEMU_MITIGATED_CHILD` | `1` | The Windows launcher sets this variable to 1 when it starts the child process with CFG and CET mitigations off. The child accepts the `--sharpemu-mitigated-child` argument only when the value is 1. Do not set it manually. | `Program.cs`, `EmulatorProcess.cs` |
+| `SHARPEMU_EQUEUE_MAX_WAIT_MS` | number (milliseconds) | Bounds an otherwise infinite `sceKernelWaitEqueue` so a guest worker blocked on an untriggered event can time out, return to the guest and release resources held across the wait. Default 0 keeps the infinite wait. Minecraft (PPSA17221) needs 16 with a dummy SDL audio driver to reach its title screen on RADV; larger values cause visible frame-time hitches because the guest stalls for the whole bound each time the wait times out (2000 gives ~2 s freezes, 100 gives ~60–80 ms hitches). | `KernelEventQueueCompatExports.cs` |
 
 ## Tests and tools
 
