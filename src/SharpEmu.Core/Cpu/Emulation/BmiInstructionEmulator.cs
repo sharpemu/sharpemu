@@ -256,6 +256,22 @@ public static class BmiInstructionEmulator
         return s >> shift;
     }
 
+    /// <summary>
+    /// MULX: unsigned multiply of the implicit EDX/RDX operand by <paramref name="src2"/>, returning
+    /// the high half and passing the low half out. Unlike MUL it leaves every flag untouched.
+    /// </summary>
+    public static ulong Mulx(ulong src1, ulong src2, GprOperandSize size, out ulong low)
+    {
+        if (size == GprOperandSize.Bits64)
+        {
+            return Math.BigMul(src1, src2, out low);
+        }
+
+        var product = (ulong)(uint)src1 * (uint)src2;
+        low = product & 0xFFFF_FFFFUL;
+        return product >> 32;
+    }
+
     /// <summary>PDEP: deposit contiguous low bits of <paramref name="src"/> into the positions selected by <paramref name="mask"/>. No flags.</summary>
     public static ulong Pdep(ulong src, ulong mask, GprOperandSize size)
     {

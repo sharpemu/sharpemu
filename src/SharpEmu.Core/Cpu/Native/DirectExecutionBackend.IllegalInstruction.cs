@@ -48,15 +48,38 @@ public sealed partial class DirectExecutionBackend
             return false;
         }
 
-        if (!TryEvaluate(contextRecord, in instruction, size, out var result, out var flagsChanged, out var eflags))
+        if (instruction.Mnemonic == Mnemonic.Mulx)
         {
-            return false;
-        }
+            // MULX is the only one with two destinations, so it skips TryEvaluate. Both sources are
+            // read before either destination is written because the low destination or the r/m
+            // operand may name RDX itself.
+            if (instruction.Op1Kind != OpKind.Register ||
+                !TryGetGprSlot(instruction.Op1Register, out var lowOffset, out _) ||
+                !TryReadOperand(contextRecord, in instruction, 2, size, out var multiplier))
+            {
+                return false;
+            }
 
-        WriteCtxU64(contextRecord, destOffset, result);
-        if (flagsChanged)
+            var multiplicand = ReadCtxU64(contextRecord, CTX_RDX);
+            var high = BmiInstructionEmulator.Mulx(multiplicand, multiplier, size, out var low);
+
+            // When both destinations name the same register the SDM says it keeps the high half,
+            // so the low half goes in first.
+            WriteCtxU64(contextRecord, lowOffset, low);
+            WriteCtxU64(contextRecord, destOffset, high);
+        }
+        else
         {
-            WriteCtxU32(contextRecord, CTX_EFLAGS, eflags);
+            if (!TryEvaluate(contextRecord, in instruction, size, out var result, out var flagsChanged, out var eflags))
+            {
+                return false;
+            }
+
+            WriteCtxU64(contextRecord, destOffset, result);
+            if (flagsChanged)
+            {
+                WriteCtxU32(contextRecord, CTX_EFLAGS, eflags);
+            }
         }
 
         WriteCtxU64(contextRecord, CTX_RIP, rip + (ulong)instruction.Length);
