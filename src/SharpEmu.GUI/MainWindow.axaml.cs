@@ -3110,6 +3110,12 @@ public partial class MainWindow : Window
         else if (!_isRunning && GameList.SelectedItem is GameEntry selected &&
                  await SelectGameVersionAsync(selected) is { } game)
         {
+            if (game.IsPackage && PkgZarConverter.FindPendingDestination(game.Path) is { } pending)
+            {
+                await ResumePendingConversionAsync(game.Path, pending);
+                return;
+            }
+
             Launch(game.Path, game.Name, game.TitleId);
         }
     }

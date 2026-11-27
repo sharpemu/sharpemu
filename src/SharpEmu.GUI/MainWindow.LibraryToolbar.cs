@@ -119,11 +119,17 @@ public partial class MainWindow
     }
 
     // Launching a package that cannot run in place (a PS4 .pkg) offers to install that one package:
-    // name and needed disk space first, then the usual folder choice and install sheet.
+    // name, needed disk space and format choice first, then the folder picker and install sheet.
     private async Task OfferInstallPackageAsync(GameEntry game)
     {
         if (_isRunning || _isClosing || Sheets.Top is not null)
         {
+            return;
+        }
+
+        if (PkgZarConverter.FindPendingDestination(game.Path) is { } pending)
+        {
+            await ResumePendingConversionAsync(game.Path, pending);
             return;
         }
 
@@ -144,10 +150,12 @@ public partial class MainWindow
             Localization.Instance.Format(
                 "Library.Pkg.PromptMessage",
                 game.Name,
-                (neededBytes / (1024.0 * 1024 * 1024)).ToString("0.0", System.Globalization.CultureInfo.CurrentCulture)));
+                (neededBytes / (1024.0 * 1024 * 1024)).ToString("0.0", System.Globalization.CultureInfo.CurrentCulture)),
+            offerFormat: true,
+            canConsume: !_isRunning);
         if (await Sheets.ShowAsync(confirm) is true)
         {
-            await InstallPkgFileAsync(game.Path);
+            await InstallConfirmedPkgFileAsync(game.Path, confirm.AsZar, confirm.ConsumeSource);
         }
     }
 
@@ -162,8 +170,14 @@ public partial class MainWindow
 
     private async Task InstallPkgFileAsync(string pkgPath)
     {
-        var loc = Localization.Instance;
-        if (!TryReadPackageInfo(pkgPath, out var titleId, out var folderName, out var isGame, out var category))
+        // A paused consuming conversion may have cut the package short, so it is not read first.
+        if (PkgZarConverter.FindPendingDestination(pkgPath) is { } pending)
+        {
+            await ResumePendingConversionAsync(pkgPath, pending);
+            return;
+        }
+
+        if (!TryReadPackageInfo(pkgPath, out _, out var folderName, out var isGame, out var category))
         {
             return;
         }
@@ -174,9 +188,39 @@ public partial class MainWindow
             return;
         }
 
+        var format = new PkgConfirmDialog(
+            Localization.Instance.Format("Library.Pkg.ConfirmOne", Path.GetFileName(pkgPath)),
+            offerFormat: true,
+            canConsume: !_isRunning);
+        if (await Sheets.ShowAsync(format) is not true)
+        {
+            return;
+        }
+
+        await FinishPkgInstallAsync(pkgPath, folderName, format.AsZar, format.ConsumeSource);
+    }
+
+    private async Task InstallConfirmedPkgFileAsync(string pkgPath, bool asZar, bool consumeSource)
+    {
+        if (!TryReadPackageInfo(pkgPath, out _, out var folderName, out var isGame, out var category))
+        {
+            return;
+        }
+
+        if (!isGame)
+        {
+            ReportSkippedNotGame(pkgPath, category);
+            return;
+        }
+
+        await FinishPkgInstallAsync(pkgPath, folderName, asZar, consumeSource);
+    }
+
+    private async Task FinishPkgInstallAsync(string pkgPath, string folderName, bool asZar, bool consumeSource)
+    {
         var folders = await StorageProvider.OpenFolderPickerAsync(new FolderPickerOpenOptions
         {
-            Title = loc.Get("Dialog.ChoosePkgInstallFolder"),
+            Title = Localization.Instance.Get("Dialog.ChoosePkgInstallFolder"),
             AllowMultiple = false,
         });
         var parent = folders.FirstOrDefault()?.TryGetLocalPath();
@@ -185,12 +229,67 @@ public partial class MainWindow
             return;
         }
 
-        if (!await InstallPackageIntoAsync(pkgPath, parent, folderName))
+        var succeeded = asZar
+            ? await ConvertPackageToZarAsync(pkgPath, Path.Combine(parent, folderName + ".zar"), consumeSource)
+            : await InstallPackageIntoAsync(pkgPath, parent, folderName);
+        if (!succeeded)
         {
             return;
         }
 
         await RescanLibraryAsync(addingFolder: true);
+    }
+
+    // Offers to pick an unfinished consuming conversion up again. The package is partly consumed,
+    // so starting over is not possible; declining leaves it paused.
+    private async Task ResumePendingConversionAsync(string pkgPath, string destination)
+    {
+        var confirm = PkgConfirmDialog.ForResume(
+            Localization.Instance.Format("Library.Pkg.ResumeMessage", Path.GetFileName(pkgPath), destination));
+        if (await Sheets.ShowAsync(confirm) is true &&
+            await ConvertPackageToZarAsync(pkgPath, destination, consumeSource: true, resuming: true))
+        {
+            await RescanLibraryAsync(addingFolder: true);
+        }
+    }
+
+    // Shows the conversion sheet for one package. The caller owns the library rescan.
+    private async Task<bool> ConvertPackageToZarAsync(string pkgPath, string destination, bool consumeSource, bool resuming = false)
+    {
+        var loc = Localization.Instance;
+        if (!resuming && (File.Exists(destination) || File.Exists(PkgZarConverter.JournalPath(destination))))
+        {
+            AppendConsoleLine(loc.Format("Library.Pkg.AlreadyInstalled", Path.GetFileName(pkgPath), destination), DimLineBrush);
+            return false;
+        }
+
+        // A running game may hold files of the package open, so it is never consumed then.
+        consumeSource &= !_isRunning;
+        var gameName = resuming ? Path.GetFileNameWithoutExtension(destination) : Path.GetFileName(pkgPath);
+        var dialog = new PkgZarDialog(gameName, pkgPath, destination, consumeSource, resuming);
+        if (await Sheets.ShowAsync(dialog) is not true)
+        {
+            if (dialog.ErrorMessage is { } error)
+            {
+                AppendConsoleLine(loc.Format("Library.PkgZar.Failed", error), ErrorLineBrush);
+            }
+
+            return false;
+        }
+
+        AppendConsoleLine(loc.Format("Status.ConvertedZar", destination), SuccessLineBrush);
+        AddInstalledArchiveToLibrary(destination);
+        return true;
+    }
+
+    // A .zar is listed through the folder it sits in, so that folder joins the library unless a
+    // library folder already covers it.
+    private void AddInstalledArchiveToLibrary(string archive)
+    {
+        if (Path.GetDirectoryName(Path.GetFullPath(archive)) is { } folder)
+        {
+            AddInstalledGameToLibrary(folder);
+        }
     }
 
     private void ReportSkippedNotGame(string pkgPath, string? category) =>
