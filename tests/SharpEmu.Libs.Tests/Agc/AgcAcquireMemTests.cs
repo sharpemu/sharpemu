@@ -18,6 +18,43 @@ public sealed class AgcAcquireMemTests
     private const uint GcrControl = 0xD000;
     private const uint PollCycles = 400;
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void AcquireMemSetEngine_ChangesOnlyTheEngineBit(bool wrapped)
+    {
+        var (memory, ctx) = CreateContext();
+        var header = wrapped
+            ? PacketHeader.Make(8, PacketOpcode.Nop, PacketCustomCode.AcquireMemory)
+            : PacketHeader.Make(8, PacketOpcode.AcquireMemory);
+        const uint Control = 0x0123_4567;
+        WriteUInt64(memory, PacketAddress, header | ((ulong)Control << 32));
+        ctx[CpuRegister.Rdi] = PacketAddress;
+        ctx[CpuRegister.Rsi] = 3;
+
+        Assert.Equal(0, AgcExports.AcquireMemSetEngine(ctx));
+        Assert.Equal(0UL, ctx[CpuRegister.Rax]);
+        Assert.Equal(Control | 0x8000_0000u, ReadUInt32(memory, PacketAddress + 4));
+
+        ctx[CpuRegister.Rsi] = 2;
+
+        Assert.Equal(0, AgcExports.AcquireMemSetEngine(ctx));
+        Assert.Equal(Control, ReadUInt32(memory, PacketAddress + 4));
+        Assert.Equal(header, ReadUInt32(memory, PacketAddress));
+    }
+
+    [Fact]
+    public void AcquireMemSetEngine_RejectsOtherPacketOpcodes()
+    {
+        var (memory, ctx) = CreateContext();
+        WriteUInt64(memory, PacketAddress, PacketHeader.Make(8, PacketOpcode.Nop));
+        ctx[CpuRegister.Rdi] = PacketAddress;
+        ctx[CpuRegister.Rsi] = 1;
+
+        Assert.Equal(unchecked((int)0x8A6C000C), AgcExports.AcquireMemSetEngine(ctx));
+        Assert.Equal(0u, ReadUInt32(memory, PacketAddress + 4));
+    }
+
     // The SDK's label sync acquires the 32 bytes of a label; the packet covers the 256-byte unit that holds them.
     [Fact]
     public void DcbAcquireMem_ALabelSizedRange_EmitsThePacketWithTheEnclosingUnit()

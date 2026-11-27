@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Kernel;
 
 namespace SharpEmu.Libs.Agc;
@@ -9,6 +10,34 @@ namespace SharpEmu.Libs.Agc;
 public static partial class AgcExports
 {
     // This partial patches previously constructed AGC command packets.
+
+    private const OrbisGen2Result InvalidAcquireMemPacketResult = unchecked((OrbisGen2Result)0x8A6C000C);
+
+    [SysAbiExport(Nid = "W0WEyog0f74", ExportName = "sceAgcAcquireMemSetEngine",
+        Target = Generation.Gen5, LibraryName = "libSceAgc")]
+    public static int AcquireMemSetEngine(CpuContext ctx)
+    {
+        var packetAddress = ctx[CpuRegister.Rdi];
+        if (packetAddress == 0 || (packetAddress & (sizeof(uint) - 1)) != 0)
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        if (!TryGetPacketIdentity(ctx, packetAddress, out var opcode, out var customCode))
+        {
+            return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        if (opcode != PacketOpcode.AcquireMemory && !(opcode == ItNop && customCode == RAcquireMem))
+        {
+            return SetReturn(ctx, InvalidAcquireMemPacketResult);
+        }
+
+        var engine = (uint)ctx[CpuRegister.Rsi] & 1u;
+        return TryPatchUInt32Bits(ctx, packetAddress + sizeof(uint), 0x8000_0000u, engine << 31)
+            ? SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK)
+            : SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
 
     // Uncatalogued name; the NID and import library identify this AGC export.
     // Observed ABI: packet, cache policy, next-buffer address, length in dwords.
