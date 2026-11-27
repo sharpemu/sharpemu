@@ -271,12 +271,14 @@ internal static unsafe partial class VulkanVideoPresenter
                 service.TryDlss(BeginBatchedGuestCommands(), frame);
             var fsr = fsrRuntime is not null &&
                 service.TryFsr(BeginBatchedGuestCommands(), frame, _scheduler.CurrentTick, _scheduler.CompletedTick);
-            if (dlss || fsrRuntime is not null)
+            var jitterCorrected = !dlss && !fsr && service.TryJitterCompensatedBasic(
+                BeginBatchedGuestCommands(), frame, bindings[1].Description, bindings[0].Description);
+            if (dlss || fsrRuntime is not null || jitterCorrected)
             {
                 ForgetNativeShadow();
             }
 
-            var recorded = dlss || fsr;
+            var recorded = dlss || fsr || jitterCorrected;
             if (!recorded)
             {
                 var command = BeginBatchedGuestCommands();

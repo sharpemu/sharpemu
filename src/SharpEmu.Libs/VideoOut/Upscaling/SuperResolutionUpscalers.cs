@@ -4,6 +4,8 @@
 using System.Globalization;
 using System.Numerics;
 using Silk.NET.Vulkan;
+using Silk.NET.Vulkan.Extensions.KHR;
+using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Upscaling;
 using SharpEmu.Libs.VideoOut.Upscaling.Fsr;
 using SharpEmu.Libs.VideoOut.Upscaling.Streamline;
@@ -179,13 +181,16 @@ internal sealed unsafe class BlitUpscaler(Vk vk, PhysicalDevice physicalDevice)
     }
 }
 
-internal sealed class SuperResolutionService(Vk vk, PhysicalDevice physicalDevice, StreamlineRuntime? streamline, FsrRuntime? fsr) : IDisposable
+internal sealed class SuperResolutionService(Vk vk, PhysicalDevice physicalDevice, Device device,
+    KhrPushDescriptor descriptors, StreamlineRuntime? streamline, FsrRuntime? fsr) : IDisposable
 {
     private const int IdleFramesBeforeRelease = 120;
 
     private readonly BlitUpscaler _basic = new(vk, physicalDevice);
+    private readonly JitterCompensatedBlit _jitterCompensatedBlit = new(vk, physicalDevice, device, descriptors);
     private long _dlssFrames;
     private long _basicFrames;
+    private long _jitterCompensatedFrames;
     private int _idleFrames;
 
     public StreamlineRuntime? Streamline => streamline;
@@ -263,8 +268,25 @@ internal sealed class SuperResolutionService(Vk vk, PhysicalDevice physicalDevic
         return true;
     }
 
+    public bool TryJitterCompensatedBasic(CommandBuffer command, SuperResolutionFrame frame,
+        in ImageViewDescription color, in ImageViewDescription output)
+    {
+        if (!_jitterCompensatedBlit.TryUpscale(command, frame, color, output))
+        {
+            return false;
+        }
+
+        if (Interlocked.Increment(ref _jitterCompensatedFrames) == 1)
+        {
+            Console.Error.WriteLine("[PSSR][INFO] Upscaling with the basic upscaler (jitter compensated).");
+        }
+
+        return true;
+    }
+
     public void Dispose()
     {
+        _jitterCompensatedBlit.Dispose();
         fsr?.Dispose();
         streamline?.Dispose();
     }

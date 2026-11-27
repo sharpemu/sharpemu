@@ -444,6 +444,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             SampleRateShading = baseFeatures.SampleRateShading,
             SamplerAnisotropy = baseFeatures.SamplerAnisotropy,
             ShaderStorageImageExtendedFormats = baseFeatures.ShaderStorageImageExtendedFormats,
+            ShaderStorageImageWriteWithoutFormat = baseFeatures.ShaderStorageImageWriteWithoutFormat,
             ShaderInt64 = baseFeatures.ShaderInt64,
             ShaderClipDistance = baseFeatures.ShaderClipDistance,
             ShaderCullDistance = baseFeatures.ShaderCullDistance,

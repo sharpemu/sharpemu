@@ -123,7 +123,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var fsr = WantsFsr
                 ? FsrRuntime.Start(_vk, _instance, _physicalDevice, _device, FsrRuntimeFiles.DefaultDirectory)
                 : null;
-            _superResolution = new SuperResolutionService(_vk, _physicalDevice, _streamline, fsr);
+            _superResolution = new SuperResolutionService(_vk, _physicalDevice, _device, _pushDescriptorApi, _streamline, fsr);
             CreateSwapchain();
             CreateCommandResources();
             CreateGuestDrawResources();
