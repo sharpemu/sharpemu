@@ -66,6 +66,8 @@ internal static class UpscalerInstaller
                 await DownloadAsync(client, StreamlineDownloadUrl, archivePath, StreamlineBytes, StreamlineSha256,
                     progress, 0, StreamlineBytes, cancellationToken);
                 using var archive = ZipFile.OpenRead(archivePath);
+                // Streamline probes this Vulkan helper even when only DLSS Super Resolution is requested.
+                files = [.. files, "NvLowLatencyVk.dll"];
                 foreach (var name in files)
                 {
                     var entry = archive.GetEntry("bin/x64/" + name)
