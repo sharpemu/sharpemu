@@ -76,6 +76,8 @@ public sealed class ImageBacking
     public List<ImageAccessState>? SubresourceStates;
     public DeviceMemory Memory;
     public ulong AllocationSize;
+    internal uint MemoryHeap = uint.MaxValue;
+    internal GpuResidency.Entry? Residency;
 
     public bool Exists => Handle.Handle != 0;
 }
@@ -86,7 +88,7 @@ public sealed unsafe partial class CachedImage : IDisposable
     private readonly GpuDeviceInfo _device;
     private readonly SubmissionScheduler _scheduler;
     private readonly IGuestBackedSpace _guestBacking;
-    private readonly ImageBackingPool? _pool;
+    private ImageBackingPool? _pool;
     private ImageBackingPool.Key _poolKey;
     private ulong _maybeCpuHash;
     private bool _cpuDirty;
@@ -177,8 +179,10 @@ public sealed unsafe partial class CachedImage : IDisposable
         Backing.Usage = create.Usage;
 
         _poolKey = ImageBackingPool.KeyOf(create);
-        if (_pool is not null && _pool.TryTake(_poolKey, out Backing.Handle, out Backing.Memory, out Backing.AllocationSize))
+        if (_pool is not null && _pool.TryTake(_poolKey, out Backing.Handle, out Backing.Memory, out Backing.AllocationSize, out Backing.MemoryHeap))
         {
+            Backing.Residency = device.Residency?.Find(Backing.Memory);
+            TouchResidency();
             return;
         }
 
@@ -212,9 +216,10 @@ public sealed unsafe partial class CachedImage : IDisposable
 
                 allocateInfo.MemoryTypeIndex = index;
                 allocationAttempted = true;
-                allocated = device.AllocateMemory(allocateInfo, out Backing.Memory);
+                allocated = device.AllocateMemory(allocateInfo, out Backing.Memory, GpuResidency.Role.Texture);
                 if (allocated == Result.Success)
                 {
+                    Backing.MemoryHeap = device.GetMemoryHeapIndex(index);
                     if (!deviceLocal)
                     {
                         ReportSystemMemoryImage(create, requirements.Size, index);
@@ -241,7 +246,12 @@ public sealed unsafe partial class CachedImage : IDisposable
         }
 
         Backing.AllocationSize = requirements.Size;
+        Backing.Residency = device.Residency?.Find(Backing.Memory);
     }
+
+    internal void TouchResidency() => Backing.Residency?.Use(Uses.DepthTarget || (Description.IsDepth && IsGpuModified)
+        ? GpuResidency.Role.Depth : Uses.RenderTarget ? GpuResidency.Role.Color :
+        IsGpuModified ? GpuResidency.Role.WrittenImage : GpuResidency.Role.Texture);
 
     private static int _systemMemoryImageReports;
 
@@ -504,6 +514,7 @@ public sealed unsafe partial class CachedImage : IDisposable
     {
         RawWriteAfterGpuWrite = false;
         _gpuModified = true;
+        TouchResidency();
         if (DimensionTwin is { } twin)
         {
             twin.DimensionTwinStale = true;
@@ -744,19 +755,22 @@ public sealed unsafe partial class CachedImage : IDisposable
         return view;
     }
 
+    internal void DiscardBackingOnRetirement() => _pool = null;
+
     // Immediate destruction; the owner waits for GPU work before disposing.
     public void Dispose()
     {
         Volatile.Write(ref _viewSnapshot, []);
         foreach (var cached in Views)
         {
+            _device.InvalidateDescriptorResources();
             _device.Vk.DestroyImageView(_device.Device, cached.View, null);
         }
 
         Views.Clear();
         if (Backing.Exists)
         {
-            if (_pool is null || !_pool.TryReturn(_poolKey, Backing.Handle, Backing.Memory, Backing.AllocationSize))
+            if (_pool is null || !_pool.TryReturn(_poolKey, Backing.Handle, Backing.Memory, Backing.AllocationSize, Backing.MemoryHeap))
             {
                 _device.Vk.DestroyImage(_device.Device, Backing.Handle, null);
                 _device.FreeMemory(Backing.Memory);
@@ -764,6 +778,7 @@ public sealed unsafe partial class CachedImage : IDisposable
 
             Backing.Handle = default;
             Backing.Memory = default;
+            Backing.Residency = null;
         }
     }
 }

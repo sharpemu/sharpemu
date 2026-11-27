@@ -27,11 +27,13 @@ public sealed unsafe class ImageBackingPool : IDisposable
         ImageCreateFlags Flags,
         ImageUsageFlags Usage);
 
-    private readonly record struct Entry(Image Handle, DeviceMemory Memory, ulong Size);
+    private readonly record struct Entry(Image Handle, DeviceMemory Memory, ulong Size, uint Heap, long ReturnedAt);
 
     private readonly GpuDeviceInfo _device;
     private readonly Dictionary<Key, Stack<Entry>> _entries = new();
+    private Stack<Entry>? _spareStack;
     private readonly LinkedList<(Key Key, Entry Entry)> _order = new();
+    private readonly Lock _gate = new();
     private ulong _pooledBytes;
     private bool _disposed;
 
@@ -44,25 +46,29 @@ public sealed unsafe class ImageBackingPool : IDisposable
     internal static Key KeyOf(in ImageCreateInfo create) =>
         new(create.Format, create.ImageType, create.Extent, create.ArrayLayers, create.MipLevels, create.Samples, create.Flags, create.Usage);
 
-    public bool TryTake(in Key key, out Image handle, out DeviceMemory memory, out ulong size)
+    public bool TryTake(in Key key, out Image handle, out DeviceMemory memory, out ulong size, out uint heap)
     {
+        using var held = _gate.EnterScope();
         if (_entries.TryGetValue(key, out var stack) && stack.TryPop(out var entry))
         {
             RemoveOrder(key, entry);
+            ReleaseEmptyStack(key, stack);
             _pooledBytes -= entry.Size;
-            (handle, memory, size) = (entry.Handle, entry.Memory, entry.Size);
+            (handle, memory, size, heap) = (entry.Handle, entry.Memory, entry.Size, entry.Heap);
             return true;
         }
 
         handle = default;
         memory = default;
         size = 0;
+        heap = uint.MaxValue;
         return false;
     }
 
     // False when the pool is full for this key or disposed; the caller then destroys it.
-    public bool TryReturn(in Key key, Image handle, DeviceMemory memory, ulong size)
+    public bool TryReturn(in Key key, Image handle, DeviceMemory memory, ulong size, uint heap)
     {
+        using var held = _gate.EnterScope();
         if (_disposed || size > MaxPooledBytes)
         {
             return false;
@@ -70,7 +76,8 @@ public sealed unsafe class ImageBackingPool : IDisposable
 
         if (!_entries.TryGetValue(key, out var stack))
         {
-            stack = new Stack<Entry>();
+            stack = _spareStack ?? new Stack<Entry>();
+            _spareStack = null;
             _entries.Add(key, stack);
         }
 
@@ -79,7 +86,8 @@ public sealed unsafe class ImageBackingPool : IDisposable
             return false;
         }
 
-        var entry = new Entry(handle, memory, size);
+        var entry = new Entry(handle, memory, size, heap, Environment.TickCount64);
+        _device.Residency?.Find(memory)?.Use(GpuResidency.Role.IdleImage);
         stack.Push(entry);
         _order.AddLast((key, entry));
         _pooledBytes += size;
@@ -114,12 +122,22 @@ public sealed unsafe class ImageBackingPool : IDisposable
             return;
         }
 
-        var kept = stack.Where(item => item != entry).Reverse().ToArray();
-        stack.Clear();
-        foreach (var item in kept)
+        Span<Entry> kept = stackalloc Entry[MaxPerKey];
+        var count = 0;
+        while (stack.TryPop(out var item) && item != entry)
         {
-            stack.Push(item);
+            kept[count++] = item;
         }
+        while (count > 0)
+            stack.Push(kept[--count]);
+        ReleaseEmptyStack(key, stack);
+    }
+
+    private void ReleaseEmptyStack(Key key, Stack<Entry> stack)
+    {
+        if (stack.Count != 0) return;
+        _entries.Remove(key);
+        _spareStack ??= stack;
     }
 
     private void Destroy(Entry entry)
@@ -128,8 +146,33 @@ public sealed unsafe class ImageBackingPool : IDisposable
         _device.FreeMemory(entry.Memory);
     }
 
+    internal ulong Trim(uint? heap, ulong target, long returnedThrough, int limit = int.MaxValue)
+    {
+        using var held = _gate.EnterScope();
+        ulong freed = 0;
+        for (var node = _order.First; node is not null && freed < target && limit > 0;)
+        {
+            var next = node.Next;
+            var (key, entry) = node.Value;
+            if (entry.ReturnedAt > returnedThrough)
+                break;
+            if (heap is null || entry.Heap == heap)
+            {
+                _order.Remove(node);
+                RemoveFromStack(key, entry);
+                _pooledBytes -= entry.Size;
+                Destroy(entry);
+                freed += entry.Size;
+                limit--;
+            }
+            node = next;
+        }
+        return freed;
+    }
+
     public void Dispose()
     {
+        using var held = _gate.EnterScope();
         if (_disposed)
         {
             return;
@@ -143,6 +186,7 @@ public sealed unsafe class ImageBackingPool : IDisposable
 
         _order.Clear();
         _entries.Clear();
+        _spareStack = null;
         _pooledBytes = 0;
     }
 }

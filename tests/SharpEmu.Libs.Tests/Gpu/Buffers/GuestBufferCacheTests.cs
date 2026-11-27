@@ -24,6 +24,79 @@ public sealed class GuestBufferCacheTests : IClassFixture<HeadlessVulkanFixture>
     private const ulong Page = GuestBufferCache.CachingPageSize;
 
     [Fact]
+    public void TransferRingCapacityFollowsReservationsAndKeepsPreviouslyRecordedSources()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var cache = harness.Cache;
+        const ulong mib = 1UL << 20;
+        Assert.Equal(8 * mib, cache.GetTransferRing(GpuBufferUsage.Stream, 0).Size);
+        Assert.Equal(4 * mib, cache.GetTransferRing(GpuBufferUsage.Download, 0).Size);
+        Assert.Equal(mib, cache.GetTransferRing(GpuBufferUsage.DeviceLocal, 0).Size);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Write(address, Pattern(256, 9));
+        var source = harness.Worker.Run(() => cache.ObtainBufferForImage(address, 4096));
+        harness.Worker.Run(() =>
+        {
+            var download = cache.GetTransferRing(GpuBufferUsage.Download, 25 * mib);
+            var scratch = cache.GetTransferRing(GpuBufferUsage.DeviceLocal, 9 * mib);
+            Assert.Equal(32 * mib, download.Size);
+            Assert.Equal(16 * mib, scratch.Size);
+            // Prepared bindings keep their stream generation while a larger request is outstanding.
+            var stream = cache.GetTransferRing(GpuBufferUsage.Stream, 1);
+            using (stream.RetainContents()) Assert.Same(stream, cache.GetTransferRing(GpuBufferUsage.Stream, 20 * mib));
+            Assert.True(cache.GetTransferRing(GpuBufferUsage.Stream, 20 * mib).Size >= 20 * mib);
+            var retained = cache.GetTransferRing(GpuBufferUsage.Stream, 0);
+            GpuBuffer exported;
+            using (retained.RetainContents())
+            {
+                exported = cache.GetUtilityBuffer(GpuBufferUsage.Stream);
+                Assert.Same(retained, exported);
+                Assert.Same(retained, cache.GetTransferRing(GpuBufferUsage.Stream, 0));
+            }
+            Assert.Same(exported, cache.GetTransferRing(GpuBufferUsage.Stream, 0));
+            var full = cache.GetUtilityBuffer(GpuBufferUsage.Upload);
+            Assert.Equal(512 * mib, full.Size);
+            Assert.Same(full, cache.GetUtilityBuffer(GpuBufferUsage.Upload));
+        });
+        Assert.Equal(Pattern(256, 9), harness.ReadBack(source.Buffer, source.Offset, 256));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void SparseAddressTablePreservesMissingAndRegisteredEntriesAcrossBlocks()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var cache = harness.Cache;
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var buffer = harness.Worker.Run(() => cache.ObtainBuffer(address, 2 * Page, false).Buffer);
+        var table = cache.BdaPageTableBuffer;
+        var offset = address / Page * sizeof(ulong);
+        Assert.Equal(GuestBufferCache.BdaPageTableSize, table.Size);
+        Assert.Equal(buffer.DeviceAddress, BitConverter.ToUInt64(harness.ReadBack(table, offset, 8)));
+        Assert.Equal(0UL, BitConverter.ToUInt64(harness.ReadBack(table, table.Size - 8, 8)));
+        harness.Worker.Run(() =>
+        {
+            var device = _vulkan.DeviceInfo;
+            var live = device.LiveAllocations;
+            var sparse = SparseAddressTable.TryCreate(device, harness.Scheduler);
+            if (sparse is null) return;
+            try
+            {
+                Assert.Equal(live, device.LiveAllocations);
+                sparse.Cover(0, 8);
+                Assert.Equal(live + 1, device.LiveAllocations);
+                sparse.Cover(8, 8);
+                Assert.Equal(live + 1, device.LiveAllocations);
+            }
+            finally { sparse.Dispose(); }
+            Assert.Equal(live, device.LiveAllocations);
+        });
+        harness.Shutdown();
+    }
+
+    [Fact]
     public void DownloadRingAcceptsFiftyMiBReservation()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;

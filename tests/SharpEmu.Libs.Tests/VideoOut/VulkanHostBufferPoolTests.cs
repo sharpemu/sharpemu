@@ -11,6 +11,32 @@ namespace SharpEmu.Libs.Tests.VideoOut;
 public sealed class VulkanHostBufferPoolTests
 {
     [Fact]
+    public void OnlyCompletedSpillsThatStayedIdleExpire()
+    {
+        var destroyed = new List<VulkanHostBufferAllocation>();
+        using var pool = new VulkanHostBufferPool(4096, destroyed.Add);
+        var key = new VulkanHostBufferPoolKey(BufferUsageFlags.StorageBufferBit, 256);
+        var regular = Allocation(1, 2, key);
+        var idle = Allocation(3, 4, key);
+        var rented = Allocation(5, 6, key);
+        var pending = Allocation(7, 8, key);
+        foreach (var allocation in new[] { regular, idle, rented, pending }) pool.Register(allocation);
+        Assert.True(pool.Return(regular.Buffer, regular.Memory));
+        Assert.True(pool.Return(idle.Buffer, idle.Memory, 0));
+        Assert.True(pool.Return(rented.Buffer, rented.Memory, 0));
+        Assert.True(pool.TryRent(key, out var active));
+        Assert.Equal(rented, active);
+        pool.TrimIdleSpills(0);
+        Assert.Empty(destroyed);
+        pool.TrimIdleSpills(VulkanHostBufferPool.SpillIdleMilliseconds);
+
+        Assert.Equal(new[] { idle }, destroyed);
+        Assert.Equal(256UL, pool.CachedBytes);
+        Assert.True(pool.TryRent(key, out var remaining));
+        Assert.Equal(regular, remaining);
+    }
+
+    [Fact]
     public void ReturnedAllocationCanBeRentedAgain()
     {
         var destroyed = new List<VulkanHostBufferAllocation>();

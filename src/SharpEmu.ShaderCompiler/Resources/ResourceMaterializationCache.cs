@@ -1095,6 +1095,7 @@ public sealed partial class ResourceMaterializationCache
         ref ResourceSpecialization specialization,
         out ResourceMaterializationFailure failure)
     {
+        using var independent = new ResourceMaterializer.IndependentReads();
         _outcome = MaterializeOutcome.Failed;
         var timing = new MaterializationTiming(MissDiagnosticsEnabled);
         try
@@ -1667,6 +1668,7 @@ public sealed partial class ResourceMaterializationCache
 
     public bool Revalidate(ResourceSnapshot snapshot, ResidentGuestBytesReader residentReader)
     {
+        using var independent = new ResourceMaterializer.IndependentReads();
         if (snapshot.Origin is not Entry entry || entry.VolatileLookups > 0)
         {
             _totalRevalidateUnlinked.Increment();

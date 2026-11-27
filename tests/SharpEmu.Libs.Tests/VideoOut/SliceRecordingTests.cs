@@ -9,6 +9,7 @@ using SharpEmu.HLE.Diagnostics;
 using SharpEmu.HLE.GpuMemory;
 using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu.Buffers;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
@@ -30,6 +31,101 @@ public sealed class SliceRecordingTests : IClassFixture<HeadlessVulkanFixture>
     private readonly HeadlessVulkan? _vulkan;
 
     public SliceRecordingTests(HeadlessVulkanFixture fixture) => _vulkan = fixture.Vulkan;
+
+    [Fact]
+    public unsafe void StoppingWorkersKeepsSliceUploadsUntilTheirSubmissionCompletes()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var presenter = new PresenterUnderTest(_vulkan);
+        presenter.Run(() =>
+        {
+            var scheduler = presenter.Harness.Scheduler;
+            var pool = new SliceArenaPool(_vulkan.DeviceInfo, scheduler);
+            presenter.SetField("_arenaPool", pool);
+            // Oversized chunks are destroyed on return, making both ends of their lifetime observable.
+            var chunk = pool.Rent(SliceArenaPool.ChunkBytes + 1);
+            var slice = Activator.CreateInstance(SliceType, nonPublic: true)!;
+            SliceType.GetField("Chunks")!.SetValue(slice, new List<SliceArenaChunk> { chunk });
+            SliceType.GetField("Submitted")!.SetValue(slice, true);
+            ((ManualResetEventSlim)SliceType.GetField("Done")!.GetValue(slice)!).Set();
+            presenter.InvokeMethod("FinishSlice", slice);
+
+            var gate = _vulkan.CreateTimelineSemaphore();
+            var wait = new SubmitBundle();
+            wait.AddWait(gate);
+            var tick = scheduler.Flush(wait);
+            ulong handleWhilePending;
+            try
+            {
+                presenter.InvokeMethod("StopRenderWorkers");
+                Assert.False(scheduler.IsTickComplete(tick));
+                handleWhilePending = chunk.Buffer.Handle.Handle;
+            }
+            finally
+            {
+                var signal = new SemaphoreSignalInfo { SType = StructureType.SemaphoreSignalInfo, Semaphore = new(gate), Value = 1 };
+                Assert.Equal(Result.Success, _vulkan.Vk.SignalSemaphore(_vulkan.Device, &signal));
+                scheduler.Wait(tick);
+                _vulkan.DestroySemaphore(gate);
+            }
+
+            var retirementError = Record.Exception(scheduler.RunCompletedOperations);
+            Assert.NotEqual(0UL, handleWhilePending);
+            Assert.Null(retirementError);
+            Assert.Equal(0UL, chunk.Buffer.Handle.Handle);
+        });
+    }
+
+    [Fact]
+    public void SliceSurplusRetainsRentedChunksAndRecentBursts()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        harness.Run(() =>
+        {
+            using var pool = new SliceArenaPool(harness.Device, harness.Scheduler);
+            var held = pool.Rent(1);
+            held.Buffer.Mapped[0] = 19;
+            var spare = Enumerable.Range(0, 16).Select(_ => pool.Rent(1)).ToArray();
+            foreach (var chunk in spare) pool.Return(chunk);
+            var now = Environment.TickCount64 + 6000;
+            pool.TrimSurplus(now);
+            Assert.Equal(17, pool.ChunkCount);
+            pool.TrimSurplus(now + 5000);
+            Assert.Equal(9, pool.ChunkCount);
+            Assert.Equal(19, held.Buffer.Mapped[0]);
+            pool.Return(held);
+        });
+    }
+
+    [Fact]
+    public void LowMemoryReleasesOnlyCompletedSpareChunks()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        harness.Run(() =>
+        {
+            var available = 4L << 30;
+            using var pool = new SliceArenaPool(harness.Device, harness.Scheduler, () => new(-1, available, 16L << 30));
+            var held = pool.Rent(1);
+            var spares = Enumerable.Range(0, 12).Select(_ => pool.Rent(1)).ToArray();
+            foreach (var spare in spares) pool.Return(spare);
+            var now = Environment.TickCount64 + 6000;
+            pool.TrimUnderPressure(now);
+            Assert.Equal(13, pool.ChunkCount);
+            available = 1L << 30;
+            pool.TrimUnderPressure(now + 1000);
+            pool.TrimUnderPressure(now + 1500);
+
+            Assert.Equal(11, pool.ChunkCount);
+            pool.TrimUnderPressure(now + 2000);
+            pool.TrimUnderPressure(now + 3000);
+            Assert.Equal(9, pool.ChunkCount);
+            held.Buffer.Mapped[0] = 123;
+            Assert.Equal(123, held.Buffer.Mapped[0]);
+            pool.Return(held);
+        });
+    }
 
     [Fact]
     public void UnresolvedDrawsReachTheJoinerInOrderWithoutAllocatingRecordingBuffers()
@@ -212,6 +308,53 @@ public sealed class SliceRecordingTests : IClassFixture<HeadlessVulkanFixture>
     }
 
     [Fact]
+    public void SliceTableReuseRequiresExactBytesAndStopsAtHandoff()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        harness.Run(() =>
+        {
+            using var pool = new SliceArenaPool(harness.Device, harness.Scheduler);
+            var arena = new SliceArena(pool, harness.Device.NonCoherentAtomSize);
+            byte[] bytes = [1, 2, 3, 4];
+            Assert.True(arena.TryUploadTable(bytes, 16, out var first));
+            Assert.True(arena.TryUploadTable(bytes.ToArray(), 16, out var repeat));
+            Assert.True(first == repeat);
+            bytes[3]++;
+            Assert.True(arena.TryUploadTable(bytes, 16, out var other));
+            Assert.NotEqual(first.Offset, other.Offset);
+            var held = arena.TakeChunks();
+            Assert.True(arena.TryUploadTable(bytes, 16, out var fresh));
+            Assert.NotSame(other.Chunk, fresh.Chunk);
+            foreach (var chunk in held.Concat(arena.TakeChunks())) pool.Return(chunk);
+        });
+    }
+
+    [Fact]
+    public void SliceArenaTrimsCompletedIdleChunksAndPreservesAnOutstandingRental()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new ImageTestHarness(_vulkan);
+        harness.Run(() =>
+        {
+            using var pool = new SliceArenaPool(harness.Device, harness.Scheduler);
+            var held = pool.Rent(1);
+            var first = pool.Rent(1);
+            var second = pool.Rent(1);
+            var third = pool.Rent(1);
+            pool.Return(first, 0);
+            pool.Return(second, 0);
+            pool.Return(third, 0);
+            pool.TrimIdle(0);
+            Assert.Equal(4, pool.ChunkCount);
+            pool.TrimIdle(VulkanHostBufferPool.SpillIdleMilliseconds);
+            Assert.Equal(2, pool.ChunkCount);
+            Assert.Equal(SliceArenaPool.ChunkBytes, (ulong)held.Buffer.Mapped.Length);
+            pool.Return(held);
+        });
+    }
+
+    [Fact]
     public void SliceArena_PacksAlignedReservationsAndHandsItsChunksOver()
     {
         if (!GatePrerequisites.Ready(_vulkan)) return;
@@ -379,6 +522,8 @@ public sealed class SliceRecordingTests : IClassFixture<HeadlessVulkanFixture>
         using var presenter = new PresenterUnderTest(_vulkan!);
         var harness = presenter.Harness;
         var address = harness.MapBacked(0x10000, ImageCacheTestSupport.ReadWrite);
+        var host = (ICommandStreamHost)presenter.Instance;
+        presenter.SetField("_translation", AgcExports.CreateCommandStreamTranslation(host.Memory, host));
         var skipped = SliceCounter("_validateDeferredSkipped");
         presenter.Run(() =>
         {
@@ -404,6 +549,114 @@ public sealed class SliceRecordingTests : IClassFixture<HeadlessVulkanFixture>
             Assert.True(ValidateSegment(presenter, slice, segment));
             Assert.Equal(before + 2, skipped.Total);
         });
+        harness.Shutdown();
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, false)]
+    [InlineData(false, true)]
+    [InlineData(true, true)]
+    public void JoinRechecksWorkerDescriptorsAfterGuestWritesAreQueuedOrImageStateChanges(bool dispatch, bool staleImageVersion)
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var presenter = new PresenterUnderTest(_vulkan!);
+        var harness = presenter.Harness;
+        var host = (ICommandStreamHost)presenter.Instance;
+        presenter.SetField("_translation", AgcExports.CreateCommandStreamTranslation(host.Memory, host));
+        var publications = presenter.GetField<PendingGuestPublications>("_guestPublications");
+        var address = harness.MapBacked(0x10000, ImageCacheTestSupport.ReadWrite);
+        presenter.Run(() =>
+        {
+            var buffer = harness.Cache.ObtainBuffer(address, 4, isWritten: false).Buffer;
+            var (slice, segment) = NewSegment(presenter, harness.Cache.RegistrationSerial, new BufferSliceUse(address, 4, false, false, false, buffer));
+            var requests = SegmentType.GetField("Requests")!.GetValue(segment)!;
+            var items = (IList)SliceType.GetField("Items")!.GetValue(slice)!;
+            var itemType = items.GetType().GetGenericArguments()[0];
+            void Add(AgcExports.DeferredWork work)
+            {
+                var item = Activator.CreateInstance(itemType, nonPublic: true)!;
+                itemType.GetField("Work")!.SetValue(item, work);
+                items.Add(item);
+                SegmentType.GetField("Count")!.SetValue(segment, items.Count);
+                PresenterUnderTest.RecordingHostType.GetMethod("NoteReadsVersion", BindingFlags.Static | BindingFlags.NonPublic)!.Invoke(null, [requests, work]);
+            }
+
+            var draw = new AgcExports.DeferredDraw();
+            var compute = new AgcExports.DeferredDispatch();
+            var reads = dispatch ? compute.Reads : draw.Reads;
+            host.BeginWorkerResolve(1, reads);
+            reads.Add(address, 0u);
+            host.EndWorkerResolve();
+            if (staleImageVersion) draw.FrontendImageVersion = compute.FrontendImageVersion = -1;
+            Add(dispatch ? compute : draw);
+            if (staleImageVersion)
+            {
+                Assert.True(host.ValidateWorkerReads(reads));
+                Assert.False(ValidateSegment(presenter, slice, segment));
+                return;
+            }
+            Assert.True(ValidateSegment(presenter, slice, segment));
+
+            var disjoint = publications.Add(0, address + 16, 4);
+            Assert.True(ValidateSegment(presenter, slice, segment));
+            var overlapping = publications.AddAfterPending(0, address, 4, 7)!;
+            Assert.Equal(reads.Version, harness.Cache.GpuModifiedVersion);
+            Assert.False(host.ValidateWorkerReads(reads));
+            Assert.False(ValidateSegment(presenter, slice, segment));
+
+            // A later member resolving against the new publication cannot vouch for the first.
+            var later = new AgcExports.DeferredDraw();
+            host.BeginWorkerResolve(2, later.Reads);
+            host.EndWorkerResolve();
+            Add(later);
+            Assert.False(ValidateSegment(presenter, slice, segment));
+            publications.Publish(disjoint, static () => { });
+            publications.Publish(overlapping, () => harness.Write(address, BitConverter.GetBytes(7u)));
+            Assert.False(ValidateSegment(presenter, slice, segment));
+            harness.Write(address, BitConverter.GetBytes(0u));
+            Assert.True(ValidateSegment(presenter, slice, segment));
+        });
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void DirtyPersistentWorkerReadIsUploadedEvenWhenTheEpochStaysStillUntilJoin()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var presenter = new PresenterUnderTest(_vulkan!);
+        var harness = presenter.Harness;
+        var cache = harness.Cache;
+        cache.ObtainMemoUse = GuestBufferCache.ObtainMemoMode.On;
+        var address = harness.MapBacked(0x10000, ImageCacheTestSupport.ReadWrite);
+        var size = 2 * GuestBufferCache.CachingPageSize;
+        var buffer = presenter.Run(() => cache.ObtainBuffer(address, size, false, allowStream: false).Buffer);
+        var bytes = Enumerable.Repeat((byte)0xAC, (int)size).ToArray();
+        Assert.True(harness.Store.MarkCpuWrite(address, size));
+        harness.Write(address, bytes);
+        presenter.Run(() =>
+        {
+            var snapshot = cache.RefreshSnapshot();
+            var host = RuntimeHelpers.GetUninitializedObject(PresenterUnderTest.RecordingHostType);
+            SetHostField(host, "_worker", true);
+            SetHostField(host, "_presenter", presenter.Instance);
+            SetHostField(host, "_bufferCache", cache);
+            SetHostField(host, "_buffers", snapshot);
+            var segment = Activator.CreateInstance(SegmentType, true)!;
+            SetHostField(host, "_segment", segment);
+            var requests = SegmentType.GetField("Requests")!.GetValue(segment)!;
+            var epoch = requests.GetType().GetField("CleanBufferEpoch")!;
+            epoch.SetValue(requests, cache.CpuDirtyEpoch);
+            var pubs = presenter.GetField<PendingGuestPublications>("_guestPublications");
+            Assert.False(cache.PrefersStreamCopy(address, size, false));
+            PresenterUnderTest.RecordingHostType.GetMethod("ObtainBufferRangeForSlice", PresenterUnderTest.InstanceMembers)!
+                .Invoke(host, [address, size, false, false, false]);
+            var uses = (List<BufferSliceUse>)requests.GetType().GetField("Buffers")!.GetValue(requests)!;
+            Assert.Same(buffer, Assert.Single(uses).Buffer);
+            Assert.Equal(-1L, (long)epoch.GetValue(requests)!);
+            Assert.Equal(0, cache.ApplyRecordedBufferUses(uses, snapshot.Serial, (long)epoch.GetValue(requests)!, pubs));
+        });
+        Assert.Equal(bytes, harness.ReadBack(buffer, buffer.Offset(address), size));
         harness.Shutdown();
     }
 
@@ -489,6 +742,47 @@ public sealed class SliceRecordingTests : IClassFixture<HeadlessVulkanFixture>
             Assert.Equal(NativeColorClearPrediction.Settled, harness.Images.PredictNativeColorClear(identifier, target));
         });
         harness.Shutdown();
+    }
+
+    [Fact]
+    public async Task DrainedItemsFinishWhileTheProducerHoldsTheHandoffLock()
+    {
+        var presenter = RuntimeHelpers.GetUninitializedObject(PresenterUnderTest.PresenterType);
+        PresenterUnderTest.PresenterType.GetField("_bufferCache", PresenterUnderTest.InstanceMembers)!.SetValue(
+            presenter, RuntimeHelpers.GetUninitializedObject(typeof(GuestBufferCache)));
+        var type = typeof(VulkanVideoPresenter).GetNestedType("CommandThread", BindingFlags.NonPublic)!;
+        var thread = Activator.CreateInstance(type, [presenter, null, null, null, null])!;
+        var post = type.GetMethod("Post")!.CreateDelegate<Action<Action, string>>(thread);
+        var run = type.GetMethod("RunBatch")!.CreateDelegate<Func<long, int, Action, int>>(thread);
+        var gate = type.GetField("_lock", PresenterUnderTest.InstanceMembers)!.GetValue(thread)!;
+        var seen = new List<int>();
+        void Post(int n) => post(() => seen.Add(n), "test");
+        for (int i = 0; i < 96; i++) Post(i);
+        Assert.Equal(32, run(long.MaxValue, 32, static () => { }));
+
+        using var held = new ManualResetEventSlim();
+        using var drained = new ManualResetEventSlim();
+        var producer = Task.Run(() =>
+        {
+            bool finished;
+            lock (gate)
+            {
+                held.Set();
+                finished = drained.Wait(TimeSpan.FromSeconds(5));
+            }
+            Post(96);
+            return finished;
+        });
+        try
+        {
+            Assert.True(held.Wait(TimeSpan.FromSeconds(5)));
+            Assert.Equal(64, run(long.MaxValue, 64, static () => { }));
+        }
+        finally { drained.Set(); }
+
+        Assert.True(await producer);
+        Assert.Equal(1, run(long.MaxValue, 64, static () => { }));
+        Assert.Equal(Enumerable.Range(0, 97), seen);
     }
 
     [Fact]

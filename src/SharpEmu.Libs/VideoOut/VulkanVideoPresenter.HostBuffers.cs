@@ -47,7 +47,8 @@ internal static unsafe partial class VulkanVideoPresenter
                     buffer,
                     allocatedMemory,
                     key,
-                    (nint)persistentMapping);
+                    (nint)persistentMapping,
+                    _deviceInfo.Residency?.Find(allocatedMemory));
                 _hostBufferPool.Register(allocation);
             }
 
@@ -65,18 +66,19 @@ internal static unsafe partial class VulkanVideoPresenter
             return allocation.Buffer;
         }
 
-        internal void RecycleHostBuffer(VkBuffer buffer, DeviceMemory memory)
+        internal void RecycleHostBuffer(VkBuffer buffer, DeviceMemory memory, bool spill = false)
         {
             if (buffer.Handle == 0)
             {
                 return;
             }
 
-            if (_hostBufferPool.Return(buffer, memory))
+            if (_hostBufferPool.Return(buffer, memory, spill ? Environment.TickCount64 : null))
             {
                 return;
             }
 
+            _deviceInfo.InvalidateDescriptorResources();
             _vk.DestroyBuffer(_device, buffer, null);
             if (memory.Handle != 0)
             {
@@ -87,6 +89,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private void DestroyHostBufferAllocation(VulkanHostBufferAllocation allocation)
         {
             _vk.UnmapMemory(_device, allocation.Memory);
+            _deviceInfo.InvalidateDescriptorResources();
             _vk.DestroyBuffer(_device, allocation.Buffer, null);
             _deviceInfo.FreeMemory(allocation.Memory);
         }

@@ -37,6 +37,9 @@ internal static unsafe partial class VulkanVideoPresenter
             SavePipelineCache(force: true);
             DrainFrameSlots();
             CollectCompletedGuestSubmissions(waitForOldest: false);
+            // Submitted slices can still use their uploads after the recording workers exit.
+            _arenaPool?.Dispose();
+            _arenaPool = null;
             _recording?.DestroyFeedbackSnapshotPool();
             DestroyRenderPipelines();
             DestroyBindlessHeap();
@@ -70,6 +73,7 @@ internal static unsafe partial class VulkanVideoPresenter
             if (_device.Handle != 0)
             {
                 _scheduler.Dispose();
+                _deviceInfo.DxgiBudget?.Dispose();
                 _deviceInfo.Slabs.Destroy();
                 DestroyGuestPipelineCaches();
                 if (_pipelineCache.Handle != 0)

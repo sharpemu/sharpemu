@@ -251,6 +251,13 @@ public sealed class VertexInputInfo
         copy.Stage = default;
         return copy;
     }
+
+    internal VertexInputInfo CopyWithStage(in ShaderStageResources stage)
+    {
+        var copy = (VertexInputInfo)MemberwiseClone();
+        copy.Stage = stage;
+        return copy;
+    }
 }
 
 public sealed record MeshDrawConfiguration
@@ -328,6 +335,13 @@ public sealed class PixelInputInfo
     {
         var copy = (PixelInputInfo)MemberwiseClone();
         copy.Stage = default;
+        return copy;
+    }
+
+    internal PixelInputInfo CopyWithStage(in ShaderStageResources stage)
+    {
+        var copy = (PixelInputInfo)MemberwiseClone();
+        copy.Stage = stage;
         return copy;
     }
 }

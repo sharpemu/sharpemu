@@ -139,7 +139,8 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
     }
 
     // One shared instance so the live allocation counter spans every buffer and image of a test.
-    public GpuDeviceInfo DeviceInfo => _deviceInfo ??= new GpuDeviceInfo(Vk, Physical, Device);
+    private bool MemoryBudgetSupported { get; init; }
+    public GpuDeviceInfo DeviceInfo => _deviceInfo ??= new GpuDeviceInfo(Vk, Physical, Device) { MemoryBudgetSupported = MemoryBudgetSupported };
 
     public string DeviceName
     {
@@ -150,11 +151,11 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         }
     }
 
-    public static HeadlessVulkan? TryCreate()
+    public static HeadlessVulkan? TryCreate(bool pipelineBinaries = false)
     {
         try
         {
-            return Create();
+            return Create(pipelineBinaries);
         }
         catch (Exception)
         {
@@ -190,6 +191,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
     {
         Vk.DeviceWaitIdle(Device);
         _deviceInfo?.Slabs.Destroy();
+        _deviceInfo?.DxgiBudget?.Dispose();
         Vk.DestroyDevice(Device, null);
         if (_debugUtils is { } debugUtils)
         {
@@ -231,7 +233,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         }
     }
 
-    private static HeadlessVulkan? Create()
+    private static HeadlessVulkan? Create(bool pipelineBinaries)
     {
         var vk = Vk.GetApi();
         uint instanceVersion = Vk.Version10;
@@ -429,8 +431,11 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         var computeSubgroup32 = vulkan13Features.SubgroupSizeControl &&
             (sizeControlProperties.RequiredSubgroupSizeStages & ShaderStageFlags.ComputeBit) != 0 &&
             sizeControlProperties.MinSubgroupSize <= 32 && sizeControlProperties.MaxSubgroupSize >= 32;
+        var sparseTable = SparseAddressTable.CanEnable(vk, physical, family, baseFeatures);
         var enabledFeatures = new PhysicalDeviceFeatures
         {
+            SparseBinding = sparseTable,
+            SparseResidencyBuffer = sparseTable,
             TessellationShader = baseFeatures.TessellationShader,
             GeometryShader = baseFeatures.GeometryShader,
             OcclusionQueryPrecise = baseFeatures.OcclusionQueryPrecise,
@@ -512,6 +517,9 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             vulkan13Features.PNext = &robustness2Features;
         }
         var extensionNames = new List<string>();
+        const string memoryBudget = "VK_EXT_memory_budget";
+        var useMemoryBudget = HasDeviceExtensions(vk, physical, [memoryBudget]);
+        if (useMemoryBudget) extensionNames.Add(memoryBudget);
         if (meshShaders)
         {
             meshFeatures = new PhysicalDeviceMeshShaderFeaturesEXT
@@ -543,6 +551,36 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         const string fillRectangleExtension = "VK_NV_fill_rectangle";
         var fillRectangle = HasDeviceExtensions(vk, physical, [fillRectangleExtension]);
         if (fillRectangle) extensionNames.Add(fillRectangleExtension);
+        PhysicalDevicePageableDeviceLocalMemoryFeaturesEXT pageable = default;
+        PhysicalDeviceMemoryPriorityFeaturesEXT memoryPriority = default;
+        var usePriority = HasDeviceExtensions(vk, physical, [GpuResidency.PriorityExtension, GpuResidency.PageableExtension]) &&
+            GpuResidency.QueryFeatures(vk, physical, &memoryPriority, &pageable);
+        if (usePriority)
+        {
+            pageable.PNext = vulkan13Features.PNext;
+            vulkan13Features.PNext = &memoryPriority;
+            extensionNames.Add(GpuResidency.PriorityExtension);
+            extensionNames.Add(GpuResidency.PageableExtension);
+        }
+        var binary = new PhysicalDevicePipelineBinaryFeaturesKHR { SType = StructureType.PhysicalDevicePipelineBinaryFeaturesKhr };
+        var maintenance = new PhysicalDeviceMaintenance5FeaturesKHR { SType = StructureType.PhysicalDeviceMaintenance5FeaturesKhr, PNext = &binary };
+        if (pipelineBinaries)
+        {
+            string[] names = ["VK_KHR_pipeline_binary", "VK_KHR_maintenance5"];
+            if (HasDeviceExtensions(vk, physical, names))
+            {
+                var query = new PhysicalDeviceFeatures2 { SType = StructureType.PhysicalDeviceFeatures2, PNext = &maintenance };
+                vk.GetPhysicalDeviceFeatures2(physical, &query);
+            }
+            if (!binary.PipelineBinaries || !maintenance.Maintenance5)
+            {
+                vk.DestroyInstance(instance, null);
+                return null;
+            }
+            binary.PNext = vulkan13Features.PNext;
+            vulkan13Features.PNext = &maintenance;
+            extensionNames.AddRange(names);
+        }
         var deviceExtensions = extensionNames.Count > 0 ? SilkMarshal.StringArrayToPtr(extensionNames.ToArray()) : 0;
         var deviceInfo = new DeviceCreateInfo
         {
@@ -569,6 +607,7 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
         vk.GetDeviceQueue(device, family, 0, out var queue);
         var result = new HeadlessVulkan(vk, instance, physical, device, queue, family, apiVersion, enabledFeatures, dynamicRendering)
         {
+            MemoryBudgetSupported = useMemoryBudget,
             SupportsFragmentShaderBarycentric = barycentric,
             SupportsFillRectangle = fillRectangle,
             SupportsMeshShaders = meshShaders,
@@ -580,6 +619,12 @@ internal sealed unsafe class HeadlessVulkan : IDisposable
             RobustBufferAccess2 = robustBufferAccess2,
             NativeFloat16Conversions = nativeFloat16,
         };
+        if (sparseTable)
+        {
+            result.DeviceInfo.SparseQueue = queue;
+            result.DeviceInfo.SparseQueueFamily = family;
+        }
+        result.DeviceInfo.ConfigureResidency(usePriority);
         if (validation)
         {
             result.RegisterDebugMessenger();
@@ -669,6 +714,8 @@ internal sealed class LoggingTickDevice : IGpuTickDevice
     public void EndBuffer(nint buffer, bool hostRead) => _inner.EndBuffer(buffer, hostRead);
 
     public IGpuCommandBufferSource CreateBufferSource() => _inner.CreateBufferSource();
+
+    public void ReleaseBufferSource(IGpuCommandBufferSource source) => _inner.ReleaseBufferSource(source);
 
     public bool TrySubmit(ReadOnlySpan<nint> buffers, SubmitBundle bundle, out string failure)
     {

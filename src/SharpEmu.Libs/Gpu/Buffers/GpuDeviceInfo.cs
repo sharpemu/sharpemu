@@ -14,8 +14,31 @@ public sealed unsafe class GpuDeviceInfo : IImageFormatSupport
     // Two threads may query the same missing key once each; the driver answers identically.
     private readonly System.Collections.Concurrent.ConcurrentDictionary<Format, FormatProperties> _formatProperties = new();
     private readonly System.Collections.Concurrent.ConcurrentDictionary<(Format, ImageType, ImageTiling, ImageUsageFlags, ImageCreateFlags), (Result Result, ImageFormatProperties Properties)> _imageFormatProperties = new();
+    // Vulkan may recycle a handle as soon as its resource is destroyed.
+    private long _descriptorGeneration;
+    internal long DescriptorGeneration => Volatile.Read(ref _descriptorGeneration);
+    internal void InvalidateDescriptorResources() => Interlocked.Increment(ref _descriptorGeneration);
+
     private int _liveAllocations;
     private int _peakAllocations;
+
+    internal uint SparseQueueFamily { get; set; }
+    internal Silk.NET.Vulkan.Queue SparseQueue { get; set; }
+    internal bool MemoryBudgetSupported { get; init; }
+    internal uint LocalBudgetHeap { get; } = uint.MaxValue;
+    internal Func<uint, ulong, ulong>? ReleaseIdleMemory { get; set; }
+
+    internal GpuResidency? Residency { get; private set; }
+    internal DxgiLocalBudget? DxgiBudget { get; private set; }
+
+    internal void ConfigureResidency(bool supported)
+    {
+        var proc = supported ? (nint)Vk.GetDeviceProcAddr(Device, "vkSetDeviceMemoryPriorityEXT").Handle : 0;
+        if (supported && proc == 0) throw new InvalidOperationException("vkSetDeviceMemoryPriorityEXT is missing on the enabled device.");
+        if (supported) Residency = new GpuResidency((memory, priority) =>
+            ((delegate* unmanaged<Device, DeviceMemory, float, void>)proc)(Device, memory, priority));
+        if (LocalBudgetHeap != uint.MaxValue) DxgiBudget = DxgiLocalBudget.Open(Vk, PhysicalDevice);
+    }
 
     // VK_EXT_image_view_min_lod is enabled, so a view can clamp to a texture descriptor's MIN_LOD.
     public bool ImageViewMinLodSupported { get; init; }
@@ -27,6 +50,16 @@ public sealed unsafe class GpuDeviceInfo : IImageFormatSupport
         Device = device;
         vk.GetPhysicalDeviceMemoryProperties(physicalDevice, out _memoryProperties);
         vk.GetPhysicalDeviceProperties(physicalDevice, out var properties);
+        if (properties.DeviceType == PhysicalDeviceType.DiscreteGpu)
+        {
+            for (uint heap = 0; heap < MemoryHeapCount; heap++)
+            {
+                if (IsDeviceLocalHeap(heap) && (LocalBudgetHeap == uint.MaxValue || GetMemoryHeapSize(heap) > GetMemoryHeapSize(LocalBudgetHeap)))
+                {
+                    LocalBudgetHeap = heap;
+                }
+            }
+        }
         MinUniformBufferOffsetAlignment = Math.Max(properties.Limits.MinUniformBufferOffsetAlignment, 1);
         MinStorageBufferOffsetAlignment = Math.Max(properties.Limits.MinStorageBufferOffsetAlignment, 1);
         NonCoherentAtomSize = Math.Max(properties.Limits.NonCoherentAtomSize, 1);
@@ -178,30 +211,61 @@ public sealed unsafe class GpuDeviceInfo : IImageFormatSupport
     // Tests: memory types whose allocations fail as when their heap is exhausted.
     internal Func<uint, bool>? SimulateExhaustedMemoryType { get; set; }
 
-    // Every device-memory allocation goes through here so the live count stays exact.
-    public Result AllocateMemory(in MemoryAllocateInfo info, out DeviceMemory memory)
+    // A small BAR heap and system memory cannot supply an allocation from the main local heap.
+    internal (ulong Budget, ulong Usage) ReadLocalBudget()
     {
-        if (SimulateExhaustedMemoryType is { } exhausted && exhausted(info.MemoryTypeIndex))
+        if (!MemoryBudgetSupported || LocalBudgetHeap == uint.MaxValue)
+            return default;
+        var budget = new PhysicalDeviceMemoryBudgetPropertiesEXT { SType = StructureType.PhysicalDeviceMemoryBudgetPropertiesExt };
+        var properties = new PhysicalDeviceMemoryProperties2 { SType = StructureType.PhysicalDeviceMemoryProperties2, PNext = &budget };
+        Vk.GetPhysicalDeviceMemoryProperties2(PhysicalDevice, &properties);
+        return (budget.HeapBudget[(int)LocalBudgetHeap], budget.HeapUsage[(int)LocalBudgetHeap]);
+    }
+
+    private Result AllocateOnce(MemoryAllocateInfo* info, out DeviceMemory memory)
+    {
+        if (SimulateExhaustedMemoryType?.Invoke(info->MemoryTypeIndex) == true)
         {
             memory = default;
             return Result.ErrorOutOfDeviceMemory;
         }
+        return Vk.AllocateMemory(Device, info, null, out memory);
+    }
 
-        fixed (MemoryAllocateInfo* pointer = &info)
+    // Every device-memory allocation goes through here so the live count stays exact.
+    public Result AllocateMemory(in MemoryAllocateInfo info, out DeviceMemory memory) =>
+        AllocateMemory(info, out memory, GpuResidency.Role.Other);
+
+    internal Result AllocateMemory(in MemoryAllocateInfo info, out DeviceMemory memory, GpuResidency.Role role)
+    {
+        var local = Residency is not null && IsDeviceLocalHeap(GetMemoryHeapIndex(info.MemoryTypeIndex)) ? Residency : null;
+        var initial = local?.Initial(role) ?? GpuResidency.Band.Default;
+        var priority = new MemoryPriorityAllocateInfoEXT { SType = StructureType.MemoryPriorityAllocateInfoExt,
+            Priority = GpuResidency.Value(initial), PNext = info.PNext };
+        var allocation = info;
+        if (initial != GpuResidency.Band.Default) allocation.PNext = &priority;
+        var result = AllocateOnce(&allocation, out memory);
+        if (result == Result.ErrorOutOfDeviceMemory && ReleaseIdleMemory is { } release)
         {
-            var result = Vk.AllocateMemory(Device, pointer, null, out memory);
-            if (result == Result.Success)
+            var heap = GetMemoryHeapIndex(info.MemoryTypeIndex);
+            var freed = release(heap, info.AllocationSize);
+            if (freed != 0)
             {
-                var live = Interlocked.Increment(ref _liveAllocations);
-                int peak;
-                while ((peak = Volatile.Read(ref _peakAllocations)) < live &&
-                       Interlocked.CompareExchange(ref _peakAllocations, live, peak) != peak)
-                {
-                }
+                result = AllocateOnce(&allocation, out memory);
             }
-
-            return result;
         }
+        if (result == Result.Success)
+        {
+            local?.Add(memory, role, initial);
+            var live = Interlocked.Increment(ref _liveAllocations);
+            int peak;
+            while ((peak = Volatile.Read(ref _peakAllocations)) < live &&
+                   Interlocked.CompareExchange(ref _peakAllocations, live, peak) != peak)
+            {
+            }
+        }
+
+        return result;
     }
 
     public void FreeMemory(DeviceMemory memory)
@@ -211,6 +275,7 @@ public sealed unsafe class GpuDeviceInfo : IImageFormatSupport
             return;
         }
 
+        Residency?.Remove(memory);
         Vk.FreeMemory(Device, memory, null);
         Interlocked.Decrement(ref _liveAllocations);
     }

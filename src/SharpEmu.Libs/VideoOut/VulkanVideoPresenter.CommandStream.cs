@@ -78,7 +78,7 @@ internal static unsafe partial class VulkanVideoPresenter
         ArgumentNullException.ThrowIfNull(work);
         if (TryGetActivePresenter(out var presenter))
         {
-            if (presenter.Relay.TryRunAfterAcceptedCommandStreams(work))
+            if (presenter.Relay.TryRunAfterAcceptedCommandStreams(() => presenter.RunOrderedVideoOutChange(work)))
             {
                 return;
             }
@@ -808,7 +808,9 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 // The translation state belongs to this thread; the queue context to the render thread.
                 _translation.BeginSubmission(queueId, submissionId, geometrySnapshots, _commandStream.GetInterpreter(queueId));
-                _commandThread!.Post(() => BeginSubmissionContext(queueId, submissionId));
+                // Workers use queue-independent recording buffers. The join binds their
+                // submission context and adopts occlusion queries on the render thread.
+                _commandThread!.PostBetweenSegments(() => BeginSubmissionContext(queueId, submissionId));
                 return;
             }
             BeginSubmissionContext(queueId, submissionId);
@@ -842,7 +844,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             if (OnCommandThread)
             {
-                _commandThread!.Post(FlushSlice);
+                _commandThread!.PostBetweenSegments(FlushSlice);
                 return;
             }
 
@@ -865,6 +867,14 @@ internal static unsafe partial class VulkanVideoPresenter
         }
 
         private long _framesEnded;
+
+        public bool TryDeferFrameBoundary(Action acknowledge)
+        {
+            if (!OnCommandThread || _commandThread!.Executed >= _lastAsyncFlipSequence) return false;
+            FlushFrame();
+            _commandThread.Post(acknowledge);
+            return true;
+        }
 
         private void EndFrame()
         {
@@ -1044,7 +1054,14 @@ internal static unsafe partial class VulkanVideoPresenter
             if (OnCommandThread)
             {
                 var queued = write;
-                _commandThread!.Post(() => RecordEndOfPipe(in queued));
+                Action record = () => RecordEndOfPipe(in queued);
+                // These forms annotate the recording. The actual guest store has its own
+                // ordered item. Keep completion actions and soft-wait landing points as cuts.
+                if (write.Landing is null && write.Kind is (EndOfPipeWriteKind.Write32 or EndOfPipeWriteKind.Write64 or
+                    EndOfPipeWriteKind.WriteBack32 or EndOfPipeWriteKind.WriteBack64))
+                    _commandThread!.PostBetweenSegments(record);
+                else
+                    _commandThread!.Post(record);
                 return;
             }
             using var completionScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.CommandEndOfPipe);
@@ -1115,11 +1132,42 @@ internal static unsafe partial class VulkanVideoPresenter
             _endOfPipeEvents.TriggerInterrupt(eventId, contextId);
         }
 
+        // The command thread admits flips. A reserved slot transfers to the presentation FIFO
+        // under the same lock as ordered capture.
+        private HashSet<ulong>? _uncapturedGpuFlips;
+        private Exception? _flipCaptureFailure;
+        private long _lastAsyncFlipSequence;
+
+        // A render failure can stop the consumer before the posted capture even starts.
+        private void AbortPendingFlipCaptures(Exception exception)
+        {
+            lock (_gate)
+            {
+                _flipCaptureFailure ??= exception;
+                if (_uncapturedGpuFlips is not { Count: > 0 }) return;
+            }
+            _commandThread?.ReportFailure(exception);
+            FailGuestPublications(exception);
+        }
+
+        // Ordered control callbacks execute on the parser. A port close or buffer unregister
+        // must see every earlier capture finish.
+        internal void RunOrderedVideoOutChange(Action work)
+        {
+            WaitForPendingFlipCapture();
+            work();
+        }
+
+        public void WaitForPendingFlipCapture()
+        {
+            if (OnCommandThread) _commandThread!.WaitPending(_lastAsyncFlipSequence);
+        }
+
         public bool HasFlipSlot()
         {
             lock (_gate)
             {
-                return _pendingGuestImagePresentations.Count < MaxPendingGuestFlipVersions;
+                return _pendingGuestImagePresentations.Count + (_uncapturedGpuFlips?.Count ?? 0) < MaxPendingGuestFlipVersions;
             }
         }
 
@@ -1130,6 +1178,8 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             if (OnCommandThread)
             {
+                if (!_guestPublications.HasQueue(queueId) && _translation.TryEndFrameBeforeCapture(handle, index))
+                    return PostGpuFlip(handle, index, flipMode, flipArgument);
                 return _commandThread!.Run(() => PrepareFlip(queueId, handle, index, flipMode, flipArgument));
             }
             EnsureBatchedGuestCommands();
@@ -1152,7 +1202,60 @@ internal static unsafe partial class VulkanVideoPresenter
             finally { _capturePublication = null; }
         }
 
+        private ulong PostGpuFlip(int handle, int index, int flipMode, long flipArgument, FlipPublicationDecision? decision = null)
+        {
+            ulong request = 0;
+            try
+            {
+                request = VideoOutExports.AllocateGpuFlipId(handle, index);
+                lock (_gate)
+                {
+                    // Failure closes admission before it takes this lock to cancel queued flips.
+                    if (_flipCaptureFailure is { } failure)
+                        throw new InvalidOperationException("GPU flip capture has failed.", failure);
+                    (_uncapturedGpuFlips ??= new()).Add(request);
+                }
+                _commandThread!.Post(() => CaptureReservedFlip(handle, index, flipMode, flipArgument, request, decision));
+                _lastAsyncFlipSequence = _commandThread.NextSequence - 1;
+                return request;
+            }
+            catch (Exception exception)
+            {
+                if (request != 0) VideoOutExports.CancelFlip(request);
+                FailGuestPublications(exception);
+                throw;
+            }
+        }
+
+        private void CaptureReservedFlip(int handle, int index, int flipMode, long flipArgument, ulong request, FlipPublicationDecision? decision)
+        {
+            try
+            {
+                _commandThread!.ThrowIfFailed();
+                EnsureBatchedGuestCommands();
+                if (decision is not null) CaptureAndPublishFlip(decision, request);
+                else PublishAndCaptureGpuFlip(handle, index, request, flipMode, flipArgument);
+                // No-buffer and lost-device captures do not enqueue a presentation.
+                lock (_gate) _uncapturedGpuFlips?.Remove(request);
+            }
+            catch (Exception exception)
+            {
+                VideoOutExports.CancelFlip(request);
+                FailGuestPublications(exception);
+                throw;
+            }
+        }
+
         public bool IsFlipDone(int handle, int index) => VideoOutExports.IsFlipDone(handle, index);
+
+        private void PublishAndCaptureGpuFlip(int handle, int index, ulong request, int flipMode, long flipArgument)
+        {
+            _translation.SyncFlipImages();
+            var result = VideoOutExports.TryReserveFlipRequest(handle, index, flipMode, flipArgument, gpuQueued: true, out _, request);
+            if (result != 0)
+                throw SubmissionScheduler.Fatal($"Could not submit the GPU flip: result={result} handle={handle} index={index} mode={flipMode} arg={flipArgument}");
+            CaptureFlip(handle, index, request, flipMode, flipArgument);
+        }
 
         public void PrepareCpuFlip(int handle, int index, ulong requestId)
         {
@@ -1283,10 +1386,13 @@ internal static unsafe partial class VulkanVideoPresenter
             VideoOutExports.CompleteFlip(requestId);
         }
 
+        internal Action? FlipCaptureStartedForTest = null;
+
         // Copies the display surface through the store; presentation shows the copy once its tick retires.
         internal void CaptureFlip(int handle, int index, ulong requestId, int flipMode, long flipArg)
         {
             var publication = _capturePublication ?? _guestPublications.LastRecorded(0);
+            FlipCaptureStartedForTest?.Invoke();
             // A no-buffer flip has no image to capture; its completion still retires in order.
             if (index == -1)
             {
@@ -1398,6 +1504,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         Publication: publication);
                     _latestPresentation = presentation;
                     _pendingGuestImagePresentations.Enqueue(presentation);
+                    _uncapturedGpuFlips?.Remove(requestId);
                     while (_pendingGuestImagePresentations.Count > MaxPendingGuestFlipVersions)
                     {
                         RetirePresentation(_pendingGuestImagePresentations.Dequeue());

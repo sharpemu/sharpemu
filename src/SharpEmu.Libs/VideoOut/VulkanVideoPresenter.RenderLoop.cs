@@ -108,6 +108,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             catch (Exception exception)
             {
+                AbortPendingFlipCaptures(exception);
                 RenderDocCapture.DiscardFrame();
                 // Device loss can strike between any two Vulkan calls in the frame;
                 // keep the window loop pumping instead of tearing the presenter down.
@@ -136,6 +137,11 @@ internal static unsafe partial class VulkanVideoPresenter
                 return;
             }
 
+            var now = Environment.TickCount64;
+            _arenaPool?.TrimUnderPressure(now);
+            _arenaPool?.TrimSurplus(now);
+            _hostBufferPool.TrimIdleSpills(now);
+            _arenaPool?.TrimIdle(now);
             using (RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.QueueRelay))
             {
                 _relay.RunPendingCommands();

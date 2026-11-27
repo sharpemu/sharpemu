@@ -16,6 +16,7 @@ using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Vulkan;
 using Xunit;
+using LinkedCompileAdmission = SharpEmu.Libs.VideoOut.LinkedCompileAdmission;
 
 namespace SharpEmu.Libs.Tests.VideoOut;
 
@@ -137,13 +138,13 @@ public sealed class ShaderPrewarmPresenterTests(HeadlessVulkanFixture fixture) :
     {
         var presenter = RuntimeHelpers.GetUninitializedObject(PresenterUnderTest.PresenterType);
         var wait = PresenterUnderTest.PresenterType.GetMethod("WaitForLinkedAdmission", PresenterUnderTest.InstanceMembers)!;
-        var admission = (SharpEmu.Libs.VideoOut.LinkedCompileAdmission)PresenterUnderTest.PresenterType
+        var admission = (LinkedCompileAdmission)PresenterUnderTest.PresenterType
             .GetField("_linkedCompileAdmission", BindingFlags.Static | BindingFlags.NonPublic)!.GetValue(null)!;
         const long large = 8L << 20;
-        var running = admission.TryAdmit(large, out _, out _);
+        var running = admission.Admit(large, out _, out _) == LinkedCompileAdmission.Result.Admitted;
         try
         {
-            var answer = Task.Run(() => (bool)wait.Invoke(presenter, [1UL, large, false])!);
+            var answer = Task.Run(() => (bool)wait.Invoke(presenter, [1UL, large, LinkedCompileAdmission.Source.BootPrewarm])!);
             Assert.True(answer.Wait(TimeSpan.FromSeconds(10)));
             Assert.False(answer.Result);
         }

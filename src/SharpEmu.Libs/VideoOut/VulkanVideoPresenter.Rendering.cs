@@ -181,7 +181,7 @@ internal static unsafe partial class VulkanVideoPresenter
                             {
                                 if (CommandsRecorded && StencilStorageWriteBackImages is not null &&
                                     StencilStorageWriteBackImages.Contains(attachment))
-                                    attachment.CopyStencilStorage(storage, owner._bufferCache.GetUtilityBuffer(GpuBufferUsage.DeviceLocal), writeBack: true);
+                                    attachment.CopyStencilStorage(storage, owner._bufferCache.GetTransferRing(GpuBufferUsage.DeviceLocal, storage.Description.Data.Size), writeBack: true);
                             }
                             finally
                             {
@@ -210,7 +210,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
                     foreach (var (buffer, memory) in OverflowBuffers)
                     {
-                        owner._presenter.RecycleHostBuffer(buffer, memory);
+                        owner._presenter.RecycleHostBuffer(buffer, memory, spill: true);
                     }
                 }
                 finally
@@ -354,6 +354,12 @@ internal static unsafe partial class VulkanVideoPresenter
             SynchronizeColorMetadata(request);
             if (_worker)
             {
+                if (request.Description.Metadata.NativeColorClear)
+                {
+                    var found = LookUpImage(ref request, exactFormat, nativeClearFollows: true);
+                    ApplyNativeColorClear(found, request);
+                    return found;
+                }
                 return LookUpImage(ref request, exactFormat);
             }
 
@@ -370,14 +376,14 @@ internal static unsafe partial class VulkanVideoPresenter
             return imageIdentifier;
         }
 
-        private ResourceSlotIdentifier LookUpImage(ref ImageRequest request, bool exactFormat = false)
+        private ResourceSlotIdentifier LookUpImage(ref ImageRequest request, bool exactFormat = false, bool nativeClearFollows = false)
         {
             if (!_worker)
             {
                 return _imageCache.FindImage(ref request, exactFormat);
             }
 
-            if (_imageCache.TryFindImageForSlice(ref request, exactFormat, out var found))
+            if (_imageCache.TryFindImageForSlice(ref request, exactFormat, out var found, nativeClearFollows))
             {
                 return found;
             }
@@ -573,7 +579,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var preparation = RequirePreparation();
-            var stream = _bufferCache.GetUtilityBuffer(GpuBufferUsage.Stream);
+            var stream = _bufferCache.GetTransferRing(GpuBufferUsage.Stream, (ulong)data.Length);
             if (stream.TryMap((ulong)data.Length, out var offset, alignment))
             {
                 data.CopyTo(stream.Mapped[(int)offset..]);
@@ -657,7 +663,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
             EnsureGuestSubmissionCapacity();
             EnsureBatchedGuestCommands();
-            _preparation = (_sparePreparation ??= new RenderPreparation(this)).Open(_bufferCache.GetUtilityBuffer(GpuBufferUsage.Stream).RetainUpcomingAllocations());
+            _preparation = (_sparePreparation ??= new RenderPreparation(this)).Open(_bufferCache.GetTransferRing(GpuBufferUsage.Stream, 0).RetainUpcomingAllocations());
             // An owner merged while the scope is open retires only after it closes: the scope's bindings may still name it.
             _bufferCache.BeginPreparation();
             return _preparation;

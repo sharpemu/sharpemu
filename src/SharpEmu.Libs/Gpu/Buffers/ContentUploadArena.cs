@@ -12,13 +12,14 @@ namespace SharpEmu.Libs.Gpu.Buffers;
 
 public sealed class ContentUploadArena : IDisposable
 {
-    private const ulong ArenaBytes = 32UL * 1024 * 1024;
+    private const int CompactKeyLimit = 16384;
+    private readonly int _keyLimit;
     private const int MaxContentBytes = 64 * 1024;
 
     private sealed class Arena(GpuBuffer buffer)
     {
         public readonly GpuBuffer Buffer = buffer;
-        public readonly byte[] Mirror = GC.AllocateUninitializedArray<byte>((int)ArenaBytes);
+        public readonly byte[] Mirror = GC.AllocateUninitializedArray<byte>((int)buffer.Size);
         public readonly Dictionary<ulong, (ulong Offset, int Size)> Entries = new();
         public readonly Dictionary<uint[], (ulong Offset, int Size)> IdentityEntries = new(ReferenceEqualityComparer.Instance);
         public ulong Offset;
@@ -27,6 +28,8 @@ public sealed class ContentUploadArena : IDisposable
 
     private readonly SubmissionScheduler _scheduler;
     private readonly Arena[] _arenas;
+    internal int IdentityKeys => _arenas.Sum(arena => arena.IdentityEntries.Count);
+    internal int HashKeys => _arenas.Sum(arena => arena.Entries.Count);
     private int _active;
 
     private static readonly ThreadCounter _hits = new();
@@ -37,12 +40,17 @@ public sealed class ContentUploadArena : IDisposable
     private static readonly ThreadCounter _collisions = new();
 
     public ContentUploadArena(GpuDeviceInfo device, SubmissionScheduler scheduler)
+        : this(device, scheduler, GcFootprint.UseCompactBuffers) { }
+
+    internal ContentUploadArena(GpuDeviceInfo device, SubmissionScheduler scheduler, bool compact)
     {
+        var arenaBytes = compact ? 8UL << 20 : 32UL << 20;
+        _keyLimit = compact ? CompactKeyLimit : int.MaxValue;
         _scheduler = scheduler;
         _arenas =
         [
-            new Arena(new GpuBuffer(device, scheduler, GpuMemoryPlacement.StreamRing, 0, GpuBuffer.AddressedFlags, ArenaBytes)),
-            new Arena(new GpuBuffer(device, scheduler, GpuMemoryPlacement.StreamRing, 0, GpuBuffer.AddressedFlags, ArenaBytes)),
+            new Arena(new GpuBuffer(device, scheduler, GpuMemoryPlacement.StreamRing, 0, GpuBuffer.AddressedFlags, arenaBytes)),
+            new Arena(new GpuBuffer(device, scheduler, GpuMemoryPlacement.StreamRing, 0, GpuBuffer.AddressedFlags, arenaBytes)),
         ];
     }
 
@@ -76,6 +84,7 @@ public sealed class ContentUploadArena : IDisposable
             return false;
         }
 
+        if (stored.IdentityEntries.Count == _keyLimit) stored.IdentityEntries.Clear();
         stored.IdentityEntries[words] = (offset, words.Length * sizeof(uint));
         return true;
     }
@@ -117,6 +126,7 @@ public sealed class ContentUploadArena : IDisposable
             return false;
         }
 
+        if (stored.Entries.Count == _keyLimit) stored.Entries.Clear();
         stored.Entries[hash] = (offset, data.Length);
         return true;
     }
@@ -145,7 +155,7 @@ public sealed class ContentUploadArena : IDisposable
     {
         var active = _arenas[_active];
         var aligned = (active.Offset + alignment - 1) / alignment * alignment;
-        if (aligned + (ulong)data.Length > ArenaBytes)
+        if (aligned + (ulong)data.Length > active.Buffer.Size)
         {
             var other = _arenas[1 - _active];
             if (other.LastUseTick > _scheduler.CompletedTick)

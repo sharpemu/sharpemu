@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.Diagnostics;
+using SharpEmu.HLE.GpuMemory;
+using SharpEmu.Libs.Gpu.Scheduling;
 
 namespace SharpEmu.Libs.Gpu.Buffers;
 
@@ -30,6 +32,45 @@ public sealed class BufferSnapshot
     public long Serial { get; }
 
     public int Count => _addresses.Length;
+
+    // Recording workers can resolve the immutable mapping to an ordered list of owners.
+    // A newer registry snapshot owns a different plan. A mutable caller must still match every span.
+    private sealed record TouchPlan(GuestSpan[] Spans, ResourceSlotIdentifier[] Owners);
+    private TouchPlan? _touchPlan;
+
+    internal void PrepareTouches(List<GuestSpan> spans)
+    {
+        if (TryGetTouches(spans, out _)) return;
+        var copy = spans.ToArray();
+        var owners = new List<ResourceSlotIdentifier>();
+        var index = 0;
+        ulong previousEnd = 0;
+        foreach (var span in copy)
+        {
+            if (!span.IsValid || span.Size == 0 || span.Address < previousEnd) return;
+            previousEnd = span.End;
+            while (index < Count && _ends[index] <= span.Address) index++;
+            for (var next = index; next < Count && _addresses[next] < span.End; next++)
+            {
+                if (owners.Count == 0 || owners[^1] != _identifiers[next])
+                    owners.Add(_identifiers[next]);
+            }
+        }
+        Volatile.Write(ref _touchPlan, new TouchPlan(copy, owners.ToArray()));
+    }
+
+    internal bool TryGetTouches(IReadOnlyList<GuestSpan> spans, out ResourceSlotIdentifier[] owners)
+    {
+        var plan = Volatile.Read(ref _touchPlan);
+        if (plan is not null && spans is List<GuestSpan> list &&
+            System.Runtime.InteropServices.CollectionsMarshal.AsSpan(list).SequenceEqual(plan.Spans))
+        {
+            owners = plan.Owners;
+            return true;
+        }
+        owners = [];
+        return false;
+    }
 
     public bool TryFind(ulong address, ulong size, out GpuBuffer buffer, out ResourceSlotIdentifier identifier)
     {
@@ -147,6 +188,7 @@ public sealed unsafe partial class GuestBufferCache
     }
 
     private static readonly bool HeldSliceUses = Environment.GetEnvironmentVariable("SHARPEMU_HELD_SLICE_USES") != "0";
+    private ObtainMemo[]? _sliceReadProofs;
     private static readonly ThreadCounter _heldSliceUses = new();
     private static readonly ThreadCounter _obtainedSliceUses = new();
 
@@ -161,18 +203,69 @@ public sealed unsafe partial class GuestBufferCache
         }
 
         CompleteGuestPublications?.Invoke(use.Address, use.Size, PublicationAccess.OverlaidRead);
-        var identifier = _registry.FindContainingBuffer(use.Address, use.Size);
         var buffer = use.Buffer;
-        if (!ReferenceEquals(_registry.TryGetRegisteredBuffer(identifier), buffer) || !buffer.IsInBounds(use.Address, use.Size) ||
-            _tracker.MayHaveCpuDirtyPages(use.Address, use.Size))
+        ResourceSlotIdentifier identifier;
+        _sliceReadProofs ??= new ObtainMemo[512];
+        // Page-aligned buffers often have equal low address bits.
+        var slot = ((ObtainMemoSet(use.Address, use.Size) >> 1) ^ (int)(use.Address >> 12)) & 511;
+        ref var proof = ref _sliceReadProofs[slot];
+        if (!proof.Holds(use.Address, use.Size) || !ReferenceEquals(proof.Buffer, buffer))
         {
-            return false;
+            identifier = _registry.FindContainingBuffer(use.Address, use.Size);
+            proof = new ObtainMemo(use.Address, use.Size, identifier, 0, buffer);
         }
+        if (!IsCleanOwner(ref proof, use.Address, use.Size)) return false;
+        identifier = proof.Identifier;
 
         TouchBuffer(identifier);
         OverlayGuestPublications?.Invoke(buffer, buffer.Offset(use.Address), use.Address, use.Size);
         _heldSliceUses.Increment();
         return true;
+    }
+
+    internal long CpuDirtyEpoch => _tracker.CpuDirtyEpoch;
+
+    // Only the presenter supplies this proof. Its two read callbacks complete or overlay
+    // overlapping dumps. Writes, texel reads and invalidations retain their ordered effects.
+    internal int ApplyRecordedBufferUses(List<BufferSliceUse> uses, long serial, long? cleanEpoch,
+        PendingGuestPublications publications)
+    {
+        if (!cleanEpoch.HasValue || !HeldSliceUses || ObtainMemoUse != ObtainMemoMode.On)
+        {
+            foreach (var use in uses) ApplySliceUse(in use);
+            return 0;
+        }
+
+        var held = 0;
+        var previousOwner = ResourceSlotIdentifier.Invalid;
+        foreach (var use in uses)
+        {
+            // A preceding full obtain can merge owners, submit or upload. Recheck at the position of each use.
+            if (use.Written || use.Texel || use.InvalidateImages || serial != RegistrationSerial ||
+                !use.Buffer.CacheIdentifier.IsValid || !publications.TryGetClearReadSnapshot(use.Address, use.Size, out var readDumps) ||
+                (cleanEpoch.Value != CpuDirtyEpoch && _tracker.MayHaveCpuDirtyPages(use.Address, use.Size)))
+            {
+                ApplySliceUse(in use);
+                previousOwner = ResourceSlotIdentifier.Invalid;
+                continue;
+            }
+
+            // No collection tick can change between consecutive fast reads on this thread.
+            if (previousOwner != use.Buffer.CacheIdentifier)
+            {
+                previousOwner = use.Buffer.CacheIdentifier;
+                TouchBuffer(previousOwner);
+            }
+            // A dump may have arrived since the completion check, as in TryHoldSliceUse.
+            if (publications.MayNeedNewOverlay(readDumps))
+            {
+                OverlayGuestPublications?.Invoke(use.Buffer, use.Buffer.Offset(use.Address), use.Address, use.Size);
+                previousOwner = ResourceSlotIdentifier.Invalid;
+            }
+            held++;
+        }
+        if (held != 0) _heldSliceUses.Add(held);
+        return held;
     }
 
     public void ApplySliceUse(in BufferSliceUse use)

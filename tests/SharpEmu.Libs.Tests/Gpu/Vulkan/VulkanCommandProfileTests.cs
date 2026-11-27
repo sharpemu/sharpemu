@@ -24,6 +24,46 @@ public sealed class VulkanCommandProfileTests(HeadlessVulkanFixture fixture) : I
     }
 
     [Fact]
+    public void WorkerRecordingsShareOnePoolAcrossCompletedSubmissions()
+    {
+        var vk = fixture.Vulkan;
+        if (!GatePrerequisites.Ready(vk)) return;
+        var device = new VulkanTickDevice(vk.Vk, vk.Device, vk.Queue, vk.QueueFamily, vk.QueueGate);
+        var rendering = new RecordingRenderingState();
+        using var scheduler = new SubmissionScheduler(device, rendering);
+        var stock = new WorkerCommandPools(scheduler, rendering);
+        var spare = new System.Collections.Concurrent.ConcurrentBag<RecordingBuffer>();
+        const int count = 32;
+        var shells = new RecordingBuffer[count];
+        var handles = new nint[count];
+        for (var wave = 0; wave < 4; wave++)
+        {
+            var tick = scheduler.Timeline.ReserveTick();
+            for (var index = 0; index < count; index++)
+            {
+                var shell = shells[index] = stock.Take(spare, 100 + wave);
+                var handle = handles[index] = shell.Ring.AcquireWorkerHandle();
+                shell.Source.BeginBuffer(handle);
+                shell.Source.EndBuffer(handle, hostRead: true);
+            }
+            var submit = new SubmitBundle();
+            submit.AddSignal(device.TimelineHandle, tick);
+            lock (device.QueueGate)
+                Assert.True(device.TrySubmit(handles, submit, out var reason), reason);
+            for (var i = 0; i < count; i++)
+            {
+                shells[i].Ring.Submitted(handles[i], tick);
+                spare.Add(shells[i]);
+            }
+            scheduler.Timeline.Wait(tick);
+        }
+        var buffers = shells.Sum(shell => shell.Ring.Count);
+        var pools = shells.Select(shell => shell.Source).Distinct().Count();
+        Assert.Equal(1, pools);
+        Assert.Equal(count, buffers);
+    }
+
+    [Fact]
     public void OverlappingSubmissionsCountOnceTowardsBusyTime()
     {
         var spans = new List<(ulong Start, ulong End)> { (100, 150), (0, 40), (140, 200), (30, 60), (300, 310) };

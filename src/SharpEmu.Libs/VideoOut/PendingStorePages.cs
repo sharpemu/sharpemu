@@ -15,6 +15,13 @@ internal sealed class PendingStorePages
     public const int LargePages = 16;
     private const int BucketShift = 52;
 
+    private struct DirectPage
+    {
+        public long Tag;
+        public int Count;
+    }
+    private DirectPage[]? _direct;
+
     private readonly ConcurrentDictionary<ulong, int> _pages = new();
     private readonly int[] _buckets = new int[1 << (64 - BucketShift)];
     private readonly List<(ulong Address, ulong End)> _large = new();
@@ -70,6 +77,22 @@ internal sealed class PendingStorePages
         for (var page = address >> PageShift; page <= last; page++)
         {
             var bucket = Bucket(page);
+            var count = _buckets[bucket];
+            var direct = _direct;
+            if (delta > 0 && count == 0)
+            {
+                if (direct is null) Volatile.Write(ref _direct, direct = new DirectPage[_buckets.Length]);
+                Volatile.Write(ref direct[bucket].Tag, (long)page + 1);
+            }
+            // Writers already own the store queue lock. A tag first installed into an empty
+            // bucket accounts for this page until its last removal, including across live flips.
+            if (direct is not null && direct[bucket].Tag == (long)page + 1)
+            {
+                direct[bucket].Count += delta;
+                if (direct[bucket].Count == 0) Volatile.Write(ref direct[bucket].Tag, 0);
+                Volatile.Write(ref _buckets[bucket], count + delta);
+                continue;
+            }
             if (delta > 0)
             {
                 Volatile.Write(ref _buckets[bucket], _buckets[bucket] + 1);
@@ -102,7 +125,10 @@ internal sealed class PendingStorePages
         var last = (address + size - 1) >> PageShift;
         for (var page = first; page <= last; page++)
         {
-            if ((!prefilter || Volatile.Read(ref _buckets[Bucket(page)]) != 0) && _pages.ContainsKey(page))
+            var bucket = Bucket(page);
+            if (prefilter && Volatile.Read(ref _buckets[bucket]) == 0) continue;
+            var direct = Volatile.Read(ref _direct);
+            if ((direct is not null && Volatile.Read(ref direct[bucket].Tag) == (long)page + 1) || _pages.ContainsKey(page))
             {
                 return true;
             }

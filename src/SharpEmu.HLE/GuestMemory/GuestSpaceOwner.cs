@@ -26,7 +26,13 @@ public sealed class GuestSpaceOwner : IDisposable
     private readonly IHostViewMemory _host;
     private readonly SharedBackingViews _views;
     private readonly object _mappingLock = new();
-    private readonly object[] _protectionLocks = CreateProtectionLocks();
+    private long _mappingVersion;
+    private sealed class ProtectionStripe
+    {
+        public long Version;
+        public ulong Begin, End;
+    }
+    private readonly ProtectionStripe[] _protectionLocks = CreateProtectionLocks();
     private readonly SortedList<ulong, ulong> _free = new();
     private readonly OwnedRangeTree _mapped = new();
     private readonly SortedList<ulong, ulong> _owned = new();
@@ -254,7 +260,13 @@ public sealed class GuestSpaceOwner : IDisposable
         return SetAccessLocked(address, size, protection);
     }
 
-    private MappingLockScope EnterMappingLock() => new(_mappingLock, _protectionLocks);
+    private MappingLockScope EnterMappingLock()
+    {
+        var scope = new MappingLockScope(_mappingLock, _protectionLocks);
+        // Every potential view mutation holds all stripes. Readers validate under their stripe.
+        _mappingVersion++;
+        return scope;
+    }
 
     // Mapping changes own every address lock before they inspect or change the range tables.
     // Transient protection needs only its address locks and does not allocate reader state.
@@ -290,10 +302,10 @@ public sealed class GuestSpaceOwner : IDisposable
     private const int ProtectionLockCount = 256;
     private const int ProtectionBlockShift = 22;
 
-    private static object[] CreateProtectionLocks()
+    private static ProtectionStripe[] CreateProtectionLocks()
     {
-        var protectionLocks = new object[ProtectionLockCount];
-        for (var index = 0; index < protectionLocks.Length; index++) protectionLocks[index] = new object();
+        var protectionLocks = new ProtectionStripe[ProtectionLockCount];
+        for (var index = 0; index < protectionLocks.Length; index++) protectionLocks[index] = new ProtectionStripe();
         return protectionLocks;
     }
 
@@ -611,6 +623,13 @@ public sealed class GuestSpaceOwner : IDisposable
         if (_disposed) return false;
         var end = address + size;
         if (size == 0) return true;
+        // A transient range owns at least the stripe of its first byte. A mapping operation owns them all.
+        var hint = _protectionLocks[(address >> ProtectionBlockShift) % ProtectionLockCount];
+        if (hint.Version == _mappingVersion && hint.Begin <= address && end <= hint.End)
+        {
+            using var profile = GpuMemoryAccessProfile.MeasureHostProtectionCall(size);
+            return _host.ChangeAccess(address, size, protection);
+        }
         var range = FindMappedRangeAtOrBelow(address);
         if (range.Size == 0 || range.Address + range.Size <= address)
             range = _mapped.FindAtOrAbove(address);
@@ -622,6 +641,13 @@ public sealed class GuestSpaceOwner : IDisposable
             {
                 using var profile = GpuMemoryAccessProfile.MeasureHostProtectionCall(stop - start);
                 if (!_host.ChangeAccess(start, stop - start, protection)) return false;
+                if (stop == end)
+                {
+                    hint.Begin = range.Address;
+                    hint.End = range.Address + range.Size;
+                    hint.Version = _mappingVersion;
+                    return true;
+                }
             }
             range = _mapped.FindAtOrAbove(range.Address + range.Size);
         }

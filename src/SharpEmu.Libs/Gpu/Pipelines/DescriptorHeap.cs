@@ -131,6 +131,19 @@ public sealed unsafe class DescriptorHeap : IDisposable
         return freshBatch.Sets[--freshBatch.Size];
     }
 
+    internal static void WriteSet(GpuDeviceInfo device, DescriptorSet set, Span<WriteDescriptorSet> writes)
+    {
+        foreach (ref var write in writes)
+        {
+            write.DstSet = set;
+        }
+
+        fixed (WriteDescriptorSet* pointer = writes)
+        {
+            device.Vk.UpdateDescriptorSets(device.Device, (uint)writes.Length, pointer, 0, null);
+        }
+    }
+
     // Halves the batch until the pool has room for it; false when one set does not fit.
     private bool Allocate(DescriptorSetLayout layout, in DescriptorSetDemand demand, SetBatchState batch)
     {
@@ -147,7 +160,7 @@ public sealed unsafe class DescriptorHeap : IDisposable
         DescriptorSet[] sets, ref uint allocation, ref uint remainingSets, ref DescriptorSetDemand remaining)
     {
         var layouts = stackalloc DescriptorSetLayout[(int)SetBatch];
-        for (var index = 0; index < SetBatch; index++)
+        for (var index = 0; index < allocation; index++)
         {
             layouts[index] = layout;
         }

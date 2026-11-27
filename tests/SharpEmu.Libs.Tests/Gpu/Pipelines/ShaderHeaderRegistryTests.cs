@@ -33,6 +33,21 @@ public sealed class ShaderHeaderRegistryTests : IDisposable
         Assert.Equal(first.Registrations, second.Registrations);
     }
 
+    [Fact]
+    public void ReplacingARegisteredHeaderInvalidatesTheReadCache()
+    {
+        var guest = new PipelineTestGuest();
+        guest.RegisterProgram(Code, Header, PipelineTestGuest.EndProgram);
+        var registry = guest.Registry;
+        var original = registry.RequireEntry(Code, "first");
+        Assert.Same(original, registry.RequireEntry(Code, "repeat"));
+        guest.Write(Header + 0x54, BitConverter.GetBytes((ushort)17));
+        ShaderHeaderRegistry.NoteRegistration();
+        var replacement = registry.RequireEntry(Code, "updated");
+        Assert.NotSame(original, replacement);
+        Assert.Equal(17u, replacement.Shader.ScratchDwords);
+    }
+
     private sealed class UserDataFrontend : IShaderFrontend
     {
         public ulong CacheDomain => 1;

@@ -22,6 +22,9 @@ public static class Videodec2Exports
     // Null entry = TryCreate() failed; every export falls back to the stub for that handle.
     private static readonly ConcurrentDictionary<ulong, Videodec2Decoder?> Decoders = new();
     private static readonly ConcurrentDictionary<ulong, Videodec2DecodedFrame> PictureInfos = new();
+    internal static bool TryGetPicture(ulong address, out Videodec2DecodedFrame picture) =>
+        PictureInfos.TryGetValue(address, out picture!);
+
     private static long _nextDecoderHandle = unchecked((long)DecoderToken);
 
     private static readonly bool TraceEnabled = IsTraceEnabled();
@@ -123,7 +126,9 @@ public static class Videodec2Exports
         ExportName = "sceVideodec2CreateDecoder",
         Target = Generation.Gen5,
         LibraryName = "libSceVideodec2")]
-    public static int Videodec2CreateDecoder(CpuContext ctx)
+    public static int Videodec2CreateDecoder(CpuContext ctx) => CreateDecoder(ctx, Videodec2Decoder.TryCreate);
+
+    internal static int CreateDecoder(CpuContext ctx, Func<Videodec2Decoder?> create)
     {
         var decoderAddress = ctx[CpuRegister.Rdx];
         if (decoderAddress == 0)
@@ -132,7 +137,7 @@ public static class Videodec2Exports
         }
 
         var handle = unchecked((ulong)Interlocked.Increment(ref _nextDecoderHandle));
-        var decoder = Videodec2Decoder.TryCreate();
+        var decoder = create();
         Decoders[handle] = decoder;
         Trace($"create handle=0x{handle:X16} real_decoder={decoder is not null}");
 
@@ -314,7 +319,7 @@ public static class Videodec2Exports
             !ctx.TryReadUInt32(outputInfoAddress + 0x0C, out var codecType) ||
             !ctx.TryReadUInt64(outputInfoAddress + 0x20, out var pixelsAddress) ||
             isValid == 0 || pictureCount == 0 || pixelsAddress == 0 || codecType != 1 ||
-            !PictureInfos.TryGetValue(pixelsAddress, out var decodedFrame))
+            !TryGetPicture(pixelsAddress, out var decodedFrame))
         {
             return SetReturn(ctx, VideodecErrorOutputInfo);
         }
@@ -420,7 +425,7 @@ public static class Videodec2Exports
             return false;
         }
 
-        PictureInfos[pixelsAddress] = decodedFrame;
+        PictureInfos[pixelsAddress] = decodedFrame with { Nv12 = [] };
         return true;
     }
 

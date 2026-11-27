@@ -38,6 +38,12 @@ public unsafe class GpuBuffer : IDisposable
     private readonly ulong _deviceAddress;
     private VkBuffer _handle;
     private DeviceMemory _memory;
+    internal GpuResidency.Entry? Residency { get; }
+    internal void TouchResidency()
+    {
+        if (Usage is not (GpuBufferUsage.Upload or GpuBufferUsage.Download))
+            Residency?.Use(_slab.HasValue ? GpuResidency.Role.Slab : GpuResidency.Role.BoundBuffer);
+    }
     private readonly ulong _memoryOffset;
     private readonly GpuMemorySlabs.Block? _slab;
 
@@ -119,7 +125,12 @@ public unsafe class GpuBuffer : IDisposable
             for (var index = 0; index < candidates.Length; index++)
             {
                 allocateInfo.MemoryTypeIndex = candidates[index];
-                result = device.AllocateMemory(allocateInfo, out _memory);
+                result = device.AllocateMemory(allocateInfo, out _memory, usage switch
+                {
+                    GpuBufferUsage.Upload => GpuResidency.Role.Upload,
+                    GpuBufferUsage.Download => GpuResidency.Role.Readback,
+                    _ => GpuResidency.Role.Buffer,
+                });
                 if (result == Result.Success)
                 {
                     chosen = index;
@@ -135,7 +146,9 @@ public unsafe class GpuBuffer : IDisposable
 
         RequireSuccess(result, $"vkAllocateMemory({usage}, 0x{size:X} bytes)");
         RequireSuccess(vk.BindBufferMemory(device.Device, _handle, _memory, _memoryOffset), "vkBindBufferMemory");
+        Residency = device.Residency?.Find(_memory);
         _allocationSize = _slab?.Size ?? requirements.Size;
+        MemoryTypeIndex = allocateInfo.MemoryTypeIndex;
         var properties = device.GetMemoryTypeFlags(allocateInfo.MemoryTypeIndex);
         IsCoherent = (properties & MemoryPropertyFlags.HostCoherentBit) != 0;
         NotePlacement(usage, allocateInfo.MemoryTypeIndex, properties);
@@ -170,9 +183,22 @@ public unsafe class GpuBuffer : IDisposable
         }
     }
 
+    // The sparse table owns its physical blocks. Buffer commands and descriptors use its stable virtual handle.
+    internal GpuBuffer(GpuDeviceInfo device, SubmissionScheduler scheduler, VkBuffer sparse, ulong size)
+    {
+        _device = device;
+        _scheduler = scheduler;
+        _handle = sparse;
+        Size = size;
+        Usage = GpuBufferUsage.DeviceLocal;
+    }
+
     public VkBuffer Handle => _handle;
 
     public ulong Size { get; }
+
+    internal uint MemoryTypeIndex { get; }
+    internal ulong AllocationSize => _allocationSize;
 
     public Span<byte> Mapped => _mapped == null ? Span<byte>.Empty : new Span<byte>(_mapped, checked((int)Size));
 
@@ -199,6 +225,8 @@ public unsafe class GpuBuffer : IDisposable
     public void ForgetReadbacks() => Readbacks = 0;
 
     public ulong CpuAddress { get; }
+
+    internal ResourceSlotIdentifier CacheIdentifier { get; set; }
 
     public ulong DeviceAddress => _deviceAddress != 0 ? _deviceAddress : throw SubmissionScheduler.Fatal("The buffer has no device address.");
 
@@ -232,6 +260,7 @@ public unsafe class GpuBuffer : IDisposable
 
     public void NoteGpuWrite(ulong offset, ulong size)
     {
+        TouchResidency();
         GpuWrites++;
         var tick = _scheduler.CurrentTick;
         if (tick > LastGpuWriteTick)
@@ -573,12 +602,13 @@ public unsafe class GpuBuffer : IDisposable
         }
 
         DeviceFaultReport.Untrack(_deviceAddress);
+        _device.InvalidateDescriptorResources();
         _device.Vk.DestroyBuffer(_device.Device, _handle, null);
         if (_slab is { } slab)
         {
             _device.Slabs.Release(slab);
         }
-        else
+        else if (_memory.Handle != 0)
         {
             _device.FreeMemory(_memory);
         }

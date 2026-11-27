@@ -36,7 +36,8 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
         : ImageDescriptorBinding.ResourceClass(kind) == ImageResourceClass.Storage ? DescriptorType.StorageImage
         : DescriptorType.StorageBuffer;
 
-    public LayoutComputeRunner(ImageTestHarness harness, ShaderCompileRequest request, byte[] spirv)
+    public LayoutComputeRunner(ImageTestHarness harness, ShaderCompileRequest request, byte[] spirv,
+        Func<ShaderModule, PipelineLayout, uint, Pipeline>? createCompute = null)
     {
         _harness = harness;
         _request = request;
@@ -124,6 +125,10 @@ internal sealed unsafe class LayoutComputeRunner : IDisposable
                     PRasterizationState = &rasterization,
                 };
                 Require(vk.CreateGraphicsPipelines(device, default, 1, &graphics, null, out _pipeline), "vkCreateGraphicsPipelines");
+            }
+            else if (createCompute is not null)
+            {
+                _pipeline = createCompute(module, _pipelineLayout, pinSubgroup32 ? 32u : 0u);
             }
             else
             {

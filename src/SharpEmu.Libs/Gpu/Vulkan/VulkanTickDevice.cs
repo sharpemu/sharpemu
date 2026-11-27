@@ -53,6 +53,14 @@ internal sealed unsafe class VulkanCommandPool : IGpuCommandBufferSource, IDispo
         return handles;
     }
 
+    public void FreeBuffer(nint buffer)
+    {
+        var command = new CommandBuffer(buffer);
+        _vk.FreeCommandBuffers(_device, _pool, 1, &command);
+    }
+
+    public void Trim() => _vk.TrimCommandPool(_device, _pool, 0);
+
     public void BeginBuffer(nint buffer)
     {
         var beginInfo = new CommandBufferBeginInfo
@@ -168,6 +176,16 @@ internal sealed unsafe class VulkanTickDevice : IGpuTickDevice
     public void BeginBuffer(nint buffer) => _pool.BeginBuffer(buffer);
 
     public void EndBuffer(nint buffer, bool hostRead) => _pool.EndBuffer(buffer, hostRead);
+
+    public void ReleaseBufferSource(IGpuCommandBufferSource source)
+    {
+        var pool = (VulkanCommandPool)source;
+        lock (_pools)
+        {
+            if (!_pools.Remove(pool)) throw new InvalidOperationException("Command pool already released.");
+        }
+        pool.Dispose();
+    }
 
     public IGpuCommandBufferSource CreateBufferSource()
     {

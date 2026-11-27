@@ -480,6 +480,7 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             if (_hostMovieImageView.Handle != 0)
             {
+                _deviceInfo.InvalidateDescriptorResources();
                 _vk.DestroyImageView(_device, _hostMovieImageView, null);
                 _hostMovieImageView = default;
             }
@@ -495,6 +496,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
             if (_hostMovieChromaImageView.Handle != 0)
             {
+                _deviceInfo.InvalidateDescriptorResources();
                 _vk.DestroyImageView(_device, _hostMovieChromaImageView, null);
                 _hostMovieChromaImageView = default;
             }

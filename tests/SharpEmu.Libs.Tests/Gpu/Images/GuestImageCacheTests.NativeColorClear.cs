@@ -2,8 +2,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using SharpEmu.HLE.GpuMemory;
+using System.Collections;
+using System.Reflection;
+using System.Runtime.CompilerServices;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Buffers;
+using SharpEmu.Libs.Tests.VideoOut;
+using SharpEmu.Libs.VideoOut;
 using Silk.NET.Vulkan;
 using Xunit;
 using static SharpEmu.Libs.Tests.Gpu.Images.ImageCacheTestSupport;
@@ -108,6 +113,52 @@ public sealed partial class GuestImageCacheTests
 
         harness.Write(metadataAddress, Enumerable.Repeat((byte)0x20, 4096).ToArray());
         Assert.False(harness.Images.NativeColorClearSettled(identifier, target));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void WorkerLookupCanUseTheSeparateNativeClearPathOnlyWhenTheCallerHandlesIt()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x20000, ReadWrite);
+        var metadataAddress = address + 0x10000;
+        var target = AsColorTarget(LinearRequest(address, 8, Format.R16G16B16A16Sfloat,
+            GuestPixelFormat.Bits16_16_16_16Float, GuestImageType.Color2D, new Extent3D(1, 1, 1), 1, 8, 1));
+        target.Description.Metadata.Kind = MetadataKind.Dcc;
+        target.Description.Metadata.Range = new GuestSpan(metadataAddress, 4096);
+        target.Description.Metadata.NativeColorClear = true;
+        target.Description.Metadata.PackedColorClearSupported = true;
+        harness.Write(metadataAddress, Enumerable.Repeat((byte)0xff, 4096).ToArray());
+        var image = harness.Find(ref target);
+        harness.Worker.Run(() => harness.Images.ApplyNativeColorClear(image, target));
+        target.Description.Metadata.PackedColorClear = new ClearColorValue(1f, 0f, 1f, 0f);
+        var request = target;
+        Assert.False(harness.Images.TryFindImageForSlice(ref request, false, out _));
+        request = target;
+        var found = harness.Images.TryFindImageForSlice(ref request, false, out var candidate, nativeClearFollows: true);
+        Assert.True(found);
+        Assert.Equal(image, candidate);
+        Assert.Equal(NativeColorClearPrediction.RegistrationOnly, harness.Images.PredictNativeColorClear(image, target));
+
+        var hostType = PresenterUnderTest.RecordingHostType;
+        var host = RuntimeHelpers.GetUninitializedObject(hostType);
+        var segmentType = typeof(VulkanVideoPresenter).GetNestedType("SliceSegment", BindingFlags.NonPublic)!;
+        var segment = Activator.CreateInstance(segmentType)!;
+        void Set(string name, object value) => hostType.GetField(name, PresenterUnderTest.InstanceMembers)!.SetValue(host, value);
+        Set("_worker", true);
+        Set("_imageCache", harness.Images);
+        Set("_bufferCache", harness.Cache);
+        Set("_failedSliceLookups", new List<ulong>());
+        Set("_segment", segment);
+        var find = hostType.GetMethod("FindImage", PresenterUnderTest.InstanceMembers)!;
+        Assert.Equal(image, find.Invoke(host, [target, false]));
+        var requests = segmentType.GetField("Requests")!.GetValue(segment)!;
+        Assert.Single((IEnumerable)requests.GetType().GetField("NativeColorEntries")!.GetValue(requests)!);
+        harness.Write(metadataAddress, Enumerable.Repeat((byte)0x20, 4096).ToArray());
+        Assert.Equal(NativeColorClearPrediction.ClearCode, harness.Images.PredictNativeColorClear(image, target));
+        var error = Assert.Throws<TargetInvocationException>(() => find.Invoke(host, [target, false]));
+        Assert.IsType<SerialRequiredException>(error.InnerException);
         harness.Shutdown();
     }
 

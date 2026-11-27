@@ -73,6 +73,7 @@ internal static partial class VulkanVideoPresenter
             public RangeKind Range;
             public long Sequence;
             public bool Sync;
+            public bool CarryableCall;
             public volatile bool Done;
             public Exception? Failure;
         }
@@ -110,6 +111,8 @@ internal static partial class VulkanVideoPresenter
         private readonly ICpuMemory _memory;
         private readonly List<Unit> _units = new();
         private int _unitHead;
+        private int _recentHeadMisses, _partnerSize;
+        private long _headJoinCost;
         private RenderSlice? _cutting;
         private readonly Action<AgcExports.DeferredWork> _runDeferred;
         private readonly Func<SliceResult> _runSlice;
@@ -118,6 +121,12 @@ internal static partial class VulkanVideoPresenter
         private List<Item> _incoming = new();
         private List<Item> _draining = new();
         private int _drainIndex;
+        private long _drainedSequence;
+        private int _queuedSlices;
+        private CommandHandoff<Item>? _handoff;
+        private long _lastHandoffSequence = -1;
+        private Item? _landingStore;
+        private int _landingThread, _landingWaiters;
         private int _outstanding;
         private long _enqueued;
         private long _executed;
@@ -275,6 +284,13 @@ internal static partial class VulkanVideoPresenter
         {
             Presenter.NotePost(caller);
             Enqueue(new Item { Kind = Kind.Call, Action = action });
+        }
+
+        // An asynchronous call eligible for storage beside the preceding slice. It still cuts recording.
+        public void PostBetweenSegments(Action action, [CallerMemberName] string caller = "")
+        {
+            Presenter.NotePost(caller);
+            Enqueue(new Item { Kind = Kind.Call, Action = action, CarryableCall = true });
         }
 
         public void Run(Action action, [CallerMemberName] string caller = "")
@@ -528,6 +544,7 @@ internal static partial class VulkanVideoPresenter
 
             lock (_writeLock)
             {
+                AwaitLanding(address, destination.Length);
                 if (!_memory.TryRead(address, destination))
                 {
                     return false;
@@ -567,6 +584,7 @@ internal static partial class VulkanVideoPresenter
             }
             lock (_writeLock)
             {
+                AwaitLanding(address, destination.Length);
                 foreach (var pending in _pendingRanges)
                 {
                     if (pending.Sequence != 0 && pending.Sequence < sequence && address < pending.Address + pending.RangeSize && pending.Address < address + size)
@@ -638,7 +656,9 @@ internal static partial class VulkanVideoPresenter
             lock (_lock)
             {
                 item.Sequence = ++_enqueued;
-                _incoming.Add(item);
+                if (item.Kind != Kind.Deferred || _incoming.Count != 0 ||
+                    !(_handoff ??= new CommandHandoff<Item>()).TryPublish(item))
+                    _incoming.Add(item);
             }
 
             Interlocked.Increment(ref _outstanding);
@@ -803,6 +823,7 @@ internal static partial class VulkanVideoPresenter
                     _unitHead = 0;
                     if (_cutting is null)
                     {
+                        _partnerSize = 0;
                         ThrowIfFailed();
                         return ran;
                     }
@@ -821,13 +842,19 @@ internal static partial class VulkanVideoPresenter
                     continue;
                 }
 
-                var unit = _units[_unitHead++];
+                var unit = _units[_unitHead];
                 if (unit.Slice is { } slice)
                 {
+                    _queuedSlices--;
+                    // Leave the trailer at the head. Stolen or refused suffixes insert before
+                    // it, and the ordinary budget still applies between the slice and its trailer.
+                    if (unit.Item is null) _unitHead++;
+                    else unit.Slice = null;
                     ran += JoinSlice(slice, betweenItems);
                 }
                 else
                 {
+                    _unitHead++;
                     var item = unit.Item!;
                     var started = Stopwatch.GetTimestamp();
                     Execute(item);
@@ -848,20 +875,22 @@ internal static partial class VulkanVideoPresenter
         // recording while the render thread joins and the command thread runs ahead.
         private void FillUnits()
         {
-            var slicing = _presenter.SlicesEnabled;
-            var slicesAhead = 0;
-            for (var index = _unitHead; index < _units.Count; index++)
+            // The last swap took every item through this sequence. A new post will be seen by the next fill.
+            if (_drainIndex == _draining.Count && Volatile.Read(ref _enqueued) == _drainedSequence)
             {
-                if (_units[index].Slice is not null)
-                {
-                    slicesAhead++;
-                }
+                return;
             }
 
-            var limit = slicing ? SlicesAheadPerWorker * _presenter.WorkerCount : 0;
+            var slicing = _presenter.SlicesEnabled;
+            var slicesAhead = _queuedSlices;
+
+            var workers = slicing ? _presenter.WorkerCount : 0;
+            var limit = SlicesAheadPerWorker * workers;
+            var waveSize = workers > 1 ? Math.Max(RestChunkItems, SliceItems / workers) : SliceItems;
             while (slicesAhead <= limit)
             {
-                if (_drainIndex == _draining.Count && !RefillDraining())
+                if (_drainIndex == _draining.Count &&
+                    (Volatile.Read(ref _enqueued) == _drainedSequence || !RefillDraining()))
                 {
                     break;
                 }
@@ -871,21 +900,57 @@ internal static partial class VulkanVideoPresenter
                 if (slicing && item.Kind == Kind.Deferred)
                 {
                     (_cutting ??= new RenderSlice()).Items.Add(item);
-                    if (_cutting.Items.Count >= SliceItems)
+                    // Give the first wave to separate workers. Once each lane has a slice, use full
+                    // slices again to amortize validation, prologue recording and submission.
+                    var target = _partnerSize != 0 ? _partnerSize : slicesAhead < workers ? waveSize : SliceItems;
+                    // With no older worker slice, a long run close to the execution cursor can
+                    // occupy one lane while the renderer waits for its entire first segment.
+                    // Observe comparable heads, then give the two halves to independent lanes.
+                    var half = target / 2;
+                    var split = false;
+                    if (_cutting.Items.Count == half && slicesAhead == 0 && workers > 1 &&
+                        _partnerSize == 0 &&
+                        _cutting.Items[0].Sequence - _executed - 1 < half)
+                    {
+                        _cutting.WatchHead = true;
+                        split = _recentHeadMisses != 0;
+                    }
+                    if (split || _cutting.Items.Count >= target)
                     {
                         CloseSlice();
+                        if (split)
+                        {
+                            _partnerSize = target - half;
+                        }
                         slicesAhead++;
                     }
 
                     continue;
                 }
 
-                if (_cutting is not null && FlushCutting())
+                _partnerSize = 0;
+                if (_cutting is not null && FlushCutting(slicesAhead, workers))
                 {
                     slicesAhead++;
+                    // Decide admission from the pure deferred prefix, exactly as for an ordinary
+                    // cut. The observation never reaches a worker or promotes a short run.
+                    if (item.Kind == Kind.Write || item.CarryableCall)
+                    {
+                        _units[^1].Item = item;
+                        continue;
+                    }
                 }
 
                 _units.Add(new Unit { Item = item });
+            }
+
+            // The producer has temporarily run dry. Give an already substantial tail to
+            // a free lane while the render thread consumes older units. Keep larger tails
+            // eligible for the balanced split in RunBatch.
+            if (slicesAhead < workers && _unitHead < _units.Count &&
+                _cutting?.Items.Count is >= RestChunkItems and < 2 * RestChunkItems)
+            {
+                CloseSlice();
             }
         }
 
@@ -893,18 +958,31 @@ internal static partial class VulkanVideoPresenter
         {
             _draining.Clear();
             _drainIndex = 0;
+            if (Volatile.Read(ref _enqueued) == _lastHandoffSequence) return false;
+            if (DrainHandoff()) return true;
             lock (_lock)
             {
+                // A producer may have published between the empty check and this lock.
+                if (DrainHandoff()) return true;
                 (_incoming, _draining) = (_draining, _incoming);
+                _drainedSequence = _enqueued;
             }
 
             return _draining.Count != 0;
         }
 
-        private bool FlushCutting()
+        private bool FlushCutting(int slicesAhead = 0, int workers = 0)
         {
             var slice = _cutting!;
             if (slice.Items.Count >= MinimumSliceItems)
+            {
+                CloseSlice();
+                return true;
+            }
+
+            // Each unjoined slice occupies at most one lane. Only start a short one when
+            // there is spare capacity and earlier work to overlap. FIFO keeps older slices first.
+            if (slicesAhead < workers && _unitHead < _units.Count && WorthRecordingShortGroup(slice))
             {
                 CloseSlice();
                 return true;
@@ -920,8 +998,23 @@ internal static partial class VulkanVideoPresenter
             return false;
         }
 
+        private static bool WorthRecordingShortGroup(RenderSlice slice)
+        {
+            // Amortize the extra cut, validation, prologue and submit. Recording a draw inline
+            // costs at least two dispatches; a barrier alone costs very little.
+            var weight = 0;
+            foreach (var item in slice.Items)
+            {
+                if (item.Work is AgcExports.GlobalBarrierWork) continue;
+                weight += item.Work!.IsDispatch ? 1 : 2;
+                if (weight >= 4) return true;
+            }
+            return false;
+        }
+
         private void SplitTail()
         {
+            _partnerSize = 0;
             var tail = _cutting!;
             _cutting = null;
             var chunks = (tail.Items.Count + RestChunkItems - 1) / RestChunkItems;
@@ -932,6 +1025,7 @@ internal static partial class VulkanVideoPresenter
                 var part = new RenderSlice { Origin = 1 };
                 part.Items.AddRange(tail.Items.GetRange(start, end - start));
                 _units.Add(new Unit { Slice = part });
+                _queuedSlices++;
                 _presenter.DispatchSlice(part, urgent: true);
                 start = end;
             }
@@ -939,15 +1033,18 @@ internal static partial class VulkanVideoPresenter
 
         private void CloseSlice()
         {
+            _partnerSize = 0;
             var slice = _cutting!;
             _cutting = null;
             _units.Add(new Unit { Slice = slice });
+            _queuedSlices++;
             _presenter.DispatchSlice(slice);
         }
 
         private int JoinSlice(RenderSlice slice, Action betweenItems)
         {
             var ran = 0;
+            var suffixQueued = false;
             if (!slice.Dispatched)
             {
                 _presenter.DispatchSlice(slice);
@@ -955,6 +1052,7 @@ internal static partial class VulkanVideoPresenter
 
             if (slice.TryClaim())
             {
+                if (slice.WatchHead && slice.Origin == 0) NoteHeadWait(false);
                 var stolenInline = slice.Items.Count;
                 if (SplitStolenSlices && _presenter.SlicesEnabled && stolenInline >= RestInlineItems + MinimumSliceItems)
                 {
@@ -982,12 +1080,24 @@ internal static partial class VulkanVideoPresenter
 
             try
             {
-                while (_presenter.NextSegment(slice, betweenItems) is { } segment)
+                var watchHead = slice.WatchHead && slice.Origin == 0;
+                while (true)
                 {
+                    if (_presenter.NextSegment(slice, betweenItems) is not { } segment)
+                    {
+                        if (watchHead) NoteHeadWait(false);
+                        break;
+                    }
                     var end = segment.First + segment.Count;
                     var joinStarted = Stopwatch.GetTimestamp();
                     var joined = _presenter.JoinSegment(slice, segment);
-                    Presenter.NoteJoin(joinStarted);
+                    var joinTicks = Presenter.NoteJoin(joinStarted);
+                    if (watchHead)
+                    {
+                        NoteHeadWait(joined && slice.HeadWaitTicks > _headJoinCost);
+                        if (joined) _headJoinCost = joinTicks;
+                        slice.WatchHead = watchHead = false;
+                    }
                     if (joined)
                     {
                         for (var position = segment.First; position < end; position++)
@@ -1012,6 +1122,15 @@ internal static partial class VulkanVideoPresenter
 
                     if (segment.SerialReason is not null)
                     {
+                        // The worker published its final segment and will never touch the suffix.
+                        // Queue it before the serial item runs; its commands still join after that item.
+                        var suffix = end + 1;
+                        if (segment.StopsRecording && _presenter.SlicesEnabled &&
+                            slice.Items.Count - suffix >= MinimumSliceItems)
+                        {
+                            QueueRestChunks(slice, suffix);
+                            suffixQueued = true;
+                        }
                         RunInline(slice.Items[end], betweenItems);
                         ran++;
                     }
@@ -1023,7 +1142,7 @@ internal static partial class VulkanVideoPresenter
             }
 
             var remaining = slice.Items.Count - slice.Resume;
-            if (remaining == 0)
+            if (remaining == 0 || suffixQueued)
             {
                 return ran;
             }
@@ -1046,6 +1165,10 @@ internal static partial class VulkanVideoPresenter
 
         private static readonly bool SplitStolenSlices = Environment.GetEnvironmentVariable("SHARPEMU_SPLIT_STOLEN_SLICES") != "0";
 
+        // Two ready heads age out a miss, restoring the normal wave size.
+        private void NoteHeadWait(bool missed) =>
+            _recentHeadMisses = ((_recentHeadMisses << 1) | (missed ? 1 : 0)) & 3;
+
         private void QueueRestChunks(RenderSlice slice, int inline)
         {
             var chunks = (slice.Items.Count - inline + RestChunkItems - 1) / RestChunkItems;
@@ -1056,6 +1179,7 @@ internal static partial class VulkanVideoPresenter
                 var rest = new RenderSlice { Origin = 2 };
                 rest.Items.AddRange(slice.Items.GetRange(start, end - start));
                 _units.Insert(_unitHead + chunk, new Unit { Slice = rest });
+                _queuedSlices++;
                 _presenter.DispatchSlice(rest, urgent: true);
                 Presenter.NoteRestChunk(rest.Items.Count);
                 start = end;
@@ -1169,29 +1293,82 @@ internal static partial class VulkanVideoPresenter
             lock (_writeLock)
             {
                 var data = item.Data.AsSpan(0, item.Length);
-                var written = (item.Kernel && _presenter.TryApplyKernelWriteOverGpuBytes(item.Address, data)) || _memory.TryWrite(item.Address, data);
-                if (!ReferenceEquals(_pendingWrites.Peek(), item))
+                if (item.Kernel && _presenter.TryApplyKernelWriteOverGpuBytes(item.Address, data))
                 {
-                    throw SubmissionScheduler.Fatal("The command stream stores ran out of order.");
+                    RetireStoreLocked(item, true);
+                    return;
                 }
-
-                _pendingWrites.Dequeue();
-                NotePendingStorePages(item, -1);
-                _pendingWriteCount = _pendingWrites.Count;
-                if (!written)
+                if (_memory is not IGuestBackedSpace { SupportsDisjointPageOffsetAccess: true })
                 {
-                    throw SubmissionScheduler.Fatal(
-                        $"The command stream cannot write guest memory: address=0x{item.Address:X16} size={item.Length}.");
+                    RetireStoreLocked(item, _memory.TryWrite(item.Address, data));
+                    return;
                 }
+                _landingStore = item;
+                _landingThread = Environment.CurrentManagedThreadId;
+            }
 
-                // No reader reaches the store once it left the queue and the index under this lock.
-                if (item.Pooled)
+            bool? written = null;
+            try
+            {
+                written = _memory.TryWrite(item.Address, item.Data.AsSpan(0, item.Length));
+            }
+            finally
+            {
+                lock (_writeLock)
                 {
-                    StoreBufferPool.Shared.Return(item.Data!);
-                    item.Data = null;
+                    _landingStore = null;
+                    if (_landingWaiters != 0) Monitor.PulseAll(_writeLock);
+                    if (written.HasValue) RetireStoreLocked(item, written.Value);
                 }
             }
         }
+
+        private void AwaitLanding(ulong address, int length)
+        {
+            while (_landingStore is { } store && _landingThread != Environment.CurrentManagedThreadId)
+            {
+                if (CommandStoreLanding.DisjointOffsets(address, length, store.Address, store.Length))
+                {
+                    break;
+                }
+                _landingWaiters++;
+                try { Monitor.Wait(_writeLock); }
+                finally { _landingWaiters--; }
+            }
+        }
+
+        private void RetireStoreLocked(Item item, bool written)
+        {
+            if (!ReferenceEquals(_pendingWrites.Peek(), item))
+            {
+                throw SubmissionScheduler.Fatal("The command stream stores ran out of order.");
+            }
+
+            _pendingWrites.Dequeue();
+            NotePendingStorePages(item, -1);
+            _pendingWriteCount = _pendingWrites.Count;
+            if (!written)
+            {
+                throw SubmissionScheduler.Fatal(
+                    $"The command stream cannot write guest memory: address=0x{item.Address:X16} size={item.Length}.");
+            }
+
+            // No reader reaches the store once it left the queue and the index under this lock.
+            if (item.Pooled)
+            {
+                StoreBufferPool.Shared.Return(item.Data!);
+                item.Data = null;
+            }
+        }
+
+        private bool DrainHandoff()
+        {
+            if (Volatile.Read(ref _handoff)?.Drain(_draining) != true) return false;
+            _lastHandoffSequence = _draining[^1].Sequence;
+            return true;
+        }
+
+        public void ReportFailure(Exception exception) => Interlocked.CompareExchange(ref _failure, exception, null);
 
         public void ThrowIfFailed()
         {

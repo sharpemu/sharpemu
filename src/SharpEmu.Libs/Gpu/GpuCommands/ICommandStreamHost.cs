@@ -172,6 +172,12 @@ public interface ICommandStreamHost
     // host that runs the stream ahead of its recording returns only after the frame is recorded.
     void FlushFrame() => Flush();
 
+    // A run-ahead host may acknowledge this boundary from the renderer after an earlier flip
+    // capture. The queue can parse on while Done still enforces its configured frame lead.
+    bool TryDeferFrameBoundary(Action acknowledge) => false;
+
+    void WaitForPendingFlipCapture() { }
+
     void FlushAndWait();
 
     void SynchronizeGpu();
@@ -232,6 +238,14 @@ public interface ICommandStreamHost
     void TriggerInterrupt(int eventId, uint contextId);
 
     bool HasFlipSlot();
+
+    // Capture and choose the publication path at the flip's stream position. For a label,
+    // the returned predicate says whether it took the ordinary immediate-store path.
+    bool TryPostPublicationFlip(int queueId, in EndOfPipeWrite write, out Func<bool>? immediateLabel)
+    {
+        immediateLabel = null;
+        return false;
+    }
 
     // Reserves and prepares a flip; the request id is never zero.
     ulong PrepareFlip(int handle, int index, int flipMode, long flipArgument);

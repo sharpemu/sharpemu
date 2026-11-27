@@ -24,7 +24,7 @@ internal static unsafe partial class VulkanVideoPresenter
         // compiling. A build that takes the store threshold or longer (PipelineBinaryStorePolicy, 20 ms by default) writes
         // its file at once, since a forced close saves nothing.
         // NVIDIA compresses the binaries with the dictionary of the executable's own shader cache file and adds that 2 MiB
-        // dictionary to every graphics pipeline's binaries, so large binaries are kept once, by content, in the shared
+        // dictionary to pipeline binaries, so large binaries are kept once, by content, in the shared
         // folder. Once the driver starts a new cache file (a new dictionary), it refuses the old files: those pipelines
         // build and write their files again. A pipeline created from binaries or capturing them is created without a
         // pipeline cache, as Vulkan requires. SHARPEMU_VK_PIPELINE_BINARIES=0 or SHARPEMU_VK_PIPELINE_CACHE=0 turns this off.
@@ -37,6 +37,8 @@ internal static unsafe partial class VulkanVideoPresenter
         private KhrPipelineBinary? _pipelineBinaries;
         private string? _pipelineBinaryDirectory;
         private string _pipelineBinaryGlobalKey = "";
+        private bool _disablePrewarmImportCapture;
+        private int _releasedPrewarmImports;
         private int _pipelineBinaryRefusals;
         private int _pipelineBinaryLoads;
         private int _pipelineBinaryStores;
@@ -98,14 +100,15 @@ internal static unsafe partial class VulkanVideoPresenter
             delegate*<Vk, Device, PipelineCache, void*, Pipeline*, Result> create,
             out Pipeline pipeline,
             out double milliseconds,
-            PipelineCreateFlags2 extraFlags = 0)
+            PipelineCreateFlags2 extraFlags = 0,
+            bool prewarmCompute = false)
         {
             var started = Stopwatch.GetTimestamp();
             var key = PipelineBinaryKey(createInfo);
             var build = key is null ? null : _pipelineBuilds.Begin(Convert.ToHexString(key));
             try
             {
-                var result = LoadOrBuildPipeline(createInfo, next, cache, create, key, out pipeline, extraFlags);
+                var result = LoadOrBuildPipeline(createInfo, next, cache, create, key, out pipeline, extraFlags, prewarmCompute);
                 milliseconds = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
                 return result;
             }
@@ -125,13 +128,14 @@ internal static unsafe partial class VulkanVideoPresenter
             delegate*<Vk, Device, PipelineCache, void*, Pipeline*, Result> create,
             byte[]? key,
             out Pipeline pipeline,
-            PipelineCreateFlags2 extraFlags)
+            PipelineCreateFlags2 extraFlags,
+            bool prewarmCompute)
         {
             var started = Stopwatch.GetTimestamp();
             var original = *next;
             Pipeline created = default;
             Result result;
-            if (key is not null && LoadPipelineBinaries(key) is { } loaded)
+            if (key is not null && LoadPipelineBinaries(key, out var sharedPart) is { } loaded)
             {
                 fixed (PipelineBinaryKHR* handles = loaded)
                 {
@@ -143,7 +147,15 @@ internal static unsafe partial class VulkanVideoPresenter
                         PPipelineBinaries = handles,
                     };
                     *next = &binaryInfo;
-                    result = create(_vk, _device, default, createInfo, &created);
+                    if (prewarmCompute && sharedPart && original == null && OperatingSystem.IsWindows() &&
+                        _physicalDeviceVendorId == NvidiaVendorId)
+                    {
+                        result = ImportPrewarmedComputePipeline((ComputePipelineCreateInfo*)createInfo, extraFlags, create, &created);
+                    }
+                    else
+                    {
+                        result = create(_vk, _device, default, createInfo, &created);
+                    }
                     *next = original;
                 }
 
@@ -182,16 +194,58 @@ internal static unsafe partial class VulkanVideoPresenter
                     StorePipelineBinaries(created, key);
                 }
 
-                var release = new ReleaseCapturedPipelineDataInfoKHR
-                {
-                    SType = StructureType.ReleaseCapturedPipelineDataInfoKhr,
-                    Pipeline = created,
-                };
-                _pipelineBinaries!.ReleaseCapturedPipelineData(_device, &release, null);
+                ReleasePipelineCapture(created);
             }
 
             pipeline = created;
             return result;
+        }
+
+        private Result ImportPrewarmedComputePipeline(
+            ComputePipelineCreateInfo* info, PipelineCreateFlags2 extraFlags,
+            delegate*<Vk, Device, PipelineCache, void*, Pipeline*, Result> create, Pipeline* pipeline)
+        {
+            if (!Volatile.Read(ref _disablePrewarmImportCapture))
+            {
+                // NVIDIA can retain a shared compression dictionary per live import. Capture lets the
+                // driver release its copy immediately while the pipeline remains usable.
+                var capture = new PipelineCreateFlags2CreateInfoKHR
+                {
+                    SType = StructureType.PipelineCreateFlags2CreateInfoKhr,
+                    PNext = info->PNext,
+                    Flags = PipelineCreateFlags2.Vk2CaptureDataBitKhr | extraFlags | (PipelineCreateFlags2)info->Flags,
+                };
+                info->PNext = &capture;
+                var result = create(_vk, _device, default, info, pipeline);
+                info->PNext = capture.PNext;
+                if (result == Result.Success)
+                {
+                    if (ReleasePipelineCapture(*pipeline) == Result.Success)
+                        Interlocked.Increment(ref _releasedPrewarmImports);
+                    else
+                        Volatile.Write(ref _disablePrewarmImportCapture, true);
+                    return result;
+                }
+
+                // Retry with the same handles before the caller discards them or compiles from source.
+                // Capture stays on when the binaries themselves are refused.
+                result = create(_vk, _device, default, info, pipeline);
+                if (result == Result.Success)
+                    Volatile.Write(ref _disablePrewarmImportCapture, true);
+                return result;
+            }
+
+            return create(_vk, _device, default, info, pipeline);
+        }
+
+        private Result ReleasePipelineCapture(Pipeline pipeline)
+        {
+            var info = new ReleaseCapturedPipelineDataInfoKHR
+            {
+                SType = StructureType.ReleaseCapturedPipelineDataInfoKhr,
+                Pipeline = pipeline,
+            };
+            return _pipelineBinaries!.ReleaseCapturedPipelineData(_device, &info, null);
         }
 
         // The driver's key for a create info and its pNext chain; null while binaries are off.
@@ -214,8 +268,9 @@ internal static unsafe partial class VulkanVideoPresenter
         // A pipeline's file is PipelineCacheSignature.Wrap of its signature and a payload: the binary count, then for each
         // binary its key size, key, data size and data, or SharedPipelineBinaryMarker and the SHA-256 of a binary in the
         // shared folder. A file of another format, driver or pipeline key is not read; a damaged one is refused.
-        private PipelineBinaryKHR[]? LoadPipelineBinaries(byte[] key)
+        private PipelineBinaryKHR[]? LoadPipelineBinaries(byte[] key, out bool sharedPart)
         {
+            sharedPart = false;
             byte[] file;
             try
             {
@@ -277,6 +332,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     }
 
                     parts[index] = shared;
+                    sharedPart = true;
                     offset += SHA256.HashSizeInBytes;
                 }
                 else if (dataLength > 0 && dataLength <= payload.Length - offset)

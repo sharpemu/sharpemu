@@ -148,6 +148,7 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
         }
     }
 
+    internal object QueueGate => _device.QueueGate;
     public ulong CurrentTick => _timeline.CurrentTick;
 
     public ulong CompletedTick => _timeline.CompletedTick;
@@ -745,12 +746,14 @@ public sealed class SubmissionScheduler : IGpuTickScheduler, IDisposable
         return _command;
     }
 
+    internal IGpuTickDevice RecordingDevice => _device;
+
     public RecordingBuffer CreateRecordingBuffer(IRenderingState rendering) => new(this, _device.CreateBufferSource(), rendering);
 
     public void BeginRecording(RecordingBuffer buffer)
     {
         buffer.Bind(_context ?? throw Fatal("The scheduler requires a submission context."));
-        buffer.Acquire();
+        buffer.AcquireWorker();
     }
 
     public void EndRecording(RecordingBuffer buffer) => buffer.End();

@@ -57,6 +57,7 @@ public sealed class CommandStreamQueue
     private Thread? _processingThread;
 
     private readonly int _boundariesInFlight;
+    private readonly Action _acknowledgeFrameBoundary;
 
     // SHARPEMU_END_OF_PIPE_SOFT_WAITS: every queue's releases; null when off. Tests set it before the first interpreter.
     private EndOfPipeLandings? _landings = EndOfPipeLandings.Configured ? new EndOfPipeLandings() : null;
@@ -84,6 +85,7 @@ public sealed class CommandStreamQueue
     public CommandStreamQueue(ICommandStreamHost host, int boundariesInFlight)
     {
         _host = host;
+        _acknowledgeFrameBoundary = AcknowledgeFrameBoundary;
         _boundariesInFlight = Math.Max(0, boundariesInFlight);
         for (var index = 0; index < QueueCount; index++)
         {
@@ -278,7 +280,7 @@ public sealed class CommandStreamQueue
             if (!_accepting)
             {
                 // Shutdown: no slice will run a queued boundary, so drain as before.
-                while (_outcome == IdleOutcome.Completed && (_processing || _submissionCount != 0))
+                while (_outcome == IdleOutcome.Completed && (_processing || _submissionCount != 0 || _pendingBoundaries != 0))
                 {
                     Monitor.Wait(_gate);
                 }
@@ -304,7 +306,7 @@ public sealed class CommandStreamQueue
         lock (_gate)
         {
             while (_outcome == IdleOutcome.Completed &&
-                   (_processing || _submissionCount != 0 || _controlBarriers.Count != 0))
+                   (_processing || _submissionCount != 0 || _controlBarriers.Count != 0 || _pendingBoundaries != 0))
             {
                 Monitor.Wait(_gate);
             }
@@ -608,7 +610,7 @@ public sealed class CommandStreamQueue
             }
             else
             {
-                if (submission!.Kind == CommandSubmissionKind.FrameBoundary)
+                if (submission!.Kind == CommandSubmissionKind.FrameBoundary && !submission.DeferredFrameBoundary)
                 {
                     _pendingBoundaries--;
                     _doneCount++;
@@ -631,6 +633,17 @@ public sealed class CommandStreamQueue
         }
     }
 
+    private void AcknowledgeFrameBoundary()
+    {
+        lock (_gate)
+        {
+            if (_outcome != IdleOutcome.Completed) return;
+            _pendingBoundaries--;
+            _doneCount++;
+            Monitor.PulseAll(_gate);
+        }
+    }
+
     private bool RunSlice(CommandSubmission submission, bool mayDeferForLanding = false, ulong completedGpuTick = 0)
     {
         if (submission.Kind == CommandSubmissionKind.FlipPreparation)
@@ -645,7 +658,8 @@ public sealed class CommandStreamQueue
         if (submission.Kind == CommandSubmissionKind.FrameBoundary)
         {
             SlicesRun++;
-            _host.FlushFrame();
+            submission.DeferredFrameBoundary = _host.TryDeferFrameBoundary(_acknowledgeFrameBoundary);
+            if (!submission.DeferredFrameBoundary) _host.FlushFrame();
             return true;
         }
 
@@ -693,7 +707,11 @@ public sealed class CommandStreamQueue
 
         if (complete)
         {
-            submission.Completion?.Consumed();
+            if (submission.Completion is { } completion)
+            {
+                _host.WaitForPendingFlipCapture();
+                completion.Consumed();
+            }
             submission.ReleaseCommandBytes();
         }
 

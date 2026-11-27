@@ -20,7 +20,12 @@ public sealed partial class GuestImageCache
         var tick = endsFrame ? _collectionTick++ : _collectionTick;
         if (endsFrame && SharpEmu.Libs.VideoOut.RenderPhaseProfile.Enabled && tick % 300 == 0)
             ReportImageMemory("collection", true, tick);
+        if (endsFrame) TrimExpiredPools(Environment.TickCount64);
         ExpireParkedImages(tick);
+        if ((_device.Residency is not null || _device.DxgiBudget is not null ||
+             (_device.MemoryBudgetSupported && _device.LocalBudgetHeap != uint.MaxValue))
+            && !ShouldScanImages(tick, endsFrame))
+            return;
         if (_totalUsedMemory < _collectionStartBytes)
         {
             return;

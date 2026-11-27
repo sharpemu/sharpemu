@@ -8,7 +8,9 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using SharpEmu.HLE.Diagnostics;
 using SharpEmu.HLE.GpuMemory;
+using SharpEmu.Libs.Agc;
 using SharpEmu.Libs.Gpu.Buffers;
+using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Images;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
@@ -280,7 +282,10 @@ internal static unsafe partial class VulkanVideoPresenter
         public bool NeedsBdaSweep;
         public bool NeedsBdaTouch;
         public long BufferSerial;
+        public long? CleanBufferEpoch;
         public long? ReadsVersion;
+        public long ReadPublications;
+        public long ReadFrontendVersion;
         public bool MixedReadsVersions;
         public readonly List<(ResourceSlotIdentifier Image, ImageRequest Request)> NativeColorUses = new();
         // Native color clears the worker passed because only their registration was not current; the join applies them.
@@ -358,6 +363,7 @@ internal static unsafe partial class VulkanVideoPresenter
         public int First;
         public int Count;
         public string? SerialReason;
+        public bool StopsRecording;
         public RecordingBuffer? Buffer;
         public List<VulkanOcclusionQueries.Block>? QueryBlocks;
         public int DrawCount;
@@ -375,6 +381,8 @@ internal static unsafe partial class VulkanVideoPresenter
         public List<SliceArenaChunk> Chunks = [];
         public List<DescriptorPool> DescriptorPools = [];
         public bool Submitted;
+        public bool WatchHead;
+        public long HeadWaitTicks;
         public bool Dispatched;
         public long DispatchedAt;
         public int Origin;
@@ -383,7 +391,6 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public bool TryClaim() => Interlocked.CompareExchange(ref _claimed, 1, 0) == 0;
     }
-
 
     private sealed class RenderWorkerPool : IDisposable
     {
@@ -422,7 +429,7 @@ internal static unsafe partial class VulkanVideoPresenter
             SubmissionScheduler.MarkReadOnlyThread(static operation => new SerialRequiredException("unguarded " + operation));
             while (true)
             {
-                _available.Wait();
+                if (!host.WaitForWork(_available)) continue;
                 if (!_urgent.TryDequeue(out var slice) && !_queue.TryDequeue(out slice))
                 {
                     if (_stopping)
@@ -508,8 +515,6 @@ internal static unsafe partial class VulkanVideoPresenter
         {
             _workers?.Dispose();
             _workers = null;
-            _arenaPool?.Dispose();
-            _arenaPool = null;
         }
 
         internal bool SlicesEnabled => _workers is not null && !_deviceLost;
@@ -548,7 +553,12 @@ internal static unsafe partial class VulkanVideoPresenter
             Interlocked.Add(ref flip ? ref RoundTripTotals.FlipTicks : ref RoundTripTotals.ReadTicks, ticks);
         }
 
-        internal static void NoteJoin(long started) => _joinTicks.Add(System.Diagnostics.Stopwatch.GetTimestamp() - started);
+        internal static long NoteJoin(long started)
+        {
+            var ticks = System.Diagnostics.Stopwatch.GetTimestamp() - started;
+            _joinTicks.Add(ticks);
+            return ticks;
+        }
 
         internal static void NoteRestChunk(int items)
         {
@@ -616,6 +626,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             var waited = System.Diagnostics.Stopwatch.GetTimestamp() - waitStarted - relayTicks;
+            if (slice.WatchHead && (spinner.Count != 0 || relayTicks != 0)) slice.HeadWaitTicks = waited;
             _sliceWaitTicks.Add(waited);
             _waitByOrigin[slice.Origin].Add(waited);
             return segment;
@@ -775,7 +786,9 @@ internal static unsafe partial class VulkanVideoPresenter
                 }
             }
 
-            if (!requests.MixedReadsVersions && (requests.ReadsVersion is not { } version || version == _bufferCache.GpuModifiedVersion))
+            if (!requests.MixedReadsVersions && (requests.ReadsVersion is not { } version ||
+                (version == _bufferCache.GpuModifiedVersion && requests.ReadPublications == _guestPublications.Ordinal &&
+                 requests.ReadFrontendVersion == _translation.KnownFrontendImageVersion)))
             {
                 _validateDeferredSkipped.Increment();
             }
@@ -951,10 +964,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     _bufferCache.SynchronizeBuffersInRange(address, size);
                 }
 
-                foreach (var use in requests.Buffers)
-                {
-                    _bufferCache.ApplySliceUse(in use);
-                }
+                _bufferCache.ApplyRecordedBufferUses(requests.Buffers, requests.BufferSerial, requests.CleanBufferEpoch, _guestPublications);
             }
             finally
             {
@@ -992,6 +1002,7 @@ internal static unsafe partial class VulkanVideoPresenter
         private RecordingBuffer? _workerBuffer;
         private long _itemSequence;
         private readonly ConcurrentBag<RecordingBuffer>? _spareBuffers;
+        private WorkerCommandPools? _workerPools;
         private readonly SliceArena? _arena;
         private readonly SliceDescriptorHeap? _sliceDescriptors;
         private readonly SliceHazards? _hazards;
@@ -1077,6 +1088,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         }
 
                         segment!.SerialReason = serial.Message;
+                        segment.StopsRecording = !serial.Resumable;
                         Interlocked.Increment(ref _serialReasons.GetOrAdd(serial.Message, static _ => new StrongBox<long>()).Value);
                         EndSegment(slice, segment);
                         segment = null;
@@ -1124,17 +1136,19 @@ internal static unsafe partial class VulkanVideoPresenter
             _presenter.RecordGlobalBarrier(BeginBatchedGuestCommands());
         }
 
-        private static void NoteReadsVersion(SliceRequests requests, SharpEmu.Libs.Agc.AgcExports.DeferredWork work)
+        private static void NoteReadsVersion(SliceRequests requests, AgcExports.DeferredWork work)
         {
-            long readsVersion;
-            if (work is SharpEmu.Libs.Agc.AgcExports.DeferredDraw draw)
+            ResolveReadLog reads;
+            long frontendVersion;
+            if (work is AgcExports.DeferredDraw draw)
             {
-                readsVersion = draw.Reads.Version;
+                reads = draw.Reads;
+                frontendVersion = draw.FrontendImageVersion;
             }
-            else if (work is SharpEmu.Libs.Agc.AgcExports.DeferredDispatch { Cancelled: false } dispatch)
+            else if (work is AgcExports.DeferredDispatch { Cancelled: false } dispatch)
             {
-                // A deferred dispatch member's reads join the segment's check like a deferred draw's.
-                readsVersion = dispatch.Reads.Version;
+                reads = dispatch.Reads;
+                frontendVersion = dispatch.FrontendImageVersion;
             }
             else
             {
@@ -1143,22 +1157,39 @@ internal static unsafe partial class VulkanVideoPresenter
 
             if (requests.ReadsVersion is not { } version)
             {
-                requests.ReadsVersion = readsVersion;
+                requests.ReadsVersion = reads.Version;
+                requests.ReadPublications = reads.Publications;
+                requests.ReadFrontendVersion = frontendVersion;
             }
-            else if (version != readsVersion)
+            else if (version != reads.Version || requests.ReadPublications != reads.Publications ||
+                     requests.ReadFrontendVersion != frontendVersion)
             {
                 requests.MixedReadsVersions = true;
             }
+        }
+
+        internal bool WaitForWork(SemaphoreSlim available)
+        {
+            if (_workerPools?.NeedsSweep != true)
+            {
+                available.Wait();
+                return true;
+            }
+            if (available.Wait(1000)) return true;
+            _workerPools.Sweep(_spareBuffers!, Environment.TickCount64);
+            return false;
         }
 
         private SliceSegment BeginSegment(int first)
         {
             var segment = new SliceSegment { First = first };
             segment.Requests.BufferSerial = _buffers.Serial;
+            segment.Requests.CleanBufferEpoch = _bufferCache.CpuDirtyEpoch;
             segment.Requests.LookupGeneration = _imageCache.LookupGeneration;
             segment.Requests.MetadataGeneration = _imageCache.MetadataGeneration;
             _segment = segment;
-            _workerBuffer = _spareBuffers!.TryTake(out var buffer) ? buffer : _scheduler.CreateRecordingBuffer(this);
+            _workerPools ??= new WorkerCommandPools(_scheduler, this);
+            _workerBuffer = _workerPools.Take(_spareBuffers!, Environment.TickCount64);
             _scheduler.BeginRecording(_workerBuffer);
             _workerBuffer.RequestMemoryBarrier(GlobalMemoryBarrier);
             _hazards!.Reset();
@@ -1310,9 +1341,16 @@ internal static unsafe partial class VulkanVideoPresenter
                 throw Serial("buffer lookup", resumable: true);
             }
 
+            // Memo hits above prove plain reads clean already. A dirty persistent read on a miss
+            // requires a fresh range check at join, even if the CPU epoch itself did not move.
+            var requests = Requests;
+            if (requests.CleanBufferEpoch >= 0 && !isWritten && !isTexelBuffer && !invalidateImages &&
+                _bufferCache.MayHaveCpuDirtyPages(address, size))
+                requests.CleanBufferEpoch = -1;
+
             entry = new SliceUseEntry(address, size, isWritten, isTexelBuffer, invalidateImages, _buffers, buffer);
             NoteSliceWrite(buffer, isWritten);
-            Requests.AddBuffer(new BufferSliceUse(address, size, isWritten, isTexelBuffer, invalidateImages, buffer));
+            requests.AddBuffer(new BufferSliceUse(address, size, isWritten, isTexelBuffer, invalidateImages, buffer));
             return (buffer, buffer.Offset(address), buffer.Size - buffer.Offset(address));
         }
 

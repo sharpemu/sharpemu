@@ -60,6 +60,13 @@ public sealed class UserScalarRegisters
         }
     }
 
+    internal void CopyTo(UserScalarRegisters target)
+    {
+        target.Values = Values;
+        target.Kinds = Kinds;
+        target.Count = Count;
+    }
+
     public void CopyFrom(UserScalarRegisters source, int count)
     {
         source.ValueSpan(count).CopyTo(Values);
@@ -234,6 +241,29 @@ public sealed class VertexStageRegisters
     // The same registers sharing the user scalar sets, which a writer then copies one by one.
     public VertexStageRegisters ShallowCopy() => (VertexStageRegisters)MemberwiseClone();
 
+    internal void CopyForDeferredDraw(VertexStageRegisters target)
+    {
+        target.ExportAddress = ExportAddress;
+        target.LocalAddress = LocalAddress;
+        target.HullAddress = HullAddress;
+        target.HullUserDataAddress = HullUserDataAddress;
+        target.HullResource1 = HullResource1;
+        target.HullResource2 = HullResource2;
+        target.GeometryAddress = GeometryAddress;
+        target.GeometryUserDataAddress = GeometryUserDataAddress;
+        target.GeometryResource1 = GeometryResource1;
+        target.GeometryResource2 = GeometryResource2;
+        target.HullUserScalars = HullUserScalars;
+        GeometryUserScalars.CopyTo(target.GeometryUserScalars);
+        target.ExportResource1 = ExportResource1;
+        target.ExportResource2 = ExportResource2;
+        target.LegacyVertexAddress = LegacyVertexAddress;
+        target.LegacyVertexResource1 = LegacyVertexResource1;
+        target.LegacyVertexResource2 = LegacyVertexResource2;
+        target.LegacyVertexUserScalars = LegacyVertexUserScalars;
+        target.ExportUserScalars = ExportUserScalars;
+    }
+
     public VertexStageRegisters Copy()
     {
         var copy = (VertexStageRegisters)MemberwiseClone();
@@ -255,6 +285,16 @@ public sealed class PixelStageRegisters
     public UserScalarRegisters UserScalars = new();
 
     public PixelStageRegisters ShallowCopy() => (PixelStageRegisters)MemberwiseClone();
+
+    internal void CopyForDeferredDraw(PixelStageRegisters target)
+    {
+        target.Address = Address;
+        target.UserDataAddress = UserDataAddress;
+        target.AuxiliaryTableAddress = AuxiliaryTableAddress;
+        target.Resource1 = Resource1;
+        target.Resource2 = Resource2;
+        UserScalars.CopyTo(target.UserScalars);
+    }
 
     public PixelStageRegisters Copy()
     {

@@ -171,6 +171,26 @@ public sealed class PageGuardTests : IDisposable
         Assert.Equal((Block + 0x1000, 0xA000UL, ReadWrite), _space.Protects[2]);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void SweepCanBatchSeparatedRunsOnlyAcrossAnAlreadyReadOnlyGap(bool writableHole)
+    {
+        using var guard = new PageGuard(_space);
+        guard.AddWatch(Block + 2 * 4096, 80 * 4096, blockReads: false);
+        if (writableHole) guard.RemoveWatch(Block + 40 * 4096, 4096, blockReads: false);
+        _space.Protects.Clear();
+        var mask = new PageMask();
+        mask.Set(1);
+        mask.Set(82);
+        guard.AddWatchMask(Block, mask, false, ProtectionCause.SweepReprotect);
+        if (!writableHole)
+            Assert.Equal((Block + 4096, 82 * 4096UL, GuestPageProtection.Read), Assert.Single(_space.Protects));
+        else
+            Assert.Equal(new[] { (Block + 4096, 4096UL, GuestPageProtection.Read),
+                (Block + 82 * 4096, 4096UL, GuestPageProtection.Read) }, _space.Protects);
+    }
+
     [Fact]
     public void RemoveWatchMask_DoesNotMergeAcrossAGapWithOtherAccess()
     {

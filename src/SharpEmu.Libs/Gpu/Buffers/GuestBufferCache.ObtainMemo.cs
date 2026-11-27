@@ -32,6 +32,8 @@ public sealed unsafe partial class GuestBufferCache
 
     private readonly record struct ObtainMemo(ulong Address, ulong Size, ResourceSlotIdentifier Identifier, ulong Offset, GpuBuffer? Buffer)
     {
+        public long Serial { get; init; } = -1;
+        public long Epoch { get; init; } = -1;
         public bool Holds(ulong address, ulong size) => Buffer is not null && Address == address && Size == size;
     }
 
@@ -75,19 +77,19 @@ public sealed unsafe partial class GuestBufferCache
             return false;
         }
 
-        var memo = _obtainMemos[way];
+        ref var memo = ref _obtainMemos[way];
         var buffer = memo.Buffer!;
-        if (!ReferenceEquals(_registry.TryGetRegisteredBuffer(memo.Identifier), buffer) || !buffer.IsInBounds(address, size) ||
-            _tracker.MayHaveCpuDirtyPages(address, size))
+        if (!IsCleanOwner(ref memo, address, size))
         {
             _obtainMemoFull.Increment();
             return false;
         }
 
         _obtainMemoUses[way] = ++_obtainMemoClock;
+        // Image synchronization and publication callbacks may obtain other ranges in this set.
+        kept = (buffer, memo.Offset);
         if (ObtainMemoUse == ObtainMemoMode.Verify)
         {
-            kept = (buffer, memo.Offset);
             _obtainMemoFull.Increment();
             return false;
         }
@@ -101,8 +103,23 @@ public sealed unsafe partial class GuestBufferCache
             _ = SynchronizeTexelFromImage(buffer, address, size);
         }
 
-        OverlayGuestPublications?.Invoke(buffer, memo.Offset, address, size);
-        kept = (buffer, memo.Offset);
+        OverlayGuestPublications?.Invoke(buffer, kept.Offset, address, size);
+        return true;
+    }
+
+    private bool IsCleanOwner(ref ObtainMemo memo, ulong address, ulong size)
+    {
+        var serial = _registry.RegistrationSerial;
+        // Capture before the dirty-page check. A racing CPU fault invalidates this proof for the next read.
+        var epoch = _tracker.CpuDirtyEpoch;
+        if (memo.Serial == serial && memo.Epoch == epoch)
+        {
+            return true;
+        }
+        if (!ReferenceEquals(_registry.TryGetRegisteredBuffer(memo.Identifier), memo.Buffer) ||
+            !memo.Buffer!.IsInBounds(address, size) || _tracker.MayHaveCpuDirtyPages(address, size))
+            return false;
+        memo = memo with { Serial = serial, Epoch = epoch };
         return true;
     }
 

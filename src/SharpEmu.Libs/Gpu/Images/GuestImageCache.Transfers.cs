@@ -963,7 +963,7 @@ public sealed unsafe partial class GuestImageCache
         }
 
         var range = image.Description.Data;
-        var ring = _bufferCache.GetUtilityBuffer(GpuBufferUsage.Download);
+        var ring = _bufferCache.GetTransferRing(GpuBufferUsage.Download, range.Size);
         GpuBuffer download = ring;
         if (MeshDrawTrace.Enabled) MeshDrawTrace.Range("image-to-guest-planned", range.Address, range.Size, "");
         if (ring.TryMap(range.Size, out var offset, Math.Max(image.Description.BytesPerBlock, 4u)))

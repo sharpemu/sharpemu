@@ -11,6 +11,40 @@ namespace SharpEmu.Libs.Tests.Loader;
 
 public sealed class GnmVideoFrameLayoutTests
 {
+    [Fact]
+    public void GuestPixelsAndPictureMetadataSurviveDecoderDeletion()
+    {
+        const ulong start = 0x2_0000_0000;
+        var ctx = new CpuContext(new FakeCpuMemory(start, 4096), Generation.Gen5);
+        var slot = start + 0x100;
+        var output = start + 0x200;
+        var pixels = start + 0x400;
+        var info = start + 0x500;
+        Assert.True(ctx.TryWriteUInt64(slot + 8, pixels));
+        Assert.True(ctx.TryWriteUInt64(slot + 16, 64));
+        Assert.True(ctx.TryWriteUInt64(output, 0x38));
+        Assert.True(ctx.TryWriteUInt64(info, 104));
+        ctx[CpuRegister.Rdx] = start + 0x80;
+        // Exercise the registered handle and picture exports without loading a native codec.
+        Assert.Equal(0, Videodec2Exports.CreateDecoder(ctx, static () => null));
+        var handle = Read64(ctx, start + 0x80);
+        Assert.NotEqual(0UL, handle);
+        var frame = new Videodec2DecodedFrame([17, 31, 43], 2, 1, 2, false) { Pts = 9876, KeyFrame = true };
+        Assert.True(Videodec2Exports.TryWriteDecodedFrame(ctx, slot, output, frame));
+        ctx[CpuRegister.Rdi] = handle;
+        Assert.Equal(0, Videodec2Exports.Videodec2DeleteDecoder(ctx));
+        Assert.True(Videodec2Exports.TryGetPicture(pixels, out var cached));
+        Assert.Empty(cached.Nv12);
+        byte[] copied = new byte[3];
+        Assert.True(ctx.Memory.TryRead(pixels, copied));
+        Assert.Equal(frame.Nv12, copied);
+        ctx[CpuRegister.Rdi] = output;
+        ctx[CpuRegister.Rsi] = info;
+        ctx[CpuRegister.Rdx] = 0;
+        Assert.Equal(0, Videodec2Exports.Videodec2GetPictureInfo(ctx));
+        Assert.Equal(9876UL, Read64(ctx, info + 0x10));
+    }
+
     [Theory]
     [InlineData(66u, 18u, 256u, false)]
     [InlineData(1920u, 1080u, 2048u, false)]

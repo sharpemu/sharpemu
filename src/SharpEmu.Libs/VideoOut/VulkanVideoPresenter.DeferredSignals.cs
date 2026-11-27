@@ -47,6 +47,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public bool TryReadDeferredLabel(int queueId, ulong address, ulong size, out bool deferred, out ulong value)
         {
+            SettleFlipDecision(-1, address, size);
             deferred = false;
             value = 0;
             if (size is not (4 or 8)) return !HasPendingMemoryPublication(address, size);
@@ -163,6 +164,7 @@ internal static unsafe partial class VulkanVideoPresenter
         // queue's later signals must not publish first. An ordering entry holds them behind it.
         private void KeepOrderAfterForeignLabel(int queueId, long foreignOrdinal)
         {
+            SettleFlipDecision(queueId);
             // An older pending entry of this queue can publish before the foreign label, so it is not enough.
             if (_guestPublications.QueueFollows(queueId, foreignOrdinal)) return;
             var entry = _guestPublications.AddOrdering(queueId);
@@ -198,6 +200,7 @@ internal static unsafe partial class VulkanVideoPresenter
 
         public bool TryDeferEndOfPipe(int queueId, in EndOfPipeWrite write)
         {
+            SettleFlipDecision(queueId);
             var size = write.Kind switch
             {
                 EndOfPipeWriteKind.InterruptOnly or EndOfPipeWriteKind.Flip => 0UL,
@@ -264,7 +267,7 @@ internal static unsafe partial class VulkanVideoPresenter
                         if (write.FlipRequestId != 0)
                         {
                             if (write.FlipIndex == -1) VideoOutExports.ReleaseNoBufferFlip(-1, write.FlipRequestId);
-                            if (_flipPublications?.TryRemove(write.FlipRequestId, out var capture) == true)
+                            if (_flipPublications?.TryRemove(write.FlipRequestId, out var capture) == true && capture != entry)
                                 _guestPublications.Publish(capture, static () => { });
                         }
                     }
@@ -323,6 +326,15 @@ internal static unsafe partial class VulkanVideoPresenter
         private void FailGuestPublications(Exception exception)
         {
             _guestPublications.Fail(exception);
+            HashSet<ulong>? uncaptured;
+            lock (_gate)
+            {
+                _flipCaptureFailure ??= exception;
+                uncaptured = _uncapturedGpuFlips;
+                _uncapturedGpuFlips = null;
+            }
+            if (uncaptured is not null)
+                foreach (var request in uncaptured) VideoOutExports.CancelFlip(request);
             if (_flipPublications is { } flips)
                 foreach (var request in flips.Keys)
                     if (flips.TryRemove(request, out _)) VideoOutExports.CancelFlip(request);

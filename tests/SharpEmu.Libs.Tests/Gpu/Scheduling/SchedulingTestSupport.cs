@@ -148,10 +148,12 @@ internal sealed class FakeTickDevice : IGpuTickDevice
     }
 
     public IGpuCommandBufferSource CreateBufferSource() => new Source(this);
+    public void ReleaseBufferSource(IGpuCommandBufferSource source) => Note("release pool");
 
     private sealed class Source(FakeTickDevice owner) : IGpuCommandBufferSource
     {
         public nint[] AllocateBuffers(int count) => owner.AllocateBuffers(count);
+        public void FreeBuffer(nint buffer) => owner.Note($"free {owner.Name(buffer)}");
 
         public void BeginBuffer(nint buffer) => owner.BeginBuffer(buffer);
 

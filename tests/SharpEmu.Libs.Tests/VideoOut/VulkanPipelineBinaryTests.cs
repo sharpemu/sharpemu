@@ -1,19 +1,145 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Buffers.Binary;
 using System.Collections.Concurrent;
+using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Tests.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Vulkan;
+using SharpEmu.ShaderCompiler;
+using SharpEmu.ShaderCompiler.Resources;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Core.Native;
 using Silk.NET.Vulkan;
 using Xunit;
+using static SharpEmu.ShaderCompiler.Tests.Resources.ResourceTestProgram;
 
 namespace SharpEmu.Libs.Tests.VideoOut;
 
 public sealed class VulkanPipelineBinaryTests(HeadlessVulkanFixture fixture) : IClassFixture<HeadlessVulkanFixture>
 {
+    [Fact]
+    public unsafe void PrewarmedBinaryDispatchesWithTheSameBitsAfterReleasingCapture()
+    {
+        using var vulkan = HeadlessVulkan.TryCreate(pipelineBinaries: true);
+        if (!GatePrerequisites.Ready(vulkan)) return;
+        var (plan, resources, layout) = Prepare(Program(MoveVectorFromScalar(0, 2, 0), MoveVectorFromScalar(4, 3, 1),
+            BufferAccess(8, "BufferStoreDwordx2", 4, 0, 2, 2), EndProgram(16)));
+        var request = new ShaderCompileRequest(plan, resources, layout) { LocalSizeX = 1, ThreadCountX = 1, WaveSize = 32 };
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var shader, out var error), error);
+
+        using var harness = new ImageTestHarness(vulkan);
+        using var presenter = new PresenterUnderTest(vulkan);
+        var directory = Directory.CreateTempSubdirectory("SharpEmuPipeline");
+        try
+        {
+            vulkan.Vk.GetPhysicalDeviceProperties(vulkan.Physical, out var properties);
+            presenter.SetField("_physicalDeviceVendorId", properties.VendorID);
+            presenter.InvokeMethod("InitializePipelineBinaries", directory.FullName);
+            presenter.SetField("_pipelineBinarySlowMilliseconds", 0.0);
+            presenter.SetField("_sharedPipelineBinaryBytes", 1);
+            Run(prewarm: true); // Initial compile and capture.
+            Run(prewarm: false); // A runtime import of the same file.
+            Assert.Equal(0, presenter.GetField<int>("_releasedPrewarmImports"));
+            Run(prewarm: true);
+            Assert.Equal(2, presenter.GetField<int>("_pipelineBinaryLoads"));
+            var release = OperatingSystem.IsWindows() && properties.VendorID == 0x10de;
+            Assert.Equal(release ? 1 : 0, presenter.GetField<int>("_releasedPrewarmImports"));
+            Assert.False(presenter.GetField<bool>("_disablePrewarmImportCapture"));
+            harness.AssertNoValidationMessages();
+
+            void Run(bool prewarm)
+            {
+                using var runner = new LayoutComputeRunner(harness, request, shader.Spirv, (module, pipelineLayout, subgroup) =>
+                    (Pipeline)presenter.InvokeMethod("CompileComputePipeline", vulkan.Vk, vulkan.Device, default(PipelineCache),
+                        module, pipelineLayout, subgroup, prewarm)!);
+                var output = runner.CreateBuffer(256);
+                var bindings = new Dictionary<DescriptorBindingKind, GpuBuffer[]> { [DescriptorBindingKind.Buffers] = [output] };
+                var registers = new uint[256];
+                registers[6] = 256;
+                foreach (var bits in new uint[] { 0x80000000, 0x7fc01234 })
+                {
+                    registers[0] = bits;
+                    registers[1] = ~bits;
+                    harness.Run(() => runner.Dispatch(registers, bindings, 1));
+                    var bytes = runner.ReadBack(output, 0, 8);
+                    Assert.Equal(bits, BinaryPrimitives.ReadUInt32LittleEndian(bytes));
+                    Assert.Equal(~bits, BinaryPrimitives.ReadUInt32LittleEndian(bytes.AsSpan(4)));
+                }
+            }
+        }
+        finally
+        {
+            directory.Delete(recursive: true);
+        }
+    }
+
+    private unsafe delegate Result ImportCompute(
+        ComputePipelineCreateInfo* info, PipelineCreateFlags2 flags,
+        delegate*<Vk, Device, PipelineCache, void*, Pipeline*, Result> create, Pipeline* pipeline);
+
+    [Fact]
+    public unsafe void RefusedCaptureRetriesTheSameBinariesAndDisablesCaptureForLaterImports()
+    {
+        var type = PresenterUnderTest.PresenterType;
+        var presenter = System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(type);
+        var import = type.GetMethod("ImportPrewarmedComputePipeline", PresenterUnderTest.InstanceMembers)!
+            .CreateDelegate<ImportCompute>(presenter);
+        PipelineBinaryKHR* handles = stackalloc PipelineBinaryKHR[] { new(41), new(43) };
+        var binaries = new PipelineBinaryInfoKHR
+        {
+            SType = StructureType.PipelineBinaryInfoKhr, BinaryCount = 2, PPipelineBinaries = handles,
+        };
+        var info = new ComputePipelineCreateInfo
+        {
+            SType = StructureType.ComputePipelineCreateInfo, PNext = &binaries, Flags = PipelineCreateFlags.CreateDisableOptimizationBit,
+        };
+        var extra = (PipelineCreateFlags2)PipelineCreateFlags.CreateAllowDerivativesBit;
+        Pipeline pipeline = default;
+        Assert.Equal(Result.ErrorInitializationFailed, import(&info, extra, &RefuseBinaries, &pipeline));
+        Assert.False((bool)type.GetField("_disablePrewarmImportCapture", PresenterUnderTest.InstanceMembers)!.GetValue(presenter)!);
+        Assert.True(info.PNext == &binaries);
+        Assert.Equal(Result.Success, import(&info, extra, &RefuseCapture, &pipeline));
+        Assert.Equal(7UL, pipeline.Handle);
+        Assert.True((bool)type.GetField("_disablePrewarmImportCapture", PresenterUnderTest.InstanceMembers)!.GetValue(presenter)!);
+        Assert.True(info.PNext == &binaries);
+        pipeline = default;
+        Assert.Equal(Result.Success, import(&info, extra, &OrdinaryImport, &pipeline));
+        Assert.Equal(7UL, pipeline.Handle);
+
+        static Result RefuseCapture(Vk vk, Device device, PipelineCache cache, void* info, Pipeline* output)
+        {
+            var next = ((ComputePipelineCreateInfo*)info)->PNext;
+            var flags = (PipelineCreateFlags2CreateInfoKHR*)next;
+            if (flags->SType != StructureType.PipelineCreateFlags2CreateInfoKhr)
+                return OrdinaryImport(vk, device, cache, info, output);
+            Assert.Equal(PipelineCreateFlags2.Vk2CaptureDataBitKhr |
+                (PipelineCreateFlags2)(PipelineCreateFlags.CreateDisableOptimizationBit | PipelineCreateFlags.CreateAllowDerivativesBit), flags->Flags);
+            CheckBinaries((PipelineBinaryInfoKHR*)flags->PNext);
+            return Result.ErrorFeatureNotPresent;
+        }
+
+        static Result RefuseBinaries(Vk vk, Device device, PipelineCache cache, void* info, Pipeline* output) =>
+            Result.ErrorInitializationFailed;
+
+        static Result OrdinaryImport(Vk vk, Device device, PipelineCache cache, void* info, Pipeline* output)
+        {
+            Assert.Equal(0UL, cache.Handle);
+            CheckBinaries((PipelineBinaryInfoKHR*)((ComputePipelineCreateInfo*)info)->PNext);
+            *output = new Pipeline(7);
+            return Result.Success;
+        }
+
+        static void CheckBinaries(PipelineBinaryInfoKHR* binaries)
+        {
+            Assert.Equal(StructureType.PipelineBinaryInfoKhr, binaries->SType);
+            Assert.Equal(2u, binaries->BinaryCount);
+            Assert.Equal(41UL, binaries->PPipelineBinaries[0].Handle);
+            Assert.Equal(43UL, binaries->PPipelineBinaries[1].Handle);
+        }
+    }
+
     [Fact]
     public void ASlowBuildIsStoredAndTheNextBuildIsMadeFromItsBinaries()
     {
@@ -295,7 +421,7 @@ public sealed class VulkanPipelineBinaryTests(HeadlessVulkanFixture fixture) : I
 
         public void Build(PresenterUnderTest presenter)
         {
-            var pipeline = (Pipeline)presenter.InvokeMethod("CompileComputePipeline", _vk, _device, _cache, _module, _layout, 0u)!;
+            var pipeline = (Pipeline)presenter.InvokeMethod("CompileComputePipeline", _vk, _device, _cache, _module, _layout, 0u, false)!;
             Assert.NotEqual(0ul, pipeline.Handle);
             _vk.DestroyPipeline(_device, pipeline, null);
         }

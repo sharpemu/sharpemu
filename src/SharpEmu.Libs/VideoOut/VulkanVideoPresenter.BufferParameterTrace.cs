@@ -26,7 +26,7 @@ internal static unsafe partial class VulkanVideoPresenter
             var descriptor = attribute.Descriptor;
             Span<byte> bytes = stackalloc byte[16];
             var readable = _guestBacking.TryReadBacking(descriptor.Address, bytes);
-            var stream = _bufferCache.GetUtilityBuffer(GpuBufferUsage.Stream);
+            var stream = _bufferCache.GetTransferRing(GpuBufferUsage.Stream, 0);
             var offset = binding.Offset + attribute.OffsetBytes;
             var mappedBytes = "unavailable";
             if (binding.Handle == stream.Handle.Handle && offset <= stream.Size && stream.Size - offset >= 16)

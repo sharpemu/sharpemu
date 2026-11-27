@@ -675,6 +675,24 @@ public sealed class PresenterSubmissionTests
         }
     }
 
+    [Fact]
+    public void RetirementPacketsStayWithinTheirSubmissionCapacityAndOwner()
+    {
+        var type = NewNested("SubmissionUploadResources").GetType();
+        var batch = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(type))!;
+        var begin = type.GetMethod("BeginPacket")!;
+        object Next(int count, bool pack = true, bool worker = false) =>
+            begin.Invoke(null, [batch, null, "draw", count, pack, worker])!;
+        var first = Next(0);
+        Assert.Same(first, Next(60));
+        Set(first, "TextureCount", 60);
+        Assert.Same(first, Next(4));
+        Assert.NotSame(first, Next(5));
+        Assert.NotSame(batch[1], Next(0, worker: true));
+        var standalone = Next(0, pack: false);
+        Assert.NotSame(standalone, Next(0));
+    }
+
     private static object NewNested(string name) =>
         Activator.CreateInstance(typeof(VulkanVideoPresenter).GetNestedType(name, BindingFlags.NonPublic)!, nonPublic: true)!;
 

@@ -248,6 +248,30 @@ internal static unsafe partial class VulkanVideoPresenter
     // The host-owned resources of one recorded draw or dispatch, retired when its submission completes.
     private sealed class SubmissionUploadResources
     {
+        private const int PackedTextures = 64;
+        public bool Packed;
+        private bool _workerPacket;
+
+        public static SubmissionUploadResources BeginPacket(List<SubmissionUploadResources> batch, Stack<SubmissionUploadResources>? spare,
+            string name, int count, bool pack, bool worker)
+        {
+            if (pack && batch.Count > 0 && batch[^1] is { Packed: true } last && last._workerPacket == worker &&
+                count <= PackedTextures - last.TextureCount)
+            {
+                if (count != 0 && last.Textures.Length == 0)
+                    last.Textures = System.Buffers.ArrayPool<TextureResource>.Shared.Rent(PackedTextures);
+                return last;
+            }
+            var packet = spare is { Count: > 0 } ? spare.Pop() : new SubmissionUploadResources();
+            packet.DebugName = name;
+            packet.Packed = pack && count <= PackedTextures;
+            packet._workerPacket = worker;
+            if (packet.Packed && count > 0)
+                packet.Textures = System.Buffers.ArrayPool<TextureResource>.Shared.Rent(PackedTextures);
+            batch.Add(packet);
+            return packet;
+        }
+
         public string DebugName = "SharpEmu translated";
         public TextureResource[] Textures = [];
         public int TextureCount;
@@ -402,7 +426,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     memoryFlags,
                     preferredMemoryFlags),
             };
-            Check(_deviceInfo.AllocateMemory(memoryInfo, out memory), "vkAllocateMemory");
+            Check(_deviceInfo.AllocateMemory(memoryInfo, out memory, Gpu.Buffers.GpuResidency.PresenterBufferRole(usage)), "vkAllocateMemory");
             Check(_vk.BindBufferMemory(_device, buffer, memory, 0), "vkBindBufferMemory");
             return buffer;
         }

@@ -2,6 +2,8 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using System.Reflection;
+using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.Tests.VideoOut;
 using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Tests.Gpu.Images;
 using SharpEmu.Libs.Tests.Gpu.Scheduling;
@@ -56,6 +58,184 @@ public sealed class GuestBufferObtainMemoTests(HeadlessVulkanFixture fixture) : 
             return read;
         });
         Assert.Equal(latest, harness.ReadBack(current.Buffer, current.Offset, Size));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void PublicationMayReplaceBothMemoWaysDuringARead()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        const int length = 512 * 1024;
+        var address = harness.MapBacked(length, ReadWrite);
+        var outer = address + Page;
+        var set = GuestBufferCache.ObtainMemoSet(outer, Size);
+        harness.Cache.ObtainMemoUse = GuestBufferCache.ObtainMemoMode.On;
+        harness.Worker.Run(() =>
+        {
+            var owner = harness.Cache.ObtainBuffer(address, length, isWritten: false, allowStream: false).Buffer;
+            var first = Read(harness, outer);
+            var colliding = 0;
+            harness.Cache.OverlayGuestPublications = (_, _, _, _) =>
+            {
+                harness.Cache.OverlayGuestPublications = null;
+                for (var next = outer + 16; colliding < 2 && next + Size <= address + length; next += 16)
+                {
+                    if (GuestBufferCache.ObtainMemoSet(next, Size) != set) continue;
+                    Assert.Same(owner, Read(harness, next).Buffer);
+                    colliding++;
+                }
+            };
+            var second = Read(harness, outer);
+            Assert.Equal(2, colliding);
+            Assert.Same(owner, second.Buffer);
+            Assert.Equal(first.Offset, second.Offset);
+        });
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void RecordedReadsRecheckPublicationsDirtyBytesAndBufferReplacementAtJoin()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var cache = harness.Cache;
+        cache.ObtainMemoUse = GuestBufferCache.ObtainMemoMode.On;
+        var publications = new PendingGuestPublications();
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        var range = address + Page;
+        var current = harness.Worker.Run(() => Read(harness, range)).Buffer;
+        List<BufferSliceUse> uses = [new(range, Size, false, false, false, current)];
+        long serial = cache.RegistrationSerial, clean = cache.CpuDirtyEpoch;
+        var disjoint = publications.Add(1, range + Size, 4);
+        int Join() => cache.ApplyRecordedBufferUses(uses, serial, clean, publications);
+        var expected = 1;
+        var overlays = 0;
+        cache.OverlayGuestPublications = (_, _, start, length) =>
+        {
+            if (publications.HasOverlap(start, length, includeLabels: false)) overlays++;
+        };
+        harness.Worker.Run(() =>
+        {
+            Assert.Equal(expected, Join());
+            Assert.Equal(0, cache.ApplyRecordedBufferUses(uses, serial, null, publications)); // No clean epoch from the recording.
+            var late = publications.Add(1, range, 8);
+            late.GpuSlot = 2;
+            Assert.Equal(0, Join());
+            Assert.Equal(1, overlays);
+            publications.Publish(late, static () => { });
+            publications.Publish(disjoint, static () => { });
+            Assert.Equal(expected, Join());
+        });
+
+        var bytes = Bytes(Size, 42);
+        Assert.True(harness.Store.MarkCpuWrite(range, Size));
+        harness.Write(range, bytes);
+        harness.Worker.Run(() => Assert.Equal(0, Join()));
+        Assert.Equal(bytes, harness.ReadBack(current, current.Offset(range), Size));
+        harness.Worker.Run(() =>
+        {
+            Assert.Equal(expected, Join()); // Epoch moved, fresh range check is clean again.
+            _ = cache.FindBuffer(address, 0x8000);
+            Assert.False(current.CacheIdentifier.IsValid);
+            Assert.Equal(0, Join());
+            var replacement = Read(harness, range).Buffer;
+            Assert.NotSame(current, replacement);
+            serial = cache.RegistrationSerial;
+            uses[0] = new(range, Size, true, false, false, replacement);
+            Assert.Equal(0, Join());
+            Assert.True(cache.HasGpuDirtyBytes(range, Size));
+        });
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void PrologueReadsTouchEveryOwnerWithTheProductionPublicationCallbacks()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var presenter = new PresenterUnderTest(_vulkan!);
+        var cache = presenter.Harness.Cache;
+        cache.ObtainMemoUse = GuestBufferCache.ObtainMemoMode.On;
+        var publications = presenter.GetField<PendingGuestPublications>("_guestPublications");
+        var address = presenter.Harness.MapBacked(0x40000, ReadWrite);
+        var complete = presenter.Instance.GetType().GetMethod("CompleteOverlappingPublications", PresenterUnderTest.InstanceMembers)!
+            .CreateDelegate<Action<ulong, ulong, bool, bool>>(presenter.Instance);
+        cache.CompleteGuestPublications = (a, s, access) => complete(a, s, access == GuestBufferCache.PublicationAccess.Write,
+            access == GuestBufferCache.PublicationAccess.OverlaidRead);
+        cache.OverlayGuestPublications = presenter.Instance.GetType().GetMethod("OverlayPendingDumps", PresenterUnderTest.InstanceMembers)!
+            .CreateDelegate<Action<GpuBuffer, ulong, ulong, ulong>>(presenter.Instance);
+        presenter.Run(() =>
+        {
+            var uses = new List<BufferSliceUse>();
+            for (int group = 0; group < 4; group++)
+            {
+                var start = address + (ulong)group * 0x10000;
+                var buffer = Read(presenter.Harness, start).Buffer;
+                for (int i = 0; i < 16; i++) uses.Add(new(start + (ulong)i * 128, 64, false, false, false, buffer));
+            }
+            var serial = cache.RegistrationSerial;
+            var clean = cache.CpuDirtyEpoch;
+            int Join() => cache.ApplyRecordedBufferUses(uses, serial, clean, publications);
+            var owners = uses.Select(use => use.Buffer.CacheIdentifier).Distinct().ToHashSet();
+            var fields = BindingFlags.Instance | BindingFlags.NonPublic;
+            var registry = (GuestBufferRegistry<GpuBuffer>)typeof(GuestBufferCache).GetField("_registry", fields)!.GetValue(cache)!;
+            var policy = (BufferRetirementPolicy)typeof(GuestBufferCache).GetField("_retirementPolicy", fields)!.GetValue(cache)!;
+            var previousTick = policy.CurrentTick;
+            cache.RunGarbageCollector();
+            int Untouched()
+            {
+                int count = 0;
+                registry.VisitRetirementCandidates(previousTick, id => { if (owners.Contains(id)) count++; return false; });
+                return count;
+            }
+            Assert.Equal(4, Untouched());
+            Assert.Equal(uses.Count, Join());
+            Assert.Equal(0, Untouched());
+        });
+    }
+
+    [Fact]
+    public void SliceReadProofRejectsChangedGuestBytesBeforeTheNextUse()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Cache.ObtainMemoUse = GuestBufferCache.ObtainMemoMode.On;
+        var use = harness.Worker.Run(() =>
+        {
+            var (buffer, _) = Read(harness, address);
+            var slice = new BufferSliceUse(address, Size, false, false, false, buffer);
+            harness.Cache.ApplySliceUse(slice);
+            harness.Cache.ApplySliceUse(slice);
+            return slice;
+        });
+        var bytes = Bytes(Size, 94);
+        Assert.True(harness.Store.MarkCpuWrite(address, Size));
+        harness.Write(address, bytes);
+        harness.Worker.Run(() => harness.Cache.ApplySliceUse(use));
+        Assert.Equal(bytes, harness.ReadBack(use.Buffer, use.Buffer.Offset(address), Size));
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void VersionedReadRepeatsPublicationsAndRejectsADirtyEpoch()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var harness = new CacheHarness(_vulkan);
+        var address = harness.MapBacked(0x10000, ReadWrite);
+        harness.Cache.ObtainMemoUse = GuestBufferCache.ObtainMemoMode.On;
+        var overlays = 0;
+        harness.Cache.OverlayGuestPublications = (_, _, _, _) => overlays++;
+        harness.Worker.Run(() =>
+        {
+            for (var i = 0; i < 4; i++) _ = Read(harness, address);
+        });
+        var bytes = Bytes(Size, 83);
+        Assert.True(harness.Store.MarkCpuWrite(address, Size));
+        harness.Write(address, bytes);
+        var current = harness.Worker.Run(() => Read(harness, address));
+        Assert.Equal(5, overlays);
+        Assert.Equal(bytes, harness.ReadBack(current.Buffer, current.Offset, Size));
         harness.Shutdown();
     }
 

@@ -18,6 +18,37 @@ public sealed class GpuBufferTests : IClassFixture<HeadlessVulkanFixture>
     public GpuBufferTests(HeadlessVulkanFixture fixture) => _vulkan = fixture.Vulkan;
 
     [Fact]
+    public void EmptyChunksWaitForForeignReadsAndKeepOneWarmChunk()
+    {
+        if (_vulkan is null) return;
+        var info = _vulkan.DeviceInfo;
+        var slabs = new GpuMemorySlabs(info);
+        var initial = info.LiveAllocations;
+        try
+        {
+            var requirements = new MemoryRequirements { Size = GpuMemorySlabs.MaxBlockSize, Alignment = 4096 };
+            var blocks = new GpuMemorySlabs.Block[17];
+            for (var i = 0; i < blocks.Length; i++)
+                Assert.True(slabs.TryAllocate(0, false, requirements, out blocks[i]));
+            Assert.Equal(initial + 3, info.LiveAllocations);
+            using (slabs.BeginForeignRead())
+            {
+                foreach (var block in blocks.AsSpan(0, 16)) slabs.Release(block);
+                Assert.Equal(initial + 3, info.LiveAllocations);
+            }
+
+            Assert.Equal(initial + 2, info.LiveAllocations);
+            slabs.Release(blocks[16]);
+            Assert.Equal(initial + 1, info.LiveAllocations);
+            Assert.True(slabs.TryAllocate(0, false, requirements, out var reused));
+            Assert.True(reused.Recycled);
+            slabs.Release(reused);
+        }
+        finally { slabs.Destroy(); }
+        Assert.Equal(initial, info.LiveAllocations);
+    }
+
+    [Fact]
     public void FixtureDisposalFreesRetainedSlabMemory()
     {
         var fixture = new HeadlessVulkanFixture();

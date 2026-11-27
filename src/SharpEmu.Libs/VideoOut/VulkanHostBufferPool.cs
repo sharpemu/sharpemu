@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 using Silk.NET.Vulkan;
+using SharpEmu.Libs.Gpu.Buffers;
 using VkBuffer = Silk.NET.Vulkan.Buffer;
 
 namespace SharpEmu.Libs.VideoOut;
@@ -14,13 +15,17 @@ internal readonly record struct VulkanHostBufferAllocation(
     VkBuffer Buffer,
     DeviceMemory Memory,
     VulkanHostBufferPoolKey Key,
-    nint Mapped);
+    nint Mapped,
+    GpuResidency.Entry? Residency = null);
 
 internal sealed class VulkanHostBufferPool : IDisposable
 {
     private readonly object _gate = new();
-    private readonly Dictionary<VulkanHostBufferPoolKey, Stack<VulkanHostBufferAllocation>>
+    private readonly Dictionary<VulkanHostBufferPoolKey, List<VulkanHostBufferAllocation>>
         _available = [];
+    private readonly Dictionary<ulong, long> _idleSpills = [];
+    internal const long SpillIdleMilliseconds = 5_000;
+    private long _nextTrim;
     private readonly Dictionary<ulong, VulkanHostBufferAllocation> _allocations = [];
     private readonly HashSet<ulong> _cachedHandles = [];
     private readonly Action<VulkanHostBufferAllocation> _destroy;
@@ -43,14 +48,17 @@ internal sealed class VulkanHostBufferPool : IDisposable
     {
         lock (_gate)
         {
-            if (!_available.TryGetValue(key, out var available) ||
-                !available.TryPop(out allocation))
+            if (!_available.TryGetValue(key, out var available) || available.Count == 0)
             {
                 allocation = default;
                 return false;
             }
 
+            allocation = available[^1];
+            allocation.Residency?.Use(GpuResidency.PresenterBufferRole(key.Usage));
+            available.RemoveAt(available.Count - 1);
             _cachedHandles.Remove(allocation.Buffer.Handle);
+            _idleSpills.Remove(allocation.Buffer.Handle);
             CachedBytes -= allocation.Key.Capacity;
             return true;
         }
@@ -69,7 +77,7 @@ internal sealed class VulkanHostBufferPool : IDisposable
         }
     }
 
-    public bool Return(VkBuffer buffer, DeviceMemory memory)
+    public bool Return(VkBuffer buffer, DeviceMemory memory, long? spillReturnedAt = null)
     {
         VulkanHostBufferAllocation? toDestroy = null;
         lock (_gate)
@@ -99,7 +107,9 @@ internal sealed class VulkanHostBufferPool : IDisposable
                     _available.Add(allocation.Key, available);
                 }
 
-                available.Push(allocation);
+                allocation.Residency?.Use(GpuResidency.Role.IdleBuffer);
+                available.Add(allocation);
+                if (spillReturnedAt.HasValue) _idleSpills.Add(buffer.Handle, spillReturnedAt.Value);
                 CachedBytes += allocation.Key.Capacity;
             }
         }
@@ -108,11 +118,7 @@ internal sealed class VulkanHostBufferPool : IDisposable
         // grab device-level locks, and holding _gate while doing so risks
         // a lock-ordering deadlock with a thread that holds the device lock
         // and is waiting on _gate.
-if (toDestroy is { } td)
-{
-    _destroy(td);
-
-        }
+        if (toDestroy is { } td) _destroy(td);
 
         return true;
     }
@@ -130,10 +136,39 @@ if (toDestroy is { } td)
             _allocations.Clear();
             _available.Clear();
             _cachedHandles.Clear();
+            _idleSpills.Clear();
             CachedBytes = 0;
         }
 
         foreach (var allocation in toDestroy)
+        {
+            _destroy(allocation);
+        }
+    }
+
+    // Called by the render loop. Only completed or abandoned preparations have returned their spills.
+    public void TrimIdleSpills(long now)
+    {
+        if (now < _nextTrim) return;
+        _nextTrim = now + SpillIdleMilliseconds;
+        List<VulkanHostBufferAllocation>? expired = null;
+        lock (_gate)
+        {
+            foreach (var (handle, returnedAt) in _idleSpills)
+                if (now - returnedAt >= SpillIdleMilliseconds)
+                    (expired ??= []).Add(_allocations[handle]);
+            if (expired is null) return;
+            foreach (var allocation in expired)
+            {
+                _idleSpills.Remove(allocation.Buffer.Handle);
+                _cachedHandles.Remove(allocation.Buffer.Handle);
+                _allocations.Remove(allocation.Buffer.Handle);
+                CachedBytes -= allocation.Key.Capacity;
+            }
+            foreach (var key in expired.Select(allocation => allocation.Key).Distinct())
+                _available[key].RemoveAll(allocation => !_cachedHandles.Contains(allocation.Buffer.Handle));
+        }
+        foreach (var allocation in expired)
         {
             _destroy(allocation);
         }

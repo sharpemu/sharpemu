@@ -328,7 +328,7 @@ internal static unsafe partial class VulkanVideoPresenter
                             var (record, code) = item;
                             var began = Stopwatch.GetTimestamp();
                             if (!PrewarmComputePipelineCore(record, code, compiler, sharedInt64Atomics, execGuardElision,
-                                    waitForAdmission: true))
+                                    LinkedCompileAdmission.Source.BackgroundPrewarm))
                             {
                                 continue;
                             }
@@ -456,7 +456,7 @@ internal static unsafe partial class VulkanVideoPresenter
             IGuestGpuBackend compiler,
             bool sharedInt64Atomics,
             bool execGuardElision) =>
-            PrewarmComputePipelineCore(record, code, compiler, sharedInt64Atomics, execGuardElision, waitForAdmission: false);
+            PrewarmComputePipelineCore(record, code, compiler, sharedInt64Atomics, execGuardElision, LinkedCompileAdmission.Source.BootPrewarm);
 
         private bool PrewarmComputePipelineCore(
             ComputePrewarmRecord record,
@@ -464,7 +464,7 @@ internal static unsafe partial class VulkanVideoPresenter
             IGuestGpuBackend compiler,
             bool sharedInt64Atomics,
             bool execGuardElision,
-            bool waitForAdmission)
+            LinkedCompileAdmission.Source source)
         {
             if (!ShaderProgramCache.TryCompilePrewarm(
                     record, code, compiler, sharedInt64Atomics, execGuardElision,
@@ -498,7 +498,7 @@ internal static unsafe partial class VulkanVideoPresenter
             // otherwise; the background lane (StartLinkedPrewarm) waits for it. The try that releases the admission follows
             // at once.
             var linked = layout!.CallTargetCount != 0;
-            if (linked && !WaitForLinkedAdmission(record.Hash, payload.Length, mayWait: waitForAdmission))
+            if (linked && !WaitForLinkedAdmission(record.Hash, payload.Length, source))
             {
                 Interlocked.Increment(ref _shaderPrewarmDroppedLinked);
                 return false;
@@ -520,7 +520,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 var cache = ResolveGuestPipelineCache(linkedCache?.Cache);
                 var identity = VulkanPipelineCacheStorage.CompiledShaderIdentity(payload);
                 var requiredSubgroupSize = ComputeRequiredSubgroupSize(record.Info);
-                pipeline = CompileComputePipeline(_vk, _device, cache, module, pipelineLayout, requiredSubgroupSize);
+                pipeline = CompileComputePipeline(_vk, _device, cache, module, pipelineLayout, requiredSubgroupSize, prewarm: !linked);
                 created = true;
                 // A plain record's pipeline waits, with the layouts it was compiled with, for the session's request (a
                 // linked one goes: the session links the callees its own program kept). The handover owns what it took;

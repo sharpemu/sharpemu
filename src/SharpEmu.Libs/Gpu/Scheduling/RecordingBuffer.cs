@@ -65,6 +65,9 @@ public sealed class RecordingBuffer
 
     private readonly IGpuCommandBufferSource _source;
     private readonly TickedBufferRing _ring;
+    internal TickedBufferRing Ring => _ring;
+    internal IGpuCommandBufferSource Source => _source;
+    internal long LastWorkerUse;
     private readonly IRenderingState _rendering;
     private SubmissionContext? _context;
     private bool _handleWasRequested;
@@ -78,12 +81,12 @@ public sealed class RecordingBuffer
 
     internal nint Buffer;
 
-    internal RecordingBuffer(SubmissionScheduler owner, IGpuCommandBufferSource source, IRenderingState rendering)
+    internal RecordingBuffer(SubmissionScheduler owner, IGpuCommandBufferSource source, IRenderingState rendering, bool compact = false)
     {
         Owner = owner;
         _source = source;
         _rendering = rendering;
-        _ring = new TickedBufferRing(source, owner.Timeline);
+        _ring = new TickedBufferRing(source, owner.Timeline) { Compact = compact };
     }
 
     public SubmissionScheduler Owner { get; }
@@ -322,6 +325,13 @@ public sealed class RecordingBuffer
         }
 
         Buffer = _ring.AcquireBuffer();
+        Begin();
+    }
+
+    internal void AcquireWorker()
+    {
+        if (!IsInvalid) throw SubmissionScheduler.Fatal("The worker command buffer is already recording.");
+        Buffer = _ring.AcquireWorkerHandle();
         Begin();
     }
 

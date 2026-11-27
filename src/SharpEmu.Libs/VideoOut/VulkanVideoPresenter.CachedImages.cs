@@ -277,7 +277,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _imageCache.TraceNativeColorMetadata(request);
             SynchronizeColorMetadata(request);
             EnsureBatchedGuestCommands();
-            var imageIdentifier = LookUpImage(ref request, exactFormat);
+            var imageIdentifier = LookUpImage(ref request, exactFormat, nativeClearFollows: true);
             ApplyNativeColorClear(imageIdentifier, request);
             BindRenderTarget(imageIdentifier);
             return new ColorAttachment { ImageIdentifier = imageIdentifier, Request = request, Resolution = resolution };
@@ -636,7 +636,7 @@ internal static unsafe partial class VulkanVideoPresenter
             _imageCache.TraceTextureMetadata(request);
             SynchronizeColorMetadata(request);
             EnsureBatchedGuestCommands();
-            var imageIdentifier = LookUpImage(ref request, resolution.ExactFormat);
+            var imageIdentifier = LookUpImage(ref request, resolution.ExactFormat, nativeClearFollows: true);
             resolution = resolution with { Request = request };
             imageIdentifier = ImageRequestBuilders.ValidateTextureOwner(_imageCache, imageIdentifier, resolution);
             ApplyNativeColorClear(imageIdentifier, request);
@@ -806,7 +806,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 preparation.StencilStorageWriteBackImages ??= new();
                 preparation.StencilStorageWriteBackImages.Add(attachment);
             }
-            attachment.CopyStencilStorage(storage, _bufferCache.GetUtilityBuffer(GpuBufferUsage.DeviceLocal), writeBack: false);
+            attachment.CopyStencilStorage(storage, _bufferCache.GetTransferRing(GpuBufferUsage.DeviceLocal, storage.Description.Data.Size), writeBack: false);
             if (_hasBoundDepth && _boundDepth.Image == attachmentIdentifier)
             {
                 var writes = _boundDepthLoadState.AttachmentWriteAspects(attachment.Backing.Format);
@@ -896,6 +896,7 @@ internal static unsafe partial class VulkanVideoPresenter
             }
 
             _feedbackSnapshotPoolBytes -= snapshot.Backing.AllocationSize;
+            snapshot.TouchResidency();
             if (entries.Count == 0)
             {
                 _feedbackSnapshotPool.Remove(key);
@@ -926,6 +927,7 @@ internal static unsafe partial class VulkanVideoPresenter
                 _feedbackSnapshotPoolBytes + allocation <= FeedbackSnapshotPoolMaxBytes)
             {
                 entries.Push(snapshot);
+                snapshot.Backing.Residency?.Use(Gpu.Buffers.GpuResidency.Role.IdleImage);
                 _feedbackSnapshotPoolBytes += allocation;
                 return;
             }

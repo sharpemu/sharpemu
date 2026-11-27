@@ -281,7 +281,7 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
             Assert.Equal(first, second);
 
             // A removed image is not served again: the binding looks the descriptor up afresh.
-            typeof(GuestImageCache).GetMethod("DeleteImage", InstanceMembers)!.Invoke(harness.Images, [first]);
+            harness.Images.DeleteImageForTest(first);
             var third = (ResourceSlotIdentifier)GetFieldValue(presenter.InvokeMethod("ResolveImageBinding", resource, words, program, 0)!, "ImageIdentifier");
             Assert.True(harness.Images.TryGetImage(third, out var image) && image.Registered);
             presenter.RenderHost.ResetBindings();
@@ -901,6 +901,33 @@ public sealed class PresenterImageBindingTests : IClassFixture<HeadlessVulkanFix
         presenter.Run(() => presenter.InvokeMethod("ResetImageBindings"));
         Assert.False(harness.Image(imageIdentifier).Binding.IsTarget);
         harness.Finish();
+        harness.Shutdown();
+    }
+
+    [Fact]
+    public void StageTextureTransitions_StaleScanRequiresEveryBindingToBeCurrent()
+    {
+        if (!GatePrerequisites.Ready(_vulkan)) return;
+        using var presenter = new PresenterUnderTest(_vulkan);
+        var harness = presenter.Harness;
+        var first = Texture(harness.MapBacked(0x10000, ReadWrite));
+        var second = Texture(harness.MapBacked(0x10000, ReadWrite));
+        presenter.Run(() =>
+        {
+            var bindings = Array.CreateInstance(TextureResourceType, 2);
+            bindings.SetValue(presenter.InvokeMethod("ResolveTexture", first), 0);
+            var resource = presenter.InvokeMethod("ResolveTexture", second)!;
+            bindings.SetValue(resource, 1);
+            var scan = RecordingHostType.GetMethod("ImageBindingsAreCurrent", InstanceMembers)!;
+            bool Current() => (bool)scan.Invoke(presenter.RenderHost, [bindings])!;
+            Assert.True(Current());
+            var image = harness.Image((ResourceSlotIdentifier)GetFieldValue(resource, "ImageIdentifier"));
+            image.Binding.NeedsRebind = true;
+            Assert.False(Current());
+            image.Binding.NeedsRebind = false;
+            Assert.True(Current());
+            presenter.InvokeMethod("ResetImageBindings");
+        });
         harness.Shutdown();
     }
 

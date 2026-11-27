@@ -1,6 +1,8 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using SharpEmu.HLE.Diagnostics;
+
 namespace SharpEmu.Libs.Gpu.GpuCommands;
 
 // A read a worker cannot serve ahead of the stream: the draw resolves in stream order instead.
@@ -17,6 +19,18 @@ public sealed class ResolveReadLog
     private bool[] _clean = new bool[64];
     private byte[] _bytes = new byte[2048];
     private int _byteCount;
+
+    private readonly bool _compact;
+
+    public ResolveReadLog() : this(GcFootprint.UseCompactBuffers) { }
+
+    internal ResolveReadLog(bool compact)
+    {
+        _compact = compact;
+    }
+
+    internal long CapacityBytes => _bytes.LongLength + _addresses.LongLength * sizeof(ulong) +
+        (_offsets.LongLength + _lengths.LongLength) * sizeof(int) + _clean.LongLength;
 
     public int Count { get; private set; }
 
@@ -77,7 +91,7 @@ public sealed class ResolveReadLog
     {
         if (_addresses.Length < source.Count)
         {
-            var capacity = source._addresses.Length;
+            var capacity = CopyCapacity(source.Count, _addresses.Length, source._addresses.Length);
             _addresses = new ulong[capacity];
             _offsets = new int[capacity];
             _lengths = new int[capacity];
@@ -86,7 +100,8 @@ public sealed class ResolveReadLog
 
         if (_bytes.Length < source._byteCount)
         {
-            _bytes = new byte[source._bytes.Length];
+            var capacity = CopyCapacity(source._byteCount, _bytes.Length, source._bytes.Length);
+            _bytes = new byte[capacity];
         }
 
         source._addresses.AsSpan(0, source.Count).CopyTo(_addresses);
@@ -98,6 +113,26 @@ public sealed class ResolveReadLog
         _byteCount = source._byteCount;
         Version = source.Version;
         Publications = source.Publications;
+    }
+
+    // A worker template can have a large high-water mark while this draw uses only a few reads.
+    private int CopyCapacity(int used, int previous, int templateCapacity) =>
+        _compact ? (int)Math.Clamp(2L * previous, used, templateCapacity) : templateCapacity;
+
+    // A retired work item can spend the rest of the session on its owner's spare queue.
+    // Smaller logs retain their storage, and a live template or worker always keeps all of its reads.
+    internal void ClearForPool()
+    {
+        Clear();
+        if (!_compact) return;
+        if (_bytes.Length > 64 * 1024) _bytes = new byte[2048];
+        if (_addresses.Length > 4096)
+        {
+            _addresses = new ulong[64];
+            _offsets = new int[64];
+            _lengths = new int[64];
+            _clean = new bool[64];
+        }
     }
 
     public void Clear()

@@ -19,6 +19,7 @@ public sealed class RecencyQueue<TSlotIdentifier> where TSlotIdentifier : struct
     private Item? _first;
     private Item? _last;
     private Item? _scanNext;
+    private Item? _budgetScanNext;
 
     internal ulong GetLastUseTick(int entryIndex) => _items[entryIndex].Tick;
 
@@ -78,21 +79,27 @@ public sealed class RecencyQueue<TSlotIdentifier> where TSlotIdentifier : struct
     }
 
     // Continue a bounded collection walk without changing the order or last-use ticks.
-    public void CollectNextAtOrBeforeTick(ulong tick, int limit, List<TSlotIdentifier> results)
+    public void CollectNextAtOrBeforeTick(ulong tick, int limit, List<TSlotIdentifier> results) =>
+        CollectNextAtOrBeforeTick(tick, limit, results, ref _scanNext);
+
+    internal void CollectNextBudgetCandidates(ulong tick, int limit, List<TSlotIdentifier> results) =>
+        CollectNextAtOrBeforeTick(tick, limit, results, ref _budgetScanNext);
+
+    private void CollectNextAtOrBeforeTick(ulong tick, int limit, List<TSlotIdentifier> results, ref Item? cursor)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(limit);
-        var item = _scanNext ?? _first;
+        var item = cursor ?? _first;
         for (var examined = 0; item != null && examined < limit; examined++)
         {
             if (item.Tick > tick)
             {
-                _scanNext = null;
+                cursor = null;
                 return;
             }
             results.Add(item.Slot);
             item = item.Next;
         }
-        _scanNext = item;
+        cursor = item;
     }
 
     private int AllocateItem()
@@ -125,6 +132,8 @@ public sealed class RecencyQueue<TSlotIdentifier> where TSlotIdentifier : struct
     {
         if (_scanNext == item)
             _scanNext = item.Next;
+        if (_budgetScanNext == item)
+            _budgetScanNext = item.Next;
         if (item.Previous != null)
         {
             item.Previous.Next = item.Next;

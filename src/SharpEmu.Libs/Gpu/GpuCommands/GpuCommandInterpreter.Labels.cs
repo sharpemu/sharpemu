@@ -606,11 +606,8 @@ public sealed partial class GpuCommandInterpreter
         }
 
         var flip = PendingFlip;
-        var requestId = _host.PrepareFlip(QueueId, flip.Handle, flip.Index, flip.FlipMode, flip.FlipArgument);
-        var write = new EndOfPipeWrite(
-            EndOfPipeWriteKind.Flip, SubmitId, FlipHandle: flip.Handle, FlipIndex: flip.Index, FlipMode: flip.FlipMode, FlipArgument: flip.FlipArgument, FlipRequestId: requestId);
-        if (!_host.TryDeferEndOfPipe(QueueId, in write)) _host.RecordEndOfPipe(in write);
-        _host.Flush();
+        FinishFlip(new(EndOfPipeWriteKind.Flip, SubmitId, FlipHandle: flip.Handle, FlipIndex: flip.Index,
+            FlipMode: flip.FlipMode, FlipArgument: flip.FlipArgument), deferred: true);
     }
 
     internal void SubmitFlipWithLabel(ulong destination, uint value)
@@ -623,13 +620,8 @@ public sealed partial class GpuCommandInterpreter
         var deferred = _host.HasPendingPublications(QueueId);
         if (!deferred) WriteDword(destination, value);
         var flip = PendingFlip;
-        var requestId = _host.PrepareFlip(QueueId, flip.Handle, flip.Index, flip.FlipMode, flip.FlipArgument);
-        var write = new EndOfPipeWrite(
-            EndOfPipeWriteKind.FlipWithWrite32, SubmitId, destination, value,
-            FlipHandle: flip.Handle, FlipIndex: flip.Index, FlipMode: flip.FlipMode, FlipArgument: flip.FlipArgument, FlipRequestId: requestId);
-        if (deferred) PublishLabel(in write, false);
-        else _host.RecordEndOfPipe(in write);
-        _host.Flush();
+        FinishFlip(new(EndOfPipeWriteKind.FlipWithWrite32, SubmitId, destination, value, FlipHandle: flip.Handle,
+            FlipIndex: flip.Index, FlipMode: flip.FlipMode, FlipArgument: flip.FlipArgument), deferred);
     }
 
     internal void SubmitFlipWithInterrupt(uint eopEventType, uint cacheAction, ulong destination, uint value)
@@ -647,12 +639,35 @@ public sealed partial class GpuCommandInterpreter
         var deferred = _host.HasPendingPublications(QueueId);
         if (!deferred) WriteDword(destination, value);
         var flip = PendingFlip;
-        var requestId = _host.PrepareFlip(QueueId, flip.Handle, flip.Index, flip.FlipMode, flip.FlipArgument);
-        var write = new EndOfPipeWrite(
-            EndOfPipeWriteKind.FlipWithInterruptWriteBack32, SubmitId, destination, value, InterruptEventId,
-            FlipHandle: flip.Handle, FlipIndex: flip.Index, FlipMode: flip.FlipMode, FlipArgument: flip.FlipArgument, FlipRequestId: requestId);
-        if (deferred) PublishLabel(in write, false);
-        else _host.RecordEndOfPipe(in write);
+        FinishFlip(new(EndOfPipeWriteKind.FlipWithInterruptWriteBack32, SubmitId, destination, value, InterruptEventId,
+            FlipHandle: flip.Handle, FlipIndex: flip.Index, FlipMode: flip.FlipMode, FlipArgument: flip.FlipArgument), deferred);
+    }
+
+    private void FinishFlip(EndOfPipeWrite write, bool deferred)
+    {
+        var hasLabel = write.Kind != EndOfPipeWriteKind.Flip;
+        if (deferred && _host.TryPostPublicationFlip(QueueId,
+            write with { WaitForGpu = hasLabel && CompletionLabelsRequireGpu }, out var immediate))
+        {
+            if (hasLabel)
+            {
+                // Both PublishLabel paths forget an older soft wait at this address. Only an
+                // ordinary store can satisfy a paired wait after the CPU has reset the label.
+                Landings?.Forget(write.Destination);
+                _lastWriteAddress = write.Destination;
+                _lastWriteValue = write.Value;
+                _lastWritePacket = _packetSerial;
+                _lastWriteLength = sizeof(uint);
+                _lastWriteIsImmediate = immediate;
+            }
+        }
+        else
+        {
+            var request = _host.PrepareFlip(QueueId, write.FlipHandle, write.FlipIndex, write.FlipMode, write.FlipArgument);
+            write = write with { FlipRequestId = request };
+            if (hasLabel && deferred) PublishLabel(in write, false);
+            else if (hasLabel || !_host.TryDeferEndOfPipe(QueueId, in write)) _host.RecordEndOfPipe(in write);
+        }
         _host.Flush();
     }
 

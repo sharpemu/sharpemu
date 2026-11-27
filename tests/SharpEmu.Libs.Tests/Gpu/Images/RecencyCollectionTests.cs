@@ -27,6 +27,24 @@ public sealed class RecencyCollectionTests
     [Theory]
     [InlineData(false)]
     [InlineData(true)]
+    public void BudgetScanAdvancesPastEntriesRejectedByTheOlderCutoff(bool touch)
+    {
+        var queue = new RecencyQueue<int>();
+        queue.Insert(1, 30);
+        var middle = queue.Insert(2, 30);
+        queue.Insert(3, 30);
+        var seen = new List<int>();
+        queue.CollectNextBudgetCandidates(84, 1, seen);
+        queue.CollectNextAtOrBeforeTick(20, 20, seen);
+        if (touch) queue.Touch(middle, 100);
+        else queue.Free(middle);
+        queue.CollectNextBudgetCandidates(84, 1, seen);
+        Assert.Equal(new[] { 1, 3 }, seen);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
     public void RemovedOrTouchedCursorAdvancesToItsSuccessor(bool touch)
     {
         var queue = new RecencyQueue<int>();

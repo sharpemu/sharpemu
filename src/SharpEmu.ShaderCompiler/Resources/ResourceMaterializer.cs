@@ -78,6 +78,7 @@ public static partial class ResourceMaterializer
         out ResourceMaterializationFailure failure,
         Action<IndirectImageFailure>? captureIndirectImageFailure = null)
     {
+        using var independent = new IndependentReads();
         using var totalProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.Total);
         if (!MaterializeSnapshot(plan, inputs, captureIndirectImageFailure is not null, out var materialized, out var programRanges, out failure))
         {
@@ -193,6 +194,7 @@ public static partial class ResourceMaterializer
     // the snapshot did not come from the fast path.
     public static bool? RevalidateFast(ResourceSnapshot snapshot)
     {
+        using var independent = new IndependentReads();
         if (snapshot.Origin is not FastOrigin origin)
         {
             return null;
@@ -231,7 +233,8 @@ public static partial class ResourceMaterializer
     // and unusable image descriptors as zeros.
     private static bool EvaluateInto(ShaderResourcePlan plan, ResourceRuntimeInputs inputs, MaterializationProgram.Output output)
     {
-        if (!plan.MaterializationProgram!.TryRunInto(plan, inputs, checked(plan.WrittenRangeCount * ShaderResourcePlan.WrittenRangeDwordCount), output))
+        if (!plan.MaterializationProgram!.TryRunInto(plan, inputs, checked(plan.WrittenRangeCount * ShaderResourcePlan.WrittenRangeDwordCount), output) ||
+            SpeculativeReadRefused)
         {
             return false;
         }
@@ -365,9 +368,46 @@ public static partial class ResourceMaterializer
         ResourceRuntimeInputs inputs,
         ref ResourceSnapshot snapshot,
         ref ResourceSpecialization specialization,
-        out ResourceMaterializationFailure failure)
+        out ResourceMaterializationFailure failure) =>
+        MaterializeFast(plan, inputs, ref snapshot, ref specialization, out failure, false, out _);
+
+    // Only a ticket's program evaluation may decline a read. Discard its scratch before a
+    // fallback, specialization or snapshot can interpret missing bytes as a valid descriptor.
+    [ThreadStatic]
+    private static SpeculativeRead _speculativeRead;
+    private enum SpeculativeRead { None, Evaluating, Refused }
+    // Guest callbacks can start a second materialization on this thread. Its reads have
+    // their own success rules and cannot consume the outer ticket's refusal.
+    internal readonly struct IndependentReads : IDisposable
     {
+        private readonly SpeculativeRead _outer;
+        public IndependentReads()
+        {
+            _outer = _speculativeRead;
+            if (_outer != SpeculativeRead.None) _speculativeRead = SpeculativeRead.None;
+        }
+        public void Dispose()
+        {
+            if (_outer != SpeculativeRead.None) _speculativeRead = _outer;
+        }
+    }
+    internal static bool SpeculativeReadActive => _speculativeRead != SpeculativeRead.None;
+    internal static bool SpeculativeReadRefused => _speculativeRead == SpeculativeRead.Refused;
+
+    internal static bool TryRefuseSpeculativeRead()
+    {
+        if (_speculativeRead == SpeculativeRead.None) return false;
+        _speculativeRead = SpeculativeRead.Refused;
+        return true;
+    }
+
+    internal static bool MaterializeFast(ShaderResourcePlan plan, ResourceRuntimeInputs inputs,
+        ref ResourceSnapshot snapshot, ref ResourceSpecialization specialization, out ResourceMaterializationFailure failure,
+        bool allowReadRefusal, out bool refused)
+    {
+        using var independent = new IndependentReads();
         using var totalProfile = ResourceMaterializationProfile.Measure(ResourceMaterializationProfile.Phase.Total);
+        refused = false;
         failure = ResourceMaterializationFailure.Other;
         _lastFastOutcome = MaterializationTally.Outcome.FastFallback;
         if (plan.RequiresSpecializationMemory && inputs.ReadCleanMemory is null)
@@ -383,7 +423,26 @@ public static partial class ResourceMaterializer
         var output = TakeOutput();
         try
         {
-            if (!EvaluateInto(plan, inputs, output))
+            bool evaluated;
+            if (allowReadRefusal)
+            {
+                _speculativeRead = SpeculativeRead.Evaluating;
+                try
+                {
+                    evaluated = EvaluateInto(plan, inputs, output);
+                    refused = SpeculativeReadRefused;
+                }
+                finally
+                {
+                    _speculativeRead = SpeculativeRead.None;
+                }
+                if (refused) return false;
+            }
+            else
+            {
+                evaluated = EvaluateInto(plan, inputs, output);
+            }
+            if (!evaluated)
             {
                 _programFallbacks.Increment();
                 return MaterializeFastFromSnapshot(plan, inputs, ref snapshot, ref specialization, out failure);

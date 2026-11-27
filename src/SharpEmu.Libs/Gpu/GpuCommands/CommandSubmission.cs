@@ -110,6 +110,8 @@ public sealed class CommandSubmission
 
     public CommandSubmissionKind Kind { get; }
 
+    internal bool DeferredFrameBoundary { get; set; }
+
     public int QueueId { get; }
 
     public ulong Address { get; }

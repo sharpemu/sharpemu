@@ -74,7 +74,7 @@ public sealed partial class GuestImageCache
 
     // Removes the image and its stencil associations; the slot is freed after the current tick, or for an image the bindless
     // heap names, after the tick in which the heap lets go of it.
-    private void DeleteImage(ResourceSlotIdentifier imageIdentifier)
+    private void DeleteImage(ResourceSlotIdentifier imageIdentifier, bool discardBacking = false)
     {
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageDelete);
         var image = _slots.TryGet(imageIdentifier);
@@ -135,27 +135,31 @@ public sealed partial class GuestImageCache
         }
 
         RemoveFromIndex(imageIdentifier);
+        if (discardBacking)
+            image.DiscardBackingOnRetirement();
         // Descriptor set 1 still names a view of this image until the heap rewrites the element. A wait before that
         // can complete this tick and run its erase, and a draw recorded after it would read a destroyed view.
         var bytes = (long)image.Backing.AllocationSize;
         if (image.HeapChanged is not null)
         {
-            image.DeferredErase = () => EraseAfterCurrentTick(imageIdentifier, bytes, callerHoldsLock: false);
+            image.DeferredErase = () => EraseAfterCurrentTick(imageIdentifier, bytes, callerHoldsLock: false, discardBacking);
             return;
         }
 
-        EraseAfterCurrentTick(imageIdentifier, bytes, callerHoldsLock: true);
+        EraseAfterCurrentTick(imageIdentifier, bytes, callerHoldsLock: true, discardBacking);
     }
 
     // Frees the slot once the current tick completes, or at once when no tick is recording.
-    private void EraseAfterCurrentTick(ResourceSlotIdentifier imageIdentifier, long bytes, bool callerHoldsLock)
+    private void EraseAfterCurrentTick(ResourceSlotIdentifier imageIdentifier, long bytes, bool callerHoldsLock, bool discardBacking)
     {
         if (_scheduler.Active)
         {
             Interlocked.Add(ref _pendingDestroyBytes, bytes);
+            if (discardBacking) Interlocked.Add(ref _pendingBudgetBytes, bytes);
             _scheduler.QueueCompletionAction(() =>
             {
                 _slots.Erase(imageIdentifier);
+                if (discardBacking) Interlocked.Add(ref _pendingBudgetBytes, -bytes);
                 Interlocked.Add(ref _pendingDestroyBytes, -bytes);
             });
         }
@@ -257,6 +261,7 @@ public sealed partial class GuestImageCache
 
     private void TouchImage(CachedImage image)
     {
+        image.TouchResidency();
         if (image.Registered)
         {
             // The first use in a frame keeps the frame of the use before it: an image used in each of the two frames before
