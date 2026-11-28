@@ -24,13 +24,13 @@ internal sealed class Ps5OuterPfs
 
     private static readonly byte[] PlainNoAuthSeed = "PPRPLAIN-NOAUTH!"u8.ToArray();
 
-    private readonly Ps5Source _source;
+    private readonly PackageSource _source;
     private readonly long _base;
     private readonly long _size;
     private readonly InodeLayout _layout;
     private readonly Inode[] _inodes;
 
-    private Ps5OuterPfs(Ps5Source source, long pfsOffset, long pfsSize, Ps5PfsSuperblock superblock, InodeLayout layout, Inode[] inodes)
+    private Ps5OuterPfs(PackageSource source, long pfsOffset, long pfsSize, Ps5PfsSuperblock superblock, InodeLayout layout, Inode[] inodes)
     {
         _source = source;
         _base = pfsOffset;
@@ -104,7 +104,7 @@ internal sealed class Ps5OuterPfs
 
     internal sealed record Inode(long Size, long[] Direct, long[] Indirect);
 
-    public static Ps5OuterPfs Open(Ps5Source source, long pfsOffset, long pfsSize, long superblockOffset)
+    public static Ps5OuterPfs Open(PackageSource source, long pfsOffset, long pfsSize, long superblockOffset)
     {
         // Data-first images keep the superblock near the end, where the header points; classic
         // images keep it at the start of the segment.
@@ -288,7 +288,7 @@ internal sealed class Ps5OuterPfs
 }
 
 // A file of the outer PFS, read through its block list.
-internal sealed class Ps5OuterFile(Ps5Source source, long baseOffset, long blockSize, long[] blocks, long size)
+internal sealed class Ps5OuterFile(PackageSource source, long baseOffset, long blockSize, long[] blocks, long size)
 {
     public long Size { get; } = size;
 
@@ -318,6 +318,30 @@ internal sealed class Ps5OuterFile(Ps5Source source, long baseOffset, long block
             source.ReadExactAt(buffer.Slice(done, n), at);
             done += n;
         }
+    }
+
+    // Package offset just past the last byte ReadExactAt(offset, count) reads; 0 for an empty range.
+    public long SourceEnd(long offset, long count)
+    {
+        if (count <= 0)
+        {
+            return 0;
+        }
+
+        if (offset < 0 || offset > Size || count > Size - offset)
+        {
+            throw new InvalidDataException($"Range of {count:N0} bytes at 0x{offset:X} is past the end of a {Size:N0}-byte outer file.");
+        }
+
+        long end = 0;
+        var last = (offset + count - 1) / blockSize;
+        for (var index = offset / blockSize; index <= last; index++)
+        {
+            var within = Math.Min(offset + count, (index + 1) * blockSize) - index * blockSize;
+            end = Math.Max(end, Ps5OuterPfs.BlockOffset(baseOffset, blocks[index], blockSize) + within);
+        }
+
+        return end;
     }
 
     public byte[] ReadAll()

@@ -559,7 +559,7 @@ public sealed class PkgTests
 
     // A minimal PKG with one unencrypted PFS image and a few sce_sys entries. No key entries:
     // the reader falls back to reading the image as-is, which keeps this fixture self-contained.
-    private static byte[] BuildSyntheticPkg(byte[] image, params (uint Id, byte[] Data)[] entries)
+    internal static byte[] BuildSyntheticPkg(byte[] image, params (uint Id, byte[] Data)[] entries)
     {
         const int imageOffset = 0x20000;
         // FindOffset starts looking for PFSC after the image's own header blocks.
@@ -603,7 +603,7 @@ public sealed class PkgTests
         BinaryPrimitives.WriteUInt32BigEndian(row[20..], size);
     }
 
-    private static int WriteDirent(byte[] block, int offset, int inode, PfsDirentType type, string name)
+    internal static int WriteDirent(byte[] block, int offset, int inode, PfsDirentType type, string name)
     {
         var nameBytes = Encoding.UTF8.GetBytes(name);
         var entrySize = (16 + nameBytes.Length + 7) & ~7;
@@ -615,7 +615,7 @@ public sealed class PkgTests
         return offset + entrySize;
     }
 
-    private static void WriteInode(byte[] block, int slot, ushort mode, long size, uint blocks, uint location)
+    internal static void WriteInode(byte[] block, int slot, ushort mode, long size, uint blocks, uint location)
     {
         var span = block.AsSpan(slot * PfsInode.Stride, PfsInode.Stride);
         BinaryPrimitives.WriteUInt16LittleEndian(span, mode);

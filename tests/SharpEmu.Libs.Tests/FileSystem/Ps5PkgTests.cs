@@ -13,7 +13,7 @@ namespace SharpEmu.Libs.Tests.FileSystem;
 // holding pfs_image.dat and naps_pkg_layout.dat, an inner flat PFS, and an embedded CNT.
 public sealed partial class Ps5PkgTests
 {
-    private const string DefaultContentId = "UP9000-PPSA01234_00-TESTGAME00000000";
+    internal const string DefaultContentId = "UP9000-PPSA01234_00-TESTGAME00000000";
 
     private const string DefaultParamJson =
         """{"titleId":"PPSA01234","localizedParameters":{"defaultLanguage":"en-US","en-US":{"titleName":"Test: The Game"},"fr-FR":{"titleName":"Le Jeu"}}}""";
@@ -391,7 +391,7 @@ public sealed partial class Ps5PkgTests
         var pfs = BuildOuterPfs(0x1000, "PPRPLAIN-NOAUTH!", [("big.bin", data), ("small.bin", small)], scramble: true);
         WithFile(pfs, path =>
         {
-            using var source = new Ps5Source(path);
+            using var source = new PackageSource(path);
             var outer = Ps5OuterPfs.Open(source, 0, pfs.Length, 0);
             var big = outer.OpenFile(outer.Find("big.bin") ?? throw new InvalidOperationException());
             Assert.Equal(data.Length, big.Size);
@@ -557,7 +557,7 @@ public sealed partial class Ps5PkgTests
 
     // ---- helpers -------------------------------------------------------------------------------
 
-    private sealed record Spec
+    internal sealed record Spec
     {
         public byte RetailByte { get; init; }
 
@@ -572,9 +572,9 @@ public sealed partial class Ps5PkgTests
         public string? ExtraCntName { get; init; }
     }
 
-    private sealed record Built(byte[] Bytes, Dictionary<string, byte[]> ExpectedFiles, long GameBytes);
+    internal sealed record Built(byte[] Bytes, Dictionary<string, byte[]> ExpectedFiles, long GameBytes);
 
-    private static byte[] Pattern(int seed, int length)
+    internal static byte[] Pattern(int seed, int length)
     {
         var bytes = new byte[length];
         for (var i = 0; i < bytes.Length; i++)
@@ -596,7 +596,7 @@ public sealed partial class Ps5PkgTests
         return record;
     }
 
-    private static byte[] DirectoryBlock(int blockSize, params (uint Inode, uint Kind, string Name)[] entries)
+    internal static byte[] DirectoryBlock(int blockSize, params (uint Inode, uint Kind, string Name)[] entries)
     {
         var block = new byte[blockSize];
         var at = 0;
@@ -613,7 +613,7 @@ public sealed partial class Ps5PkgTests
     // One LZ chunk (with seed) holding `block` as 8 seed bytes plus literals stored with the memcpy
     // entropy type and no commands. Every array uses the 3-byte memcpy header: a first byte with the
     // high bit set would read as the excess framing.
-    private static byte[] KrakenLiteralChunk(byte[] block)
+    internal static byte[] KrakenLiteralChunk(byte[] block)
     {
         var literals = block[8..];
         var payload = new List<byte>();
@@ -627,7 +627,7 @@ public sealed partial class Ps5PkgTests
         return [.. payload];
     }
 
-    private static byte[] CblockRecord(uint coffsetMod, ulong kdePredictor)
+    internal static byte[] CblockRecord(uint coffsetMod, ulong kdePredictor)
     {
         var record = new byte[9];
         BinaryPrimitives.WriteUInt64LittleEndian(record, coffsetMod | (kdePredictor << 56));
@@ -636,7 +636,7 @@ public sealed partial class Ps5PkgTests
 
     // Signed 32-bit PFS with the encrypted mode bit set. Block 0 is the superblock, then the inode
     // table, the root directory, then data (and indirect) blocks, optionally in scrambled order.
-    private static byte[] BuildOuterPfs(int blockSize, string seed, IReadOnlyList<(string Name, byte[] Data)> files, bool scramble)
+    internal static byte[] BuildOuterPfs(int blockSize, string seed, IReadOnlyList<(string Name, byte[] Data)> files, bool scramble)
     {
         const int InodeSize = 0x2C8;
         const int Stride = 36;
@@ -772,7 +772,7 @@ public sealed partial class Ps5PkgTests
         return blocks.Take(count).ToList();
     }
 
-    private static Built BuildPackage(Spec spec)
+    internal static Built BuildPackage(Spec spec)
     {
         const int Mount = 0x30000;
         var logical = new byte[Mount];
@@ -864,7 +864,12 @@ public sealed partial class Ps5PkgTests
         CblockRecord((uint)((krakenEnd + 0x10000) & 0x3FFFF), 0).CopyTo(naps, 91);
 
         var pfs = BuildOuterPfs(0x10000, spec.Seed, [("pfs_image.dat", image), ("naps_pkg_layout.dat", naps)], scramble: true);
+        return AssemblePackage(spec, pfs, expected);
+    }
 
+    // CNT and FIH around an outer PFS; adds the sce_sys files the CNT carries to `expected`.
+    internal static Built AssemblePackage(Spec spec, byte[] pfs, Dictionary<string, byte[]> expected)
+    {
         // CNT: entries, then the names table, then the data they point at.
         var cntFiles = new List<(uint Id, uint NameAt, uint Flags, byte[] Data)>();
         var names = new MemoryStream();

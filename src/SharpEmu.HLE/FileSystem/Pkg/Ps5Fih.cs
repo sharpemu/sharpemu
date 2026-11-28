@@ -17,7 +17,7 @@ internal sealed record Ps5Fih(ushort FormatVersion, long PfsOffset, long PfsSize
 
     private static ReadOnlySpan<byte> Magic => [0x7F, 0x46, 0x49, 0x48];
 
-    public static Ps5Fih Read(Ps5Source source)
+    public static Ps5Fih Read(PackageSource source)
     {
         if (source.Length < HeaderSize)
         {
@@ -92,7 +92,7 @@ internal sealed class Ps5Cnt
 
     public long FilesSize => Files.Sum(file => (long)file.Bytes.Length);
 
-    public static Ps5Cnt Read(Ps5Source source, long cntOffset)
+    public static Ps5Cnt Read(PackageSource source, long cntOffset)
     {
         var header = source.ReadBytes(0x80, cntOffset);
         if (!header.AsSpan(0, 4).SequenceEqual(new byte[] { 0x7F, 0x43, 0x4E, 0x54 }))

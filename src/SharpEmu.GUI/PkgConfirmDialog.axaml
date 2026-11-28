@@ -9,12 +9,52 @@ SPDX-License-Identifier: GPL-2.0-or-later
                  x:Class="SharpEmu.GUI.PkgConfirmDialog"
                  SheetWidth="520">
   <StackPanel Margin="28" Spacing="14">
-    <TextBlock Classes="sheetTitle"
+    <TextBlock x:Name="TitleText"
+               Classes="sheetTitle"
                Text="{Binding [Library.Pkg.PromptTitle], Source={x:Static local:Localization.Instance}}"
                TextWrapping="Wrap" />
 
     <TextBlock x:Name="MessageText"
                TextWrapping="Wrap" />
+
+    <!-- Only when the caller offers a choice of format: Folder is the existing install, .zar converts. -->
+    <StackPanel x:Name="FormatPanel" Spacing="10" IsVisible="False">
+      <Grid ColumnDefinitions="*,Auto">
+        <TextBlock VerticalAlignment="Center"
+                   Text="{Binding [Library.Pkg.Format], Source={x:Static local:Localization.Instance}}" />
+        <Border Grid.Column="1" Classes="menuSegments">
+          <StackPanel Orientation="Horizontal" Spacing="2">
+            <Button x:Name="FolderButton"
+                    Classes="menuSegment active"
+                    Content="{Binding [Library.Pkg.FormatFolder], Source={x:Static local:Localization.Instance}}" />
+            <Button x:Name="ZarButton"
+                    Classes="menuSegment"
+                    Content="{Binding [Library.Pkg.FormatZar], Source={x:Static local:Localization.Instance}}" />
+          </StackPanel>
+        </Border>
+      </Grid>
+
+      <TextBlock x:Name="FormatHint"
+                 Foreground="{StaticResource MutedBrush}"
+                 TextWrapping="Wrap" />
+
+      <StackPanel x:Name="ZarOptions" Spacing="8" IsVisible="False">
+        <CheckBox x:Name="ConsumeCheck">
+          <TextBlock TextWrapping="Wrap"
+                     Text="{Binding [Library.Pkg.Consume], Source={x:Static local:Localization.Instance}}" />
+        </CheckBox>
+        <TextBlock x:Name="ConsumeWarning"
+                   Foreground="{StaticResource DangerBrush}"
+                   TextWrapping="Wrap"
+                   IsVisible="False"
+                   Text="{Binding [Library.Pkg.ConsumeWarning], Source={x:Static local:Localization.Instance}}" />
+        <TextBlock x:Name="ConsumeBusy"
+                   Foreground="{StaticResource MutedBrush}"
+                   TextWrapping="Wrap"
+                   IsVisible="False"
+                   Text="{Binding [Library.Pkg.ConsumeBusy], Source={x:Static local:Localization.Instance}}" />
+      </StackPanel>
+    </StackPanel>
 
     <StackPanel Margin="0,8,0,0"
                 Orientation="Horizontal"

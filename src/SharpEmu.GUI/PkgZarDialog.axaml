@@ -1,0 +1,50 @@
+<!--
+Copyright (C) 2026 SharpEmu Emulator Project
+SPDX-License-Identifier: GPL-2.0-or-later
+-->
+
+<local:SheetView xmlns="https://github.com/avaloniaui"
+                 xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                 xmlns:local="clr-namespace:SharpEmu.GUI"
+                 x:Class="SharpEmu.GUI.PkgZarDialog"
+                 SheetWidth="560">
+  <StackPanel Margin="28" Spacing="12">
+    <TextBlock x:Name="HeadingText"
+               FontSize="20"
+               FontWeight="Bold"
+               TextWrapping="Wrap" />
+
+    <TextBlock x:Name="ExplanationText"
+               TextWrapping="Wrap" />
+
+    <TextBlock x:Name="DestinationText"
+               Foreground="{StaticResource MutedBrush}"
+               TextWrapping="Wrap" />
+
+    <ProgressBar x:Name="ConvertProgress"
+                 Minimum="0"
+                 Maximum="1"
+                 Height="8"
+                 Margin="0,8,0,0" />
+
+    <TextBlock x:Name="StatusText"
+               Foreground="{StaticResource MutedBrush}"
+               TextWrapping="Wrap" />
+
+    <TextBlock x:Name="FileText"
+               Foreground="{StaticResource MutedBrush}"
+               TextTrimming="CharacterEllipsis" />
+
+    <StackPanel Margin="0,8,0,0"
+                Orientation="Horizontal"
+                HorizontalAlignment="Right"
+                Spacing="10">
+      <Button x:Name="ResumeButton"
+              IsVisible="False"
+              Content="{Binding [Library.Pkg.ResumeButton], Source={x:Static local:Localization.Instance}}" />
+      <Button x:Name="CloseButton"
+              Classes="ghost"
+              Content="{Binding [Common.Cancel], Source={x:Static local:Localization.Instance}}" />
+    </StackPanel>
+  </StackPanel>
+</local:SheetView>
