@@ -25,6 +25,7 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
 
     private readonly HostVideoOptions _options;
     private readonly Action? _toggleBackendHud;
+    private readonly Action? _requestPssrCapture;
     private readonly object _gamepadGate = new();
     private SDL_Window* _window;
     private bool _textInputActive;
@@ -53,10 +54,12 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
     public SdlHostWindow(
         string title,
         HostVideoOptions options,
-        Action? toggleBackendHud = null)
+        Action? toggleBackendHud = null,
+        Action? requestPssrCapture = null)
     {
         _options = options.Normalize();
         _toggleBackendHud = toggleBackendHud;
+        _requestPssrCapture = requestPssrCapture;
         SdlGamepadStateReader.EnableSonyHidApi();
         if (!SDL_InitSubSystem(InitFlags))
         {
@@ -644,6 +647,10 @@ internal sealed unsafe class SdlHostWindow : IDisposable, IHostGamepadOutput
             else if (IsCaptureKey(keyEvent.key))
             {
                 RenderDocCapture.RequestCapture();
+            }
+            else if (keyEvent.key == SDL_Keycode.SDLK_F10)
+            {
+                _requestPssrCapture?.Invoke();
             }
             else if (keyEvent.key == SDL_Keycode.SDLK_F11)
             {

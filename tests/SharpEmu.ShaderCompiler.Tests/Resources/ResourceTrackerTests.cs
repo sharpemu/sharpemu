@@ -517,6 +517,32 @@ public sealed class ResourceTrackerTests
     }
 
     [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void BufferDescriptorArithmeticAfterReadFirstLane_StaysOnTheDevice(bool dynamicAddress)
+    {
+        var program = Program(
+            BufferLoad(0, 0, dwords: 2),
+            MoveScalarRegister(8, 8, 0),
+            MoveScalarRegister(12, 9, 1),
+            MoveScalarRegister(16, 10, 2),
+            MoveScalar(20, 11, 0x16204),
+            ReadFirstLane(24, dynamicAddress ? 8u : 12u, 4),
+            dynamicAddress ? ReadFirstLane(28, 12, 5) : Nop(28),
+            dynamicAddress
+                ? Sop2(32, "SOrB32", 9, Gen5Operand.Scalar(12), Operand(0x40000))
+                : Sop2(32, "SLshrB32", 10, Gen5Operand.Scalar(12), Operand(2)),
+            BufferAccess(36, dynamicAddress ? "BufferLoadDword" : "BufferStoreDword", 8),
+            EndProgram(44));
+
+        var request = Request(program, userDataCount: 4);
+        Assert.Single(request.Resources.Info.Buffers);
+        Assert.True(request.Memory.Find(36)!.DeviceDescriptor);
+        Assert.True(Gen5SpirvTranslator.TryCompileProgram(request, out var compiled, out var error), error);
+        Gen5MipStatisticsTests.ValidateWhenAvailable(compiled.Spirv);
+    }
+
+    [Theory]
     [InlineData(0u, 5u, 0x1234u, 0x12340000u)]
     [InlineData(1u, 5u, 0x8001u, 0x80010000u)]
     [InlineData(1u, 4u, 0x8001u, 0xFFFF8001u)]

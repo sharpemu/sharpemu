@@ -354,6 +354,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                      LineHeight="19.2" />
                         </Border>
                         <Border Classes="pkgBadge"
+                                VerticalAlignment="Top"
+                                IsVisible="{Binding HasProVersion}"
+                                ToolTip.Tip="{Binding [Options.Console.Model.Ps5Pro],
+                                                      Source={x:Static local:Localization.Instance},
+                                                      x:CompileBindings=False}">
+                          <TextBlock Classes="pkgBadgeText" Text="Pro" />
+                        </Border>
+                        <Border Classes="pkgBadge"
                                 IsVisible="{Binding RunsFromPackage}">
                           <TextBlock Classes="pkgBadgeText" Text="PKG" />
                         </Border>
@@ -1416,6 +1424,14 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                  Text="{Binding [Options.Graphics], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
                     </Grid>
                   </Button>
+                  <Button x:Name="OptionsPssrNav" Classes="optionsNav"
+                          AutomationProperties.Name="{Binding [Options.Pssr.Tab], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
+                    <Grid ColumnDefinitions="36,*">
+                      <TextBlock Grid.Column="0" Classes="materialSymbol optionsNavIcon" Text="auto_awesome" />
+                      <TextBlock Grid.Column="1" Classes="optionsNavLabel"
+                                 Text="{Binding [Options.Pssr.Tab], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                    </Grid>
+                  </Button>
                   <Button x:Name="OptionsEnvironmentNav" Classes="optionsNav"
                           AutomationProperties.Name="{Binding [Options.Env.Tab], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}">
                     <Grid ColumnDefinitions="36,*">
@@ -1486,6 +1502,17 @@ SPDX-License-Identifier: GPL-2.0-or-later
                                   VerticalAlignment="Center" />
                       </local:SettingRow>
 
+                      <local:SettingRow x:Name="ConsoleModelRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Options.Console.Model.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.Console.Model.Desc], Source={x:Static local:Localization.Instance}}">
+                        <ComboBox x:Name="ConsoleModelBox"
+                                  Classes="optionValue"
+                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
+                                  HorizontalContentAlignment="Left"
+                                  VerticalAlignment="Center" />
+                      </local:SettingRow>
+
                       <local:SettingRow x:Name="DefaultProfileRow"
                                         Classes="optionRow"
                                         Label="{Binding [Options.DefaultProfile.Label], Source={x:Static local:Localization.Instance}}"
@@ -1531,6 +1558,166 @@ SPDX-License-Identifier: GPL-2.0-or-later
               </ScrollViewer>
 
               <ScrollViewer x:Name="OptionsGraphicsPanel" Classes="optionsSectionPanel" />
+              <ScrollViewer x:Name="OptionsPssrPanel" Classes="optionsSectionPanel">
+                <StackPanel>
+                  <StackPanel Classes="optionsSectionHeader">
+                    <TextBlock Classes="optionsSectionTitle"
+                               Text="{Binding [Options.Pssr.Tab], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                    <TextBlock Classes="optionsSectionDesc"
+                               Text="{Binding [Options.Page.Pssr.Desc], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  </StackPanel>
+
+                  <Border x:Name="PssrProOnlyNotice" Classes="optionsGroup" IsVisible="False">
+                    <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12" Margin="18,14">
+                      <TextBlock Grid.Column="0"
+                                 Classes="materialSymbol"
+                                 Text="warning"
+                                 Foreground="{DynamicResource WarningBrush}"
+                                 VerticalAlignment="Center" />
+                      <TextBlock Grid.Column="1"
+                                 Text="{Binding [Options.Pssr.ProOnly], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}"
+                                 Foreground="{DynamicResource WarningBrush}"
+                                 TextWrapping="Wrap"
+                                 VerticalAlignment="Center" />
+                    </Grid>
+                  </Border>
+
+                  <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Pssr.Group.General], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  <Border x:Name="PssrGeneralGroup" Classes="optionsGroup">
+                    <StackPanel>
+                      <local:SettingRow x:Name="PssrUpscalerRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Options.Pssr.Upscaler.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.Pssr.Upscaler.Desc], Source={x:Static local:Localization.Instance}}">
+                        <ComboBox x:Name="PssrUpscalerBox"
+                                  Classes="optionValue"
+                                  ItemTemplate="{StaticResource LocalizedChoiceTemplate}"
+                                  HorizontalContentAlignment="Left"
+                                  VerticalAlignment="Center" />
+                      </local:SettingRow>
+                      <local:SettingRow x:Name="PssrAutoChoiceRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Options.Pssr.AutoChoice.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="" />
+                    </StackPanel>
+                  </Border>
+
+                  <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Pssr.Group.Dlss], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  <Border x:Name="PssrDlssGroup" Classes="optionsGroup">
+                    <StackPanel>
+                      <local:SettingRow x:Name="DlssFilesRow"
+                                        Classes="optionRow"
+                                        Label="{Binding [Options.Pssr.DlssFiles.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.Pssr.DlssFiles.Hint], Source={x:Static local:Localization.Instance}}">
+                        <WrapPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                          <Button x:Name="DlssInstallButton" Classes="accent" MinWidth="160" Margin="0,0,8,8"
+                                  Content="{Binding [Options.Pssr.Install.Action], Source={x:Static local:Localization.Instance}}" />
+                          <Button x:Name="StreamlineDownloadButton"
+                                  Classes="optionAction"
+                                  Margin="0,0,8,8">
+                            <TextBlock Text="{Binding [Options.Pssr.DlssFiles.Streamline], Source={x:Static local:Localization.Instance}}"
+                                       VerticalAlignment="Center" />
+                          </Button>
+                          <Button x:Name="DlssFolderButton"
+                                  Classes="optionAction"
+                                  Margin="0,0,8,8">
+                            <TextBlock Text="{Binding [Options.Pssr.DlssFiles.Folder], Source={x:Static local:Localization.Instance}}"
+                                       VerticalAlignment="Center" />
+                          </Button>
+                          <Button x:Name="DlssRefreshButton"
+                                  Classes="optionAction"
+                                  Margin="0,0,0,8">
+                            <TextBlock Text="{Binding [Options.Pssr.DlssFiles.Refresh], Source={x:Static local:Localization.Instance}}"
+                                       VerticalAlignment="Center" />
+                          </Button>
+                        </WrapPanel>
+                      </local:SettingRow>
+                      <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12" Margin="18,4,18,16">
+                        <TextBlock x:Name="DlssFilesStatusIcon"
+                                   Grid.Column="0"
+                                   Classes="materialSymbol"
+                                   VerticalAlignment="Top" />
+                        <StackPanel Grid.Column="1" Spacing="4">
+                          <TextBlock x:Name="DlssFilesStatusTitle"
+                                     FontWeight="SemiBold"
+                                     TextWrapping="Wrap" />
+                          <TextBlock x:Name="DlssFilesStatusDetails"
+                                     Classes="optionsSectionDesc"
+                                     TextWrapping="Wrap" />
+                          <TextBlock x:Name="DlssFilesCheckedText"
+                                     Classes="optionsSectionDesc"
+                                     IsVisible="False"
+                                     TextWrapping="Wrap" />
+                          <TextBlock x:Name="DlssVendorNotice"
+                                     Foreground="{DynamicResource WarningBrush}"
+                                     IsVisible="False"
+                                     TextWrapping="Wrap" />
+                        </StackPanel>
+                      </Grid>
+                    </StackPanel>
+                  </Border>
+
+                  <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Pssr.Group.Fsr], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  <Border x:Name="PssrFsrGroup" Classes="optionsGroup">
+                    <StackPanel>
+                      <local:SettingRow Classes="optionRow"
+                                        Label="{Binding [Options.Pssr.Fsr.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.Pssr.FsrFiles.Hint], Source={x:Static local:Localization.Instance}}">
+                        <WrapPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                          <Button x:Name="FsrInstallButton" Classes="accent" MinWidth="160" Margin="0,0,8,8"
+                                  Content="{Binding [Options.Pssr.Install.Action], Source={x:Static local:Localization.Instance}}" />
+                          <Button x:Name="FsrDownloadButton" Classes="optionAction" Margin="0,0,8,8"
+                                  Content="AMD FSR SDK" />
+                          <Button x:Name="FsrFolderButton" Classes="optionAction" Margin="0,0,8,8">
+                            <TextBlock Text="{Binding [Options.Pssr.DlssFiles.Folder], Source={x:Static local:Localization.Instance}}"
+                                       VerticalAlignment="Center" />
+                          </Button>
+                          <Button x:Name="FsrRefreshButton" Classes="optionAction" Margin="0,0,0,8">
+                            <TextBlock Text="{Binding [Options.Pssr.DlssFiles.Refresh], Source={x:Static local:Localization.Instance}}"
+                                       VerticalAlignment="Center" />
+                          </Button>
+                        </WrapPanel>
+                      </local:SettingRow>
+                      <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12" Margin="18,4,18,16">
+                        <TextBlock x:Name="FsrFilesStatusIcon" Grid.Column="0" Classes="materialSymbol" VerticalAlignment="Top" />
+                        <StackPanel Grid.Column="1" Spacing="4">
+                          <TextBlock x:Name="FsrFilesStatusTitle" FontWeight="SemiBold" TextWrapping="Wrap" />
+                          <TextBlock x:Name="FsrFilesStatusDetails" Classes="optionsSectionDesc" TextWrapping="Wrap" />
+                          <TextBlock x:Name="FsrFilesCheckedText" Classes="optionsSectionDesc" IsVisible="False" TextWrapping="Wrap" />
+                        </StackPanel>
+                      </Grid>
+                    </StackPanel>
+                  </Border>
+
+                  <TextBlock Classes="optionsGroupHeader" Text="{Binding [Options.Pssr.Group.Xess], Source={x:Static local:Localization.Instance}, x:CompileBindings=False}" />
+                  <Border x:Name="PssrXessGroup" Classes="optionsGroup">
+                    <StackPanel>
+                      <local:SettingRow Classes="optionRow"
+                                        Label="{Binding [Options.Pssr.Xess.Label], Source={x:Static local:Localization.Instance}}"
+                                        Description="{Binding [Options.Pssr.XessFiles.Hint], Source={x:Static local:Localization.Instance}}">
+                        <WrapPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                          <Button x:Name="XessInstallButton" Classes="accent" MinWidth="160" Margin="0,0,8,8"
+                                  Content="{Binding [Options.Pssr.Install.Action], Source={x:Static local:Localization.Instance}}" />
+                          <Button x:Name="XessDownloadButton" Classes="optionAction" Margin="0,0,8,8"
+                                  Content="Intel XeSS SDK" />
+                          <Button x:Name="XessFolderButton" Classes="optionAction" Margin="0,0,8,8"
+                                  Content="{Binding [Options.Pssr.DlssFiles.Folder], Source={x:Static local:Localization.Instance}}" />
+                          <Button x:Name="XessRefreshButton" Classes="optionAction" Margin="0,0,0,8"
+                                  Content="{Binding [Options.Pssr.DlssFiles.Refresh], Source={x:Static local:Localization.Instance}}" />
+                        </WrapPanel>
+                      </local:SettingRow>
+                      <Grid ColumnDefinitions="Auto,*" ColumnSpacing="12" Margin="18,4,18,16">
+                        <TextBlock x:Name="XessFilesStatusIcon" Grid.Column="0" Classes="materialSymbol" VerticalAlignment="Top" />
+                        <StackPanel Grid.Column="1" Spacing="4">
+                          <TextBlock x:Name="XessFilesStatusTitle" FontWeight="SemiBold" TextWrapping="Wrap" />
+                          <TextBlock x:Name="XessFilesStatusDetails" Classes="optionsSectionDesc" TextWrapping="Wrap" />
+                          <TextBlock x:Name="XessFilesCheckedText" Classes="optionsSectionDesc" IsVisible="False" TextWrapping="Wrap" />
+                        </StackPanel>
+                      </Grid>
+                    </StackPanel>
+                  </Border>
+                </StackPanel>
+              </ScrollViewer>
               <ScrollViewer x:Name="OptionsEnvironmentPanel" Classes="optionsSectionPanel" />
 
               <ScrollViewer x:Name="OptionsLoggingPanel"

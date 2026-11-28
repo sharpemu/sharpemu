@@ -22,6 +22,11 @@ public sealed partial class GuestImageCache
             ReportImageMemory("collection", true, tick);
         if (endsFrame) TrimExpiredPools(Environment.TickCount64);
         ExpireParkedImages(tick);
+        if (endsFrame)
+        {
+            ManageDeviceMemory(tick);
+        }
+
         if ((_device.Residency is not null || _device.DxgiBudget is not null ||
              (_device.MemoryBudgetSupported && _device.LocalBudgetHeap != uint.MaxValue))
             && !ShouldScanImages(tick, endsFrame))

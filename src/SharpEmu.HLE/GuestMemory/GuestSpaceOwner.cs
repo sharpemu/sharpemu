@@ -19,6 +19,8 @@ public sealed class GuestSpaceOwner : IDisposable
     internal static Action<string> OnFatal = message => Environment.FailFast(message);
 
     public const ulong GuestPage = 0x4000;
+    private const ulong LowFixedAddressStart = 0x1_0000_0000;
+    private const ulong LowFixedAddressEnd = 0x7_0000_0000;
     private const ulong UserAddressStart = 0x10_0000_0000;
     private const ulong UserAddressEnd = 0xFC_0000_0000;
     private const ulong MinimumPreReservedRange = 0x0100_0000;
@@ -39,6 +41,8 @@ public sealed class GuestSpaceOwner : IDisposable
     private readonly bool _preReserveGuestAddressSpace;
     private bool _disposed;
     private readonly HostAddressRange? _startupReservation;
+    private bool _holdLowFixedAddresses;
+    private HostAddressRange? _driverAperture;
 
     public GuestSpaceOwner(IHostViewMemory host, ulong backingSize, bool preReserveGuestAddressSpace = false,
         HostAddressRange? startupReservation = null)
@@ -527,7 +531,8 @@ public sealed class GuestSpaceOwner : IDisposable
 
             foreach (var (address, size) in _owned)
             {
-                if (_startupReservation is { } startupRange && address == startupRange.Address && size == startupRange.Size)
+                if (_startupReservation is { } startupRange && address >= startupRange.Address &&
+                    address + size <= startupRange.Address + startupRange.Size)
                 {
                     if (!_host.JoinHoles(address, size))
                         OnFatal($"Could not restore the startup guest reservation at 0x{address:X16}.");
@@ -547,12 +552,85 @@ public sealed class GuestSpaceOwner : IDisposable
         }
     }
 
+    public bool EnableNativeGpuInterop(ulong apertureAddress, ulong apertureSize)
+    {
+        if (!IsValidRange(apertureAddress, apertureSize) || apertureAddress % Granularity != 0 || apertureSize % Granularity != 0)
+        {
+            return false;
+        }
+
+        using (EnterMappingLock())
+        {
+            if (_disposed)
+            {
+                return false;
+            }
+
+            if (!_holdLowFixedAddresses)
+            {
+                _holdLowFixedAddresses = true;
+                ReserveFreeRanges(LowFixedAddressStart, LowFixedAddressEnd);
+            }
+
+            if (_driverAperture is not null)
+            {
+                return true;
+            }
+
+            if (!TryReleaseOwnedRangeLocked(apertureAddress, apertureSize))
+            {
+                return false;
+            }
+
+            _driverAperture = new HostAddressRange(apertureAddress, apertureSize);
+            return true;
+        }
+    }
+
+    private bool TryReleaseOwnedRangeLocked(ulong address, ulong size)
+    {
+        var ownedIndex = RangeSearch.FindLastIndexAtOrBelow(_owned, address);
+        if (ownedIndex < 0)
+        {
+            return false;
+        }
+
+        var ownedStart = _owned.Keys[ownedIndex];
+        var ownedEnd = ownedStart + _owned.Values[ownedIndex];
+        if (address + size > ownedEnd || !TryTakeFreeRange(address, size) || !_host.FreeHole(address, size))
+        {
+            return false;
+        }
+
+        _owned.Remove(ownedStart);
+        if (address > ownedStart)
+        {
+            _owned.Add(ownedStart, address - ownedStart);
+        }
+
+        if (address + size < ownedEnd)
+        {
+            _owned.Add(address + size, ownedEnd - address - size);
+        }
+
+        return true;
+    }
+
     private void PreReserveGuestAddressSpace()
     {
+        if (_holdLowFixedAddresses)
+        {
+            ReserveFreeRanges(LowFixedAddressStart, LowFixedAddressEnd);
+        }
+
         if (_startupReservation is { } retainedRange)
         {
-            _owned.Add(retainedRange.Address, retainedRange.Size);
-            AddFreeRange(retainedRange.Address, retainedRange.Size);
+            foreach (var (address, size) in ExcludeDriverAperture(retainedRange.Address, retainedRange.Address + retainedRange.Size))
+            {
+                _owned.Add(address, size);
+                AddFreeRange(address, size);
+            }
+
             return;
         }
 
@@ -561,7 +639,35 @@ public sealed class GuestSpaceOwner : IDisposable
             return;
         }
 
-        foreach (var range in _host.ReserveFreeAddressRanges(UserAddressStart, UserAddressEnd, MinimumPreReservedRange))
+        foreach (var (address, size) in ExcludeDriverAperture(UserAddressStart, UserAddressEnd))
+        {
+            ReserveFreeRanges(address, address + size);
+        }
+    }
+
+    private IEnumerable<(ulong Address, ulong Size)> ExcludeDriverAperture(ulong start, ulong end)
+    {
+        if (_driverAperture is not { } aperture || aperture.Address >= end || aperture.Address + aperture.Size <= start)
+        {
+            yield return (start, end - start);
+            yield break;
+        }
+
+        if (aperture.Address > start)
+        {
+            yield return (start, aperture.Address - start);
+        }
+
+        var apertureEnd = aperture.Address + aperture.Size;
+        if (apertureEnd < end)
+        {
+            yield return (apertureEnd, end - apertureEnd);
+        }
+    }
+
+    private void ReserveFreeRanges(ulong start, ulong end)
+    {
+        foreach (var range in _host.ReserveFreeAddressRanges(start, end, MinimumPreReservedRange))
         {
             _owned.Add(range.Address, range.Size);
             AddFreeRange(range.Address, range.Size);

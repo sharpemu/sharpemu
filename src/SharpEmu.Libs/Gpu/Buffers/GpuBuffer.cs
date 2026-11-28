@@ -46,6 +46,7 @@ public unsafe class GpuBuffer : IDisposable
     }
     private readonly ulong _memoryOffset;
     private readonly GpuMemorySlabs.Block? _slab;
+    private readonly bool _inSystemMemory;
 
     // allowSlab: the caller records on the scheduler's current command buffer, which clears a recycled slab block.
     public GpuBuffer(GpuDeviceInfo device, SubmissionScheduler scheduler, GpuBufferUsage usage, ulong cpuAddress, BufferUsageFlags flags, ulong size,
@@ -154,6 +155,14 @@ public unsafe class GpuBuffer : IDisposable
         NotePlacement(usage, allocateInfo.MemoryTypeIndex, properties);
         if (chosen > 0)
         {
+            if ((device.GetMemoryTypeFlags(candidates[0]) & MemoryPropertyFlags.DeviceLocalBit) != 0 &&
+                (properties & MemoryPropertyFlags.DeviceLocalBit) == 0)
+            {
+                _inSystemMemory = true;
+                device.NoteSystemMemoryBuffer(_allocationSize, added: true);
+                device.NoteDeviceLocalExhausted();
+            }
+
             NoteFallback(device, usage, size, requirements.MemoryTypeBits, candidates[0], allocateInfo.MemoryTypeIndex, _slab is not null,
                 slabFailed && firstFailure == Result.Success ? "the slab chunk allocation failed" : firstFailure.ToString());
         }
@@ -603,6 +612,11 @@ public unsafe class GpuBuffer : IDisposable
 
         DeviceFaultReport.Untrack(_deviceAddress);
         _device.InvalidateDescriptorResources();
+        if (_inSystemMemory)
+        {
+            _device.NoteSystemMemoryBuffer(_allocationSize, added: false);
+        }
+
         _device.Vk.DestroyBuffer(_device.Device, _handle, null);
         if (_slab is { } slab)
         {

@@ -51,13 +51,16 @@ public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
 
     public GameEntry(
         string name, string? titleId, string? version, string path, long sizeBytes,
-        string? coverPath, string? backgroundPath, bool compatibilityMode = false, bool needsInstall = false)
+        string? coverPath, string? backgroundPath, bool compatibilityMode = false, bool needsInstall = false,
+        bool supportsPs5Pro = false)
     {
         _needsInstall = needsInstall;
         _name = name;
         _titleId = titleId;
         _version = version;
         _compatibilityMode = compatibilityMode;
+        SupportsPs5Pro = supportsPs5Pro;
+        HasProVersion = supportsPs5Pro;
         Path = path;
         _sizeBytes = sizeBytes;
         _coverPath = coverPath;
@@ -161,12 +164,25 @@ public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
 
     public bool HasMultipleVersions => _versionCount > 1;
 
+    internal bool SupportsPs5Pro { get; private set; }
+
+    public bool HasProVersion { get; private set; }
+
     internal void SetVersionCount(int count)
     {
         _versionCount = count;
         RaisePropertyChanged(nameof(VersionText));
         RaisePropertyChanged(nameof(HasVersion));
         RaisePropertyChanged(nameof(HasMultipleVersions));
+    }
+
+    internal void SetHasProVersion(bool hasProVersion)
+    {
+        if (HasProVersion != hasProVersion)
+        {
+            HasProVersion = hasProVersion;
+            RaisePropertyChanged(nameof(HasProVersion));
+        }
     }
 
     public bool CompatibilityMode => _compatibilityMode;
@@ -227,6 +243,12 @@ public sealed class GameEntry : LibraryTile, INotifyPropertyChanged
         {
             _compatibilityMode = scanned.CompatibilityMode;
             RaisePropertyChanged(nameof(CompatibilityMode));
+            changes |= GameEntryChanges.Metadata;
+        }
+
+        if (SupportsPs5Pro != scanned.SupportsPs5Pro)
+        {
+            SupportsPs5Pro = scanned.SupportsPs5Pro;
             changes |= GameEntryChanges.Metadata;
         }
 

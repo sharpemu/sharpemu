@@ -177,8 +177,9 @@ public sealed class SelfLoader : ISelfLoader
             throw new InvalidDataException("Input image is empty.");
         }
 
+        bool supportsPs5Pro = false;
         var applicationInfo = readParamJson
-            ? TryLoadParamJson(fs, mountRoot)
+            ? TryLoadParamJson(fs, mountRoot, out supportsPs5Pro)
             : default;
 
         if (clearVirtualMemory)
@@ -384,13 +385,18 @@ public sealed class SelfLoader : ISelfLoader
             tlsInfo.MemorySize,
             tlsInfo.StaticOffset,
             importedModuleNames,
-            applicationInfo.ConceptId);
+            applicationInfo.ConceptId)
+        {
+            SupportsPs5Pro = supportsPs5Pro,
+        };
     }
 
     private static (string? Title, string? TitleId, string? Version, string? ConceptId) TryLoadParamJson(
         IFileSystem? fs,
-        string? mountRoot)
+        string? mountRoot,
+        out bool supportsPs5Pro)
     {
+        supportsPs5Pro = false;
         if (fs == null)
         {
             Console.WriteLine("[LOADER] param.json not found (no filesystem provided).");
@@ -417,7 +423,7 @@ public sealed class SelfLoader : ISelfLoader
             return default;
         }
 
-        var applicationInfo = Ps5ParamJsonReader.TryReadPs5Param(fs, foundPath);
+        var applicationInfo = Ps5ParamJsonReader.TryReadPs5Param(fs, foundPath, out supportsPs5Pro);
         Console.WriteLine($"[LOADER] Loading param.json at {foundPath}");
         Console.WriteLine(
             $"[LOADER] Title: {applicationInfo.Title ?? "(unknown)"}, " +

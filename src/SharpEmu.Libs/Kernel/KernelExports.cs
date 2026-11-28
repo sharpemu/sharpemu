@@ -542,7 +542,7 @@ public static class KernelExports
         LibraryName = "libKernel")]
     public static int KernelIsTrinityMode(CpuContext ctx)
     {
-        ctx[CpuRegister.Rax] = 0;
+        ctx[CpuRegister.Rax] = ConsoleHardware.IsPro ? 1UL : 0UL;
 
         return (int)OrbisGen2Result.ORBIS_GEN2_OK;
     }

@@ -147,7 +147,7 @@ public sealed partial class GpuCommandInterpreter
                 {
                     // The marker ids with a side effect (MarkerPacket) are flips. The user-data markers only set an interpreter
                     // property no register write reads.
-                    if ((payload[0] & 0xFFFu) is 0x777 or 0x778 or 0x781)
+                    if (MarkerHasSideEffect(payload[0] & 0xFFFu))
                     {
                         return true;
                     }

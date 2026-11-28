@@ -98,6 +98,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
     {
         Console.Error.WriteLine("[MEDIA][INFO] BINK VIDEO PLAYBACK MODE: " +
             SharpEmu.Libs.Media.HostMovieBridge.GetPlaybackModeName(Environment.GetEnvironmentVariable("SHARPEMU_BINK_MODE")));
+        ConsoleHardware.Configure(options.Ps5Pro);
+        Console.Error.WriteLine($"[LOADER][INFO] Console model: {(options.Ps5Pro ? "PS5 Pro" : "PS5")}");
         var cpuExecutionOptions = new CpuExecutionOptions
         {
             CpuEngine = options.CpuEngine,
@@ -109,6 +111,17 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
             viewHost: HostViewMemory.Create(),
             preReserveGuestAddressSpace: true,
             adoptStartupAddressReservations: options.AdoptStartupAddressReservations);
+        if (ConsoleHardware.IsPro && SharpEmu.Libs.VideoOut.Upscaling.SuperResolutionSettings.WantsDlss)
+        {
+            const ulong driverApertureStart = 0xF4_0000_0000;
+            const ulong driverApertureSize = 0x8_0000_0000;
+            var released = virtualMemory.PrepareForNativeGpuInterop(driverApertureStart, driverApertureSize);
+            Console.Error.WriteLine(released
+                ? $"[LOADER][INFO] DLSS address layout: low guest addresses are held for fixed mappings; 0x{driverApertureStart:X}+0x{driverApertureSize:X} is left to the GPU driver."
+                : "[LOADER][WARN] DLSS address layout could not be prepared; games that map fixed low addresses may fail with DLSS on.");
+        }
+
+        SharpEmu.Libs.VideoOut.Upscaling.SuperResolutionStartup.Begin();
         var moduleManager = new ModuleManager();
         // The compile-time generated registry (SharpEmu.SourceGenerators) is the sole
         // registration source; content tests in SharpEmu.Libs.Tests pin its invariants.
@@ -198,7 +211,8 @@ public sealed class SharpEmuRuntime : ISharpEmuRuntime
         NpUniversalDataSystemExports.ResetRuntimeState();
         KernelModuleRegistry.Reset();
         var image = LoadImage(normalizedEbootPath, _executableRelativePath is null ? null : app0Root);
-        VideoOutExports.ConfigureApplicationInfo(image.Title, image.TitleId, image.Version);
+        VideoOutExports.ConfigureApplicationInfo(image.Title, image.TitleId, image.Version,
+            proMode: ConsoleHardware.IsPro && image.SupportsPs5Pro);
         KernelMemoryCompatExports.ConfigureApplicationInfo(image.TitleId);
         AddcontEntitlements.ConfigureConceptId(image.ConceptId);
         SaveDataExports.ConfigureApplicationInfo(image.TitleId);

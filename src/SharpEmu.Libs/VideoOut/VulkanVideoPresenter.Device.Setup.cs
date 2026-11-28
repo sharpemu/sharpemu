@@ -8,6 +8,10 @@ using SharpEmu.Libs.Gpu.Buffers;
 using SharpEmu.Libs.Gpu.Pipelines;
 using SharpEmu.Libs.Gpu.Rendering;
 using SharpEmu.Libs.Gpu.Scheduling;
+using SharpEmu.Libs.VideoOut.Upscaling;
+using SharpEmu.Libs.VideoOut.Upscaling.Fsr;
+using SharpEmu.Libs.VideoOut.Upscaling.Streamline;
+using SharpEmu.Libs.VideoOut.Upscaling.Xess;
 using Silk.NET.Core;
 using Silk.NET.Core.Native;
 using Silk.NET.Vulkan;
@@ -90,9 +94,25 @@ internal static unsafe partial class VulkanVideoPresenter
                     $"SharpEmu requires Vulkan 1.3; loader exposes {loaderVersion >> 22}.{(loaderVersion >> 12) & 0x3ff}.");
             }
 
+            _streamline = StartStreamline();
+            if (SharpEmu.Libs.Kernel.ConsoleHardware.IsPro && SuperResolutionSettings.Backend == SuperResolutionBackend.Xess)
+            {
+                _xess = XessRuntime.Load(_vk, XessRuntimeFiles.DefaultDirectory, IsInstanceExtensionAvailable);
+            }
             CreateInstance();
             CreateSurface();
             SelectPhysicalDevice();
+            if (_streamline is not null && !_streamline.SupportsAdapter(_physicalDevice))
+            {
+                _streamline.Dispose();
+                _streamline = null;
+            }
+            if (_xess is not null && !_xess.SelectDevice(_instance, _physicalDevice, IsDeviceExtensionAvailable))
+            {
+                _xess.Dispose();
+                _xess = null;
+            }
+
             CreateDevice();
             CreatePipelineCache();
             // The scalar graph and translation disk caches keep this game's entries beside its pipeline cache.
@@ -109,6 +129,12 @@ internal static unsafe partial class VulkanVideoPresenter
                     Environment.GetEnvironmentVariable("SHARPEMU_VK_PIPELINE_CACHE_PATH")) + ".binaries");
             }
 
+            FinishStreamlineAttach();
+            var fsr = WantsFsr
+                ? FsrRuntime.Start(_vk, _instance, _physicalDevice, _device, FsrRuntimeFiles.DefaultDirectory)
+                : null;
+            _xess?.Attach(_device);
+            _superResolution = new SuperResolutionService(_vk, _physicalDevice, _device, _pushDescriptorApi, _streamline, fsr, _xess);
             CreateSwapchain();
             CreateCommandResources();
             CreateGuestDrawResources();
@@ -117,6 +143,78 @@ internal static unsafe partial class VulkanVideoPresenter
             Console.Error.WriteLine(
                 $"[LOADER][INFO] Vulkan VideoOut ready: {_extent.Width}x{_extent.Height}, format={_swapchainFormat}");
             StartShaderPrewarm();
+        }
+
+        private SharpEmu.Libs.VideoOut.Upscaling.Streamline.StreamlineRuntime? _streamline;
+        private XessRuntime? _xess;
+        private Task<bool>? _streamlineAttach;
+        internal SharpEmu.Libs.VideoOut.Upscaling.SuperResolutionService? _superResolution;
+
+        private static bool WantsFsr => SharpEmu.Libs.Kernel.ConsoleHardware.IsPro && SuperResolutionSettings.WantsFsr;
+        internal bool FsrSeparateDepthStencilLayouts { get; private set; }
+
+        private void BeginStreamlineAttach()
+        {
+            if (_streamline is not { } streamline)
+            {
+                return;
+            }
+
+            var instance = _instance;
+            var physicalDevice = _physicalDevice;
+            var device = _device;
+            var queueFamily = _queueFamilyIndex;
+            _streamlineAttach = Task.Run(() => streamline.AttachDevice(instance, physicalDevice, device, queueFamily));
+        }
+
+        private void FinishStreamlineAttach()
+        {
+            if (_streamlineAttach is not { } attach)
+            {
+                return;
+            }
+
+            _streamlineAttach = null;
+            bool attached;
+            try
+            {
+                attached = attach.GetAwaiter().GetResult();
+            }
+            catch (Exception exception)
+            {
+                Console.Error.WriteLine($"[DLSS][WARN] DLSS is off: attaching Streamline failed ({exception.Message}).");
+                attached = false;
+            }
+
+            if (!attached)
+            {
+                _streamline?.Dispose();
+                _streamline = null;
+            }
+        }
+
+        private static SharpEmu.Libs.VideoOut.Upscaling.Streamline.StreamlineRuntime? StartStreamline()
+        {
+            if (!SharpEmu.Libs.Kernel.ConsoleHardware.IsPro)
+            {
+                return null;
+            }
+
+            if (!SharpEmu.Libs.VideoOut.Upscaling.SuperResolutionSettings.WantsDlss)
+            {
+                return null;
+            }
+
+            try
+            {
+                return SharpEmu.Libs.VideoOut.Upscaling.Streamline.StreamlineRuntime.Start(
+                    SharpEmu.Libs.VideoOut.Upscaling.DlssRuntimeFiles.DefaultDirectory);
+            }
+            catch (Exception exception) when (exception is DllNotFoundException or BadImageFormatException or EntryPointNotFoundException)
+            {
+                Console.Error.WriteLine($"[DLSS][WARN] DLSS is off: {exception.Message}");
+                return null;
+            }
         }
 
         private static void WaitForRenderDocAttachIfRequested()
@@ -324,10 +422,17 @@ internal static unsafe partial class VulkanVideoPresenter
                 byte* swapchainColorspaceExtension = null;
                 var instanceCreateFlags = InstanceCreateFlags.None;
                 var enabledExtensionCount = (int)extensionCount;
-                var enabledExtensions = stackalloc byte*[(int)extensionCount + 3];
+                var upscalerExtensions = _streamline?.InstanceExtensions ?? _xess?.InstanceExtensions ?? [];
+                var enabledExtensions = stackalloc byte*[(int)extensionCount + 3 + upscalerExtensions.Count];
+                var enabledNames = new HashSet<string>(StringComparer.Ordinal);
+                var upscalerExtensionPointers = new List<nint>();
                 for (var index = 0; index < (int)extensionCount; index++)
                 {
                     enabledExtensions[index] = extensions[index];
+                    if (SilkMarshal.PtrToString((nint)extensions[index]) is { } enabledName)
+                    {
+                        enabledNames.Add(enabledName);
+                    }
                 }
 
                 if (_vulkanDebugUtilsEnabled &&
@@ -351,6 +456,19 @@ internal static unsafe partial class VulkanVideoPresenter
                     swapchainColorspaceExtension =
                         (byte*)SilkMarshal.StringToPtr(SwapchainColorspaceExtensionName);
                     enabledExtensions[enabledExtensionCount++] = swapchainColorspaceExtension;
+                }
+
+                enabledNames.Add(DebugUtilsExtensionName);
+                enabledNames.Add(PortabilityEnumerationExtensionName);
+                enabledNames.Add(SwapchainColorspaceExtensionName);
+                foreach (var name in upscalerExtensions)
+                {
+                    if (enabledNames.Add(name) && IsInstanceExtensionAvailable(name))
+                    {
+                        var pointer = SilkMarshal.StringToPtr(name);
+                        upscalerExtensionPointers.Add(pointer);
+                        enabledExtensions[enabledExtensionCount++] = (byte*)pointer;
+                    }
                 }
 
                 if (_vulkanValidationEnabled &&
@@ -408,6 +526,11 @@ internal static unsafe partial class VulkanVideoPresenter
                     if (swapchainColorspaceExtension is not null)
                     {
                         SilkMarshal.Free((nint)swapchainColorspaceExtension);
+                    }
+
+                    foreach (var pointer in upscalerExtensionPointers)
+                    {
+                        SilkMarshal.Free(pointer);
                     }
                 }
             }
@@ -816,6 +939,25 @@ internal static unsafe partial class VulkanVideoPresenter
         private const string ShaderClockExtensionName = "VK_KHR_shader_clock";
         private const string UnifiedImageLayoutsExtensionName = "VK_KHR_unified_image_layouts";
         private bool _supportsImageViewMinLod;
+        private string _deviceConfigurationSignature = "";
+
+        private static string DeviceConfigurationSignature(byte** extensions, uint count, StreamlineRuntime? streamline)
+        {
+            var names = new List<string>();
+            for (var index = 0; index < count; index++)
+            {
+                if (SilkMarshal.PtrToString((nint)extensions[index]) is { } name)
+                {
+                    names.Add(name);
+                }
+            }
+
+            names.Sort(StringComparer.Ordinal);
+            var signature = "ext:" + string.Join(',', names);
+            return streamline is null
+                ? signature
+                : $"{signature};sl12:{string.Join(',', streamline.Features12)};sl13:{string.Join(',', streamline.Features13)}";
+        }
         private const string MeshShaderExtensionName = "VK_EXT_mesh_shader";
         private bool _supportsUnifiedImageLayouts;
 
@@ -1152,6 +1294,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 PNext = &drawParametersFeatures,
             };
             _vk.GetPhysicalDeviceFeatures2(_physicalDevice, &featuresQuery);
+            var supportedVulkan12Features = vulkan12Features;
+            var supportedVulkan13Features = vulkan13Features;
             _supportsMeshShader = meshExtensionAvailable && meshFeatures.MeshShader &&
                 vulkan13Features.ComputeFullSubgroups &&
                 ((ShaderStageFlags)Volatile.Read(ref _nativeSubgroupShaderStages) & ShaderStageFlags.MeshBitExt) != 0;
@@ -1254,9 +1398,11 @@ internal static unsafe partial class VulkanVideoPresenter
             var pipelineLibraryExtension = (byte*)SilkMarshal.StringToPtr(PipelineLibraryExtensionName);
             var graphicsPipelineLibraryExtension = (byte*)SilkMarshal.StringToPtr(GraphicsPipelineLibraryExtensionName);
             var deviceFaultExtension = (byte*)SilkMarshal.StringToPtr("VK_EXT_device_fault");
+            var streamlineDeviceExtensions = _streamline?.DeviceExtensions ?? [];
+            var dynamicExtensionPointers = new List<nint>();
             try
             {
-                var extensions = stackalloc byte*[26];
+                var extensions = stackalloc byte*[26 + FsrDeviceFeatures.ExtensionCount + streamlineDeviceExtensions.Count + (_xess?.DeviceExtensions.Count ?? 0)];
                 var extensionCount = 0u;
                 extensions[extensionCount++] = swapchainExtension;
                 if (useMemoryBudget)
@@ -1557,6 +1703,69 @@ internal static unsafe partial class VulkanVideoPresenter
                     ComputeFullSubgroups = _supportsMeshShader,
                     PNext = renderingChain,
                 };
+                FsrDeviceFeatures fsrFeatures = default;
+                if (WantsFsr)
+                {
+                    FsrDeviceFeatures.Enable(&fsrFeatures, _vk, _physicalDevice, IsDeviceExtensionAvailable, ref enabledFeatures,
+                        ref vulkan12Features, ref vulkan13Features, extensions, ref extensionCount, dynamicExtensionPointers);
+                    FsrSeparateDepthStencilLayouts = vulkan12Features.SeparateDepthStencilLayouts;
+                }
+                if (_streamline is not null)
+                {
+                    StreamlineDeviceFeatures.Enable(ref vulkan12Features, in supportedVulkan12Features, _streamline.Features12);
+                    StreamlineDeviceFeatures.Enable(ref vulkan13Features, in supportedVulkan13Features, _streamline.Features13);
+                    var enabledNames = new HashSet<string>(StringComparer.Ordinal);
+                    for (var index = 0; index < extensionCount; index++)
+                    {
+                        if (SilkMarshal.PtrToString((nint)extensions[index]) is { } enabledName)
+                        {
+                            enabledNames.Add(enabledName);
+                        }
+                    }
+
+                    foreach (var name in streamlineDeviceExtensions)
+                    {
+                        if (enabledNames.Add(name) && IsDeviceExtensionAvailable(name))
+                        {
+                            var pointer = SilkMarshal.StringToPtr(name);
+                            dynamicExtensionPointers.Add(pointer);
+                            extensions[extensionCount++] = (byte*)pointer;
+                        }
+                        else if (!IsDeviceExtensionAvailable(name))
+                        {
+                            Console.Error.WriteLine($"[DLSS][WARN] The GPU lacks {name}, which DLSS asked for.");
+                        }
+                    }
+                }
+                PhysicalDeviceMutableDescriptorTypeFeaturesEXT xessMutableDescriptors;
+                if (_xess is not null)
+                {
+                    if (_xess.EnableDeviceFeatures(ref enabledFeatures, ref vulkan12Features, ref vulkan13Features, &xessMutableDescriptors))
+                    {
+                        var enabledNames = new HashSet<string>(StringComparer.Ordinal);
+                        for (var index = 0; index < extensionCount; index++)
+                        {
+                            if (SilkMarshal.PtrToString((nint)extensions[index]) is { } name)
+                            {
+                                enabledNames.Add(name);
+                            }
+                        }
+                        foreach (var name in _xess.DeviceExtensions)
+                        {
+                            if (enabledNames.Add(name))
+                            {
+                                var pointer = SilkMarshal.StringToPtr(name);
+                                dynamicExtensionPointers.Add(pointer);
+                                extensions[extensionCount++] = (byte*)pointer;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        _xess.Dispose();
+                        _xess = null;
+                    }
+                }
                 var features2 = new PhysicalDeviceFeatures2
                 {
                     SType = StructureType.PhysicalDeviceFeatures2,
@@ -1573,6 +1782,7 @@ internal static unsafe partial class VulkanVideoPresenter
                     PpEnabledExtensionNames = extensions,
                 };
 
+                _deviceConfigurationSignature = DeviceConfigurationSignature(extensions, extensionCount, _streamline);
                 Check(_vk.CreateDevice(_physicalDevice, &createInfo, null, out _device), "vkCreateDevice");
                 if (reportDeviceFaults)
                     SharpEmu.Libs.Gpu.Vulkan.DeviceFaultReport.Attach(_vk, _device, faultFeatures.DeviceFaultVendorBinary);
@@ -1623,9 +1833,14 @@ internal static unsafe partial class VulkanVideoPresenter
                 SilkMarshal.Free((nint)barycentricExtension);
                 SilkMarshal.Free((nint)viewportIndexLayerExtension);
                 SilkMarshal.Free((nint)meshExtension);
+                foreach (var pointer in dynamicExtensionPointers)
+                {
+                    SilkMarshal.Free(pointer);
+                }
             }
 
             _vk.GetDeviceQueue(_device, _queueFamilyIndex, 0, out _queue);
+            BeginStreamlineAttach();
             _deviceInfo = new GpuDeviceInfo(_vk, _physicalDevice, _device)
             {
                 ImageViewMinLodSupported = _supportsImageViewMinLod,

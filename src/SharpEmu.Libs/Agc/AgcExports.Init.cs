@@ -119,10 +119,6 @@ public static partial class AgcExports
     public static int GetRegisterDefaults2Internal(CpuContext ctx) =>
         ReturnRegisterDefaults(ctx, internalDefaults: true);
 
-    /// <summary>
-    /// Reports that the GPU is not running in Trinity mode, matching the base
-    /// console this backend emulates.
-    /// </summary>
     [SysAbiExport(
         Nid = "BfBDZGbti7A",
         ExportName = "sceAgcGetIsTrinityMode",
@@ -130,8 +126,17 @@ public static partial class AgcExports
         LibraryName = "libSceAgc")]
     public static int GetIsTrinityMode(CpuContext ctx)
     {
-        ctx[CpuRegister.Rax] = 0;
-        return (int)OrbisGen2Result.ORBIS_GEN2_OK;
+        var output = ctx[CpuRegister.Rdi];
+        if (output != 0)
+        {
+            Span<byte> value = [SharpEmu.Libs.Kernel.ConsoleHardware.IsPro ? (byte)1 : (byte)0];
+            if (!ctx.Memory.TryWrite(output, value))
+            {
+                return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            }
+        }
+
+        return SetReturn(ctx, OrbisGen2Result.ORBIS_GEN2_OK);
     }
 
     private static int ReturnRegisterDefaults(CpuContext ctx, bool internalDefaults)

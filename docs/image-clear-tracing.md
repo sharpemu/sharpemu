@@ -54,6 +54,22 @@ Filenames include `compute`, the dispatch sequence, phase, and shader image inde
 The pixel and compute selectors have separate two-operation limits. Both are off
 by default. Buffer contents and dispatch arguments are not included in image dumps.
 
+## PSSR capture
+
+Set `SHARPEMU_PSSR_CAPTURE=1` before launching in PS5 Pro mode. Press F10 in
+the game window while the problem is visible. The next four PSSR dispatches
+save the bound color, depth, motion vectors and exposure before upscaling,
+and the color output after DLSS or Basic upscaling. Each capture has its own
+directory under `user/logs/pssr-captures` with raw images and JSON manifests.
+The log identifies the upscaler, render region and jitter for each dispatch.
+With the same PS5 Pro setting, a guest can call `scePsmlMfsrRequestCapture`
+with its context and the number of dispatches to record.
+`scePsmlMfsrIsCaptureInProgress` stays true for that context while its
+dispatches are recorded and written. The emulator handles one capture at a time.
+The image shape and file size limits above also apply to PSSR captures.
+PSSR captures also support RG16 float, packed HDR, RGBA8, BGRA8, and depth.
+Depth dumps contain the depth aspect in its transfer format.
+
 ## Image history
 
 Set `SHARPEMU_TRACE_IMAGE_CLEARS=1` before launch to inspect Vulkan color-target and volume clear decisions.

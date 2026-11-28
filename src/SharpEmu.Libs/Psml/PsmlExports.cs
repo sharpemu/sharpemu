@@ -1,28 +1,61 @@
 // Copyright (C) 2026 SharpEmu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+using System.Runtime.InteropServices;
 using SharpEmu.HLE;
+using SharpEmu.Libs.Gpu.GpuCommands;
+using SharpEmu.Libs.Gpu.Upscaling;
+using SharpEmu.Libs.Kernel;
 
 namespace SharpEmu.Libs.Psml;
 
-public static class PsmlExports
+public static partial class PsmlExports
 {
-    // Empirically for Astro Bot (PPSA21567):
-    //   [0] must be 0x80 (sizeThis / r9); any other value в†’ Allocate length=0
-    //   AllocateMainDirectMemory(length=[0]*[16], alignment=[8], type=0xC)
-    // So put desired byte size in [8] (becomes alignment) and page size in [16].
-    private const ulong RequirementStructSize = 0x80;
-    private const ulong SharedResourcesPageSize = 0x10000;
-    private const ulong SharedResourcesBufferSizeBytes = 0x2000000;
-    private const ulong SharedResourcesContextSizeBytes = 0x100000;
-    private const ulong ContextBufferSizeBytes = 0x800000;
-    private const ulong ContextBufferAuxSizeBytes = 0x100000;
+    private const ulong PhysicalBlockSize = 0x10000;
+    private const ulong PhysicalBlockAlignment = 0x10000;
+    private const ulong PhysicalBlockCount = 1;
+    private const ulong HandleBytes = 0x40;
+    private const uint HandleMagic = 0x4C4D5350;
+    private const int ContextOutputSizeOffset = 0x18;
+    private const int ContextNameOffset = 0x30;
+    private const uint MaxSurfaceSide = 16384;
+    private const int InvalidCaptureContext = unchecked((int)0x8A810005);
 
-    private static int _mfsrInitialized;
-    private static readonly Lock SharedResourcesGate = new();
-    private static readonly Dictionary<ulong, SharedResourcesState> SharedResourcesByDescriptor = new();
-    private static readonly Lock ContextGate = new();
-    private static readonly Dictionary<ulong, ContextState> ContextsByAddress = new();
+    private static readonly Lock Gate = new();
+    private static readonly Dictionary<ulong, uint> SharedResources = new();
+    private static readonly Dictionary<ulong, ContextState> Contexts = new();
+    private static uint _nextContextId;
+    private static int _dispatchesTraced;
+    private static CaptureRequest? _capture;
+
+    private sealed record ContextState(uint Id, uint OutputWidth, uint OutputHeight, string Name,
+        ulong Mfsr2SharedResources = 0, ulong Mfsr2Block = 0, uint InputColorSpace = 0);
+
+    private sealed class CaptureRequest(uint? contextId, int frames, string directory)
+    {
+        private int _sequence;
+
+        public uint? ContextId { get; } = contextId;
+        public int Remaining { get; set; } = frames;
+        public int Pending { get; set; }
+
+        public string BeginFrame()
+        {
+            Pending++;
+            Remaining--;
+            _sequence++;
+            return Path.Combine(directory, $"frame-{_sequence:D2}");
+        }
+
+        public void CompleteFrame()
+        {
+            lock (Gate)
+            {
+                Pending--;
+                FinishCaptureIfIdle(this);
+            }
+        }
+    }
 
     [SysAbiExport(
         Nid = "3WVD91e12ZQ",
@@ -31,52 +64,17 @@ public static class PsmlExports
         LibraryName = "libScePsml")]
     public static int PsmlMfsrInit(CpuContext ctx)
     {
-        var arg0 = ctx[CpuRegister.Rdi];
-        var arg1 = ctx[CpuRegister.Rsi];
-        var arg2 = ctx[CpuRegister.Rdx];
-        Interlocked.Exchange(ref _mfsrInitialized, 1);
-        TracePsml($"mfsr_init arg0=0x{arg0:X} arg1=0x{arg1:X} arg2=0x{arg2:X}");
+        Trace("init");
         return ctx.SetReturn(0);
     }
-
-    // Mfsr2 runs on a Trinity console only; any other console reports it as unsupported.
-    private const int Mfsr2ErrorUnsupportedConsole = unchecked((int)0x8A8A0012);
-
-    [SysAbiExport(
-        Nid = "o+NM86gEwFE",
-        ExportName = "scePsmlMfsr2Init",
-        Target = Generation.Gen5,
-        LibraryName = "libScePsml")]
-    public static int PsmlMfsr2Init(CpuContext ctx) => ctx.SetReturn(Mfsr2ErrorUnsupportedConsole);
 
     [SysAbiExport(
         Nid = "+2KpvixvL6E",
         ExportName = "scePsmlMfsrGetSharedResourcesInitRequirement",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libScePsml")]
-    public static int PsmlMfsrGetSharedResourcesInitRequirement(CpuContext ctx)
-    {
-        var bufferRequirementAddress = ctx[CpuRegister.Rdi];
-        var contextRequirementAddress = ctx[CpuRegister.Rsi];
-        var flags = ctx[CpuRegister.Rdx];
-        var configAddress = ctx[CpuRegister.Rcx];
-        if (bufferRequirementAddress == 0 || contextRequirementAddress == 0)
-        {
-            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
-        }
-
-        if (!WriteMemoryRequirement(ctx, bufferRequirementAddress, SharedResourcesBufferSizeBytes) ||
-            !WriteMemoryRequirement(ctx, contextRequirementAddress, SharedResourcesContextSizeBytes))
-        {
-            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
-        }
-
-        TracePsml(
-            $"mfsr_get_shared_resources_init_requirement buf=0x{bufferRequirementAddress:X16} " +
-            $"ctx=0x{contextRequirementAddress:X16} flags=0x{flags:X} config=0x{configAddress:X16} " +
-            $"buf_size=0x{SharedResourcesBufferSizeBytes:X} ctx_size=0x{SharedResourcesContextSizeBytes:X}");
-        return ctx.SetReturn(0);
-    }
+    public static int PsmlMfsrGetSharedResourcesInitRequirement(CpuContext ctx) =>
+        WriteRequirement(ctx, ctx[CpuRegister.Rdi], "shared_resources_requirement");
 
     [SysAbiExport(
         Nid = "eWoKNeB6V-k",
@@ -85,36 +83,45 @@ public static class PsmlExports
         LibraryName = "libScePsml")]
     public static int PsmlMfsrCreateSharedResources(CpuContext ctx)
     {
-        var descriptorAddress = ctx[CpuRegister.Rdi];
-        var contextRequirementAddress = ctx[CpuRegister.Rsi];
-        var directMemoryAddress = ctx[CpuRegister.Rdx];
-        if (descriptorAddress == 0 || contextRequirementAddress == 0 || directMemoryAddress == 0)
+        var output = ctx[CpuRegister.Rdi];
+        if (output == 0)
         {
             return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        var contextSizeBytes = ReadRequirementSize(ctx, contextRequirementAddress, SharedResourcesContextSizeBytes);
-        var state = new SharedResourcesState(
-            DescriptorAddress: descriptorAddress,
-            DirectMemoryAddress: directMemoryAddress,
-            BufferSizeBytes: SharedResourcesBufferSizeBytes,
-            ContextSizeBytes: contextSizeBytes,
-            PageSizeBytes: SharedResourcesPageSize);
-
-        if (!WriteSharedResourcesDescriptor(ctx, state))
+        if (!TryCreateHandle(ctx, 0, out var handle))
         {
-            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
         }
 
-        lock (SharedResourcesGate)
+        lock (Gate)
         {
-            SharedResourcesByDescriptor[descriptorAddress] = state;
+            SharedResources[handle] = 0;
         }
 
-        TracePsml(
-            $"mfsr_create_shared_resources desc=0x{descriptorAddress:X16} req=0x{contextRequirementAddress:X16} " +
-            $"direct=0x{directMemoryAddress:X16} buf_size=0x{state.BufferSizeBytes:X} " +
-            $"ctx_size=0x{state.ContextSizeBytes:X} page=0x{state.PageSizeBytes:X}");
+        if (!ctx.TryWriteUInt64(output, handle))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        Trace($"create_shared_resources handle=0x{handle:X16}");
+        return ctx.SetReturn(0);
+    }
+
+    [SysAbiExport(
+        Nid = "jEevBXmagOQ",
+        ExportName = "scePsmlMfsrReleaseSharedResources",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePsml")]
+    public static int PsmlMfsrReleaseSharedResources(CpuContext ctx)
+    {
+        var handle = ctx[CpuRegister.Rdi];
+        lock (Gate)
+        {
+            SharedResources.Remove(handle);
+        }
+
+        Trace($"release_shared_resources handle=0x{handle:X16}");
         return ctx.SetReturn(0);
     }
 
@@ -123,148 +130,56 @@ public static class PsmlExports
         ExportName = "scePsmlMfsrGetContextBufferRequirement800M3_2",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libScePsml")]
-    public static int PsmlMfsrGetContextBufferRequirement800M3_2(CpuContext ctx)
-    {
-        var bufferRequirementAddress = ctx[CpuRegister.Rdi];
-        var contextRequirementAddress = ctx[CpuRegister.Rsi];
-        var directMemoryAddress = ctx[CpuRegister.Rdx];
-        if (bufferRequirementAddress == 0 || contextRequirementAddress == 0 || directMemoryAddress == 0)
-        {
-            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
-        }
+    public static int PsmlMfsrGetContextBufferRequirement800M3_2(CpuContext ctx) =>
+        WriteRequirement(ctx, ctx[CpuRegister.Rdi], "context_requirement_800m3_2");
 
-        if (!WriteMemoryRequirement(ctx, bufferRequirementAddress, ContextBufferSizeBytes) ||
-            !WriteMemoryRequirement(ctx, contextRequirementAddress, ContextBufferAuxSizeBytes))
-        {
-            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
-        }
-
-        TracePsml(
-            $"mfsr_get_context_buffer_requirement_800m3_2 buf=0x{bufferRequirementAddress:X16} " +
-            $"ctx=0x{contextRequirementAddress:X16} direct=0x{directMemoryAddress:X16} " +
-            $"buf_size=0x{ContextBufferSizeBytes:X} aux_size=0x{ContextBufferAuxSizeBytes:X}");
-        return ctx.SetReturn(0);
-    }
+    [SysAbiExport(
+        Nid = "VGjrQa-WqdU",
+        ExportName = "scePsmlMfsrGetContextBufferRequirement1100",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePsml")]
+    public static int PsmlMfsrGetContextBufferRequirement1100(CpuContext ctx) =>
+        WriteRequirement(ctx, ctx[CpuRegister.Rdi], "context_requirement_1100");
 
     [SysAbiExport(
         Nid = "gxv3i+MTEzU",
         ExportName = "scePsmlMfsrCreateContext800M3_2",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libScePsml")]
-    public static int PsmlMfsrCreateContext800M3_2(CpuContext ctx)
+    public static int PsmlMfsrCreateContext800M3_2(CpuContext ctx) => CreateContext(ctx, "800m3_2");
+
+    [SysAbiExport(
+        Nid = "fccGInHrj8A",
+        ExportName = "scePsmlMfsrCreateContext1100",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePsml")]
+    public static int PsmlMfsrCreateContext1100(CpuContext ctx) => CreateContext(ctx, "1100");
+
+    [SysAbiExport(
+        Nid = "JaLBe0P3jSU",
+        ExportName = "scePsmlMfsrReleaseContext",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePsml")]
+    public static int PsmlMfsrReleaseContext(CpuContext ctx)
     {
-        var contextAddress = ctx[CpuRegister.Rdi];
-        var requirementAddress = ctx[CpuRegister.Rsi];
-        var structSize = ctx[CpuRegister.Rdx];
-        var sharedDirectMemory = ctx[CpuRegister.Rcx];
-        var pageSize = ctx[CpuRegister.R8];
-        if (contextAddress == 0 || sharedDirectMemory == 0)
+        var handle = ctx[CpuRegister.Rdi];
+        lock (Gate)
         {
-            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+            RemoveContextLocked(handle);
         }
 
-        var sharedState = TryFindSharedResources(sharedDirectMemory, contextAddress);
-        var effectiveStructSize = structSize != 0 ? structSize : RequirementStructSize;
-        var effectivePageSize = pageSize != 0 ? pageSize : SharedResourcesPageSize;
-        var sharedDescriptor = sharedState?.DescriptorAddress ?? contextAddress - 0x30;
-        var bufferSize = sharedState?.BufferSizeBytes ?? ContextBufferSizeBytes;
-
-        var state = new ContextState(
-            ContextAddress: contextAddress,
-            SharedResourcesDescriptor: sharedDescriptor,
-            DirectMemoryAddress: sharedDirectMemory,
-            BufferSizeBytes: bufferSize,
-            PageSizeBytes: effectivePageSize,
-            StructSizeBytes: effectiveStructSize);
-
-        if (!WriteContextObject(ctx, state))
-        {
-            return ctx.SetReturn((int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
-        }
-
-        lock (ContextGate)
-        {
-            ContextsByAddress[contextAddress] = state;
-        }
-
-        TracePsml(
-            $"mfsr_create_context_800m3_2 ctx=0x{contextAddress:X16} req=0x{requirementAddress:X16} " +
-            $"struct=0x{effectiveStructSize:X} direct=0x{sharedDirectMemory:X16} " +
-            $"shared_desc=0x{sharedDescriptor:X16} buf_size=0x{bufferSize:X} page=0x{effectivePageSize:X}");
+        Trace($"release_context handle=0x{handle:X16}");
         return ctx.SetReturn(0);
     }
 
-    private static bool WriteMemoryRequirement(CpuContext ctx, ulong address, ulong sizeBytes)
+    private static void RemoveContextLocked(ulong handle)
     {
-        return ctx.TryWriteUInt64(address, RequirementStructSize) &&
-               ctx.TryWriteUInt64(address + 0x08, sizeBytes) &&
-               ctx.TryWriteUInt64(address + 0x10, SharedResourcesPageSize);
-    }
-
-    private static ulong ReadRequirementSize(CpuContext ctx, ulong address, ulong fallback)
-    {
-        if (!ctx.TryReadUInt64(address + 0x08, out var sizeBytes) || sizeBytes == 0)
+        if (Contexts.Remove(handle, out var state) && _capture is { } capture && capture.ContextId == state.Id)
         {
-            return fallback;
+            capture.Remaining = 0;
+            FinishCaptureIfIdle(capture);
         }
-
-        // Guest requirement structs use size @8; reject pointer-like garbage.
-        return sizeBytes > 0x1000_0000UL ? fallback : sizeBytes;
     }
-
-    private static SharedResourcesState? TryFindSharedResources(ulong directMemoryAddress, ulong contextAddress)
-    {
-        lock (SharedResourcesGate)
-        {
-            foreach (var state in SharedResourcesByDescriptor.Values)
-            {
-                if (state.DirectMemoryAddress == directMemoryAddress)
-                {
-                    return state;
-                }
-            }
-
-            var inferredDescriptor = contextAddress >= 0x30 ? contextAddress - 0x30 : 0;
-            if (inferredDescriptor != 0 &&
-                SharedResourcesByDescriptor.TryGetValue(inferredDescriptor, out var byDescriptor))
-            {
-                return byDescriptor;
-            }
-        }
-
-        return null;
-    }
-
-    private static bool WriteContextObject(CpuContext ctx, ContextState state)
-    {
-        return ctx.TryWriteUInt64(state.ContextAddress + 0x00, state.StructSizeBytes) &&
-               ctx.TryWriteUInt64(state.ContextAddress + 0x08, state.DirectMemoryAddress) &&
-               ctx.TryWriteUInt64(state.ContextAddress + 0x10, state.SharedResourcesDescriptor) &&
-               ctx.TryWriteUInt64(state.ContextAddress + 0x18, state.BufferSizeBytes) &&
-               ctx.TryWriteUInt64(state.ContextAddress + 0x20, state.PageSizeBytes) &&
-               ctx.TryWriteUInt64(state.ContextAddress + 0x28, state.ContextAddress) &&
-               ctx.TryWriteUInt64(state.ContextAddress + 0x30, state.DirectMemoryAddress);
-    }
-
-    private static bool WriteSharedResourcesDescriptor(CpuContext ctx, SharedResourcesState state)
-    {
-        // Stamp a compact self-describing blob so follow-up PSML calls can treat the
-        // descriptor as initialized guest memory instead of an all-zero placeholder.
-        return ctx.TryWriteUInt64(state.DescriptorAddress + 0x00, RequirementStructSize) &&
-               ctx.TryWriteUInt64(state.DescriptorAddress + 0x08, state.DirectMemoryAddress) &&
-               ctx.TryWriteUInt64(state.DescriptorAddress + 0x10, state.DirectMemoryAddress) &&
-               ctx.TryWriteUInt64(state.DescriptorAddress + 0x18, state.BufferSizeBytes) &&
-               ctx.TryWriteUInt64(state.DescriptorAddress + 0x20, state.ContextSizeBytes) &&
-               ctx.TryWriteUInt64(state.DescriptorAddress + 0x28, state.PageSizeBytes) &&
-               ctx.TryWriteUInt64(state.DescriptorAddress + 0x30, state.DirectMemoryAddress) &&
-               ctx.TryWriteUInt64(state.DescriptorAddress + 0x38, state.BufferSizeBytes + state.ContextSizeBytes);
-    }
-
-
-    // Astro logo path: SizeInDwords then GetDispatchMfsrPacket900 (RUNLFro+qok).
-    // Unresolved 900 returns non-zero and trips GfxRenderStagePSSR.cpp:266.
-    private const int SoftPacketSizeInDwords = 0x80;
-    private const ulong SoftPacketSizeBytes = SoftPacketSizeInDwords * 4UL;
 
     [SysAbiExport(
         Nid = "AHalTX9wFZY",
@@ -273,14 +188,15 @@ public static class PsmlExports
         LibraryName = "libScePsml")]
     public static int PsmlMfsrGetDispatchMfsrPacketSizeInDwords(CpuContext ctx)
     {
-        // Logo/PSSR path: guest asserts ret == 0, then calls GetDispatchMfsrPacket900
-        // with rdi=SoftPacketSizeInDwords (observed 0x80). Returning the size in rax
-        // tripped :266 and skipped the 900 call (tDISP-s6). SCE_OK keeps the chain.
-        var arg0 = ctx[CpuRegister.Rdi];
-        TracePsml(
-            $"mfsr_get_dispatch_packet_size_dwords arg0=0x{arg0:X} " +
-            $"size=0x{SoftPacketSizeInDwords:X} ret=0");
-        return ctx.SetReturn(0);
+        var output = ctx[CpuRegister.Rsi];
+        if (output == 0)
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        return ctx.SetReturn(ctx.TryWriteUInt32(output, SuperResolutionPacket.Dwords)
+            ? 0
+            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
     }
 
     [SysAbiExport(
@@ -288,88 +204,371 @@ public static class PsmlExports
         ExportName = "scePsmlMfsrGetDispatchMfsrPacket900",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libScePsml")]
-    public static int PsmlMfsrGetDispatchMfsrPacket900(CpuContext ctx) =>
-        SoftGetDispatchMfsrPacket(ctx, "900");
+    public static int PsmlMfsrGetDispatchMfsrPacket900(CpuContext ctx) => WriteDispatchPacket(ctx, "900");
 
     [SysAbiExport(
         Nid = "s2psNHUIdjk",
         ExportName = "scePsmlMfsrGetDispatchMfsrPacket1000",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libScePsml")]
-    public static int PsmlMfsrGetDispatchMfsrPacket1000(CpuContext ctx) =>
-        SoftGetDispatchMfsrPacket(ctx, "1000");
+    public static int PsmlMfsrGetDispatchMfsrPacket1000(CpuContext ctx) => WriteDispatchPacket(ctx, "1000");
 
     [SysAbiExport(
         Nid = "94iBp3KvIuI",
         ExportName = "scePsmlMfsrGetDispatchMfsrPacket1100",
         Target = Generation.Gen4 | Generation.Gen5,
         LibraryName = "libScePsml")]
-    public static int PsmlMfsrGetDispatchMfsrPacket1100(CpuContext ctx) =>
-        SoftGetDispatchMfsrPacket(ctx, "1100");
+    public static int PsmlMfsrGetDispatchMfsrPacket1100(CpuContext ctx) => WriteDispatchPacket(ctx, "1100");
 
-    private static int SoftGetDispatchMfsrPacket(CpuContext ctx, string variant)
+    [SysAbiExport(
+        Nid = "GHna9-DvnUk",
+        ExportName = "scePsmlMfsrGetMipmapBias",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePsml")]
+    public static int PsmlMfsrGetMipmapBias(CpuContext ctx)
     {
-        var arg0 = ctx[CpuRegister.Rdi];
-        var arg1 = ctx[CpuRegister.Rsi];
-        var arg2 = ctx[CpuRegister.Rdx];
-        var arg3 = ctx[CpuRegister.Rcx];
-        // Logo call shape (tDISP-s3): rdi=size_dwords (0x80), rsi/rdx = guest
-        // packet/param buffers. Clear the first mapped buffer arg.
-        var packetAddress = 0UL;
-        foreach (var candidate in new[] { arg1, arg2, arg3 })
+        var handle = ctx[CpuRegister.Rdi];
+        var output = ctx[CpuRegister.Rsi];
+        var renderWidth = (uint)ctx[CpuRegister.Rdx];
+        var renderHeight = (uint)ctx[CpuRegister.Rcx];
+        if (output == 0)
         {
-            if (candidate >= 0x10000)
-            {
-                packetAddress = candidate;
-                break;
-            }
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
         }
 
-        var cleared = packetAddress != 0 && TryClearGuestBuffer(ctx, packetAddress, SoftPacketSizeBytes);
-        TracePsml(
-            $"mfsr_get_dispatch_packet_{variant} a0=0x{arg0:X16} a1=0x{arg1:X16} " +
-            $"a2=0x{arg2:X16} a3=0x{arg3:X16} packet=0x{packetAddress:X16} cleared={cleared}");
+        ContextState? state;
+        lock (Gate)
+        {
+            Contexts.TryGetValue(handle, out state);
+        }
+
+        var bias = 0f;
+        if (state is { OutputWidth: > 0 } && renderWidth > 0 && renderWidth < state.OutputWidth)
+        {
+            bias = MathF.Log2(renderWidth / (float)state.OutputWidth);
+        }
+
+        Trace($"mipmap_bias handle=0x{handle:X16} render={renderWidth}x{renderHeight} bias={bias:0.###}");
+        return ctx.SetReturn(ctx.TryWriteUInt32(output, BitConverter.SingleToUInt32Bits(bias))
+            ? 0
+            : (int)OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+    }
+
+    [SysAbiExport(
+        Nid = "GJY0MvuTcs8",
+        ExportName = "scePsmlMfsrRequestCapture",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePsml")]
+    public static int PsmlMfsrRequestCapture(CpuContext ctx)
+    {
+        if (ctx.TargetGeneration != Generation.Gen5 || !CaptureEnabled)
+        {
+            return ctx.SetReturn(0);
+        }
+
+        var frames = unchecked((byte)ctx[CpuRegister.Rsi]);
+        lock (Gate)
+        {
+            if (!Contexts.TryGetValue(ctx[CpuRegister.Rdi], out var state))
+            {
+                return ctx.SetReturn(InvalidCaptureContext);
+            }
+
+            return ctx.SetReturn(frames == 0
+                ? (int)OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT
+                : RequestCapture(state.Id, frames));
+        }
+    }
+
+    [SysAbiExport(
+        Nid = "LXq+6mIxpCw",
+        ExportName = "scePsmlMfsrIsCaptureInProgress",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePsml")]
+    public static int PsmlMfsrIsCaptureInProgress(CpuContext ctx)
+    {
+        if (ctx.TargetGeneration != Generation.Gen5 || !CaptureEnabled)
+        {
+            return ctx.SetReturn(0);
+        }
+
+        lock (Gate)
+        {
+            return ctx.SetReturn(Contexts.TryGetValue(ctx[CpuRegister.Rdi], out var state) &&
+                _capture?.ContextId == state.Id ? 1 : 0);
+        }
+    }
+
+    internal static bool CaptureEnabled => ConsoleHardware.IsPro &&
+        Environment.GetEnvironmentVariable("SHARPEMU_PSSR_CAPTURE") == "1";
+
+    internal static void RequestCaptureFromWindow()
+    {
+        if (!CaptureEnabled)
+        {
+            return;
+        }
+
+        lock (Gate)
+        {
+            _ = RequestCapture(contextId: null, frames: 4);
+        }
+    }
+
+    private static int RequestCapture(uint? contextId, int frames)
+    {
+        if (_capture is not null)
+        {
+            return (int)OrbisGen2Result.ORBIS_GEN2_ERROR_BUSY;
+        }
+
+        var directory = Path.Combine(SharpEmuPaths.DataRoot, "user", "logs", "pssr-captures",
+            $"{DateTime.UtcNow:yyyyMMdd-HHmmss-fff}-{Guid.NewGuid():N}");
+        Volatile.Write(ref _capture, new CaptureRequest(contextId, frames, directory));
+        Console.Error.WriteLine($"[PSSR][INFO] Capture requested for the next {frames} dispatches. path={directory}");
+        return 0;
+    }
+
+    internal static (string Path, Action Complete)? BeginCaptureFrame(uint contextId)
+    {
+        if (Volatile.Read(ref _capture) is null)
+        {
+            return null;
+        }
+
+        lock (Gate)
+        {
+            if (_capture is not { Remaining: > 0 } capture ||
+                (capture.ContextId is uint requested && requested != contextId))
+            {
+                return null;
+            }
+
+            return (capture.BeginFrame(), capture.CompleteFrame);
+        }
+    }
+
+    private static void FinishCaptureIfIdle(CaptureRequest capture)
+    {
+        if (capture is { Remaining: 0, Pending: 0 } && ReferenceEquals(_capture, capture))
+        {
+            Volatile.Write(ref _capture, null);
+        }
+    }
+
+    [SysAbiExport(
+        Nid = "FSGaTQze0UY",
+        ExportName = "scePsmlMfsrSelectConfig",
+        Target = Generation.Gen4 | Generation.Gen5,
+        LibraryName = "libScePsml")]
+    public static int PsmlMfsrSelectConfig(CpuContext ctx)
+    {
+        Trace($"select_config a0=0x{ctx[CpuRegister.Rdi]:X} a1=0x{ctx[CpuRegister.Rsi]:X}");
         return ctx.SetReturn(0);
     }
 
-    private static bool TryClearGuestBuffer(CpuContext ctx, ulong address, ulong length)
+    private static int WriteRequirement(CpuContext ctx, ulong requirement, string name)
     {
-        Span<byte> zeroes = stackalloc byte[4096];
-        zeroes.Clear();
-        for (ulong offset = 0; offset < length;)
+        if (requirement == 0)
         {
-            var chunkSize = (int)Math.Min((ulong)zeroes.Length, length - offset);
-            if (!ctx.Memory.TryWrite(address + offset, zeroes[..chunkSize]))
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        if (!ctx.TryWriteUInt64(requirement, PhysicalBlockSize) ||
+            !ctx.TryWriteUInt64(requirement + 0x08, PhysicalBlockAlignment) ||
+            !ctx.TryWriteUInt64(requirement + 0x10, PhysicalBlockCount))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        Trace($"{name} block=0x{PhysicalBlockSize:X} align=0x{PhysicalBlockAlignment:X} count={PhysicalBlockCount}");
+        return ctx.SetReturn(0);
+    }
+
+    private static int CreateContext(CpuContext ctx, string variant)
+    {
+        var output = ctx[CpuRegister.Rdi];
+        var parameters = ctx[CpuRegister.Rsi];
+        if (output == 0 || parameters == 0)
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        uint outputWidth = 0;
+        uint outputHeight = 0;
+        if (ctx.TryReadUInt16(parameters + ContextOutputSizeOffset, out var width) &&
+            ctx.TryReadUInt16(parameters + ContextOutputSizeOffset + 2, out var height) &&
+            width is > 0 and <= (ushort)MaxSurfaceSide && height is > 0 and <= (ushort)MaxSurfaceSide)
+        {
+            outputWidth = width;
+            outputHeight = height;
+        }
+
+        var name = string.Empty;
+        if (ctx.TryReadUInt64(parameters + ContextNameOffset, out var namePointer) && namePointer != 0 &&
+            ctx.TryReadNullTerminatedUtf8(namePointer, 64, out var text))
+        {
+            name = text;
+        }
+
+        uint id;
+        lock (Gate)
+        {
+            id = ++_nextContextId;
+        }
+
+        if (!TryCreateHandle(ctx, id, out var handle))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        lock (Gate)
+        {
+            Contexts[handle] = new ContextState(id, outputWidth, outputHeight, name);
+        }
+
+        if (!ctx.TryWriteUInt64(output, handle))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        Console.Error.WriteLine(
+            $"[PSSR][INFO] Context {id} created ({variant}): output={outputWidth}x{outputHeight}" +
+            (name.Length > 0 ? $" name={name}" : string.Empty) +
+            (ConsoleHardware.IsPro ? string.Empty : " (console model is PS5)"));
+        return ctx.SetReturn(0);
+    }
+
+    private static void ConvertDispatchParameters900(Span<byte> block)
+    {
+        const int renderOffset = 0xF8;
+        const int renderOffsetBytes = 8;
+        block[renderOffset..^renderOffsetBytes].CopyTo(block[(renderOffset + renderOffsetBytes)..]);
+        block.Slice(renderOffset, renderOffsetBytes).Clear();
+    }
+
+    private static int WriteDispatchPacket(CpuContext ctx, string variant)
+    {
+        var handle = ctx[CpuRegister.Rdi];
+        var span = ctx[CpuRegister.Rsi];
+        var parameters = ctx[CpuRegister.Rdx];
+        if (span == 0 || parameters == 0 ||
+            !ctx.TryReadUInt64(span, out var packetAddress) || packetAddress == 0 ||
+            !ctx.TryReadUInt32(span + 0x08, out var packetDwords) || packetDwords < SuperResolutionPacket.Dwords)
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_INVALID_ARGUMENT);
+        }
+
+        ContextState? state;
+        lock (Gate)
+        {
+            Contexts.TryGetValue(handle, out state);
+        }
+
+        Span<byte> block = stackalloc byte[SuperResolutionPacket.DispatchParameterBytes];
+        if (!ctx.Memory.TryRead(parameters, block))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        if (variant == "900")
+        {
+            ConvertDispatchParameters900(block);
+        }
+
+        return WriteDispatchPacket(ctx, packetAddress, state, block, variant, SuperResolutionPacket.Dwords);
+    }
+
+    private static int WriteDispatchPacket(
+        CpuContext ctx, ulong packetAddress, ContextState? state, ReadOnlySpan<byte> block, string variant, int dwords)
+    {
+        Span<uint> textures = stackalloc uint[SuperResolutionPacket.TextureCount * SuperResolutionPacket.TextureDwords];
+        textures.Clear();
+        var mask = 0u;
+        var pointers = MemoryMarshal.Cast<byte, ulong>(block[..(SuperResolutionPacket.TextureCount * sizeof(ulong))]);
+        for (var index = 0; index < SuperResolutionPacket.TextureCount; index++)
+        {
+            var pointer = pointers[index];
+            if (pointer == 0)
             {
-                return false;
+                continue;
             }
 
-            offset += unchecked((uint)chunkSize);
+            var words = textures.Slice(index * SuperResolutionPacket.TextureDwords, SuperResolutionPacket.TextureDwords);
+            if (ctx.Memory.TryRead(pointer, MemoryMarshal.AsBytes(words)))
+            {
+                mask |= 1u << index;
+            }
+            else
+            {
+                if (variant == "MFSR2")
+                {
+                    return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+                }
+
+                words.Clear();
+            }
         }
 
-        return true;
-    }
-
-    private static void TracePsml(string message)
-    {
-        if (string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_PSML"), "1", StringComparison.Ordinal))
+        Span<uint> packet = stackalloc uint[dwords];
+        SuperResolutionPacket.Write(
+            packet,
+            state?.Id ?? 0,
+            state?.OutputWidth ?? 0,
+            state?.OutputHeight ?? 0,
+            mask,
+            motionVectorsJittered: variant == "900",
+            textures,
+            block[SuperResolutionPacket.ParameterOffset..]);
+        var padding = packet[SuperResolutionPacket.Dwords..];
+        if (!padding.IsEmpty)
         {
-            Console.Error.WriteLine($"[LOADER][TRACE] psml.{message}");
+            padding.Clear();
+            padding[0] = PacketHeader.Make((uint)padding.Length, PacketOpcode.Nop);
         }
+
+        if (!ctx.Memory.TryWrite(packetAddress, MemoryMarshal.AsBytes(packet)))
+        {
+            return ctx.SetReturn(OrbisGen2Result.ORBIS_GEN2_ERROR_MEMORY_FAULT);
+        }
+
+        if (Interlocked.Increment(ref _dispatchesTraced) <= 4 || TraceEnabled)
+        {
+            var render = SuperResolutionPacket.TryRead(packet[1..], out var dispatch)
+                ? $"{dispatch.RenderWidth}x{dispatch.RenderHeight}+{dispatch.RenderOffsetX},{dispatch.RenderOffsetY} jitter=({dispatch.JitterX:0.###},{dispatch.JitterY:0.###}) " +
+                  $"mv_scale=({dispatch.MotionVectorScaleX:0.###},{dispatch.MotionVectorScaleY:0.###}) flags=0x{(uint)dispatch.Flags:X} reset={dispatch.Reset}"
+                : "unreadable";
+            Console.Error.WriteLine(
+                $"[PSSR][INFO] Dispatch ({variant}) context={state?.Id ?? 0} inputs=0x{mask:X2} render={render}");
+        }
+
+        return ctx.SetReturn(0);
     }
 
-    private readonly record struct SharedResourcesState(
-        ulong DescriptorAddress,
-        ulong DirectMemoryAddress,
-        ulong BufferSizeBytes,
-        ulong ContextSizeBytes,
-        ulong PageSizeBytes);
+    private static bool TryCreateHandle(CpuContext ctx, uint id, out ulong handle)
+    {
+        handle = 0;
+        if (!(ctx.Memory is IGuestMemoryAllocator allocator && allocator.TryAllocateGuestMemory(HandleBytes, 16, out handle)) &&
+            !KernelMemoryCompatExports.TryAllocateHleData(ctx, HandleBytes, 16, out handle))
+        {
+            return false;
+        }
 
-    private readonly record struct ContextState(
-        ulong ContextAddress,
-        ulong SharedResourcesDescriptor,
-        ulong DirectMemoryAddress,
-        ulong BufferSizeBytes,
-        ulong PageSizeBytes,
-        ulong StructSizeBytes);
+        Span<uint> words = stackalloc uint[(int)(HandleBytes / sizeof(uint))];
+        words.Clear();
+        words[0] = HandleMagic;
+        words[1] = id;
+        return ctx.Memory.TryWrite(handle, MemoryMarshal.AsBytes(words));
+    }
+
+    private static bool TraceEnabled =>
+        string.Equals(Environment.GetEnvironmentVariable("SHARPEMU_LOG_PSML"), "1", StringComparison.Ordinal);
+
+    private static void Trace(string message)
+    {
+        if (TraceEnabled)
+        {
+            Console.Error.WriteLine($"[PSSR][TRACE] {message}");
+        }
+    }
 }

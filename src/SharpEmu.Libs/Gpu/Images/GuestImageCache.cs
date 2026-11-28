@@ -503,7 +503,10 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         return image;
     }
 
-    public ImageView AcquireTextureView(ResourceSlotIdentifier imageIdentifier, in ImageRequest request)
+    public ImageView AcquireTextureView(ResourceSlotIdentifier imageIdentifier, in ImageRequest request) =>
+        AcquireTextureView(imageIdentifier, request, out _);
+
+    internal ImageView AcquireTextureView(ResourceSlotIdentifier imageIdentifier, in ImageRequest request, out ImageViewDescription description)
     {
         if (SubmissionScheduler.ReadOnlyThread)
         {
@@ -521,7 +524,7 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         }
 
         AcquireTextureCore(imageIdentifier, image, in request);
-        return image.GetOrCreateView(request.View);
+        return image.GetOrCreateView(request.View, out description);
     }
 
     private void AcquireTextureCore(ResourceSlotIdentifier imageIdentifier, CachedImage image, in ImageRequest request)
@@ -912,6 +915,11 @@ public sealed unsafe partial class GuestImageCache : IGuestImageCache, IGuestIma
         using var profileScope = RenderPhaseProfile.MeasureDetail(RenderPhaseProfile.Phase.ImageCreate);
         var imageIdentifier = _slots.Insert(new CachedImage(_device, _scheduler, _backing, description, _backingPool, _reportAllocationFailure));
         _createdImageCount++;
+        if (_slots[imageIdentifier].Backing.InSystemMemory)
+        {
+            _systemMemoryImages.Add(imageIdentifier);
+        }
+
         ReportLargeImageCreation(_slots[imageIdentifier], creationPath);
         ReportImageLifetime(_slots[imageIdentifier], "recreate");
         if (RenderPhaseProfile.Enabled)

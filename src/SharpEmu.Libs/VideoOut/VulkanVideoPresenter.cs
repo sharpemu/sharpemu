@@ -11,6 +11,7 @@ using SharpEmu.Libs.Gpu;
 using SharpEmu.Libs.Gpu.GpuCommands;
 using SharpEmu.Libs.Gpu.Scheduling;
 using SharpEmu.Libs.Gpu.Images;
+using SharpEmu.Libs.Psml;
 using SharpEmu.ShaderCompiler;
 using SharpEmu.ShaderCompiler.Vulkan;
 using Silk.NET.Vulkan;
@@ -311,7 +312,8 @@ internal static unsafe partial class VulkanVideoPresenter
                 DestroyHostBufferAllocation);
             _window = new SdlHostWindow(
                 VideoOutExports.GetWindowTitle(),
-                _videoOptions);
+                _videoOptions,
+                requestPssrCapture: PsmlExports.CaptureEnabled ? PsmlExports.RequestCaptureFromWindow : null);
         }
 
         public void Run()

@@ -7,6 +7,82 @@ namespace SharpEmu.ShaderCompiler.Vulkan;
 // shader, and the multisample depth readback the tests use to check it.
 public static class BlitShaders
 {
+    public static byte[] CreateJitterCompensatedBlit()
+    {
+        const uint floatClamp = 43; // GLSL.std.450 FClamp
+        var module = new SpirvModuleBuilder();
+        module.AddCapability(SpirvCapability.Shader);
+        module.AddCapability(SpirvCapability.StorageImageWriteWithoutFormat);
+        var glsl = module.ImportExtInst("GLSL.std.450");
+        var voidType = module.TypeVoid();
+        var uintType = module.TypeInt(32, signed: false);
+        var floatType = module.TypeFloat(32);
+        var boolType = module.TypeBool();
+        var bvec2 = module.TypeVector(boolType, 2);
+        var uvec2 = module.TypeVector(uintType, 2);
+        var uvec3 = module.TypeVector(uintType, 3);
+        var vec2 = module.TypeVector(floatType, 2);
+        var vec4 = module.TypeVector(floatType, 4);
+
+        var inputType = module.TypeSampledImage(module.TypeImage(floatType, SpirvImageDim.Dim2D,
+            depth: false, arrayed: false, multisampled: false, sampled: 1, SpirvImageFormat.Unknown));
+        var outputType = module.TypeImage(floatType, SpirvImageDim.Dim2D,
+            depth: false, arrayed: false, multisampled: false, sampled: 2, SpirvImageFormat.Unknown);
+        uint ImageBinding(uint type, uint binding)
+        {
+            var variable = module.AddGlobalVariable(module.TypePointer(SpirvStorageClass.UniformConstant, type),
+                SpirvStorageClass.UniformConstant);
+            module.AddDecoration(variable, SpirvDecoration.DescriptorSet, 0);
+            module.AddDecoration(variable, SpirvDecoration.Binding, binding);
+            return variable;
+        }
+
+        var input = ImageBinding(inputType, 0);
+        var output = ImageBinding(outputType, 1);
+        var pushType = module.TypeStruct(vec2, vec2, vec2, vec2, uvec2);
+        module.AddDecoration(pushType, SpirvDecoration.Block);
+        for (uint index = 0; index < 5; index++)
+        {
+            module.AddMemberDecoration(pushType, index, SpirvDecoration.Offset, index * 8);
+        }
+        var push = module.AddGlobalVariable(module.TypePointer(SpirvStorageClass.PushConstant, pushType), SpirvStorageClass.PushConstant);
+        var invocation = module.AddGlobalVariable(module.TypePointer(SpirvStorageClass.Input, uvec3), SpirvStorageClass.Input);
+        module.AddDecoration(invocation, SpirvDecoration.BuiltIn, (uint)SpirvBuiltIn.GlobalInvocationId);
+
+        uint LoadPush(uint type, uint index) => module.AddInstruction(SpirvOp.Load, type,
+            module.AddInstruction(SpirvOp.AccessChain, module.TypePointer(SpirvStorageClass.PushConstant, type),
+                push, module.Constant(uintType, index)));
+
+        var main = module.BeginFunction(voidType, module.TypeFunction(voidType));
+        module.AddLabel();
+        var xyz = module.AddInstruction(SpirvOp.Load, uvec3, invocation);
+        var pixel = module.AddInstruction(SpirvOp.VectorShuffle, uvec2, xyz, xyz, 0, 1);
+        var outside = module.AddInstruction(SpirvOp.Any, boolType,
+            module.AddInstruction(SpirvOp.UGreaterThanEqual, bvec2, pixel, LoadPush(uvec2, 4)));
+        var writeLabel = module.AllocateId();
+        var endLabel = module.AllocateId();
+        module.AddStatement(SpirvOp.SelectionMerge, endLabel, 0);
+        module.AddStatement(SpirvOp.BranchConditional, outside, endLabel, writeLabel);
+        module.AddLabel(writeLabel);
+
+        var pixelFloat = module.AddInstruction(SpirvOp.ConvertUToF, vec2, pixel);
+        var step = module.AddInstruction(SpirvOp.FMul, vec2, pixelFloat, LoadPush(vec2, 1));
+        var uv = module.AddInstruction(SpirvOp.FAdd, vec2, LoadPush(vec2, 0), step);
+        var clamped = module.AddInstruction(SpirvOp.ExtInst, vec2, glsl, floatClamp, uv, LoadPush(vec2, 2), LoadPush(vec2, 3));
+        var source = module.AddInstruction(SpirvOp.Load, inputType, input);
+        var color = module.AddInstruction(SpirvOp.ImageSampleExplicitLod, vec4, source, clamped, 2, module.ConstantFloat(floatType, 0));
+        var destination = module.AddInstruction(SpirvOp.Load, outputType, output);
+        module.AddStatement(SpirvOp.ImageWrite, destination, pixel, color);
+        module.AddStatement(SpirvOp.Branch, endLabel);
+
+        module.AddLabel(endLabel);
+        module.AddStatement(SpirvOp.Return);
+        module.EndFunction();
+        module.AddExecutionMode(main, SpirvExecutionMode.LocalSize, 8, 8, 1);
+        module.AddEntryPoint(SpirvExecutionModel.GLCompute, main, "main", [invocation, input, output, push]);
+        return module.Build();
+    }
+
     public static byte[] CreateFullscreenTriangleVertex()
     {
         var module = new SpirvModuleBuilder();

@@ -111,7 +111,7 @@ result filters, mutex warning sampling, and diagnostic selection.
 | Debugger | 1 |
 | Log channels | 76 |
 | Traces | 31 |
-| Data dumps | 14 |
+| Data dumps | 15 |
 | Performance measurement | 20 |
 | Internal | 1 |
 | Tests and tools | 11 |
@@ -466,6 +466,7 @@ Each variable writes data to files.
 | `SHARPEMU_LOG_DISASM` | `1` | Writes guest disassembly to stderr when a guest fault, an abort or an illegal instruction occurs. It shows the code before the fault address, before the stack return address and before three frame return addresses. | `DirectExecutionBackend.Exceptions.cs` |
 | `SHARPEMU_LOG_IL2CPP_EXCEPTION` | `1` | Writes a diagnostic dump when the guest calls the unresolved import with NID `cfwBSQyr5Ys`. The dump shows the registers, the code pointers on the stack and the frame pointer chain. The emulator writes a maximum of 4 dumps. | `DirectExecutionBackend.Imports.cs` |
 | `SHARPEMU_LOG_POINTER_WINDOWS` | list of hex addresses | Writes a memory window for each address when a guest access fault occurs. Use a comma between the addresses. The window size is 0x80 bytes unless `SHARPEMU_LOG_POINTER_WINDOW_SIZE` sets a different size. | `DirectExecutionBackend.Exceptions.cs` |
+| `SHARPEMU_PSSR_CAPTURE` | `1` | Enables PSSR diagnostics in PS5 Pro mode. Press F10 in the game window to capture the next four PSSR dispatches. Supported input and output images are saved as raw `.bin` files with `.json` metadata under `user/logs/pssr-captures/` in the SharpEmu data directory. The default is off. | `PsmlExports.cs`, `SdlHostWindow.cs` |
 | `SHARPEMU_SNAPSHOT_COMPUTE_HASH` | shader hash | Takes image snapshots before and after the first two Vulkan dispatches of the compute shader with this hash. See [selected draw snapshots](image-clear-tracing.md#selected-draw-snapshots). | `VulkanVideoPresenter.ImageSnapshots.cs` |
 | `SHARPEMU_SNAPSHOT_PIXEL_HASH` | shader hash | Takes input and output image snapshots of the first two Vulkan draws with this pixel shader hash. The default is off. See [selected draw snapshots](image-clear-tracing.md#selected-draw-snapshots) for limits and output paths. | `VulkanVideoPresenter.ImageSnapshots.cs` |
 | `SHARPEMU_SHADER_SPIRV_DUMP_DIR` | path | Set a directory for shader dumps. When set, the Vulkan presenter writes each SPIR-V module to a numbered `.spv` file. The `SHARPEMU_DUMP_SPIRV=1` dumps also use this directory. Their default is `shader-dumps` next to the executable. | `VulkanVideoPresenter.Pipelines.cs`, `ShaderProgramCache.cs`, `VulkanVideoPresenter.Device.Setup.cs` |

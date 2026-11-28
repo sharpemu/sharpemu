@@ -1382,6 +1382,29 @@ public sealed unsafe class PhysicalVirtualMemory : IVirtualMemory, IGuestMemoryA
         return _backedSpace!.TryReserveFreeRange(address, size);
     }
 
+    public bool PrepareForNativeGpuInterop(ulong apertureAddress, ulong apertureSize)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            return false;
+        }
+
+        _gate.EnterWriteLock();
+        try
+        {
+            if (!HasBackingOwner())
+            {
+                return false;
+            }
+
+            return _backedSpace!.EnableNativeGpuInterop(apertureAddress, apertureSize);
+        }
+        finally
+        {
+            _gate.ExitWriteLock();
+        }
+    }
+
     public bool TryHoldRangeAtOrAbove(ulong searchStart, ulong size, ulong alignment, out ulong address)
         => TrySelectBackingRange(searchStart, size, alignment, false, out address);
 

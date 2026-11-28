@@ -99,6 +99,28 @@ public static class HostSystemInfo
         }
     }
 
+    public static HostGpuVendor GpuVendor => VendorOf(GpuName);
+
+    public static HostGpuVendor VendorOf(string? name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+        {
+            return HostGpuVendor.Unknown;
+        }
+
+        if (name.Contains("nvidia", StringComparison.OrdinalIgnoreCase) || name.Contains("geforce", StringComparison.OrdinalIgnoreCase))
+        {
+            return HostGpuVendor.Nvidia;
+        }
+
+        if (name.Contains("amd", StringComparison.OrdinalIgnoreCase) || name.Contains("radeon", StringComparison.OrdinalIgnoreCase))
+        {
+            return HostGpuVendor.Amd;
+        }
+
+        return name.Contains("intel", StringComparison.OrdinalIgnoreCase) ? HostGpuVendor.Intel : HostGpuVendor.Unknown;
+    }
+
     private static int ScoreGpu(string? name)
     {
         if (string.IsNullOrWhiteSpace(name) ||
@@ -209,4 +231,12 @@ public static class HostSystemInfo
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GlobalMemoryStatusEx(ref MemoryStatusEx buffer);
+}
+
+public enum HostGpuVendor
+{
+    Unknown,
+    Nvidia,
+    Amd,
+    Intel,
 }

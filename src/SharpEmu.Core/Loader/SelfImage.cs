@@ -86,6 +86,8 @@ public sealed class SelfImage
 
     public string? Version { get; }
 
+    public bool SupportsPs5Pro { get; init; }
+
     /// <summary>The PS5 concept id shared by every regional release of the game, when param.json has one.</summary>
     public string? ConceptId { get; }
 

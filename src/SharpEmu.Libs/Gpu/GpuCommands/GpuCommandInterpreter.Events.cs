@@ -9,6 +9,9 @@ namespace SharpEmu.Libs.Gpu.GpuCommands;
 public sealed partial class GpuCommandInterpreter
 {
     private const uint MarkerMagic = 0x6875_0000u;
+
+    private static bool MarkerHasSideEffect(uint markerId) =>
+        markerId is 0x777 or 0x778 or 0x781 or Upscaling.SuperResolutionPacket.MarkerId;
     private const uint UserDataMarkerBufferResource = 1;
     private const uint UserDataMarkerRegion = 2;
 
@@ -233,6 +236,17 @@ public sealed partial class GpuCommandInterpreter
                 break;
             case 0x781:
                 SubmitFlipWithInterrupt(payload[4], payload[5], Address(payload[1], payload[2]), payload[3]);
+                break;
+            case Upscaling.SuperResolutionPacket.MarkerId:
+                if (Upscaling.SuperResolutionPacket.TryRead(payload, out var superResolution))
+                {
+                    _host.DispatchSuperResolution(superResolution);
+                }
+                else
+                {
+                    NoteUnknownMarker(markerId, packet);
+                }
+
                 break;
             default:
                 // A marker id this interpreter has no side effect for (profiling/debug annotations such as

@@ -595,30 +595,50 @@ public sealed partial class ResourceTracker
             (_plan.ValidateRuntimeValue(dword) || DependsOnScalarMemoryWord(dword))) &&
         handle.Operands.Any(DependsOnScalarMemoryWord);
 
-    private bool HasDeviceRecordCount(ScalarValue? handle) =>
-        handle is { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 } &&
-        !_plan.ValidateRuntimeValue(handle.Operands[2]) &&
-        IsLaneDerivedRecordCount(handle.Operands[2]) &&
-        _plan.ValidateRuntimeValue(handle.Operands[0]) &&
-        _plan.ValidateRuntimeValue(handle.Operands[1]) &&
-        _plan.ValidateRuntimeValue(handle.Operands[3]);
+    private bool IsLaneDerivedBufferHandle(ScalarValue? handle)
+    {
+        if (handle is not { Kind: ScalarValueKind.BufferHandle, Operands.Length: 4 })
+        {
+            return false;
+        }
 
-    private bool IsLaneDerivedRecordCount(ScalarValue value)
+        Span<bool> fromLane = stackalloc bool[4];
+        for (var index = 0; index < fromLane.Length; index++)
+        {
+            var word = handle.Operands[index];
+            if (word.Type != ScalarValueType.U32)
+            {
+                return false;
+            }
+
+            fromLane[index] = !_plan.ValidateRuntimeValue(word);
+            if (fromLane[index] && !IsLaneDerivedDescriptorWord(word))
+            {
+                return false;
+            }
+        }
+
+        // Track a lane-built address as a pair. A descriptor with a host address
+        // can also take its record count from the lanes.
+        return !fromLane[3] && fromLane[0] == fromLane[1] && (fromLane[0] || fromLane[2]);
+    }
+
+    private bool IsLaneDerivedDescriptorWord(ScalarValue value)
     {
         var pending = new Stack<ScalarValue>();
         var visited = new HashSet<ScalarValue>();
         var grounded = new HashSet<ScalarValue>();
-        var merges = new List<ScalarValue>();
+        var derivedValues = new List<ScalarValue>();
         var hasLaneValue = false;
         pending.Push(value);
         while (pending.TryPop(out var current))
         {
             if (!visited.Add(current)) continue;
-            if (current.Type != ScalarValueType.U32) return false;
-            if (current.Kind == ScalarValueKind.Phi)
+            if (current.Kind == ScalarValueKind.Phi ||
+                (current.Kind == ScalarValueKind.Operation && RuntimeValueValidator.IsUniformOperation(current.Operation)))
             {
                 if (current.Operands.Length == 0) return false;
-                merges.Add(current);
+                derivedValues.Add(current);
                 foreach (var incoming in current.Operands) pending.Push(incoming);
             }
             else if (current.Kind == ScalarValueKind.FirstLane)
@@ -636,16 +656,22 @@ public sealed partial class ResourceTracker
             }
         }
 
-        // A loop must have an incoming value, not only a cycle of merge nodes.
+        // A loop must have an incoming value. Scalar operations also need every input to be defined.
         bool changed;
         do
         {
             changed = false;
-            foreach (var merge in merges)
-                if (!grounded.Contains(merge) && merge.Operands.Any(grounded.Contains))
-                    changed |= grounded.Add(merge);
+            foreach (var derived in derivedValues)
+            {
+                if (!grounded.Contains(derived) && (derived.Kind == ScalarValueKind.Phi
+                    ? derived.Operands.Any(grounded.Contains)
+                    : derived.Operands.All(grounded.Contains)))
+                {
+                    changed |= grounded.Add(derived);
+                }
+            }
         } while (changed);
-        return hasLaneValue && merges.All(grounded.Contains);
+        return hasLaneValue && derivedValues.All(grounded.Contains);
     }
 
     private bool DependsOnScalarMemoryWord(ScalarValue value)
@@ -1266,11 +1292,12 @@ public sealed partial class ResourceTracker
                 return;
             }
 
-            // Scalar loads can address buffers that have no host descriptor binding, while
-            // vector buffer descriptors loaded from scalar-buffer data must stay device-side.
+            // The GPU can read V# words from its SGPRs when memory loads or lane-derived
+            // arithmetic produce the descriptor during execution.
             if ((memory.Kind == MemoryResourceKind.ScalarBuffer && !IsHostBufferHandle(access.Handle)) ||
                 (memory.Kind == MemoryResourceKind.Buffer &&
-                    (IsDeviceLoadedBufferHandle(access.Handle) || HasDeviceRecordCount(access.Handle))))
+                    (IsDeviceLoadedBufferHandle(access.Handle) ||
+                     (!memory.Opcode.StartsWith("TBuffer", StringComparison.Ordinal) && IsLaneDerivedBufferHandle(access.Handle)))))
             {
                 memory.DeviceDescriptor = true;
                 _info.UsesDeviceAddresses = true;

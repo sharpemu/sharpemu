@@ -12,6 +12,8 @@ public readonly struct SharpEmuRuntimeOptions
 
     public int? SystemLanguage { get; init; }
 
+    public bool Ps5Pro { get; init; }
+
     public bool StrictDynlibResolution { get; init; }
 
     public int ImportTraceLimit { get; init; }

@@ -27,19 +27,31 @@ public sealed record Disc(LocalizedParameters? LocalizedParameters);
 
 public static class Ps5ParamJsonReader
 {
-    public static (string? Title, string? TitleId, string? Version, string? ConceptId) TryReadPs5Param(IFileSystem fs, string paramJsonPath)
+    private const uint Ps5ProEnhancedFlag = 0x0040_0000;
+
+    public static (string? Title, string? TitleId, string? Version, string? ConceptId) TryReadPs5Param(IFileSystem fs, string paramJsonPath) =>
+        TryReadPs5Param(fs, paramJsonPath, out _);
+
+    internal static (string? Title, string? TitleId, string? Version, string? ConceptId) TryReadPs5Param(
+        IFileSystem fs, string paramJsonPath, out bool supportsPs5Pro)
     {
+        supportsPs5Pro = false;
         if (!fs.Exists(paramJsonPath))
             return (null, null, null, null);
 
         if (!fs.TryReadAllBytes(paramJsonPath, out var data))
             return (null, null, null, null);
 
-        return TryReadPs5Param(data);
+        return TryReadPs5Param(data, out supportsPs5Pro);
     }
 
-    public static (string? Title, string? TitleId, string? Version, string? ConceptId) TryReadPs5Param(byte[] data)
+    public static (string? Title, string? TitleId, string? Version, string? ConceptId) TryReadPs5Param(byte[] data) =>
+        TryReadPs5Param(data, out _);
+
+    internal static (string? Title, string? TitleId, string? Version, string? ConceptId) TryReadPs5Param(
+        byte[] data, out bool supportsPs5Pro)
     {
+        supportsPs5Pro = false;
         if (data == null || data.Length == 0)
             return (null, null, null, null);
 
@@ -52,6 +64,7 @@ public static class Ps5ParamJsonReader
             }
 
             using var doc = JsonDocument.Parse(json);
+            supportsPs5Pro = SupportsPs5Pro(doc.RootElement);
             return TryReadPs5Param(doc.RootElement);
         }
         catch (JsonException)
@@ -59,6 +72,12 @@ public static class Ps5ParamJsonReader
             return (null, null, null, null);
         }
     }
+
+    public static bool SupportsPs5Pro(JsonElement root) =>
+        root.ValueKind == JsonValueKind.Object &&
+        root.TryGetProperty("attribute3", out var attribute) &&
+        attribute.ValueKind == JsonValueKind.Number &&
+        attribute.TryGetUInt32(out var value) && (value & Ps5ProEnhancedFlag) != 0;
 
     private static (string? Title, string? TitleId, string? Version, string? ConceptId) TryReadPs5Param(JsonElement root)
     {

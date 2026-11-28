@@ -348,12 +348,10 @@ internal static unsafe partial class VulkanVideoPresenter
             Result acquireResult;
             using (RenderPhaseProfile.Measure(RenderPhaseProfile.Phase.Acquire))
             {
-                acquireResult = _swapchainApi.AcquireNextImage(
-                    _device,
+                acquireResult = AcquireNextImageThroughHooks(
                     _swapchain,
                     SwapchainAcquireTimeoutNs,
                     _frameImageAvailable[frameSlot],
-                    default,
                     &imageIndex);
             }
             if (acquireResult == Result.Timeout)
@@ -486,7 +484,7 @@ internal static unsafe partial class VulkanVideoPresenter
             {
                 lock (_queueGate)
                 {
-                    presentResult = _swapchainApi.QueuePresent(_queue, &presentInfo);
+                    presentResult = QueuePresentThroughHooks(&presentInfo);
                 }
             }
 

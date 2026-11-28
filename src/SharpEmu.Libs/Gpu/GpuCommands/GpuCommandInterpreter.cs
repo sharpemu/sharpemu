@@ -562,7 +562,7 @@ public sealed partial class GpuCommandInterpreter
                 }
 
                 return custom == PacketCustomCode.Zero &&
-                    (payload.IsEmpty || (payload[0] & 0xFFFF_0000u) != MarkerMagic || (payload[0] & 0xFFFu) is not (0x777 or 0x778 or 0x781));
+                    (payload.IsEmpty || (payload[0] & 0xFFFF_0000u) != MarkerMagic || !MarkerHasSideEffect(payload[0] & 0xFFFu));
             default:
                 return false;
         }
